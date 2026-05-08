@@ -250,7 +250,10 @@ async function kbCollections(argv: string[], io: CliIO): Promise<number> {
   const collections = await listCollections(config, capability, limit);
   writeJsonOrText(io.stdout, args, collections, () =>
     collections
-      .map((item) => `${item.name ?? ""}\t${item.key ?? ""}\t${item.path ?? ""}\t${item.id ?? ""}`)
+      .map(
+        (item) =>
+          `${item.name ?? ""}\t${collectionKey(item) ?? ""}\t${collectionPath(item) ?? ""}\t${item.id ?? ""}`,
+      )
       .join("\n")
       .concat(collections.length ? "\n" : ""),
   );
@@ -483,8 +486,10 @@ async function resolveSelectorFields(
   }
 
   const match = matches[0] as CollectionItem;
-  if (typeof match.key === "string" && match.key) return { collection_key: match.key };
-  if (typeof match.path === "string" && match.path) return { collection_path: match.path };
+  const key = collectionKey(match);
+  if (key) return { collection_key: key };
+  const path = collectionPath(match);
+  if (path) return { collection_path: path };
   if (typeof match.id === "string" && match.id) return { primary_collection_id: match.id };
   throw new CliError(
     `Collection matched name ${selector.value}, but response had no key, path, or id.`,
@@ -720,11 +725,29 @@ async function runPool<T, R>(
 function collectionItems(payload: unknown): CollectionItem[] {
   const data = responseData(payload);
   if (Array.isArray(data)) return data.filter(isObject) as CollectionItem[];
+  if (isObject(data) && Array.isArray(data.collections))
+    return data.collections.filter(isObject) as CollectionItem[];
   if (isObject(data) && Array.isArray(data.data))
     return data.data.filter(isObject) as CollectionItem[];
   if (isObject(payload) && Array.isArray(payload.data))
     return payload.data.filter(isObject) as CollectionItem[];
   throw new CliError("Collection list response did not contain a data array.");
+}
+
+function collectionKey(item: CollectionItem): string | undefined {
+  return (
+    stringField(item, "key") ??
+    stringField(item, "collectionKey") ??
+    stringField(item, "collection_key")
+  );
+}
+
+function collectionPath(item: CollectionItem): string | undefined {
+  return (
+    stringField(item, "path") ??
+    stringField(item, "collectionPath") ??
+    stringField(item, "collection_path")
+  );
 }
 
 function responseData(payload: unknown): unknown {
