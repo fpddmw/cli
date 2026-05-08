@@ -1,0 +1,191 @@
+version: 1
+layout: repo
+lastReviewedAt: "2026-05-08"
+lastReviewedCommit: "2f4144ea41116de344f7fce1f2ef919823b09bff"
+
+catalog:
+  repos:
+    - id: cli
+      path: .
+      canonicalRepo: tiangong-ai/cli
+      entryDoc: AGENTS.md
+      workflowDocs:
+        - docs/agents/repo-validation.md
+        - docs/agents/repo-architecture.md
+        - README.md
+      workspaceIntegrationRequired: true
+
+repo:
+  id: cli
+  owner: cli
+
+ownership:
+  domains:
+    - id: repo-governance-and-docs
+      paths:
+        include:
+          - AGENTS.md
+          - README.md
+          - .docpact/config.yaml
+          - docs/agents/**
+          - .github/workflows/**
+      ownerRepo: cli
+    - id: command-surface
+      paths:
+        include:
+          - bin/**
+          - src/main.ts
+          - src/cli.ts
+      ownerRepo: cli
+    - id: validation-and-automation
+      paths:
+        include:
+          - package.json
+          - package-lock.json
+          - .nvmrc
+          - tsconfig.json
+          - tsconfig.build.json
+          - .prettierrc.json
+          - test/**
+          - scripts/**
+      ownerRepo: cli
+
+routing:
+  intents:
+    command-surface:
+      paths:
+        - bin/**
+        - src/**
+        - README.md
+    validation-release:
+      paths:
+        - package.json
+        - package-lock.json
+        - .nvmrc
+        - tsconfig.json
+        - tsconfig.build.json
+        - .prettierrc.json
+        - test/**
+        - scripts/**
+        - .github/workflows/**
+        - docs/agents/repo-validation.md
+    repo-docs:
+      paths:
+        - AGENTS.md
+        - README.md
+        - .docpact/config.yaml
+        - docs/agents/**
+
+coverage:
+  include:
+    - AGENTS.md
+    - README.md
+    - .docpact/config.yaml
+    - docs/agents/**
+    - .github/workflows/**
+    - package.json
+    - package-lock.json
+    - .nvmrc
+    - .prettierrc.json
+    - tsconfig.json
+    - tsconfig.build.json
+    - bin/**
+    - src/**
+    - test/**
+    - scripts/**
+  exclude:
+    - .git/**
+    - .docpact/runs/**
+    - node_modules/**
+    - dist/**
+    - coverage/**
+    - "*.log"
+
+docInventory:
+  include:
+    - AGENTS.md
+    - README.md
+    - .docpact/config.yaml
+    - docs/agents/repo-validation.md
+    - docs/agents/repo-architecture.md
+  exclude:
+    - .git/**
+    - .docpact/runs/**
+    - node_modules/**
+    - dist/**
+    - coverage/**
+
+freshness:
+  warn_after_commits: 50
+  warn_after_days: 90
+  critical_after_days: 180
+
+rules:
+  - id: cli-bootstrap-contract
+    scope: repo
+    repo: cli
+    triggers:
+      - path: AGENTS.md
+        kind: agent-contract
+      - path: .docpact/config.yaml
+        kind: governance-config
+      - path: docs/agents/**
+        kind: governed-doc
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+      - path: docs/agents/repo-architecture.md
+        mode: review_or_update
+    reason: Repo entry guidance, routing, architecture, and validation docs must stay aligned.
+  - id: cli-command-surface-contract
+    scope: repo
+    repo: cli
+    triggers:
+      - path: bin/**
+        kind: launcher
+      - path: src/**
+        kind: command-runtime
+      - path: README.md
+        kind: repo-readme
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: README.md
+        mode: review_or_update
+      - path: docs/agents/repo-architecture.md
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+    reason: Launcher and command runtime changes alter the public CLI contract.
+  - id: cli-validation-contract
+    scope: repo
+    repo: cli
+    triggers:
+      - path: package.json
+        kind: runtime-config
+      - path: package-lock.json
+        kind: dependency-lock
+      - path: .nvmrc
+        kind: node-baseline
+      - path: .prettierrc.json
+        kind: formatter-config
+      - path: tsconfig*.json
+        kind: runtime-config
+      - path: test/**
+        kind: test
+      - path: scripts/**
+        kind: validation-script
+      - path: .github/workflows/**
+        kind: ci
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: .docpact/config.yaml
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+    reason: Node baseline, quality gates, coverage, and CI define how CLI changes are validated.

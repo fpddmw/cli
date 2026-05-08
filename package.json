@@ -1,0 +1,57 @@
+{
+  "name": "@tiangong-ai/cli",
+  "version": "0.0.0",
+  "description": "Tiangong AI command-line interface.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tiangong-ai/cli.git"
+  },
+  "homepage": "https://github.com/tiangong-ai/cli#readme",
+  "bugs": {
+    "url": "https://github.com/tiangong-ai/cli/issues"
+  },
+  "type": "module",
+  "bin": {
+    "tiangong": "./bin/tiangong.js"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "README.md",
+    "AGENTS.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --import tsx --test test/*.test.ts",
+    "test:coverage": "npm run build && node ./scripts/run-test-coverage.cjs",
+    "prepush:gate": "npm run lint && npm run test:coverage && docpact validate-config --root . --strict && docpact lint --root . --worktree --mode enforce",
+    "lint": "npm run lint:format && npm run lint:coverage-guards",
+    "lint:format": "prettier --check \"{src,test,bin,scripts}/**/*.{ts,js,cjs,mjs}\" \"*.{md,json}\" \"docs/**/*.md\" \".docpact/**/*.yaml\" \".github/**/*.yml\"",
+    "lint:coverage-guards": "node ./scripts/assert-no-coverage-ignore.cjs",
+    "format": "prettier --write \"{src,test,bin,scripts}/**/*.{ts,js,cjs,mjs}\" \"*.{md,json}\" \"docs/**/*.md\" \".docpact/**/*.yaml\" \".github/**/*.yml\"",
+    "clean": "node --eval \"import('node:fs').then(({ rmSync }) => rmSync('dist', { recursive: true, force: true }))\""
+  },
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "keywords": [
+    "tiangong",
+    "ai",
+    "cli",
+    "kb"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^24.12.2",
+    "c8": "^11.0.0",
+    "prettier": "^3.8.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+.docpact/runs/
+.env
+.DS_Store
+*.log
+.tiangong-kb-ingest-manifest.jsonl
