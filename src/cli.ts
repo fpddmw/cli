@@ -110,7 +110,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
 
     if (command === "doctor") {
       if (subcommand === "--help" || subcommand === "-h") {
-        write(io.stdout, "Usage: tiangong doctor\n");
+        write(io.stdout, "Usage: tiangong-ai doctor\n");
         return 0;
       }
       return await doctor(rest, io);
@@ -263,7 +263,7 @@ async function kbCollections(argv: string[], io: CliIO): Promise<number> {
 async function kbStatus(argv: string[], io: CliIO): Promise<number> {
   const args = parseArgs(argv);
   const [documentId] = args.positionals;
-  if (!documentId) throw new CliError("Usage: tiangong kb status <document-id>");
+  if (!documentId) throw new CliError("Usage: tiangong-ai kb status <document-id>");
 
   const config = resolveConfig(args, io.env);
   const payload = await jsonRequest(config, `documents/${encodeURIComponent(documentId)}`);
@@ -275,7 +275,7 @@ async function kbIngest(argv: string[], io: CliIO): Promise<number> {
   const args = parseArgs(argv);
   const config = resolveConfig(args, io.env);
   const targetPath = args.positionals[0];
-  if (!targetPath) throw new CliError("Usage: tiangong kb ingest <file-or-folder>");
+  if (!targetPath) throw new CliError("Usage: tiangong-ai kb ingest <file-or-folder>");
 
   const selector = resolveCollectionSelector(args, io.env);
   const selectorFields = await resolveSelectorFields(config, selector);
@@ -957,12 +957,12 @@ function topHelp(): string {
   return `Tiangong AI CLI
 
 Usage:
-  tiangong doctor [--json]
-  tiangong kb ingest upload <file-or-folder> [--recursive] [--concurrency 3]
-  tiangong kb ingest status <document-id>
-  tiangong kb collections list [--capability upload]
+  tiangong-ai doctor [--json]
+  tiangong-ai kb ingest upload <file-or-folder> [--recursive] [--concurrency 3]
+  tiangong-ai kb ingest status <document-id>
+  tiangong-ai kb collections list [--capability upload]
 
-Run "tiangong kb --help" for KB options.
+Run "tiangong-ai kb --help" for KB options.
 `;
 }
 
@@ -970,9 +970,9 @@ function kbHelp(): string {
   return `Tiangong KB commands
 
 Usage:
-  tiangong kb ingest upload <file-or-folder> [options]
-  tiangong kb ingest status <document-id> [--json]
-  tiangong kb collections list [--capability upload] [--json]
+  tiangong-ai kb ingest upload <file-or-folder> [options]
+  tiangong-ai kb ingest status <document-id> [--json]
+  tiangong-ai kb collections list [--capability upload] [--json]
 
 Common options:
   --api-key <token>

@@ -227,6 +227,6 @@ describe("runCli", () => {
     });
 
     assert.equal(exitCode, 1);
-    assert.match(stderr, /Usage: tiangong kb status/);
+    assert.match(stderr, /Usage: tiangong-ai kb status/);
   });
 });

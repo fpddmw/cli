@@ -1,0 +1,64 @@
+name: npm-publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm for trusted publishing
+        run: npm install --global npm@11.12.1
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify tag matches package version
+        run: |
+          package_version="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
+          expected_tag="v${package_version}"
+          if [[ "${GITHUB_REF_NAME}" != "$expected_tag" ]]; then
+            echo "Release tag ${GITHUB_REF_NAME} must match package version ${expected_tag}"
+            exit 1
+          fi
+
+      - name: Check npm registry version availability
+        run: |
+          package_name="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).name")"
+          package_version="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
+          if npm view "${package_name}@${package_version}" version >/dev/null 2>&1; then
+            echo "Package ${package_name}@${package_version} is already published"
+            exit 1
+          fi
+
+      - name: Verify package
+        run: |
+          npm run lint
+          npm test
+          npm run test:coverage
+          npm pack --dry-run >/dev/null
+
+      - name: Publish to npm
+        run: npm publish --access public --provenance

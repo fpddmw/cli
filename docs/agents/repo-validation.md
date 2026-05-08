@@ -27,7 +27,7 @@ lastReviewedCommit: 2f4144ea41116de344f7fce1f2ef919823b09bff
 - Node: `>=24 <25`
 - Package manager: `npm`
 - Source: TypeScript
-- Stable launcher: `bin/tiangong.js`
+- Stable launcher: `bin/tiangong-ai.js`
 - Repository text checkout uses LF line endings through `.gitattributes`; this
   keeps Prettier behavior consistent across Linux and Windows CI runners.
 
@@ -45,6 +45,22 @@ docpact lint --root . --worktree --mode enforce
 
 `npm run prepush:gate` aggregates the lint, coverage, and docpact checks when
 `docpact` is installed locally.
+
+## Release Flow
+
+`.github/workflows/npm-publish.yml` publishes `@tiangong-ai/cli` to npm from
+GitHub Actions. It runs the same npm lint, test, and coverage gates before any
+publish attempt.
+
+Publishing starts when a `v*` tag is pushed. The tag must match
+`package.json` version exactly, for example `v0.1.0` for version `0.1.0`.
+
+The workflow uses npm Trusted Publishing through GitHub OIDC. Configure npm
+trusted publisher metadata for this repository and workflow before first use;
+do not configure an npm token secret. The publish job keeps `id-token: write`
+enabled, upgrades npm for trusted publishing, checks that the version is not
+already published, runs the local gates, performs a package dry run, and then
+executes `npm publish --access public --provenance`.
 
 ## Coverage Policy
 

@@ -13,14 +13,14 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-05-08
-lastReviewedCommit: 2f4144ea41116de344f7fce1f2ef919823b09bff
+lastReviewedCommit: 84641a513a342bd9a3c7a06f0510c0c86b8170b0
 ---
 
 # Repo Architecture
 
 ## Ownership
 
-This repository owns the public `tiangong` command-line interface for Tiangong
+This repository owns the public `tiangong-ai` command-line interface for Tiangong
 AI automation.
 
 The CLI owns local operator behavior such as command parsing, filesystem
@@ -30,7 +30,7 @@ storage writes, queueing, and document status transitions.
 
 ## Current Runtime Shape
 
-- `bin/tiangong.js`: stable executable launcher.
+- `bin/tiangong-ai.js`: stable executable launcher.
 - `src/main.ts`: process entrypoint.
 - `src/cli.ts`: command dispatch and current KB ingest implementation.
 - `scripts/**`: validation helpers.
