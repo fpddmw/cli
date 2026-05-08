@@ -53,4 +53,40 @@ describe("runCli", () => {
     assert.match(stderr, /Missing API key/);
     assert.doesNotMatch(stderr, /CliError:/);
   });
+
+  it("supports nested KB ingest upload alias", async () => {
+    let stderr = "";
+    const exitCode = await runCli(["kb", "ingest", "upload", "/does/not/exist"], {
+      env: { TIANGONG_AI_API_KEY: "fake", TIANGONG_KB_DEFAULT_COLLECTION_KEY: "course/test" },
+      stdout: { write: () => undefined },
+      stderr: { write: (chunk: string) => void (stderr += chunk) },
+    });
+
+    assert.equal(exitCode, 1);
+    assert.match(stderr, /Path not found/);
+  });
+
+  it("supports nested KB collections list alias", async () => {
+    let stderr = "";
+    const exitCode = await runCli(["kb", "collections", "list"], {
+      env: {},
+      stdout: { write: () => undefined },
+      stderr: { write: (chunk: string) => void (stderr += chunk) },
+    });
+
+    assert.equal(exitCode, 1);
+    assert.match(stderr, /Missing API key/);
+  });
+
+  it("supports nested KB ingest status alias", async () => {
+    let stderr = "";
+    const exitCode = await runCli(["kb", "ingest", "status"], {
+      env: { TIANGONG_AI_API_KEY: "fake" },
+      stdout: { write: () => undefined },
+      stderr: { write: (chunk: string) => void (stderr += chunk) },
+    });
+
+    assert.equal(exitCode, 1);
+    assert.match(stderr, /Usage: tiangong kb status/);
+  });
 });

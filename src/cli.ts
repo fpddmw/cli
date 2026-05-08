@@ -122,9 +122,18 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
         return 0;
       }
       if (subcommand === "ingest" || subcommand === "upload") {
+        if (rest[0] === "status") {
+          return await kbStatus(rest.slice(1), io);
+        }
+        if (rest[0] === "upload") {
+          return await kbIngest(rest.slice(1), io);
+        }
         return await kbIngest(rest, io);
       }
       if (subcommand === "collections") {
+        if (rest[0] === "list") {
+          return await kbCollections(rest.slice(1), io);
+        }
         return await kbCollections(rest, io);
       }
       if (subcommand === "status") {
@@ -926,9 +935,9 @@ function topHelp(): string {
 
 Usage:
   tiangong doctor [--json]
-  tiangong kb ingest <file-or-folder> [--recursive] [--concurrency 3]
-  tiangong kb collections [--capability upload]
-  tiangong kb status <document-id>
+  tiangong kb ingest upload <file-or-folder> [--recursive] [--concurrency 3]
+  tiangong kb ingest status <document-id>
+  tiangong kb collections list [--capability upload]
 
 Run "tiangong kb --help" for KB options.
 `;
@@ -938,9 +947,9 @@ function kbHelp(): string {
   return `Tiangong KB commands
 
 Usage:
-  tiangong kb ingest <file-or-folder> [options]
-  tiangong kb collections [--capability upload] [--json]
-  tiangong kb status <document-id> [--json]
+  tiangong kb ingest upload <file-or-folder> [options]
+  tiangong kb ingest status <document-id> [--json]
+  tiangong kb collections list [--capability upload] [--json]
 
 Common options:
   --api-key <token>

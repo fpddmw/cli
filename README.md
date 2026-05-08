@@ -46,25 +46,25 @@ prefix `/api/v1/kb`.
 Upload one file:
 
 ```bash
-tiangong kb ingest /path/to/document.pdf
+tiangong kb ingest upload /path/to/document.pdf
 ```
 
 Upload a folder recursively with local checkpointing:
 
 ```bash
-tiangong kb ingest /path/to/folder --recursive --concurrency 3 --retries 3
+tiangong kb ingest upload /path/to/folder --recursive --concurrency 3 --retries 3
 ```
 
 List uploadable collections:
 
 ```bash
-tiangong kb collections --capability upload
+tiangong kb collections list --capability upload
 ```
 
 Check document status:
 
 ```bash
-tiangong kb status <document-id>
+tiangong kb ingest status <document-id>
 ```
 
 ## Boundary
