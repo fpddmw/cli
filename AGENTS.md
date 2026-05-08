@@ -60,7 +60,7 @@ aggregated local quality gate.
 
 ## Release
 
-GitHub Actions publishes npm releases through `.github/workflows/npm-publish.yml`.
+GitHub Actions publishes npm releases through `.github/workflows/publish.yml`.
 The workflow uses npm Trusted Publishing through GitHub OIDC and runs npm lint,
 test, coverage, and pack checks before publishing.
 

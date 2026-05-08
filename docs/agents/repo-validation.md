@@ -48,7 +48,7 @@ docpact lint --root . --worktree --mode enforce
 
 ## Release Flow
 
-`.github/workflows/npm-publish.yml` publishes `@tiangong-ai/cli` to npm from
+`.github/workflows/publish.yml` publishes `@tiangong-ai/cli` to npm from
 GitHub Actions. It runs the same npm lint, test, and coverage gates before any
 publish attempt.
 
