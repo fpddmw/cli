@@ -18,14 +18,14 @@ lastReviewedCommit: 2f4144ea41116de344f7fce1f2ef919823b09bff
 
 # Tiangong AI CLI
 
-Package: `@tiangong-ai/cli` Executable: `tiangong` Node: `>=24`
+Package: `@tiangong-ai/cli` Executable: `tiangong-ai` Node: `>=24`
 
 ## Run From This Repository
 
 ```bash
 npm install
 npm run build
-node ./bin/tiangong.js --help
+node ./bin/tiangong-ai.js --help
 ```
 
 Use Node `24.x`; this package declares `>=24 <25` and includes `.nvmrc` for
@@ -46,25 +46,25 @@ prefix `/api/v1/kb`.
 Upload one file:
 
 ```bash
-tiangong kb ingest upload /path/to/document.pdf
+tiangong-ai kb ingest upload /path/to/document.pdf
 ```
 
 Upload a folder recursively with local checkpointing:
 
 ```bash
-tiangong kb ingest upload /path/to/folder --recursive --concurrency 3 --retries 3
+tiangong-ai kb ingest upload /path/to/folder --recursive --concurrency 3 --retries 3
 ```
 
 List uploadable collections:
 
 ```bash
-tiangong kb collections list --capability upload
+tiangong-ai kb collections list --capability upload
 ```
 
 Check document status:
 
 ```bash
-tiangong kb ingest status <document-id>
+tiangong-ai kb ingest status <document-id>
 ```
 
 ## Boundary
@@ -82,3 +82,10 @@ npm test
 npm run test:coverage
 docpact validate-config --root . --strict
 ```
+
+## Release
+
+Publishing is handled by GitHub Actions in `.github/workflows/npm-publish.yml`.
+Push a `v*` tag that matches `package.json` version. The workflow publishes
+`@tiangong-ai/cli` to npm through npm Trusted Publishing after lint, tests,
+coverage, version availability, and a package dry run pass.

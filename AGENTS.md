@@ -11,6 +11,7 @@ checkPaths:
   - AGENTS.md
   - README.md
   - package.json
+  - .github/workflows/**
   - .docpact/config.yaml
   - docs/agents/**
   - src/**
@@ -35,10 +36,10 @@ This repository owns the Tiangong AI command-line interface.
 
 ## Current Command Surface
 
-- `tiangong doctor`
-- `tiangong kb ingest`
-- `tiangong kb collections`
-- `tiangong kb status`
+- `tiangong-ai doctor`
+- `tiangong-ai kb ingest`
+- `tiangong-ai kb collections`
+- `tiangong-ai kb status`
 
 ## Validation
 
@@ -56,6 +57,12 @@ docpact lint --root . --worktree --mode enforce
 Use `npm run typecheck` for a faster TypeScript-only check.
 Use `npm run prepush:gate` when `docpact` is installed and you want the
 aggregated local quality gate.
+
+## Release
+
+GitHub Actions publishes npm releases through `.github/workflows/npm-publish.yml`.
+The workflow uses npm Trusted Publishing through GitHub OIDC and runs npm lint,
+test, coverage, and pack checks before publishing.
 
 ## Required Docs
 
