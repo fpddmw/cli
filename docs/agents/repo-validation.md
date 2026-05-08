@@ -11,6 +11,8 @@ checkPaths:
   - package.json
   - package-lock.json
   - .nvmrc
+  - .gitattributes
+  - .prettierrc.json
   - scripts/**
   - test/**
   - .github/workflows/**
@@ -26,6 +28,8 @@ lastReviewedCommit: 2f4144ea41116de344f7fce1f2ef919823b09bff
 - Package manager: `npm`
 - Source: TypeScript
 - Stable launcher: `bin/tiangong.js`
+- Repository text checkout uses LF line endings through `.gitattributes`; this
+  keeps Prettier behavior consistent across Linux and Windows CI runners.
 
 ## Local Gates
 
