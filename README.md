@@ -85,7 +85,7 @@ docpact validate-config --root . --strict
 
 ## Release
 
-Publishing is handled by GitHub Actions in `.github/workflows/npm-publish.yml`.
+Publishing is handled by GitHub Actions in `.github/workflows/publish.yml`.
 Push a `v*` tag that matches `package.json` version. The workflow publishes
 `@tiangong-ai/cli` to npm through npm Trusted Publishing after lint, tests,
 coverage, version availability, and a package dry run pass.
