@@ -1144,6 +1144,8 @@ function batchStatusItems(payload: unknown): BulkStatusItem[] {
   const items =
     isObject(data) && Array.isArray(data.documents)
       ? data.documents
+      : isObject(data) && Array.isArray(data.results)
+        ? data.results
       : Array.isArray(data)
         ? data
         : [];

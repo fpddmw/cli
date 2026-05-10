@@ -475,7 +475,7 @@ describe("runCli", () => {
         return new Response(
           JSON.stringify({
             data: {
-              documents: body.documentIds.map((documentId: string) => ({
+              results: body.documentIds.map((documentId: string) => ({
                 documentId,
                 status: "completed",
                 opensearchIndexed: true,
