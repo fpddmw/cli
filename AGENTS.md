@@ -38,6 +38,10 @@ This repository owns the Tiangong AI command-line interface.
 
 - `tiangong-ai doctor`
 - `tiangong-ai kb ingest`
+- `tiangong-ai kb ingest bulk`
+- `tiangong-ai kb ingest jobs`
+- `tiangong-ai kb ingest resume`
+- `tiangong-ai kb ingest export`
 - `tiangong-ai kb collections`
 - `tiangong-ai kb status`
 
