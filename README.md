@@ -55,10 +55,83 @@ Upload a folder recursively with local checkpointing:
 tiangong-ai kb ingest upload /path/to/folder --recursive --concurrency 3 --retries 3
 ```
 
+Bulk scan a large folder and emit a structural JSON summary:
+
+```bash
+tiangong-ai kb ingest bulk scan /path/to/folder --json
+```
+
+Dry-run a layered metadata map against a folder and collection schema:
+
+```bash
+tiangong-ai kb ingest bulk dry-run /path/to/folder \
+  --collection-path /course/thu_humanities \
+  --metadata-map metadata-map.yaml \
+  --json
+```
+
+The same dry-run is also available through the skill-facing alias:
+
+```bash
+tiangong-ai kb ingest metadata dry-run /path/to/folder \
+  --collection-path /course/thu_humanities \
+  --metadata-map metadata-map.yaml \
+  --json
+```
+
+Run a resumable sliding-window bulk ingest:
+
+```bash
+tiangong-ai kb ingest bulk /path/to/folder \
+  --collection-path /course/thu_humanities \
+  --metadata-map metadata-map.yaml \
+  --window-size 100 \
+  --top-up-max 50 \
+  --upload-concurrency 4 \
+  --poll-interval 30
+```
+
+`tiangong-ai kb ingest bulk run /path/to/folder` is accepted as an explicit
+alias for wrappers that want a verb before the folder path.
+
+Bulk ingest uses SQLite as its checkpoint source. By default, job files are
+stored under the OS app-data directory:
+
+- macOS: `~/Library/Application Support/tiangong-ai/kb-ingest/jobs/<job-id>.sqlite`
+- Linux: `~/.local/share/tiangong-ai/kb-ingest/jobs/<job-id>.sqlite`
+- Windows: `%APPDATA%/tiangong-ai/kb-ingest/jobs/<job-id>.sqlite`
+
+Use `--state /path/to/job.sqlite` to override the checkpoint path. Bulk jobs do
+not use `.tiangong-kb-ingest-manifest.jsonl` as their checkpoint.
+
+Bulk ingest always creates 300dpi-normalized ingest copies for `.docx` files
+and creates PDF split parts when a PDF exceeds the active upload limit. Derived
+files stay under `.tiangong-kb-ingest-derived` by default, and that directory is
+excluded from future bulk scans. DOCX copies keep the original logical path for
+metadata-map evaluation, and the generated DOCX copy is uploaded even when
+normalization does not materially reduce file size. PDF split parts keep the
+original logical parent directory. Upload metadata remains the user/business
+metadata produced by the metadata map.
+
+Manage bulk jobs:
+
+```bash
+tiangong-ai kb ingest jobs
+tiangong-ai kb ingest status <job-id>
+tiangong-ai kb ingest resume <job-id>
+tiangong-ai kb ingest export <job-id> --format csv
+```
+
 List uploadable collections:
 
 ```bash
 tiangong-ai kb collections list --capability upload
+```
+
+Resolve a collection and include the effective metadata schema:
+
+```bash
+tiangong-ai kb collections schema --collection-path /course/thu_humanities --json
 ```
 
 Check document status:
@@ -70,7 +143,11 @@ tiangong-ai kb ingest status <document-id>
 ## Boundary
 
 The CLI is a thin local client. It sends bearer-token requests to the Tiangong
-KB ingest API and records local manifests for batch recovery. The backend owns
+KB ingest API and records local checkpoints for batch recovery. Non-bulk upload
+still uses a JSONL manifest. Bulk ingest uses SQLite and releases sliding-window
+capacity only when document status is `completed` and both `opensearchIndexed`
+and `pineconeIndexed` are true. If the status API does not return those index
+flags yet, the file remains in `waiting_for_index_flags`. The backend owns
 authorization, collection permissions, duplicate detection, NAS raw writes,
 parse queueing, and status transitions.
 
