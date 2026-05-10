@@ -1146,9 +1146,9 @@ function batchStatusItems(payload: unknown): BulkStatusItem[] {
       ? data.documents
       : isObject(data) && Array.isArray(data.results)
         ? data.results
-      : Array.isArray(data)
-        ? data
-        : [];
+        : Array.isArray(data)
+          ? data
+          : [];
   return items
     .filter(isObject)
     .map((item) =>
