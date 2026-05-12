@@ -32,6 +32,7 @@ const DEFAULT_BULK_POLL_INTERVAL_SECONDS = 30;
 const DEFAULT_BULK_MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 const DEFAULT_BULK_DERIVED_DIR = ".tiangong-kb-ingest-derived";
 const DOCX_TARGET_IMAGE_DPI = 300;
+const DOCX_NORMALIZE_MIN_BYTES = 10 * 1024 * 1024;
 const EMUS_PER_INCH = 914400;
 const RETRYABLE_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const TERMINAL_STATUSES = new Set(["completed", "failed", "deleted"]);
@@ -168,6 +169,7 @@ interface BulkJobRecord {
   schemaSnapshot: unknown;
   metadataMap: MetadataMap;
   dryRunSummary: MetadataDryRunSummary | undefined;
+  pipelineHealth: BulkPipelineHealthSnapshot | undefined;
   createdAt: string;
   updatedAt: string;
 }
@@ -278,7 +280,21 @@ interface BulkStatusItem {
   indexRecordCount?: number | undefined;
   lastError?: string | undefined;
   lastErrorStage?: string | undefined;
+  itemError?: {
+    code: string;
+    message: string;
+    retryable: boolean;
+  };
   raw: unknown;
+}
+
+interface BulkPipelineHealthSnapshot {
+  healthy: boolean;
+  pressure: "ok" | "degraded" | "paused" | "unknown";
+  recommendedAction: "continue" | "slow_down" | "pause_top_up";
+  recommendedPollAfterSeconds: number;
+  checkedAt?: string | undefined;
+  message?: string | undefined;
 }
 
 type BulkPreflightClassification =
@@ -296,6 +312,10 @@ interface BulkPreflightOptions {
   maxUploadBytes: number;
   workDir: string;
   generateDerived: boolean;
+}
+
+interface BulkMaterializeResult {
+  uploadRows: BulkFileRecord[];
 }
 
 interface BulkPreflightSummary {
@@ -580,6 +600,7 @@ async function kbIngestStatus(argv: string[], io: CliIO): Promise<number> {
         `status=${job.status}`,
         `state=${job.statePath}`,
         `root=${job.rootPath}`,
+        `pressure=${job.pipelineHealth?.pressure ?? "unknown"} action=${job.pipelineHealth?.recommendedAction ?? "continue"}`,
         `files=${summary.total} pending=${summary.pending} inflight=${summary.inflight} completed=${summary.completed} failed=${summary.failed}`,
         "",
       ].join("\n"),
@@ -765,10 +786,8 @@ async function kbIngestBulkRun(argv: string[], io: CliIO): Promise<number> {
   const metadataMap = await loadMetadataMap(args);
   const files = await collectBulkFilePlans(root, true, args);
   const schemaSnapshot = await loadSchemaSnapshot(args, io.env, config, selector);
-  const preflightPlans = await prepareBulkPreflightPlans(
-    files,
-    preflightOptionsFromArgs(args, schemaSnapshot, root, true),
-  );
+  const preflightOptions = preflightOptionsFromArgs(args, schemaSnapshot, root, false);
+  const preflightPlans = await prepareBulkPreflightPlans(files, preflightOptions);
   const dryRunSummary = metadataDryRun(preflightPlans.allPlans, metadataMap, schemaSnapshot);
   dryRunSummary.preflight = buildPreflightSummary(
     preflightPlans.allPlans,
@@ -794,6 +813,7 @@ async function kbIngestBulkRun(argv: string[], io: CliIO): Promise<number> {
     metadataMap,
     env: io.env,
     stdout: io.stdout,
+    preflightOptions,
   });
 
   writeJsonOrText(io.stdout, args, result, () => formatBulkRunSummary(result));
@@ -832,7 +852,7 @@ async function kbIngestJobs(argv: string[], io: CliIO): Promise<number> {
     jobs
       .map(
         (job) =>
-          `${job.jobId}\t${job.status}\t${job.summary.completed}/${job.summary.total}\t${job.statePath}`,
+          `${job.jobId}\t${job.status}\t${job.summary.completed}/${job.summary.total}\tpressure=${job.pipelineHealth?.pressure ?? "unknown"}\taction=${job.pipelineHealth?.recommendedAction ?? "continue"}\t${job.statePath}`,
       )
       .join("\n")
       .concat(jobs.length ? "\n" : ""),
@@ -849,6 +869,7 @@ async function kbIngestResume(argv: string[], io: CliIO): Promise<number> {
   const job = await readBulkJob(statePath);
   const config = resolveConfig(args, io.env);
   const selectorFields = await resolveSelectorFields(config, job.collectionSelector);
+  const preflightOptions = preflightOptionsFromArgs(args, job.schemaSnapshot, job.rootPath, false);
   const result = await runBulkLoop({
     args,
     config,
@@ -857,6 +878,7 @@ async function kbIngestResume(argv: string[], io: CliIO): Promise<number> {
     metadataMap: job.metadataMap,
     env: io.env,
     stdout: io.stdout,
+    preflightOptions,
   });
   writeJsonOrText(io.stdout, args, result, () => formatBulkRunSummary(result));
   return result.failed > 0 || result.blocked > 0 ? 1 : 0;
@@ -871,6 +893,7 @@ async function kbIngestExport(argv: string[], io: CliIO): Promise<number> {
 
   const format = getString(args, "format") ?? "jsonl";
   const rows = await readBulkFiles(statePath);
+  const job = await readBulkJob(statePath);
   if (format === "csv") {
     write(
       io.stdout,
@@ -923,7 +946,7 @@ async function kbIngestExport(argv: string[], io: CliIO): Promise<number> {
     throw new CliError("--format must be jsonl, json, or csv.");
   }
   if (format === "json") {
-    write(io.stdout, `${JSON.stringify({ files: rows }, null, 2)}\n`);
+    write(io.stdout, `${JSON.stringify({ job, files: rows }, null, 2)}\n`);
   } else {
     write(
       io.stdout,
@@ -944,6 +967,7 @@ async function runBulkLoop(input: {
   metadataMap: MetadataMap;
   env: NodeJS.ProcessEnv;
   stdout: Output;
+  preflightOptions: BulkPreflightOptions;
 }): Promise<{
   jobId: string;
   statePath: string;
@@ -956,6 +980,7 @@ async function runBulkLoop(input: {
   skipped: number;
   blocked: number;
   polls: number;
+  pipelineHealth?: BulkPipelineHealthSnapshot | undefined;
 }> {
   const windowSize = getPositiveInteger(input.args, "window-size", DEFAULT_BULK_WINDOW_SIZE);
   const topUpMax = getPositiveInteger(input.args, "top-up-max", DEFAULT_BULK_TOP_UP_MAX);
@@ -975,27 +1000,40 @@ async function runBulkLoop(input: {
 
   await resetInterruptedBulkUploads(input.statePath);
   await updateJobStatus(input.statePath, "running");
+  let lastPipelineHealth: BulkPipelineHealthSnapshot | undefined;
 
   while (true) {
     polls += 1;
     await pollBulkStatuses(input.statePath, input.config);
     const summary = await bulkJobSummary(input.statePath);
     const capacity = Math.max(0, windowSize - summary.inflight);
-    const uploadLimit = Math.min(capacity, topUpMax);
+    lastPipelineHealth = await readBulkPipelineHealth(input.config, pollInterval);
+    await saveBulkPipelineHealth(input.statePath, lastPipelineHealth);
+    const uploadLimit = bulkUploadLimitForHealth(Math.min(capacity, topUpMax), lastPipelineHealth);
+    const effectiveUploadConcurrency =
+      lastPipelineHealth.recommendedAction === "slow_down" ? 1 : uploadConcurrency;
 
     if (uploadLimit > 0) {
       const pending = await claimPendingBulkFiles(input.statePath, uploadLimit);
-      await runPool(pending, uploadConcurrency, async (row) => {
-        const result = await uploadBulkFile({
-          args: input.args,
-          config: input.config,
-          selectorFields: input.selectorFields,
+      await runPool(pending, effectiveUploadConcurrency, async (row) => {
+        const materialized = await materializeBulkFileForUpload({
+          statePath: input.statePath,
+          metadataMap: input.metadataMap,
+          preflightOptions: input.preflightOptions,
           row,
-          retries,
-          env: input.env,
         });
-        await saveBulkUploadResult(input.statePath, row.relativePath, result);
-        return result;
+        return await runPool(materialized.uploadRows, 1, async (uploadRow) => {
+          const result = await uploadBulkFile({
+            args: input.args,
+            config: input.config,
+            selectorFields: input.selectorFields,
+            row: uploadRow,
+            retries,
+            env: input.env,
+          });
+          await saveBulkUploadResult(input.statePath, uploadRow.relativePath, result);
+          return result;
+        });
       });
     }
 
@@ -1003,7 +1041,7 @@ async function runBulkLoop(input: {
     if (getBoolean(input.args, "verbose")) {
       write(
         input.stdout,
-        `poll=${polls} pending=${nextSummary.pending} inflight=${nextSummary.inflight} completed=${nextSummary.completed} failed=${nextSummary.failed} waiting_for_index_flags=${nextSummary.waitingForIndexFlags}\n`,
+        `poll=${polls} pending=${nextSummary.pending} inflight=${nextSummary.inflight} completed=${nextSummary.completed} failed=${nextSummary.failed} waiting_for_index_flags=${nextSummary.waitingForIndexFlags} pressure=${lastPipelineHealth.pressure} action=${lastPipelineHealth.recommendedAction}\n`,
       );
     }
     if (nextSummary.pending === 0 && nextSummary.inflight === 0) {
@@ -1016,6 +1054,7 @@ async function runBulkLoop(input: {
         jobId: jobIdFromStatePath(input.statePath),
         statePath: input.statePath,
         polls,
+        pipelineHealth: lastPipelineHealth,
       };
     }
     if (maxPolls > 0 && polls >= maxPolls) {
@@ -1025,10 +1064,27 @@ async function runBulkLoop(input: {
         jobId: jobIdFromStatePath(input.statePath),
         statePath: input.statePath,
         polls,
+        pipelineHealth: lastPipelineHealth,
       };
     }
-    await sleep(pollInterval * 1000);
+    await sleep(bulkPollIntervalForHealth(pollInterval, lastPipelineHealth) * 1000);
   }
+}
+
+function bulkUploadLimitForHealth(limit: number, health: BulkPipelineHealthSnapshot): number {
+  if (limit <= 0) return 0;
+  if (health.recommendedAction === "pause_top_up") return 0;
+  if (health.recommendedAction === "slow_down") return Math.max(1, Math.ceil(limit / 2));
+  return limit;
+}
+
+function bulkPollIntervalForHealth(
+  baseSeconds: number,
+  health: BulkPipelineHealthSnapshot | undefined,
+): number {
+  if (!health) return baseSeconds;
+  if (health.recommendedAction === "continue") return baseSeconds;
+  return Math.max(baseSeconds, health.recommendedPollAfterSeconds);
 }
 
 async function uploadBulkFile(input: {
@@ -1059,6 +1115,221 @@ async function uploadBulkFile(input: {
   });
 }
 
+async function materializeBulkFileForUpload(input: {
+  statePath: string;
+  metadataMap: MetadataMap;
+  preflightOptions: BulkPreflightOptions;
+  row: BulkFileRecord;
+}): Promise<BulkMaterializeResult> {
+  if (input.row.ingestVariant === "direct_upload") {
+    return { uploadRows: [input.row] };
+  }
+
+  try {
+    const preflightOptions = materializeOptionsForRow(input.preflightOptions, input.row);
+    if (input.row.ingestVariant === "compressed_docx") {
+      const docxRow = await materializeDocxBulkRow(
+        input.statePath,
+        input.metadataMap,
+        preflightOptions,
+        input.row,
+      );
+      return { uploadRows: docxRow ? [docxRow] : [] };
+    }
+
+    if (input.row.ingestVariant === "page_split_pdf") {
+      const pdfRows = await materializePdfBulkRow(
+        input.statePath,
+        input.metadataMap,
+        preflightOptions,
+        input.row,
+      );
+      return { uploadRows: pdfRows };
+    }
+
+    await markBulkFileFailed(input.statePath, input.row.relativePath, "UNSUPPORTED_INGEST_VARIANT");
+    return { uploadRows: [] };
+  } catch (error) {
+    await markBulkFileFailed(
+      input.statePath,
+      input.row.relativePath,
+      error instanceof Error ? error.message : String(error),
+    );
+    return { uploadRows: [] };
+  }
+}
+
+function materializeOptionsForRow(
+  options: BulkPreflightOptions,
+  row: BulkFileRecord,
+): BulkPreflightOptions {
+  const rowMaxUploadBytes = Number(row.preflight.maxUploadBytes);
+  return {
+    ...options,
+    maxUploadBytes:
+      Number.isFinite(rowMaxUploadBytes) && rowMaxUploadBytes > 0
+        ? rowMaxUploadBytes
+        : options.maxUploadBytes,
+  };
+}
+
+async function materializeDocxBulkRow(
+  statePath: string,
+  metadataMap: MetadataMap,
+  options: BulkPreflightOptions,
+  row: BulkFileRecord,
+): Promise<BulkFileRecord | undefined> {
+  if (row.derivedPath && row.derivedSize !== undefined && row.derivedSha256) {
+    const existing = await stat(row.derivedPath).catch(() => undefined);
+    if (existing?.isFile() && existing.size === row.derivedSize) return row;
+  }
+
+  const source = bulkRecordToOriginalPlan(row);
+  const docx = await analyzeDocx(source.originalPath);
+  if (isEmptyDocxAnalysis(docx)) {
+    await markBulkFileSkipped(statePath, row.relativePath, "empty_docx");
+    return undefined;
+  }
+
+  const materialized = await createDocxIngestCopy(source, options, docx, row.classification);
+  return await updateMaterializedBulkRow(statePath, metadataMap, row.relativePath, materialized);
+}
+
+async function materializePdfBulkRow(
+  statePath: string,
+  metadataMap: MetadataMap,
+  options: BulkPreflightOptions,
+  row: BulkFileRecord,
+): Promise<BulkFileRecord[]> {
+  if (row.partIndex !== undefined && row.derivedPath) {
+    const existing = await stat(row.derivedPath).catch(() => undefined);
+    if (existing?.isFile() && existing.size === row.derivedSize) return [row];
+  }
+
+  const source = bulkRecordToOriginalPlan(row);
+  const pdf = (await analyzePdf(source.originalPath).catch((error: unknown) => ({
+    error: error instanceof Error ? error.message : String(error),
+    pageCount: 0,
+    imageCount: 0,
+    imageHeavy: false,
+  }))) as PdfAnalysis;
+  const partPlans = await createPdfPartPlans(source, options, pdf, row.classification);
+  if (row.partIndex !== undefined) {
+    const currentPart = partPlans.find((part) => part.relativePath === row.relativePath);
+    if (!currentPart) {
+      await markBulkFileFailed(statePath, row.relativePath, "PDF_SPLIT_PART_REGENERATION_MISMATCH");
+      return [];
+    }
+    return [await updateMaterializedBulkRow(statePath, metadataMap, row.relativePath, currentPart)];
+  }
+  const now = new Date().toISOString();
+  const db = await openSqlite(statePath);
+  try {
+    createBulkSchema(db);
+    db.exec("BEGIN");
+    try {
+      for (const part of partPlans) {
+        insertBulkFilePlan(db, metadataMap, part, bulkInitialStatus(part), now);
+      }
+      db.prepare("DELETE FROM files WHERE relative_path = ?").run(row.relativePath);
+      touchJob(db, now);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.close();
+  }
+  return [];
+}
+
+async function updateMaterializedBulkRow(
+  statePath: string,
+  metadataMap: MetadataMap,
+  relativePath: string,
+  file: BulkFilePlan,
+): Promise<BulkFileRecord> {
+  const evaluated = evaluateMetadata(metadataMap, file);
+  const now = new Date().toISOString();
+  const db = await openSqlite(statePath);
+  try {
+    createBulkSchema(db);
+    db.prepare(
+      `UPDATE files
+       SET path = ?, size = ?, mtime_ms = ?, sha256 = ?, ext = ?, path_segments_json = ?, path_depth = ?,
+           metadata_json = ?, matched_rules_json = ?, classification = ?, ingest_variant = ?, source_document_key = ?,
+           derived_path = ?, derived_size = ?, derived_sha256 = ?, normalize_strategy = ?, generated_metadata_json = ?,
+           preflight_json = ?, updated_at = ?
+       WHERE relative_path = ?`,
+    ).run(
+      file.path,
+      file.size,
+      file.mtimeMs,
+      file.sha256,
+      file.ext,
+      JSON.stringify(file.pathSegments),
+      file.pathDepth,
+      JSON.stringify(evaluated.metadata),
+      JSON.stringify(evaluated.matchedRules),
+      file.classification,
+      file.ingestVariant,
+      file.sourceDocumentKey,
+      file.derivedPath ?? null,
+      file.derivedSize ?? null,
+      file.derivedSha256 ?? null,
+      file.normalizeStrategy ?? null,
+      JSON.stringify(file.generatedMetadata),
+      JSON.stringify(file.preflight),
+      now,
+      relativePath,
+    );
+    touchJob(db, now);
+    const updated = db.prepare("SELECT * FROM files WHERE relative_path = ?").get(relativePath);
+    if (!updated)
+      throw new CliError(`Bulk row disappeared during materialization: ${relativePath}`);
+    return rowToBulkFile(updated);
+  } finally {
+    db.close();
+  }
+}
+
+async function markBulkFileFailed(
+  statePath: string,
+  relativePath: string,
+  error: string,
+): Promise<void> {
+  const db = await openSqlite(statePath);
+  const now = new Date().toISOString();
+  try {
+    createBulkSchema(db);
+    db.prepare(
+      "UPDATE files SET status = 'failed', last_error = ?, updated_at = ? WHERE relative_path = ?",
+    ).run(error, now, relativePath);
+    touchJob(db, now);
+  } finally {
+    db.close();
+  }
+}
+
+async function markBulkFileSkipped(
+  statePath: string,
+  relativePath: string,
+  reason: string,
+): Promise<void> {
+  const db = await openSqlite(statePath);
+  const now = new Date().toISOString();
+  try {
+    createBulkSchema(db);
+    db.prepare(
+      "UPDATE files SET status = 'skipped', last_error = ?, updated_at = ? WHERE relative_path = ?",
+    ).run(reason, now, relativePath);
+    touchJob(db, now);
+  } finally {
+    db.close();
+  }
+}
+
 async function pollBulkStatuses(statePath: string, config: KbConfig): Promise<void> {
   const inflight = await readInflightBulkFiles(statePath);
   const documentIds = inflight.map((row) => row.documentId).filter(Boolean) as string[];
@@ -1085,6 +1356,13 @@ async function pollBulkStatuses(statePath: string, config: KbConfig): Promise<vo
 }
 
 function judgeBulkStatus(item: BulkStatusItem): { status: string; lastError?: string } {
+  if (item.itemError) {
+    const message = `${item.itemError.code}: ${item.itemError.message}`;
+    return item.itemError.retryable
+      ? { status: "uploaded", lastError: message }
+      : { status: "failed", lastError: message };
+  }
+
   const status = item.status ?? "";
   if (BULK_FAILED_STATUSES.has(status)) {
     return {
@@ -1149,14 +1427,7 @@ function batchStatusItems(payload: unknown): BulkStatusItem[] {
         : Array.isArray(data)
           ? data
           : [];
-  return items
-    .filter(isObject)
-    .map((item) =>
-      statusItemFromPayload(
-        item,
-        stringField(item, "documentId") ?? stringField(item, "document_id") ?? "",
-      ),
-    );
+  return items.filter(isObject).map((item) => batchStatusItemFromPayload(item));
 }
 
 function statusItemFromPayload(payload: unknown, fallbackDocumentId = ""): BulkStatusItem {
@@ -1175,6 +1446,108 @@ function statusItemFromPayload(payload: unknown, fallbackDocumentId = ""): BulkS
     lastErrorStage: typeof item.lastErrorStage === "string" ? item.lastErrorStage : undefined,
     raw: payload,
   };
+}
+
+async function readBulkPipelineHealth(
+  config: KbConfig,
+  fallbackPollAfterSeconds: number,
+): Promise<BulkPipelineHealthSnapshot> {
+  try {
+    const payload = await jsonRequest(config, "pipeline/health");
+    return pipelineHealthFromPayload(payload, fallbackPollAfterSeconds);
+  } catch (error) {
+    if (error instanceof HttpError && error.status && [404, 405, 501].includes(error.status)) {
+      return {
+        healthy: true,
+        pressure: "unknown",
+        recommendedAction: "continue",
+        recommendedPollAfterSeconds: fallbackPollAfterSeconds,
+        message: "Pipeline health endpoint is unavailable; continuing without backpressure.",
+      };
+    }
+    if (error instanceof HttpError) {
+      return {
+        healthy: false,
+        pressure: "paused",
+        recommendedAction: "pause_top_up",
+        recommendedPollAfterSeconds:
+          error.retryAfterSeconds ?? Math.max(fallbackPollAfterSeconds, 30),
+        message: error.message,
+      };
+    }
+    return {
+      healthy: false,
+      pressure: "paused",
+      recommendedAction: "pause_top_up",
+      recommendedPollAfterSeconds: Math.max(fallbackPollAfterSeconds, 30),
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function pipelineHealthFromPayload(
+  payload: unknown,
+  fallbackPollAfterSeconds: number,
+): BulkPipelineHealthSnapshot {
+  const data = responseData(payload);
+  if (!isObject(data)) {
+    throw new CliError("Pipeline health response did not contain an object payload.");
+  }
+  const action = stringField(data, "recommendedAction");
+  if (action !== "continue" && action !== "slow_down" && action !== "pause_top_up") {
+    throw new CliError("Pipeline health response did not contain a valid recommendedAction.");
+  }
+  const pressure = stringField(data, "pressure");
+  const pollAfter = Number(data.recommendedPollAfterSeconds);
+  return {
+    healthy: typeof data.healthy === "boolean" ? data.healthy : action === "continue",
+    pressure:
+      pressure === "ok" || pressure === "degraded" || pressure === "paused" ? pressure : "unknown",
+    recommendedAction: action,
+    recommendedPollAfterSeconds:
+      Number.isFinite(pollAfter) && pollAfter > 0 ? pollAfter : fallbackPollAfterSeconds,
+    checkedAt: stringField(data, "checkedAt"),
+    message:
+      stringField(data, "message") ??
+      (isObject(data.indexPreflight) ? stringField(data.indexPreflight, "message") : undefined),
+  };
+}
+
+async function saveBulkPipelineHealth(
+  statePath: string,
+  health: BulkPipelineHealthSnapshot,
+): Promise<void> {
+  const db = await openSqlite(statePath);
+  const now = new Date().toISOString();
+  try {
+    createBulkSchema(db);
+    db.prepare("UPDATE jobs SET pipeline_health_json = ?, updated_at = ?").run(
+      JSON.stringify(health),
+      now,
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function batchStatusItemFromPayload(item: Record<string, unknown>): BulkStatusItem {
+  const documentId = stringField(item, "documentId") ?? stringField(item, "document_id") ?? "";
+  if (item.ok === true && isObject(item.status)) {
+    return statusItemFromPayload(item.status, documentId);
+  }
+  if (item.ok === false && isObject(item.error)) {
+    const error = item.error;
+    return {
+      documentId,
+      itemError: {
+        code: stringField(error, "code") ?? "STATUS_ITEM_ERROR",
+        message: stringField(error, "message") ?? "Document status lookup failed.",
+        retryable: typeof error.retryable === "boolean" ? error.retryable : false,
+      },
+      raw: item,
+    };
+  }
+  return statusItemFromPayload(item, documentId);
 }
 
 async function initializeBulkJob(input: {
@@ -1209,50 +1582,9 @@ async function initializeBulkJob(input: {
       );
     }
 
-    const insert = db.prepare(
-      `INSERT OR IGNORE INTO files
-       (path, relative_path, size, mtime_ms, sha256, ext, path_segments_json, path_depth, metadata_json, matched_rules_json, status, attempts, created_at, updated_at,
-        original_path, original_relative_path, original_size, original_mtime_ms, original_sha256, original_ext, classification, ingest_variant, source_document_key,
-        derived_path, derived_size, derived_sha256, normalize_strategy, part_index, part_count, page_start, page_end, generated_metadata_json, preflight_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
     for (const file of input.files) {
-      const evaluated = evaluateMetadata(input.metadataMap, file);
       const status = bulkInitialStatus(file);
-      insert.run(
-        file.path,
-        file.relativePath,
-        file.size,
-        file.mtimeMs,
-        file.sha256,
-        file.ext,
-        JSON.stringify(file.pathSegments),
-        file.pathDepth,
-        JSON.stringify(evaluated.metadata),
-        JSON.stringify(evaluated.matchedRules),
-        status,
-        now,
-        now,
-        file.originalPath,
-        file.originalRelativePath,
-        file.originalSize,
-        file.originalMtimeMs,
-        file.originalSha256,
-        file.originalExt,
-        file.classification,
-        file.ingestVariant,
-        file.sourceDocumentKey,
-        file.derivedPath ?? null,
-        file.derivedSize ?? null,
-        file.derivedSha256 ?? null,
-        file.normalizeStrategy ?? null,
-        file.partIndex ?? null,
-        file.partCount ?? null,
-        file.pageStart ?? null,
-        file.pageEnd ?? null,
-        JSON.stringify(file.generatedMetadata),
-        JSON.stringify(file.preflight),
-      );
+      insertBulkFilePlan(db, input.metadataMap, file, status, now);
     }
     touchJob(db, now);
   } finally {
@@ -1270,6 +1602,56 @@ async function openSqlite(path: string): Promise<SqlDatabase> {
   return db;
 }
 
+function insertBulkFilePlan(
+  db: SqlDatabase,
+  metadataMap: MetadataMap,
+  file: BulkFilePlan,
+  status: string,
+  now: string,
+): void {
+  const evaluated = evaluateMetadata(metadataMap, file);
+  db.prepare(
+    `INSERT OR IGNORE INTO files
+     (path, relative_path, size, mtime_ms, sha256, ext, path_segments_json, path_depth, metadata_json, matched_rules_json, status, attempts, created_at, updated_at,
+      original_path, original_relative_path, original_size, original_mtime_ms, original_sha256, original_ext, classification, ingest_variant, source_document_key,
+      derived_path, derived_size, derived_sha256, normalize_strategy, part_index, part_count, page_start, page_end, generated_metadata_json, preflight_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    file.path,
+    file.relativePath,
+    file.size,
+    file.mtimeMs,
+    file.sha256,
+    file.ext,
+    JSON.stringify(file.pathSegments),
+    file.pathDepth,
+    JSON.stringify(evaluated.metadata),
+    JSON.stringify(evaluated.matchedRules),
+    status,
+    now,
+    now,
+    file.originalPath,
+    file.originalRelativePath,
+    file.originalSize,
+    file.originalMtimeMs,
+    file.originalSha256,
+    file.originalExt,
+    file.classification,
+    file.ingestVariant,
+    file.sourceDocumentKey,
+    file.derivedPath ?? null,
+    file.derivedSize ?? null,
+    file.derivedSha256 ?? null,
+    file.normalizeStrategy ?? null,
+    file.partIndex ?? null,
+    file.partCount ?? null,
+    file.pageStart ?? null,
+    file.pageEnd ?? null,
+    JSON.stringify(file.generatedMetadata),
+    JSON.stringify(file.preflight),
+  );
+}
+
 function createBulkSchema(db: SqlDatabase): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS jobs (
@@ -1279,6 +1661,7 @@ function createBulkSchema(db: SqlDatabase): void {
       schema_snapshot_json TEXT,
       metadata_map_json TEXT NOT NULL,
       dry_run_summary_json TEXT,
+      pipeline_health_json TEXT,
       status TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -1323,7 +1706,16 @@ function createBulkSchema(db: SqlDatabase): void {
     CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
     CREATE INDEX IF NOT EXISTS idx_files_document_id ON files(document_id);
   `);
+  ensureBulkJobColumns(db);
   ensureBulkFileColumns(db);
+}
+
+function ensureBulkJobColumns(db: SqlDatabase): void {
+  const rows = db.prepare("PRAGMA table_info(jobs)").all();
+  const columns = new Set(rows.map((row) => String(row.name)));
+  if (!columns.has("pipeline_health_json")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN pipeline_health_json TEXT;");
+  }
 }
 
 function ensureBulkFileColumns(db: SqlDatabase): void {
@@ -1373,6 +1765,9 @@ async function readBulkJob(statePath: string): Promise<BulkJobRecord> {
       metadataMap: JSON.parse(String(row.metadata_map_json)) as MetadataMap,
       dryRunSummary: row.dry_run_summary_json
         ? (JSON.parse(String(row.dry_run_summary_json)) as MetadataDryRunSummary)
+        : undefined,
+      pipelineHealth: row.pipeline_health_json
+        ? (JSON.parse(String(row.pipeline_health_json)) as BulkPipelineHealthSnapshot)
         : undefined,
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
@@ -1491,8 +1886,9 @@ async function resetInterruptedBulkUploads(statePath: string): Promise<void> {
   const db = await openSqlite(statePath);
   const now = new Date().toISOString();
   try {
+    createBulkSchema(db);
     db.prepare(
-      "UPDATE files SET status = 'pending', last_error = ?, updated_at = ? WHERE status = 'uploading' AND document_id IS NULL",
+      "UPDATE files SET status = 'pending', last_error = ?, updated_at = ? WHERE status IN ('uploading', 'planned') AND document_id IS NULL",
     ).run("Upload was interrupted before a document id was recorded.", now);
     touchJob(db, now);
   } finally {
@@ -1562,6 +1958,33 @@ function rowToBulkFile(row: Record<string, unknown>): BulkFileRecord {
     preflight: row.preflight_json
       ? (JSON.parse(String(row.preflight_json)) as Record<string, unknown>)
       : {},
+  };
+}
+
+function bulkRecordToOriginalPlan(row: BulkFileRecord): BulkFilePlan {
+  const pathSegments = row.originalRelativePath.split("/").filter(Boolean);
+  return {
+    path: row.originalPath,
+    filename: basename(row.originalPath),
+    size: row.originalSize,
+    mtimeMs: row.originalMtimeMs,
+    sha256: row.originalSha256,
+    manifestKey: row.originalRelativePath,
+    relativePath: row.originalRelativePath,
+    ext: row.originalExt,
+    pathSegments,
+    pathDepth: pathSegments.length,
+    originalPath: row.originalPath,
+    originalRelativePath: row.originalRelativePath,
+    originalSize: row.originalSize,
+    originalMtimeMs: row.originalMtimeMs,
+    originalSha256: row.originalSha256,
+    originalExt: row.originalExt,
+    classification: row.classification,
+    ingestVariant: row.ingestVariant,
+    sourceDocumentKey: row.sourceDocumentKey,
+    generatedMetadata: row.generatedMetadata,
+    preflight: row.preflight,
   };
 }
 
@@ -1702,6 +2125,24 @@ async function preflightOneBulkFile(
     const docx = await analyzeDocx(file.path).catch((error: unknown) => ({
       error: error instanceof Error ? error.message : String(error),
     }));
+    if (isEmptyDocxAnalysis(docx)) {
+      return [
+        decorateBulkPlan(file, "empty", "skipped", {
+          ...docx,
+          reason: "empty_docx",
+          maxUploadBytes: options.maxUploadBytes,
+        }),
+      ];
+    }
+    if (file.size <= DOCX_NORMALIZE_MIN_BYTES) {
+      return [
+        decorateBulkPlan(file, "direct_upload", "direct_upload", {
+          ...docx,
+          maxUploadBytes: options.maxUploadBytes,
+          normalizeThresholdBytes: DOCX_NORMALIZE_MIN_BYTES,
+        }),
+      ];
+    }
     const classification =
       file.size > options.maxUploadBytes ? "oversize_docx_image_heavy" : "direct_upload";
     if (!options.generateDerived) {
@@ -1709,6 +2150,7 @@ async function preflightOneBulkFile(
         decorateBulkPlan(file, classification, "compressed_docx", {
           ...docx,
           maxUploadBytes: options.maxUploadBytes,
+          normalizeThresholdBytes: DOCX_NORMALIZE_MIN_BYTES,
           normalizeStrategy: "docx_image_300dpi_normalize",
         }),
       ];
@@ -1869,16 +2311,15 @@ function bulkInitialStatus(file: BulkFilePlan): string {
   if (file.classification === "empty") return "skipped";
   if (file.classification === "unsupported") return "skipped";
   if (file.ingestVariant === "skipped") return "blocked";
-  if (
-    (file.ingestVariant === "compressed_docx" || file.ingestVariant === "page_split_pdf") &&
-    file.derivedSize === undefined
-  ) {
-    return "planned";
+  if (file.ingestVariant === "compressed_docx" && file.derivedSize === undefined) return "pending";
+  if (file.ingestVariant === "page_split_pdf" && file.derivedSize === undefined) return "pending";
+  if (file.ingestVariant === "compressed_docx") {
+    if (file.derivedSize !== undefined && file.derivedSize <= Number(file.preflight.maxUploadBytes))
+      return "pending";
+    return "blocked";
   }
-  if (file.ingestVariant === "compressed_docx") return "pending";
   if (file.size > 0 && file.size <= Number(file.preflight.maxUploadBytes ?? Infinity))
     return "pending";
-  if (file.classification === "direct_upload") return "pending";
   if (file.derivedSize !== undefined && file.derivedSize <= Number(file.preflight.maxUploadBytes))
     return "pending";
   return "blocked";
@@ -2008,12 +2449,64 @@ async function analyzeDocx(path: string): Promise<Record<string, unknown>> {
     (entry) => entry.name.startsWith("word/media/") && !entry.name.endsWith("/"),
   );
   const mediaSizes = media.map((entry) => entry.uncompressedSize);
+  const documentXml = zipEntryText(entries, "word/document.xml") ?? "";
+  const bodyText = extractDocxBodyText(documentXml);
+  const appXml = zipEntryText(entries, "docProps/app.xml") ?? "";
   return {
     mediaCount: media.length,
     mediaTotalBytes: mediaSizes.reduce((sum, size) => sum + size, 0),
     mediaMaxBytes: mediaSizes.reduce((max, size) => Math.max(max, size), 0),
+    textCharacterCount: bodyText.length,
+    paragraphCount: countRegex(documentXml, /<w:p(?:\s|>)/g),
+    drawingCount: countRegex(documentXml, /<w:drawing(?:\s|>)/g),
+    pictCount: countRegex(documentXml, /<w:pict(?:\s|>)/g),
+    appWords: xmlElementNumber(appXml, "Words"),
+    appCharacters: xmlElementNumber(appXml, "Characters"),
+    appParagraphs: xmlElementNumber(appXml, "Paragraphs"),
     zipEntryCount: entries.length,
   };
+}
+
+function isEmptyDocxAnalysis(docx: Record<string, unknown>): boolean {
+  if (docx.error) return false;
+  const mediaCount = Number(docx.mediaCount ?? 0);
+  const textCharacterCount = Number(docx.textCharacterCount ?? 0);
+  const appWords = Number(docx.appWords ?? 0);
+  return mediaCount === 0 && textCharacterCount === 0 && appWords === 0;
+}
+
+function zipEntryText(entries: ZipEntry[], name: string): string | undefined {
+  const entry = entries.find((candidate) => candidate.name === name);
+  return entry?.data.toString("utf8");
+}
+
+function extractDocxBodyText(xml: string): string {
+  const text = [...xml.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)]
+    .map((match) => decodeXmlText(match[1] ?? ""))
+    .join("");
+  return text.trim();
+}
+
+function countRegex(input: string, regex: RegExp): number {
+  return (input.match(regex) ?? []).length;
+}
+
+function xmlElementNumber(xml: string, name: string): number | undefined {
+  const match = new RegExp(`<${name}>(\\d+)</${name}>`).exec(xml);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function decodeXmlText(input: string): string {
+  return input
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code: string) => String.fromCodePoint(parseInt(code, 16)));
 }
 
 async function createDocxIngestCopy(
@@ -2996,8 +3489,11 @@ function formatBulkRunSummary(summary: {
   skipped: number;
   blocked: number;
   polls: number;
+  pipelineHealth?: BulkPipelineHealthSnapshot | undefined;
 }): string {
-  return `Bulk job ${summary.jobId}: completed=${summary.completed} failed=${summary.failed} skipped=${summary.skipped} blocked=${summary.blocked} pending=${summary.pending} inflight=${summary.inflight} waiting_for_index_flags=${summary.waitingForIndexFlags} state=${summary.statePath}\n`;
+  const pressure = summary.pipelineHealth?.pressure ?? "unknown";
+  const action = summary.pipelineHealth?.recommendedAction ?? "continue";
+  return `Bulk job ${summary.jobId}: completed=${summary.completed} failed=${summary.failed} skipped=${summary.skipped} blocked=${summary.blocked} pending=${summary.pending} inflight=${summary.inflight} waiting_for_index_flags=${summary.waitingForIndexFlags} pressure=${pressure} action=${action} state=${summary.statePath}\n`;
 }
 
 async function uploadWithRetries(input: {

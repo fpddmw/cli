@@ -104,14 +104,15 @@ stored under the OS app-data directory:
 Use `--state /path/to/job.sqlite` to override the checkpoint path. Bulk jobs do
 not use `.tiangong-kb-ingest-manifest.jsonl` as their checkpoint.
 
-Bulk ingest always creates 300dpi-normalized ingest copies for `.docx` files
-and creates PDF split parts when a PDF exceeds the active upload limit. Derived
-files stay under `.tiangong-kb-ingest-derived` by default, and that directory is
-excluded from future bulk scans. DOCX copies keep the original logical path for
-metadata-map evaluation, and the generated DOCX copy is uploaded even when
-normalization does not materially reduce file size. PDF split parts keep the
-original logical parent directory. Upload metadata remains the user/business
-metadata produced by the metadata map.
+Bulk ingest scans and fingerprints files first, then lazily creates derived
+files only when a row enters the active upload window. `.docx` files larger than
+10MiB are uploaded through 300dpi-normalized ingest copies; smaller `.docx`
+files upload directly unless they are empty. Oversized PDFs are split into the
+fewest uploadable PDF parts when they enter the window, and the generated part
+rows are written back to SQLite so resume can reuse them. Derived files stay
+under `.tiangong-kb-ingest-derived` by default, and that directory is excluded
+from future bulk scans. Upload metadata remains the user/business metadata
+produced by the metadata map.
 
 Manage bulk jobs:
 

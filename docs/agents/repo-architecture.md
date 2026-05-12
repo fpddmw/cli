@@ -49,15 +49,17 @@ schema snapshots, uploads, and document status polling. The backend remains the
 source of truth for authorization, dedupe, pipeline state transitions, and
 indexing results.
 
-Bulk derived files are generated as local operator artifacts. All `.docx` files
-are uploaded through 300dpi-normalized ingest copies, while oversized PDFs are
-split into the fewest uploadable PDF parts. The default
+Bulk derived files are generated lazily as local operator artifacts. Initial
+bulk setup only scans, fingerprints, runs lightweight preflight, and writes
+SQLite state. When a row enters the upload window, `.docx` files larger than
+10MiB are uploaded through 300dpi-normalized ingest copies, while oversized PDFs
+are split into the fewest uploadable PDF parts. The default
 `.tiangong-kb-ingest-derived` directory is excluded from later bulk scans. DOCX
 copies preserve the original logical path for metadata-map evaluation, PDF split
 parts preserve the original logical parent directory, and split/normalize
 lineage stays in SQLite/export state instead of being uploaded as default KB
-metadata. The CLI uploads the generated DOCX copy even when normalization leaves
-the file unchanged or only slightly smaller.
+metadata. Empty `.docx` files with no body text and no media are marked skipped
+before upload.
 
 ## Skill Boundary
 
