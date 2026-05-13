@@ -10,6 +10,22 @@ import sharp from "sharp";
 
 import { DEFAULT_API_BASE_URL, parseArgs, resolveCollectionSelector, runCli } from "../src/cli.js";
 
+function pipelineHealthPayload(action: "continue" | "slow_down" | "pause_top_up" = "continue") {
+  return {
+    data: {
+      healthy: action === "continue",
+      pressure: action === "continue" ? "ok" : action === "slow_down" ? "degraded" : "paused",
+      recommendedAction: action,
+      recommendedPollAfterSeconds: 1,
+      checkedAt: "2026-05-11T00:00:00.000Z",
+      queues: {},
+      retries: {},
+      workers: {},
+      indexPreflight: { status: "healthy", message: null },
+    },
+  };
+}
+
 describe("parseArgs", () => {
   it("parses positionals, boolean flags, and value flags", () => {
     const parsed = parseArgs(["file.pdf", "--recursive", "--concurrency", "3", "--json=true"]);
@@ -143,15 +159,19 @@ describe("runCli", () => {
     }
   });
 
-  it("resolves collection names from v1 collection envelopes before upload", async () => {
+  it("routes upload compatibility through bulk and collection-name resolution", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "tiangong-cli-test-"));
     const filePath = join(tempDir, "sample.txt");
-    const manifestPath = join(tempDir, "manifest.jsonl");
+    const statePath = join(tempDir, "job.sqlite");
+    const schemaPath = join(tempDir, "schema.json");
     await writeFile(filePath, "sample upload content\n");
+    await writeFile(schemaPath, JSON.stringify({ metadataSchema: { fields: [] } }));
 
     const previousFetch = globalThis.fetch;
+    const requestedUrls: string[] = [];
     globalThis.fetch = (async (input, init) => {
       const url = String(input);
+      requestedUrls.push(url);
       if (url.includes("/collections?")) {
         return new Response(
           JSON.stringify({
@@ -171,23 +191,52 @@ describe("runCli", () => {
         );
       }
 
-      assert.ok(url.endsWith("/documents"));
-      assert.equal(init?.method, "POST");
-      assert.equal((init?.body as FormData).get("collection_path"), "/course/thu_humanities");
-      return new Response(
-        JSON.stringify({
-          data: {
-            documentId: "doc_123",
-            status: "parse_queued",
-            duplicate: false,
-            requestId: "req_upload",
-            idempotencyKey: "idem_123",
-          },
-          request_id: "req_upload",
-          api_version: "v1",
-        }),
-        { status: 201, headers: { "content-type": "application/json" } },
-      );
+      if (url.endsWith("/documents") && init?.method === "POST") {
+        assert.equal((init.body as FormData).get("collection_path"), "/course/thu_humanities");
+        return new Response(
+          JSON.stringify({
+            data: {
+              documentId: "doc_123",
+              status: "parse_queued",
+              duplicate: false,
+              requestId: "req_upload",
+              idempotencyKey: "idem_123",
+            },
+            request_id: "req_upload",
+            api_version: "v1",
+          }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/documents/status:batch") && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            data: {
+              results: [
+                {
+                  documentId: "doc_123",
+                  ok: true,
+                  status: {
+                    documentId: "doc_123",
+                    status: "completed",
+                    opensearchIndexed: true,
+                    pineconeIndexed: true,
+                    indexRecordCount: 1,
+                  },
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/pipeline/health")) {
+        return new Response(JSON.stringify(pipelineHealthPayload()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
     }) as typeof fetch;
 
     try {
@@ -200,8 +249,12 @@ describe("runCli", () => {
           filePath,
           "--collection-name",
           "THU Humanities",
-          "--manifest",
-          manifestPath,
+          "--schema-file",
+          schemaPath,
+          "--state",
+          statePath,
+          "--poll-interval",
+          "0.01",
           "--json",
         ],
         {
@@ -213,54 +266,25 @@ describe("runCli", () => {
 
       assert.equal(exitCode, 0);
       const summary = JSON.parse(stdout);
-      assert.equal(summary.uploaded, 1);
-      assert.equal(summary.results[0].documentId, "doc_123");
-      assert.equal(summary.results[0].duplicate, false);
+      assert.equal(summary.completed, 1);
+      assert.equal(summary.failed, 0);
+      assert.equal(summary.statePath, statePath);
+      assert.ok(requestedUrls.some((url) => url.includes("/collections?")));
+      await assert.rejects(stat(join(tempDir, "manifest.jsonl")));
     } finally {
       globalThis.fetch = previousFetch;
       await rm(tempDir, { recursive: true, force: true });
     }
   });
 
-  it("waits for upload status through the external status route", async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), "tiangong-cli-wait-"));
+  it("rejects removed JSONL manifest upload checkpoints", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "tiangong-cli-manifest-"));
     const filePath = join(tempDir, "sample.txt");
     const manifestPath = join(tempDir, "manifest.jsonl");
     await writeFile(filePath, "sample upload content\n");
 
-    const previousFetch = globalThis.fetch;
-    const requestedUrls: string[] = [];
-    globalThis.fetch = (async (input, init) => {
-      const url = String(input);
-      requestedUrls.push(url);
-      if (url.endsWith("/documents") && init?.method === "POST") {
-        return new Response(
-          JSON.stringify({
-            data: {
-              documentId: "doc_wait_upload",
-              status: "parse_queued",
-              duplicate: false,
-            },
-          }),
-          { status: 201, headers: { "content-type": "application/json" } },
-        );
-      }
-      if (url.endsWith("/documents/doc_wait_upload/status")) {
-        return new Response(
-          JSON.stringify({
-            data: {
-              documentId: "doc_wait_upload",
-              status: "completed",
-              terminal: true,
-            },
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      throw new Error(`Unexpected request: ${url}`);
-    }) as typeof fetch;
-
     try {
+      let stderr = "";
       const exitCode = await runCli(
         [
           "kb",
@@ -277,14 +301,14 @@ describe("runCli", () => {
         {
           env: { TIANGONG_AI_API_KEY: "fake" },
           stdout: { write: () => undefined },
-          stderr: { write: () => undefined },
+          stderr: { write: (chunk: string) => void (stderr += chunk) },
         },
       );
 
-      assert.equal(exitCode, 0);
-      assert.ok(requestedUrls.some((url) => url.endsWith("/documents/doc_wait_upload/status")));
+      assert.equal(exitCode, 1);
+      assert.match(stderr, /--manifest option was removed/);
+      await assert.rejects(stat(manifestPath));
     } finally {
-      globalThis.fetch = previousFetch;
       await rm(tempDir, { recursive: true, force: true });
     }
   });
@@ -477,14 +501,25 @@ describe("runCli", () => {
             data: {
               results: body.documentIds.map((documentId: string) => ({
                 documentId,
-                status: "completed",
-                opensearchIndexed: true,
-                pineconeIndexed: true,
+                ok: true,
+                status: {
+                  documentId,
+                  status: "completed",
+                  opensearchIndexed: true,
+                  pineconeIndexed: true,
+                  indexRecordCount: 1,
+                },
               })),
             },
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
+      }
+      if (url.endsWith("/pipeline/health")) {
+        return new Response(JSON.stringify(pipelineHealthPayload()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
       }
       throw new Error(`Unexpected request: ${url}`);
     }) as typeof fetch;
@@ -565,6 +600,12 @@ describe("runCli", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
+      if (url.endsWith("/pipeline/health")) {
+        return new Response(JSON.stringify(pipelineHealthPayload()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       throw new Error(`Unexpected request: ${url}`);
     }) as typeof fetch;
 
@@ -612,6 +653,167 @@ describe("runCli", () => {
       });
       assert.equal(statusCode, 0);
       assert.equal(JSON.parse(statusOut).summary.waitingForIndexFlags, 1);
+    } finally {
+      globalThis.fetch = previousFetch;
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("marks only the affected row failed for per-document batch status errors", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "tiangong-cli-bulk-partial-status-"));
+    const rootDir = join(tempDir, "root");
+    const statePath = join(tempDir, "job.sqlite");
+    const schemaPath = join(tempDir, "schema.json");
+    await mkdir(rootDir, { recursive: true });
+    await writeFile(join(rootDir, "good.txt"), "good");
+    await writeFile(join(rootDir, "bad.txt"), "bad");
+    await writeFile(schemaPath, JSON.stringify({ metadataSchema: { fields: [] } }));
+
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/documents") && init?.method === "POST") {
+        const form = init.body as FormData;
+        const name = String((form.get("file") as File).name);
+        return new Response(
+          JSON.stringify({ data: { documentId: name.includes("good") ? "doc_good" : "doc_bad" } }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/documents/status:batch")) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              results: [
+                {
+                  documentId: "doc_good",
+                  ok: true,
+                  status: {
+                    documentId: "doc_good",
+                    status: "completed",
+                    opensearchIndexed: true,
+                    pineconeIndexed: true,
+                    indexRecordCount: 1,
+                  },
+                },
+                {
+                  documentId: "doc_bad",
+                  ok: false,
+                  error: { code: "DOCUMENT_NOT_FOUND", message: "missing", retryable: false },
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/pipeline/health")) {
+        return new Response(JSON.stringify(pipelineHealthPayload()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    try {
+      let stdout = "";
+      const exitCode = await runCli(
+        [
+          "kb",
+          "ingest",
+          "bulk",
+          rootDir,
+          "--collection-path",
+          "/course/test",
+          "--schema-file",
+          schemaPath,
+          "--state",
+          statePath,
+          "--poll-interval",
+          "0.01",
+          "--max-polls",
+          "3",
+          "--json",
+        ],
+        {
+          env: { TIANGONG_AI_API_KEY: "fake" },
+          stdout: { write: (chunk: string) => void (stdout += chunk) },
+          stderr: { write: () => undefined },
+        },
+      );
+
+      assert.equal(exitCode, 1);
+      const payload = JSON.parse(stdout);
+      assert.equal(payload.completed, 1);
+      assert.equal(payload.failed, 1);
+    } finally {
+      globalThis.fetch = previousFetch;
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("pauses bulk upload top-up when pipeline health says pause_top_up", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "tiangong-cli-bulk-health-pause-"));
+    const rootDir = join(tempDir, "root");
+    const statePath = join(tempDir, "job.sqlite");
+    const schemaPath = join(tempDir, "schema.json");
+    await mkdir(rootDir, { recursive: true });
+    await writeFile(join(rootDir, "one.txt"), "one");
+    await writeFile(schemaPath, JSON.stringify({ metadataSchema: { fields: [] } }));
+
+    const previousFetch = globalThis.fetch;
+    let uploads = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/pipeline/health")) {
+        return new Response(JSON.stringify(pipelineHealthPayload("pause_top_up")), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/documents") && init?.method === "POST") {
+        uploads += 1;
+        return new Response(JSON.stringify({ data: { documentId: "doc_never" } }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    try {
+      let stdout = "";
+      const exitCode = await runCli(
+        [
+          "kb",
+          "ingest",
+          "bulk",
+          rootDir,
+          "--collection-path",
+          "/course/test",
+          "--schema-file",
+          schemaPath,
+          "--state",
+          statePath,
+          "--poll-interval",
+          "0.01",
+          "--max-polls",
+          "1",
+          "--json",
+        ],
+        {
+          env: { TIANGONG_AI_API_KEY: "fake" },
+          stdout: { write: (chunk: string) => void (stdout += chunk) },
+          stderr: { write: () => undefined },
+        },
+      );
+
+      assert.equal(exitCode, 0);
+      const payload = JSON.parse(stdout);
+      assert.equal(payload.pending, 1);
+      assert.equal(payload.pipelineHealth.recommendedAction, "pause_top_up");
+      assert.equal(uploads, 0);
     } finally {
       globalThis.fetch = previousFetch;
       await rm(tempDir, { recursive: true, force: true });
@@ -747,7 +949,12 @@ describe("runCli", () => {
     await writeFile(join(rootDir, "direct.txt"), "direct");
     await writeStoredZip(join(rootDir, "small.docx"), [
       ["[Content_Types].xml", Buffer.from("<Types></Types>")],
-      ["word/document.xml", Buffer.from("<w:document></w:document>")],
+      [
+        "word/document.xml",
+        Buffer.from(
+          '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>hello</w:t></w:r></w:p></w:body></w:document>',
+        ),
+      ],
     ]);
     await writeFile(join(rootDir, "empty.txt"), "");
     await writeFile(join(rootDir, "unsupported.exe"), "binary");
@@ -787,7 +994,7 @@ describe("runCli", () => {
       assert.equal(payload.preflight.classificationCounts.unsupported, 1);
       assert.equal(payload.preflight.classificationCounts.oversize_scanned_pdf, 1);
       assert.equal(payload.preflight.totalFiles, 5);
-      assert.equal(payload.preflight.planned.normalizedDocx, 1);
+      assert.equal(payload.preflight.planned.normalizedDocx, 0);
       assert.equal(payload.preflight.categoryCounts.oversize, 1);
       assert.equal(payload.preflight.categoryCounts.imageHeavy, 1);
 
@@ -883,6 +1090,7 @@ describe("runCli", () => {
         ),
       ],
       ["word/media/image1.jpg", sourceImage],
+      ["word/embeddings/filler.bin", randomBytes(11 * 1024 * 1024)],
     ]);
     await writeFile(schemaPath, JSON.stringify({ metadataSchema: { fields: [] } }));
 
@@ -909,18 +1117,29 @@ describe("runCli", () => {
         return new Response(
           JSON.stringify({
             data: {
-              documents: [
+              results: [
                 {
                   documentId: "doc_docx",
-                  status: "completed",
-                  opensearchIndexed: true,
-                  pineconeIndexed: true,
+                  ok: true,
+                  status: {
+                    documentId: "doc_docx",
+                    status: "completed",
+                    opensearchIndexed: true,
+                    pineconeIndexed: true,
+                    indexRecordCount: 1,
+                  },
                 },
               ],
             },
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
+      }
+      if (url.endsWith("/pipeline/health")) {
+        return new Response(JSON.stringify(pipelineHealthPayload()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
       }
       throw new Error(`Unexpected request: ${url}`);
     }) as typeof fetch;
@@ -1012,16 +1231,27 @@ describe("runCli", () => {
         return new Response(
           JSON.stringify({
             data: {
-              documents: body.documentIds.map((documentId: string) => ({
+              results: body.documentIds.map((documentId: string) => ({
                 documentId,
-                status: "completed",
-                opensearchIndexed: true,
-                pineconeIndexed: true,
+                ok: true,
+                status: {
+                  documentId,
+                  status: "completed",
+                  opensearchIndexed: true,
+                  pineconeIndexed: true,
+                  indexRecordCount: 1,
+                },
               })),
             },
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
+      }
+      if (url.endsWith("/pipeline/health")) {
+        return new Response(JSON.stringify(pipelineHealthPayload()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
       }
       throw new Error(`Unexpected request: ${url}`);
     }) as typeof fetch;
@@ -1053,14 +1283,17 @@ describe("runCli", () => {
         },
       );
       assert.equal(firstCode, 0);
-      assert.equal(uploads.length, 2);
+      assert.equal(uploads.length, 0);
 
       let resumeOut = "";
-      const resumeCode = await runCli(["kb", "ingest", "resume", statePath, "--json"], {
-        env: { TIANGONG_AI_API_KEY: "fake" },
-        stdout: { write: (chunk: string) => void (resumeOut += chunk) },
-        stderr: { write: () => undefined },
-      });
+      const resumeCode = await runCli(
+        ["kb", "ingest", "resume", statePath, "--poll-interval", "0.01", "--json"],
+        {
+          env: { TIANGONG_AI_API_KEY: "fake" },
+          stdout: { write: (chunk: string) => void (resumeOut += chunk) },
+          stderr: { write: () => undefined },
+        },
+      );
       assert.equal(resumeCode, 0);
       assert.equal(JSON.parse(resumeOut).completed, 2);
       assert.equal(uploads.length, 2);
