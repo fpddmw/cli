@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, openAsBlob, readFileSync } from "node:fs";
-import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import {
   basename,
@@ -22,20 +22,18 @@ import sharp from "sharp";
 export const DEFAULT_API_BASE_URL = "https://thuenv.tiangong.world:7300";
 export const DEFAULT_API_PATH_PREFIX = "/api/v1/kb";
 
-const DEFAULT_CONCURRENCY = 3;
 const DEFAULT_RETRIES = 3;
-const DEFAULT_MANIFEST = ".tiangong-kb-ingest-manifest.jsonl";
 const DEFAULT_BULK_WINDOW_SIZE = 100;
 const DEFAULT_BULK_TOP_UP_MAX = 50;
 const DEFAULT_BULK_UPLOAD_CONCURRENCY = 4;
 const DEFAULT_BULK_POLL_INTERVAL_SECONDS = 30;
+const DEFAULT_BULK_MAX_POLLS = 120;
 const DEFAULT_BULK_MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 const DEFAULT_BULK_DERIVED_DIR = ".tiangong-kb-ingest-derived";
 const DOCX_TARGET_IMAGE_DPI = 300;
 const DOCX_NORMALIZE_MIN_BYTES = 10 * 1024 * 1024;
 const EMUS_PER_INCH = 914400;
 const RETRYABLE_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
-const TERMINAL_STATUSES = new Set(["completed", "failed", "deleted"]);
 const BULK_FAILED_STATUSES = new Set(["failed", "deleted", "dead", "timeout"]);
 const BULK_IN_FLIGHT_STATUSES = new Set(["uploaded", "waiting_for_index_flags", "uploading"]);
 const BULK_SUPPORTED_EXTENSIONS = new Set([
@@ -54,9 +52,6 @@ const BULK_SUPPORTED_EXTENSIONS = new Set([
   ".xls",
   ".xlsx",
 ]);
-const DEFAULT_POLL_INTERVAL_SECONDS = 2;
-const DEFAULT_WAIT_TIMEOUT_SECONDS = 300;
-
 interface Output {
   write(text: string): unknown;
 }
@@ -98,7 +93,7 @@ interface FilePlan {
   size: number;
   mtimeMs: number;
   sha256: string;
-  manifestKey: string;
+  uploadKey: string;
 }
 
 interface BulkFilePlan extends FilePlan {
@@ -127,20 +122,17 @@ interface BulkFilePlan extends FilePlan {
   preflight: Record<string, unknown>;
 }
 
-interface ManifestRecord {
+interface UploadResult {
   key: string;
   path: string;
   sha256: string;
-  status: "planned" | "skipped" | "succeeded" | "failed";
+  status: "succeeded" | "failed";
   attempts?: number;
   documentId?: string;
   existingDocumentId?: string;
   duplicate?: boolean;
   error?: string;
   updatedAt: string;
-}
-
-interface UploadResult extends ManifestRecord {
   response?: unknown;
   requestId?: string;
   idempotencyKey?: string;
@@ -613,90 +605,12 @@ async function kbIngestStatus(argv: string[], io: CliIO): Promise<number> {
 
 async function kbIngest(argv: string[], io: CliIO): Promise<number> {
   const args = parseArgs(argv);
-  const config = resolveConfig(args, io.env);
-  const targetPath = args.positionals[0];
-  if (!targetPath) throw new CliError("Usage: tiangong-ai kb ingest <file-or-folder>");
-
-  const selector = resolveCollectionSelector(args, io.env);
-  const selectorFields = await resolveSelectorFields(config, selector);
-  const recursive = getBoolean(args, "recursive");
-  const force = getBoolean(args, "force");
-  const waitForTerminal = getBoolean(args, "wait");
-  const concurrency = positiveIntegerValue(
-    getString(args, "concurrency") ?? firstEnv(io.env, "TIANGONG_KB_UPLOAD_CONCURRENCY"),
-    DEFAULT_CONCURRENCY,
-    "--concurrency",
-  );
-  const retries = nonNegativeIntegerValue(
-    getString(args, "retries") ?? firstEnv(io.env, "TIANGONG_KB_UPLOAD_RETRIES"),
-    DEFAULT_RETRIES,
-    "--retries",
-  );
-  const manifestPath = resolve(
-    getString(args, "manifest") ??
-      firstEnv(io.env, "TIANGONG_KB_MANIFEST_PATH") ??
-      DEFAULT_MANIFEST,
-  );
-  const metadata = await loadMetadata(args);
-
-  const files = await collectFiles(resolve(targetPath), recursive);
-  const manifest = await loadManifest(manifestPath);
-  const plans = await Promise.all(files.map((file) => fingerprintFile(file)));
-  const uploadPlans = plans.filter(
-    (plan) => force || manifest.get(plan.manifestKey)?.status !== "succeeded",
-  );
-
-  await mkdir(dirname(manifestPath), { recursive: true });
-
-  if (uploadPlans.length === 0) {
-    const summary = { total: plans.length, uploaded: 0, skipped: plans.length, failed: 0 };
-    writeJsonOrText(
-      io.stdout,
-      args,
-      summary,
-      () => `No files to upload; ${plans.length} already succeeded.\n`,
-    );
-    return 0;
-  }
-
-  const results = await runPool(uploadPlans, concurrency, async (plan) => {
-    const result = await uploadWithRetries({
-      args,
-      config,
-      selectorFields,
-      plan,
-      metadata,
-      retries,
-      waitForTerminal,
-      env: io.env,
-    });
-    await appendManifest(manifestPath, result);
-    if (!getBoolean(args, "json")) {
-      write(io.stdout, formatUploadLine(result));
-    }
-    return result;
-  });
-
-  const failed = results.filter((item) => item.status === "failed").length;
-  const summary = {
-    total: plans.length,
-    uploaded: results.filter((item) => item.status === "succeeded").length,
-    skipped: plans.length - uploadPlans.length,
-    failed,
-    manifest: manifestPath,
-    results,
-  };
-
-  if (getBoolean(args, "json")) {
-    write(io.stdout, `${JSON.stringify(summary, null, 2)}\n`);
-  } else {
-    write(
-      io.stdout,
-      `Summary: uploaded=${summary.uploaded} skipped=${summary.skipped} failed=${failed}\n`,
+  if (args.flags.has("manifest")) {
+    throw new CliError(
+      "The --manifest option was removed. Use kb ingest bulk --state for checkpoints.",
     );
   }
-
-  return failed > 0 ? 1 : 0;
+  return await kbIngestBulkRun(argv, io);
 }
 
 async function kbIngestBulk(argv: string[], io: CliIO): Promise<number> {
@@ -775,7 +689,7 @@ async function kbIngestBulkPreflight(argv: string[], io: CliIO): Promise<number>
 async function kbIngestBulkRun(argv: string[], io: CliIO): Promise<number> {
   const args = parseArgs(argv);
   const rootPath = args.positionals[0];
-  if (!rootPath) throw new CliError("Usage: tiangong-ai kb ingest bulk <folder>");
+  if (!rootPath) throw new CliError("Usage: tiangong-ai kb ingest bulk <file-or-folder>");
 
   const config = resolveConfig(args, io.env);
   const root = resolve(rootPath);
@@ -984,18 +898,32 @@ async function runBulkLoop(input: {
 }> {
   const windowSize = getPositiveInteger(input.args, "window-size", DEFAULT_BULK_WINDOW_SIZE);
   const topUpMax = getPositiveInteger(input.args, "top-up-max", DEFAULT_BULK_TOP_UP_MAX);
-  const uploadConcurrency = getPositiveInteger(
-    input.args,
-    "upload-concurrency",
-    getPositiveInteger(input.args, "concurrency", DEFAULT_BULK_UPLOAD_CONCURRENCY),
+  const uploadConcurrency = positiveIntegerValue(
+    getString(input.args, "upload-concurrency") ??
+      getString(input.args, "concurrency") ??
+      firstEnv(input.env, "TIANGONG_KB_UPLOAD_CONCURRENCY"),
+    DEFAULT_BULK_UPLOAD_CONCURRENCY,
+    "--upload-concurrency",
   );
-  const pollInterval = getPositiveNumber(
-    input.args,
-    "poll-interval",
+  const pollInterval = positiveNumberValue(
+    getString(input.args, "poll-interval") ?? firstEnv(input.env, "TIANGONG_KB_BULK_POLL_INTERVAL"),
     DEFAULT_BULK_POLL_INTERVAL_SECONDS,
+    "--poll-interval",
   );
-  const retries = getNonNegativeInteger(input.args, "retries", DEFAULT_RETRIES);
-  const maxPolls = getNonNegativeInteger(input.args, "max-polls", 0);
+  const retries = nonNegativeIntegerValue(
+    getString(input.args, "retries") ?? firstEnv(input.env, "TIANGONG_KB_UPLOAD_RETRIES"),
+    DEFAULT_RETRIES,
+    "--retries",
+  );
+  const maxPolls = getNonNegativeInteger(
+    input.args,
+    "max-polls",
+    nonNegativeIntegerValue(
+      firstEnv(input.env, "TIANGONG_KB_BULK_MAX_POLLS"),
+      DEFAULT_BULK_MAX_POLLS,
+      "TIANGONG_KB_BULK_MAX_POLLS",
+    ),
+  );
   let polls = 0;
 
   await resetInterruptedBulkUploads(input.statePath);
@@ -1101,7 +1029,7 @@ async function uploadBulkFile(input: {
     size: input.row.size,
     mtimeMs: input.row.mtimeMs,
     sha256: input.row.sha256,
-    manifestKey: `${input.row.sha256}:${input.row.size}`,
+    uploadKey: `${input.row.sha256}:${input.row.size}`,
   };
   return uploadWithRetries({
     args: input.args,
@@ -1110,7 +1038,6 @@ async function uploadBulkFile(input: {
     plan,
     metadata: input.row.metadataJson,
     retries: input.retries,
-    waitForTerminal: false,
     env: input.env,
   });
 }
@@ -1969,7 +1896,7 @@ function bulkRecordToOriginalPlan(row: BulkFileRecord): BulkFilePlan {
     size: row.originalSize,
     mtimeMs: row.originalMtimeMs,
     sha256: row.originalSha256,
-    manifestKey: row.originalRelativePath,
+    uploadKey: row.originalRelativePath,
     relativePath: row.originalRelativePath,
     ext: row.originalExt,
     pathSegments,
@@ -2042,10 +1969,16 @@ async function collectBulkFilePlans(
   recursive: boolean,
   args?: ParsedArgs,
 ): Promise<BulkFilePlan[]> {
-  const files = await collectFiles(root, recursive, {
-    excludeDirectories: bulkScanExcludeDirs(root, args),
-  });
-  return Promise.all(files.map((file) => fingerprintBulkFile(root, file)));
+  const item = await stat(root).catch(() => undefined);
+  if (!item) throw new CliError(`Path not found: ${root}`);
+
+  const relativeRoot = item.isFile() ? dirname(root) : root;
+  const files = item.isFile()
+    ? [root]
+    : await collectFiles(root, recursive, {
+        excludeDirectories: bulkScanExcludeDirs(root, args),
+      });
+  return Promise.all(files.map((file) => fingerprintBulkFile(relativeRoot, file)));
 }
 
 function bulkScanExcludeDirs(root: string, args?: ParsedArgs): Set<string> {
@@ -2542,7 +2475,7 @@ async function createDocxIngestCopy(
     size: derivedPlan.size,
     mtimeMs: derivedPlan.mtimeMs,
     sha256: derivedPlan.sha256,
-    manifestKey: derivedPlan.manifestKey,
+    uploadKey: derivedPlan.uploadKey,
     relativePath: file.originalRelativePath,
     pathSegments: file.pathSegments,
     pathDepth: file.pathDepth,
@@ -2648,7 +2581,7 @@ async function createPdfPartPlans(
         size: derivedPlan.size,
         mtimeMs: derivedPlan.mtimeMs,
         sha256: derivedPlan.sha256,
-        manifestKey: derivedPlan.manifestKey,
+        uploadKey: derivedPlan.uploadKey,
         relativePath: logicalRelativePath,
         pathSegments: logicalPathSegments,
         pathDepth: logicalPathSegments.length,
@@ -3503,7 +3436,6 @@ async function uploadWithRetries(input: {
   plan: FilePlan;
   metadata: Record<string, unknown>;
   retries: number;
-  waitForTerminal: boolean;
   env: NodeJS.ProcessEnv;
 }): Promise<UploadResult> {
   let lastError: unknown;
@@ -3520,18 +3452,14 @@ async function uploadWithRetries(input: {
       });
       const documentId = documentIdFromUpload(response);
       const existingDocumentId = existingDocumentIdFromUpload(response);
-      let finalResponse: unknown = response;
-      if (input.waitForTerminal && documentId) {
-        finalResponse = await waitForStatus(input.config, documentId, input.args, input.env);
-      }
 
       const result: UploadResult = {
-        key: input.plan.manifestKey,
+        key: input.plan.uploadKey,
         path: input.plan.path,
         sha256: input.plan.sha256,
         status: "succeeded",
         attempts: attempt,
-        response: finalResponse,
+        response,
         requestId,
         idempotencyKey,
         updatedAt: new Date().toISOString(),
@@ -3550,7 +3478,7 @@ async function uploadWithRetries(input: {
   }
 
   return {
-    key: input.plan.manifestKey,
+    key: input.plan.uploadKey,
     path: input.plan.path,
     sha256: input.plan.sha256,
     status: "failed",
@@ -3657,34 +3585,6 @@ async function listCollections(
   }
 }
 
-async function waitForStatus(
-  config: KbConfig,
-  documentId: string,
-  args: ParsedArgs,
-  env: NodeJS.ProcessEnv,
-): Promise<unknown> {
-  const timeoutSeconds = positiveNumberValue(
-    getString(args, "wait-timeout") ?? firstEnv(env, "TIANGONG_KB_WAIT_TIMEOUT"),
-    DEFAULT_WAIT_TIMEOUT_SECONDS,
-    "--wait-timeout",
-  );
-  const intervalSeconds = positiveNumberValue(
-    getString(args, "poll-interval") ?? firstEnv(env, "TIANGONG_KB_POLL_INTERVAL"),
-    DEFAULT_POLL_INTERVAL_SECONDS,
-    "--poll-interval",
-  );
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < timeoutSeconds * 1000) {
-    const payload = await getDocumentStatus(config, documentId);
-    const status = statusFromPayload(payload);
-    if (status && TERMINAL_STATUSES.has(status)) return payload;
-    await sleep(intervalSeconds * 1000);
-  }
-
-  throw new CliError(`Timed out waiting for document ${documentId}.`);
-}
-
 async function jsonRequest(
   config: KbConfig,
   path: string,
@@ -3774,7 +3674,7 @@ async function collectFiles(
   if (item.isFile()) return [path];
   if (!item.isDirectory()) throw new CliError(`Path is not a file or directory: ${path}`);
   if (!recursive)
-    throw new CliError(`Path is a directory. Pass --recursive to upload its files: ${path}`);
+    throw new CliError(`Path is a directory and recursive traversal is disabled: ${path}`);
 
   const { readdir } = await import("node:fs/promises");
   const files: string[] = [];
@@ -3810,40 +3710,8 @@ async function fingerprintFile(path: string): Promise<FilePlan> {
     size: info.size,
     mtimeMs: info.mtimeMs,
     sha256,
-    manifestKey: `${sha256}:${info.size}`,
+    uploadKey: `${sha256}:${info.size}`,
   };
-}
-
-async function loadManifest(path: string): Promise<Map<string, ManifestRecord>> {
-  const records = new Map<string, ManifestRecord>();
-  const content = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return "";
-    throw error;
-  });
-  for (const line of content.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    const record = JSON.parse(line) as ManifestRecord;
-    records.set(record.key, record);
-  }
-  return records;
-}
-
-async function appendManifest(path: string, record: ManifestRecord): Promise<void> {
-  await appendFile(path, `${JSON.stringify(record)}\n`, "utf8");
-}
-
-async function loadMetadata(args: ParsedArgs): Promise<Record<string, unknown>> {
-  const metadataFile = getString(args, "metadata-file");
-  const metadataJson = getString(args, "metadata-json");
-  if (metadataFile && metadataJson)
-    throw new CliError("Use only one of --metadata-file or --metadata-json.");
-  if (!metadataFile && !metadataJson) return {};
-  const raw = metadataFile ? await readFile(resolve(metadataFile), "utf8") : metadataJson;
-  const parsed = JSON.parse(raw ?? "{}") as unknown;
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new CliError("Metadata must be a JSON object.");
-  }
-  return parsed as Record<string, unknown>;
 }
 
 async function runPool<T, R>(
@@ -3924,12 +3792,6 @@ function duplicateFromUpload(payload: unknown): boolean | undefined {
   if (!isObject(data)) return undefined;
   const value = data.duplicate ?? data.isDuplicate;
   return typeof value === "boolean" ? value : undefined;
-}
-
-function statusFromPayload(payload: unknown): string | undefined {
-  const data = responseData(payload);
-  if (!isObject(data)) return undefined;
-  return stringField(data, "status");
 }
 
 function writeJsonOrText(
@@ -4106,8 +3968,7 @@ function topHelp(): string {
 
 Usage:
   tiangong-ai doctor [--json]
-  tiangong-ai kb ingest upload <file-or-folder> [--recursive] [--concurrency 3]
-  tiangong-ai kb ingest bulk <folder> [--window-size 100] [--top-up-max 50]
+  tiangong-ai kb ingest bulk <file-or-folder> [--window-size 100] [--top-up-max 50]
   tiangong-ai kb ingest jobs
   tiangong-ai kb ingest status <document-id>
   tiangong-ai kb collections list [--capability upload]
@@ -4120,13 +3981,12 @@ function kbHelp(): string {
   return `Tiangong KB commands
 
 Usage:
-  tiangong-ai kb ingest upload <file-or-folder> [options]
-	  tiangong-ai kb ingest bulk <folder> [options]
-	  tiangong-ai kb ingest bulk scan <folder> [--json]
-	  tiangong-ai kb ingest bulk preflight <folder> [--json]
-	  tiangong-ai kb ingest bulk dry-run <folder> --metadata-map <path> [--json]
-	  tiangong-ai kb ingest normalize dry-run <folder> [--json]
-	  tiangong-ai kb ingest metadata dry-run <folder> --metadata-map <path> [--json]
+  tiangong-ai kb ingest bulk <file-or-folder> [options]
+  tiangong-ai kb ingest bulk scan <folder> [--json]
+  tiangong-ai kb ingest bulk preflight <folder> [--json]
+  tiangong-ai kb ingest bulk dry-run <folder> --metadata-map <path> [--json]
+  tiangong-ai kb ingest normalize dry-run <folder> [--json]
+  tiangong-ai kb ingest metadata dry-run <folder> --metadata-map <path> [--json]
   tiangong-ai kb ingest jobs [--json]
   tiangong-ai kb ingest status <job-id-or-document-id> [--json]
   tiangong-ai kb ingest resume <job-id> [options]
@@ -4145,14 +4005,15 @@ Common options:
   --json
 
 Ingest options:
-  --recursive
-  --manifest <path>
-  --concurrency <n>
+  --state <path>
+  --metadata-map <path>
+  --schema-file <path>
+  --window-size <n>
+  --top-up-max <n>
+  --upload-concurrency <n>
   --retries <n>
-  --force
-  --wait
-  --metadata-json <json>
-  --metadata-file <path>
+  --poll-interval <seconds>
+  --max-polls <n> (default 120, use 0 for no limit)
 `;
 }
 
@@ -4160,8 +4021,8 @@ function bulkHelp(): string {
   return `Tiangong KB bulk ingest
 
 Usage:
-  tiangong-ai kb ingest bulk <folder> --collection-path <path> [options]
-	  tiangong-ai kb ingest bulk run <folder> --collection-path <path> [options]
+  tiangong-ai kb ingest bulk <file-or-folder> --collection-path <path> [options]
+	  tiangong-ai kb ingest bulk run <file-or-folder> --collection-path <path> [options]
 	  tiangong-ai kb ingest bulk scan <folder> --json
 	  tiangong-ai kb ingest bulk preflight <folder> --json
 	  tiangong-ai kb ingest bulk dry-run <folder> --metadata-map metadata-map.yaml --json
@@ -4176,7 +4037,7 @@ Bulk options:
   --top-up-max <n>
   --upload-concurrency <n>
   --poll-interval <seconds>
-  --max-polls <n>
+  --max-polls <n> (default 120, use 0 for no limit)
   --json
 `;
 }

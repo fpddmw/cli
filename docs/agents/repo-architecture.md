@@ -24,7 +24,7 @@ This repository owns the public `tiangong-ai` command-line interface for Tiangon
 AI automation.
 
 The CLI owns local operator behavior such as command parsing, filesystem
-intake, manifest/checkpoint files, retries, concurrency, and structured output.
+intake, SQLite checkpoint files, retries, concurrency, and structured output.
 Backend services own authorization, collection permission checks, dedupe,
 storage writes, queueing, and document status transitions.
 
@@ -32,17 +32,17 @@ storage writes, queueing, and document status transitions.
 
 - `bin/tiangong-ai.js`: stable executable launcher.
 - `src/main.ts`: process entrypoint.
-- `src/cli.ts`: command dispatch, KB upload/status clients, bulk scan,
+- `src/cli.ts`: command dispatch, KB ingest/status clients, bulk scan,
   metadata dry-run, SQLite checkpointing, and sliding-window bulk runner.
 - `scripts/**`: validation helpers.
 - `test/**`: Node test runner suites.
 
 ## Bulk Ingest Boundary
 
-Bulk ingest state is local operator state. The CLI stores job and file
-checkpoints in SQLite under the OS app-data directory by default, or an explicit
-`--state` path. The legacy `.tiangong-kb-ingest-manifest.jsonl` remains scoped
-to non-bulk upload and is not a bulk checkpoint source.
+Ingest state is local operator state. The CLI stores job and file checkpoints
+in SQLite under the OS app-data directory by default, or an explicit `--state`
+path. Compatibility upload aliases route through the bulk runner rather than a
+separate checkpoint format.
 
 The CLI may call external bearer-token API routes for collection resolution,
 schema snapshots, uploads, and document status polling. The backend remains the
