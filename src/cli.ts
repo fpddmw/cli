@@ -27,7 +27,7 @@ const DEFAULT_BULK_WINDOW_SIZE = 100;
 const DEFAULT_BULK_TOP_UP_MAX = 50;
 const DEFAULT_BULK_UPLOAD_CONCURRENCY = 4;
 const DEFAULT_BULK_POLL_INTERVAL_SECONDS = 30;
-const DEFAULT_BULK_MAX_POLLS = 120;
+const DEFAULT_BULK_MAX_POLLS = 0;
 const DEFAULT_BULK_MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 const DEFAULT_BULK_DERIVED_DIR = ".tiangong-kb-ingest-derived";
 const DOCX_TARGET_IMAGE_DPI = 300;
@@ -4013,7 +4013,7 @@ Ingest options:
   --upload-concurrency <n>
   --retries <n>
   --poll-interval <seconds>
-  --max-polls <n> (default 120, use 0 for no limit)
+  --max-polls <n> (default 0, no client-side polling limit)
 `;
 }
 
@@ -4037,7 +4037,7 @@ Bulk options:
   --top-up-max <n>
   --upload-concurrency <n>
   --poll-interval <seconds>
-  --max-polls <n> (default 120, use 0 for no limit)
+  --max-polls <n> (default 0, no client-side polling limit)
   --json
 `;
 }

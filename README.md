@@ -48,8 +48,7 @@ Run a resumable sliding-window ingest for one file or a folder:
 ```bash
 tiangong-ai kb ingest bulk /path/to/document.pdf \
   --collection-path /course/thu_humanities \
-  --poll-interval 30 \
-  --max-polls 120
+  --poll-interval 30
 ```
 
 Run a larger folder ingest:
@@ -60,8 +59,7 @@ tiangong-ai kb ingest bulk /path/to/folder \
   --window-size 100 \
   --top-up-max 50 \
   --upload-concurrency 4 \
-  --poll-interval 30 \
-  --max-polls 120
+  --poll-interval 30
 ```
 
 Bulk scan a large folder and emit a structural JSON summary:
@@ -97,8 +95,7 @@ tiangong-ai kb ingest bulk /path/to/folder \
   --window-size 100 \
   --top-up-max 50 \
   --upload-concurrency 4 \
-  --poll-interval 30 \
-  --max-polls 120
+  --poll-interval 30
 ```
 
 `tiangong-ai kb ingest bulk run /path/to/folder` is accepted as an explicit
@@ -111,9 +108,10 @@ stored under the OS app-data directory:
 - Linux: `~/.local/share/tiangong-ai/kb-ingest/jobs/<job-id>.sqlite`
 - Windows: `%APPDATA%/tiangong-ai/kb-ingest/jobs/<job-id>.sqlite`
 
-Use `--state /path/to/job.sqlite` to override the checkpoint path. Use
-`--max-polls 0` only for operator runs that should wait without a client-side
-polling limit.
+Use `--state /path/to/job.sqlite` to override the checkpoint path. Bulk ingest
+does not impose a client-side polling limit by default, so it can keep topping
+up the sliding upload window until all rows complete. Use `--max-polls <n>` only
+when a wrapper or operator needs a bounded run.
 
 Bulk ingest scans and fingerprints files first, then lazily creates derived
 files only when a row enters the active upload window. `.docx` files larger than
