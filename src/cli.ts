@@ -935,7 +935,11 @@ async function runBulkLoop(input: {
     await pollBulkStatuses(input.statePath, input.config);
     const summary = await bulkJobSummary(input.statePath);
     const capacity = Math.max(0, windowSize - summary.inflight);
-    lastPipelineHealth = await readBulkPipelineHealth(input.config, pollInterval);
+    lastPipelineHealth = await readBulkPipelineHealth(
+      input.config,
+      pollInterval,
+      input.selectorFields,
+    );
     await saveBulkPipelineHealth(input.statePath, lastPipelineHealth);
     const uploadLimit = bulkUploadLimitForHealth(Math.min(capacity, topUpMax), lastPipelineHealth);
     const effectiveUploadConcurrency =
@@ -1378,9 +1382,10 @@ function statusItemFromPayload(payload: unknown, fallbackDocumentId = ""): BulkS
 async function readBulkPipelineHealth(
   config: KbConfig,
   fallbackPollAfterSeconds: number,
+  selectorFields: Record<string, string> = {},
 ): Promise<BulkPipelineHealthSnapshot> {
   try {
-    const payload = await jsonRequest(config, "pipeline/health");
+    const payload = await jsonRequest(config, pipelineHealthPath(selectorFields));
     return pipelineHealthFromPayload(payload, fallbackPollAfterSeconds);
   } catch (error) {
     if (error instanceof HttpError && error.status && [404, 405, 501].includes(error.status)) {
@@ -1410,6 +1415,17 @@ async function readBulkPipelineHealth(
       message: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+function pipelineHealthPath(selectorFields: Record<string, string>) {
+  const params = new URLSearchParams();
+  for (const key of ["primary_collection_id", "collection_path", "collection_key"]) {
+    const value = selectorFields[key];
+    if (value) params.set(key, value);
+  }
+
+  const query = params.toString();
+  return query ? `pipeline/health?${query}` : "pipeline/health";
 }
 
 function pipelineHealthFromPayload(

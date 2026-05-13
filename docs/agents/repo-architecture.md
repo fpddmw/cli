@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-05-13
-lastReviewedCommit: 9f6d90b59729299ccd7fa2ee190b3489f39e7e43
+lastReviewedCommit: ab563926a36f07f61f3926d0dac31544ec078c98
 ---
 
 # Repo Architecture
@@ -60,6 +60,9 @@ parts preserve the original logical parent directory, and split/normalize
 lineage stays in SQLite/export state instead of being uploaded as default KB
 metadata. Empty `.docx` files with no body text and no media are marked skipped
 before upload.
+Bulk polling sends the resolved collection selector to `pipeline/health` so the
+backend can scope index preflight/backpressure to the target collection's
+search partition rather than unrelated active partitions.
 
 ## Skill Boundary
 
