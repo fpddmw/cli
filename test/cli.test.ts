@@ -26,6 +26,10 @@ function pipelineHealthPayload(action: "continue" | "slow_down" | "pause_top_up"
   };
 }
 
+function isPipelineHealthUrl(input: string) {
+  return new URL(input).pathname.endsWith("/pipeline/health");
+}
+
 describe("parseArgs", () => {
   it("parses positionals, boolean flags, and value flags", () => {
     const parsed = parseArgs(["file.pdf", "--recursive", "--concurrency", "3", "--json=true"]);
@@ -230,7 +234,7 @@ describe("runCli", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
-      if (url.endsWith("/pipeline/health")) {
+      if (isPipelineHealthUrl(url)) {
         return new Response(JSON.stringify(pipelineHealthPayload()), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -515,7 +519,7 @@ describe("runCli", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
-      if (url.endsWith("/pipeline/health")) {
+      if (isPipelineHealthUrl(url)) {
         return new Response(JSON.stringify(pipelineHealthPayload()), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -600,7 +604,7 @@ describe("runCli", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
-      if (url.endsWith("/pipeline/health")) {
+      if (isPipelineHealthUrl(url)) {
         return new Response(JSON.stringify(pipelineHealthPayload()), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -707,7 +711,7 @@ describe("runCli", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
-      if (url.endsWith("/pipeline/health")) {
+      if (isPipelineHealthUrl(url)) {
         return new Response(JSON.stringify(pipelineHealthPayload()), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -764,9 +768,11 @@ describe("runCli", () => {
 
     const previousFetch = globalThis.fetch;
     let uploads = 0;
+    let healthUrl = "";
     globalThis.fetch = (async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/pipeline/health")) {
+      if (isPipelineHealthUrl(url)) {
+        healthUrl = url;
         return new Response(JSON.stringify(pipelineHealthPayload("pause_top_up")), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -813,6 +819,7 @@ describe("runCli", () => {
       const payload = JSON.parse(stdout);
       assert.equal(payload.pending, 1);
       assert.equal(payload.pipelineHealth.recommendedAction, "pause_top_up");
+      assert.equal(new URL(healthUrl).searchParams.get("collection_path"), "/course/test");
       assert.equal(uploads, 0);
     } finally {
       globalThis.fetch = previousFetch;
@@ -1135,7 +1142,7 @@ describe("runCli", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
-      if (url.endsWith("/pipeline/health")) {
+      if (isPipelineHealthUrl(url)) {
         return new Response(JSON.stringify(pipelineHealthPayload()), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -1247,7 +1254,7 @@ describe("runCli", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
-      if (url.endsWith("/pipeline/health")) {
+      if (isPipelineHealthUrl(url)) {
         return new Response(JSON.stringify(pipelineHealthPayload()), {
           status: 200,
           headers: { "content-type": "application/json" },
