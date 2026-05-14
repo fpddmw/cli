@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, openAsBlob, readFileSync } from "node:fs";
+import { createReadStream, openAsBlob, readFileSync, statSync } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import {
   basename,
   dirname,
   extname,
+  isAbsolute,
   join,
   posix as pathPosix,
   relative,
@@ -639,7 +640,7 @@ async function kbIngestBulkScan(argv: string[], io: CliIO): Promise<number> {
 
   const root = resolve(rootPath);
   const recursive = getBoolean(args, "recursive") || true;
-  const files = await collectBulkFilePlans(root, recursive, args);
+  const files = await collectBulkFilePlans(root, recursive, args, rootPath);
   const summary = buildScanSummary(files, {
     scanBudget: getPositiveInteger(args, "scan-budget", 5000),
     minSamplesPerPattern: getPositiveInteger(args, "min-samples-per-pattern", 20),
@@ -657,7 +658,7 @@ async function kbIngestBulkDryRun(argv: string[], io: CliIO): Promise<number> {
 
   const root = resolve(rootPath);
   const metadataMap = await loadMetadataMap(args);
-  const files = await collectBulkFilePlans(root, true, args);
+  const files = await collectBulkFilePlans(root, true, args, rootPath);
   const schemaSnapshot = await loadSchemaSnapshot(args, io.env);
   const preflightPlans = await prepareBulkPreflightPlans(
     files,
@@ -675,7 +676,7 @@ async function kbIngestBulkPreflight(argv: string[], io: CliIO): Promise<number>
   if (!rootPath) throw new CliError("Usage: tiangong-ai kb ingest bulk preflight <folder>");
 
   const root = resolve(rootPath);
-  const files = await collectBulkFilePlans(root, true, args);
+  const files = await collectBulkFilePlans(root, true, args, rootPath);
   const schemaSnapshot = await loadOptionalSchemaSnapshot(args, io.env);
   const preflightPlans = await prepareBulkPreflightPlans(
     files,
@@ -698,7 +699,7 @@ async function kbIngestBulkRun(argv: string[], io: CliIO): Promise<number> {
   const statePath = await resolveBulkStatePath(args, getString(args, "job-id"));
   const jobId = jobIdFromStatePath(statePath);
   const metadataMap = await loadMetadataMap(args);
-  const files = await collectBulkFilePlans(root, true, args);
+  const files = await collectBulkFilePlans(root, true, args, rootPath);
   const schemaSnapshot = await loadSchemaSnapshot(args, io.env, config, selector);
   const preflightOptions = preflightOptionsFromArgs(args, schemaSnapshot, root, false);
   const preflightPlans = await prepareBulkPreflightPlans(files, preflightOptions);
@@ -1029,7 +1030,7 @@ async function uploadBulkFile(input: {
 }): Promise<UploadResult> {
   const plan: FilePlan = {
     path: input.row.path,
-    filename: basename(input.row.path),
+    filename: bulkUploadFilename(input.row),
     size: input.row.size,
     mtimeMs: input.row.mtimeMs,
     sha256: input.row.sha256,
@@ -1044,6 +1045,13 @@ async function uploadBulkFile(input: {
     retries: input.retries,
     env: input.env,
   });
+}
+
+function bulkUploadFilename(row: BulkFileRecord): string {
+  if (row.ingestVariant === "compressed_docx") {
+    return basename(row.originalPath);
+  }
+  return basename(row.path);
 }
 
 async function materializeBulkFileForUpload(input: {
@@ -1984,17 +1992,43 @@ async function collectBulkFilePlans(
   root: string,
   recursive: boolean,
   args?: ParsedArgs,
+  inputRootPath?: string,
 ): Promise<BulkFilePlan[]> {
   const item = await stat(root).catch(() => undefined);
   if (!item) throw new CliError(`Path not found: ${root}`);
 
   const relativeRoot = item.isFile() ? dirname(root) : root;
+  const logicalRoot = logicalRootPath(inputRootPath ?? root, root, item.isFile());
   const files = item.isFile()
     ? [root]
     : await collectFiles(root, recursive, {
         excludeDirectories: bulkScanExcludeDirs(root, args),
       });
-  return Promise.all(files.map((file) => fingerprintBulkFile(relativeRoot, file)));
+  return Promise.all(
+    files.map((file) => fingerprintBulkFile(relativeRoot, file, logicalRoot, item.isFile())),
+  );
+}
+
+function logicalRootPath(inputRootPath: string, resolvedRoot: string, isFileRoot: boolean): string {
+  if (!isAbsolute(inputRootPath)) {
+    return normalizeLogicalPath(inputRootPath);
+  }
+
+  const cwdRelative = relative(process.cwd(), resolvedRoot);
+  if (cwdRelative && !cwdRelative.startsWith("..") && !isAbsolute(cwdRelative)) {
+    return normalizeLogicalPath(cwdRelative);
+  }
+
+  return isFileRoot ? basename(resolvedRoot) : "";
+}
+
+function normalizeLogicalPath(input: string): string {
+  const normalized = input
+    .split(sep)
+    .join("/")
+    .replace(/^\.\/+/u, "")
+    .replace(/\/+$/u, "");
+  return normalized === "." ? "" : normalized;
 }
 
 function bulkScanExcludeDirs(root: string, args?: ParsedArgs): Set<string> {
@@ -2004,10 +2038,21 @@ function bulkScanExcludeDirs(root: string, args?: ParsedArgs): Set<string> {
   return excludeDirectories;
 }
 
-async function fingerprintBulkFile(root: string, path: string): Promise<BulkFilePlan> {
+async function fingerprintBulkFile(
+  root: string,
+  path: string,
+  logicalRoot: string,
+  isFileRoot: boolean,
+): Promise<BulkFilePlan> {
   const plan = await fingerprintFile(path);
   const relativePath = relative(root, path).split(sep).join("/");
-  const pathSegments = relativePath.split("/").filter(Boolean);
+  const originalRelativePath =
+    isFileRoot && logicalRoot
+      ? logicalRoot
+      : logicalRoot
+        ? pathPosix.join(logicalRoot, relativePath)
+        : relativePath;
+  const pathSegments = originalRelativePath.split("/").filter(Boolean);
   const ext = extname(path).toLowerCase();
   const sourceDocumentKey = `sha256:${plan.sha256}`;
   return {
@@ -2017,7 +2062,7 @@ async function fingerprintBulkFile(root: string, path: string): Promise<BulkFile
     pathSegments,
     pathDepth: pathSegments.length,
     originalPath: path,
-    originalRelativePath: relativePath,
+    originalRelativePath,
     originalSize: plan.size,
     originalMtimeMs: plan.mtimeMs,
     originalSha256: plan.sha256,
@@ -2366,8 +2411,18 @@ function preflightOptionsFromArgs(
     getPositiveInteger(args, "target-bytes", 0) ||
     collectionMaxUploadBytes(schemaSnapshot) ||
     DEFAULT_BULK_MAX_UPLOAD_BYTES;
-  const workDir = resolve(getString(args, "work-dir") ?? join(root, DEFAULT_BULK_DERIVED_DIR));
+  const workDir = resolve(
+    getString(args, "work-dir") ?? join(defaultBulkWorkDirRoot(root), DEFAULT_BULK_DERIVED_DIR),
+  );
   return { maxUploadBytes, workDir, generateDerived };
+}
+
+function defaultBulkWorkDirRoot(root: string): string {
+  try {
+    return statSync(root).isFile() ? dirname(root) : root;
+  } catch {
+    return root;
+  }
 }
 
 function collectionMaxUploadBytes(schemaSnapshot: unknown): number | undefined {
@@ -2995,20 +3050,23 @@ function buildScanSummary(
   const patternMap = new Map<string, { pattern: string; count: number; samples: string[] }>();
 
   for (const file of files) {
-    pathDepths[String(file.pathDepth)] = (pathDepths[String(file.pathDepth)] ?? 0) + 1;
+    const metadataPath = metadataRelativePath(file);
+    const metadataSegments = metadataPath.split("/").filter(Boolean);
+    pathDepths[String(metadataSegments.length)] =
+      (pathDepths[String(metadataSegments.length)] ?? 0) + 1;
     extensions[file.ext || "(none)"] = (extensions[file.ext || "(none)"] ?? 0) + 1;
-    const top = file.pathSegments[0] ?? "(root)";
+    const top = metadataSegments[0] ?? "(root)";
     topLevelDirs[top] = (topLevelDirs[top] ?? 0) + 1;
-    const filenamePattern = normalizePathToken(basename(file.relativePath));
+    const filenamePattern = normalizePathToken(basename(metadataPath));
     filenamePatterns[filenamePattern] = (filenamePatterns[filenamePattern] ?? 0) + 1;
-    const pattern = file.pathSegments
+    const pattern = metadataSegments
       .map((segment, index) =>
-        index === file.pathSegments.length - 1 ? "{file}" : normalizePathToken(segment),
+        index === metadataSegments.length - 1 ? "{file}" : normalizePathToken(segment),
       )
       .join("/");
     const entry = patternMap.get(pattern) ?? { pattern, count: 0, samples: [] };
     entry.count += 1;
-    if (entry.samples.length < options.minSamplesPerPattern) entry.samples.push(file.relativePath);
+    if (entry.samples.length < options.minSamplesPerPattern) entry.samples.push(metadataPath);
     patternMap.set(pattern, entry);
   }
 
@@ -3025,15 +3083,19 @@ function buildScanSummary(
     topLevelDirs,
     filenamePatterns,
     patterns,
-    samples: files.slice(0, Math.min(options.scanBudget, files.length)).map((file) => ({
-      path: file.relativePath,
-      size: file.size,
-      mtimeMs: file.mtimeMs,
-      sha256: file.sha256,
-      ext: file.ext,
-      pathDepth: file.pathDepth,
-      pathSegments: file.pathSegments,
-    })),
+    samples: files.slice(0, Math.min(options.scanBudget, files.length)).map((file) => {
+      const metadataPath = metadataRelativePath(file);
+      const metadataSegments = metadataPath.split("/").filter(Boolean);
+      return {
+        path: metadataPath,
+        size: file.size,
+        mtimeMs: file.mtimeMs,
+        sha256: file.sha256,
+        ext: file.ext,
+        pathDepth: metadataSegments.length,
+        pathSegments: metadataSegments,
+      };
+    }),
   };
 }
 
@@ -3137,6 +3199,7 @@ function metadataDryRun(
 
   for (const file of files) {
     const evaluated = evaluateMetadata(metadataMap, file);
+    const reportPath = metadataRelativePath(file);
     for (const rule of evaluated.matchedRules) ruleCoverage[rule] = (ruleCoverage[rule] ?? 0) + 1;
     if (evaluated.matchedRules.length === 0 || evaluated.matchedRules.includes("fallback"))
       fallback += 1;
@@ -3149,7 +3212,7 @@ function metadataDryRun(
         requiredMissing[key] = (requiredMissing[key] ?? 0) + 1;
         fileValid = false;
         if (errors.length < 50)
-          errors.push({ path: file.relativePath, field: key, reason: "required_missing" });
+          errors.push({ path: reportPath, field: key, reason: "required_missing" });
         continue;
       }
       if (
@@ -3160,7 +3223,7 @@ function metadataDryRun(
         typeErrors[key] = (typeErrors[key] ?? 0) + 1;
         fileValid = false;
         if (errors.length < 50)
-          errors.push({ path: file.relativePath, field: key, reason: "type_error", value });
+          errors.push({ path: reportPath, field: key, reason: "type_error", value });
       }
       const enumValues = Array.isArray(field.values)
         ? field.values
@@ -3171,7 +3234,7 @@ function metadataDryRun(
         typeErrors[key] = (typeErrors[key] ?? 0) + 1;
         fileValid = false;
         if (errors.length < 50)
-          errors.push({ path: file.relativePath, field: key, reason: "enum_error", value });
+          errors.push({ path: reportPath, field: key, reason: "enum_error", value });
       }
     }
     if (fileValid) valid += 1;
@@ -3256,17 +3319,23 @@ function metadataFieldValue(field: MetadataField, file: BulkFilePlan): unknown {
 }
 
 function metadataSourceValue(source: string, file: BulkFilePlan, index?: number): unknown {
-  if (source === "relative_path") return file.relativePath;
-  if (source === "path_segment") return file.pathSegments[index ?? 0];
-  if (source === "filename") return basename(file.relativePath);
-  if (source === "filename_stem") return basename(file.relativePath, extname(file.relativePath));
-  if (source === "parent_dir") return file.pathSegments.at(-2) ?? "";
-  if (source === "top_dir") return file.pathSegments[0] ?? "";
+  const metadataPath = metadataRelativePath(file);
+  const metadataSegments = metadataPath.split("/").filter(Boolean);
+  if (source === "relative_path") return metadataPath;
+  if (source === "path_segment") return metadataSegments[index ?? 0];
+  if (source === "filename") return basename(metadataPath);
+  if (source === "filename_stem") return basename(metadataPath, extname(metadataPath));
+  if (source === "parent_dir") return metadataSegments.at(-2) ?? "";
+  if (source === "top_dir") return metadataSegments[0] ?? "";
   if (source === "ext") return file.ext;
-  if (source === "path_depth") return file.pathDepth;
+  if (source === "path_depth") return metadataSegments.length;
   if (source === "mtime") return file.mtimeMs;
   if (source === "size") return file.size;
   return undefined;
+}
+
+function metadataRelativePath(file: Pick<BulkFilePlan, "originalRelativePath" | "relativePath">) {
+  return file.originalRelativePath || file.relativePath;
 }
 
 function coerceMetadataValue(value: unknown, type: string | undefined): unknown {
@@ -3285,12 +3354,13 @@ function coerceMetadataValue(value: unknown, type: string | undefined): unknown 
 
 function metadataRuleMatches(match: MetadataMatch | undefined, file: BulkFilePlan): boolean {
   if (!match) return true;
-  if (typeof match === "string") return globMatches(match, file.relativePath);
+  const metadataPath = metadataRelativePath(file);
+  if (typeof match === "string") return globMatches(match, metadataPath);
   if (match.all) return match.all.every((child) => metadataRuleMatches(child, file));
   if (match.any) return match.any.some((child) => metadataRuleMatches(child, file));
-  if (match.path_prefix && !file.relativePath.startsWith(match.path_prefix)) return false;
-  if (match.glob && !globMatches(match.glob, file.relativePath)) return false;
-  if (match.regex && !new RegExp(match.regex).test(file.relativePath)) return false;
+  if (match.path_prefix && !metadataPath.startsWith(match.path_prefix)) return false;
+  if (match.glob && !globMatches(match.glob, metadataPath)) return false;
+  if (match.regex && !new RegExp(match.regex).test(metadataPath)) return false;
   if (match.ext) {
     const expected = Array.isArray(match.ext) ? match.ext : [match.ext];
     if (!expected.map((item) => item.toLowerCase()).includes(file.ext.toLowerCase())) return false;
@@ -3322,10 +3392,20 @@ function metadataSchemaFields(schemaSnapshot: unknown): Record<string, unknown>[
 
 function metadataValueMatchesType(value: unknown, type: string | undefined): boolean {
   if (!type) return true;
+  if (type === "enum" || type === "date") return typeof value === "string";
   if (type === "string") return typeof value === "string";
   if (type === "number") return typeof value === "number" && Number.isFinite(value);
   if (type === "boolean") return typeof value === "boolean";
   if (type === "array") return Array.isArray(value);
+  if (type === "string_array" || type === "tag_array") {
+    return Array.isArray(value) && value.every((item) => typeof item === "string");
+  }
+  if (type === "number_array") {
+    return (
+      Array.isArray(value) &&
+      value.every((item) => typeof item === "number" && Number.isFinite(item))
+    );
+  }
   if (type === "object") return isObject(value);
   return true;
 }
