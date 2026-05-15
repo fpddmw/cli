@@ -381,12 +381,10 @@ describe("runCli", () => {
         "        match:",
         '          glob: "**/*"',
         "        fields:",
-        "          relative_path:",
+        "          raw_relative_path:",
         "            source: relative_path",
         "          filename:",
         "            source: filename",
-        "          material_type: attachment",
-        "          tags: [thu_humanities]",
         "  - name: domain",
         "    merge: first_match",
         "    rules:",
@@ -422,9 +420,9 @@ describe("runCli", () => {
         "layers:",
         "  - name: base",
         "    rules:",
-        "      - name: bad_tags",
+        "      - name: bad_week",
         "        fields:",
-        "          tags: thu_humanities",
+        "          week: not-a-number",
         "",
       ].join("\n"),
     );
@@ -434,9 +432,8 @@ describe("runCli", () => {
         metadataSchema: {
           fields: [
             { key: "course_code", type: "string", required: true },
-            { key: "relative_path", type: "string", required: true },
-            { key: "material_type", type: "enum", values: ["attachment"], required: true },
-            { key: "tags", type: "tag_array", required: true },
+            { key: "raw_relative_path", type: "string", required: true },
+            { key: "filename", type: "string", required: true },
             { key: "week", type: "number", required: false },
             { key: "year", type: "number", required: false },
           ],
@@ -517,7 +514,7 @@ describe("runCli", () => {
         },
       );
       assert.equal(invalidExitCode, 1);
-      assert.equal(JSON.parse(invalidStdout).typeErrors.tags, 1);
+      assert.equal(JSON.parse(invalidStdout).typeErrors.week, 1);
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
@@ -1456,17 +1453,8 @@ describe("runCli", () => {
           "    rules:",
           "      - name: filesystem",
           "        fields:",
-          "          relative_path:",
+          "          raw_relative_path:",
           "            source: relative_path",
-          "          source_unit:",
-          "            source: path_segment",
-          "            index: 2",
-          "          material_type: periodical",
-          "          tags: [thu_humanities]",
-          "          year:",
-          "            source: relative_path",
-          '            regex: "(20[0-9]{2})"',
-          "            type: number",
           "",
         ].join("\n"),
       );
@@ -1475,16 +1463,7 @@ describe("runCli", () => {
         JSON.stringify({
           metadataSchema: {
             fields: [
-              { key: "source_unit", type: "string", required: true },
-              {
-                key: "material_type",
-                type: "enum",
-                values: ["periodical"],
-                required: true,
-              },
-              { key: "relative_path", type: "string", required: true },
-              { key: "tags", type: "tag_array", required: true },
-              { key: "year", type: "number", required: true },
+              { key: "raw_relative_path", type: "string", required: true },
             ],
           },
         }),
@@ -1565,12 +1544,8 @@ describe("runCli", () => {
       assert.equal(exitCode, 0);
       assert.equal(JSON.parse(stdout).completed, 1);
       assert.deepEqual(uploads[0], {
-        relative_path:
+        raw_relative_path:
           "清华人文大展/链接/出土文献研究与保护中心/期刊目录-清华大学出土文献研究与保护中心/2021目录.docx",
-        source_unit: "出土文献研究与保护中心",
-        material_type: "periodical",
-        tags: ["thu_humanities"],
-        year: 2021,
         client_filename: "2021目录.docx",
         client_size: 16,
         client_mtime_ms: uploads[0]?.client_mtime_ms,
