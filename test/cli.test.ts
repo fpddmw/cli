@@ -1462,9 +1462,7 @@ describe("runCli", () => {
         schemaPath,
         JSON.stringify({
           metadataSchema: {
-            fields: [
-              { key: "raw_relative_path", type: "string", required: true },
-            ],
+            fields: [{ key: "raw_relative_path", type: "string", required: true }],
           },
         }),
       );
