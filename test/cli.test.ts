@@ -618,6 +618,199 @@ describe("runCli", () => {
     }
   });
 
+  it("chunks bulk status polling to the external API batch limit", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "tiangong-cli-bulk-status-chunks-"));
+    const rootDir = join(tempDir, "root");
+    const statePath = join(tempDir, "job.sqlite");
+    const schemaPath = join(tempDir, "schema.json");
+    await mkdir(rootDir, { recursive: true });
+    for (let index = 0; index < 101; index += 1) {
+      await writeFile(join(rootDir, `doc-${String(index).padStart(3, "0")}.txt`), "body");
+    }
+    await writeFile(schemaPath, JSON.stringify({ metadataSchema: { fields: [] } }));
+
+    const previousFetch = globalThis.fetch;
+    const uploadedIds: string[] = [];
+    const statusBatchSizes: number[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/documents") && init?.method === "POST") {
+        const documentId = `doc_${uploadedIds.length + 1}`;
+        uploadedIds.push(documentId);
+        return new Response(JSON.stringify({ data: { documentId, duplicate: false } }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/documents/status:batch") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        statusBatchSizes.push(body.documentIds.length);
+        assert.ok(body.documentIds.length <= 100);
+        return new Response(
+          JSON.stringify({
+            data: {
+              results: body.documentIds.map((documentId: string) => ({
+                documentId,
+                ok: true,
+                status: {
+                  documentId,
+                  status: "completed",
+                  opensearchIndexed: true,
+                  pineconeIndexed: true,
+                  indexRecordCount: 1,
+                },
+              })),
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (isPipelineHealthUrl(url)) {
+        return new Response(JSON.stringify(pipelineHealthPayload()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    try {
+      let stdout = "";
+      const exitCode = await runCli(
+        [
+          "kb",
+          "ingest",
+          "bulk",
+          "run",
+          rootDir,
+          "--collection-path",
+          "/course/test",
+          "--schema-file",
+          schemaPath,
+          "--state",
+          statePath,
+          "--window-size",
+          "101",
+          "--top-up-max",
+          "101",
+          "--poll-interval",
+          "0.01",
+          "--max-polls",
+          "5",
+          "--json",
+        ],
+        {
+          env: { TIANGONG_AI_API_KEY: "fake" },
+          stdout: { write: (chunk: string) => void (stdout += chunk) },
+          stderr: { write: () => undefined },
+        },
+      );
+
+      assert.equal(exitCode, 0);
+      assert.equal(JSON.parse(stdout).completed, 101);
+      assert.deepEqual(statusBatchSizes, [100, 1]);
+    } finally {
+      globalThis.fetch = previousFetch;
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("continues bulk polling after a retryable status batch timeout", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "tiangong-cli-bulk-status-timeout-"));
+    const rootDir = join(tempDir, "root");
+    const statePath = join(tempDir, "job.sqlite");
+    const schemaPath = join(tempDir, "schema.json");
+    await mkdir(rootDir, { recursive: true });
+    await writeFile(join(rootDir, "doc.txt"), "body");
+    await writeFile(schemaPath, JSON.stringify({ metadataSchema: { fields: [] } }));
+
+    const previousFetch = globalThis.fetch;
+    let statusPolls = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/documents") && init?.method === "POST") {
+        return new Response(JSON.stringify({ data: { documentId: "doc_timeout" } }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/documents/status:batch") && init?.method === "POST") {
+        statusPolls += 1;
+        if (statusPolls === 1) {
+          throw new Error("The operation was aborted due to timeout");
+        }
+        return new Response(
+          JSON.stringify({
+            data: {
+              results: [
+                {
+                  documentId: "doc_timeout",
+                  ok: true,
+                  status: {
+                    documentId: "doc_timeout",
+                    status: "completed",
+                    opensearchIndexed: true,
+                    pineconeIndexed: true,
+                    indexRecordCount: 1,
+                  },
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (isPipelineHealthUrl(url)) {
+        return new Response(JSON.stringify(pipelineHealthPayload()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    try {
+      let stdout = "";
+      let stderr = "";
+      const exitCode = await runCli(
+        [
+          "kb",
+          "ingest",
+          "bulk",
+          rootDir,
+          "--collection-path",
+          "/course/test",
+          "--schema-file",
+          schemaPath,
+          "--state",
+          statePath,
+          "--window-size",
+          "1",
+          "--top-up-max",
+          "1",
+          "--poll-interval",
+          "0.01",
+          "--max-polls",
+          "5",
+          "--json",
+        ],
+        {
+          env: { TIANGONG_AI_API_KEY: "fake" },
+          stdout: { write: (chunk: string) => void (stdout += chunk) },
+          stderr: { write: (chunk: string) => void (stderr += chunk) },
+        },
+      );
+
+      assert.equal(exitCode, 0);
+      assert.equal(JSON.parse(stdout).completed, 1);
+      assert.equal(statusPolls, 2);
+      assert.match(stderr, /bulk status polling failed and will be retried/);
+    } finally {
+      globalThis.fetch = previousFetch;
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps completed documents waiting when status APIs omit index flags", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "tiangong-cli-bulk-status-flags-"));
     const rootDir = join(tempDir, "root");

@@ -31,6 +31,7 @@ const DEFAULT_BULK_POLL_INTERVAL_SECONDS = 30;
 const DEFAULT_BULK_MAX_POLLS = 0;
 const DEFAULT_BULK_MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 const DEFAULT_BULK_DERIVED_DIR = ".tiangong-kb-ingest-derived";
+const KB_DOCUMENT_STATUS_BATCH_LIMIT = 100;
 const DOCX_TARGET_IMAGE_DPI = 300;
 const DOCX_NORMALIZE_MIN_BYTES = 10 * 1024 * 1024;
 const EMUS_PER_INCH = 914400;
@@ -728,6 +729,7 @@ async function kbIngestBulkRun(argv: string[], io: CliIO): Promise<number> {
     metadataMap,
     env: io.env,
     stdout: io.stdout,
+    stderr: io.stderr,
     preflightOptions,
   });
 
@@ -793,6 +795,7 @@ async function kbIngestResume(argv: string[], io: CliIO): Promise<number> {
     metadataMap: job.metadataMap,
     env: io.env,
     stdout: io.stdout,
+    stderr: io.stderr,
     preflightOptions,
   });
   writeJsonOrText(io.stdout, args, result, () => formatBulkRunSummary(result));
@@ -882,6 +885,7 @@ async function runBulkLoop(input: {
   metadataMap: MetadataMap;
   env: NodeJS.ProcessEnv;
   stdout: Output;
+  stderr: Output;
   preflightOptions: BulkPreflightOptions;
 }): Promise<{
   jobId: string;
@@ -933,7 +937,19 @@ async function runBulkLoop(input: {
 
   while (true) {
     polls += 1;
-    await pollBulkStatuses(input.statePath, input.config);
+    let statusPollError: HttpError | undefined;
+    try {
+      await pollBulkStatuses(input.statePath, input.config);
+    } catch (error) {
+      if (!isRecoverableBulkStatusPollError(error)) {
+        throw error;
+      }
+      statusPollError = error;
+      write(
+        input.stderr,
+        `warning: bulk status polling failed and will be retried: ${error.message}\n`,
+      );
+    }
     const summary = await bulkJobSummary(input.statePath);
     const capacity = Math.max(0, windowSize - summary.inflight);
     lastPipelineHealth = await readBulkPipelineHealth(
@@ -942,7 +958,9 @@ async function runBulkLoop(input: {
       input.selectorFields,
     );
     await saveBulkPipelineHealth(input.statePath, lastPipelineHealth);
-    const uploadLimit = bulkUploadLimitForHealth(Math.min(capacity, topUpMax), lastPipelineHealth);
+    const uploadLimit = statusPollError
+      ? 0
+      : bulkUploadLimitForHealth(Math.min(capacity, topUpMax), lastPipelineHealth);
     const effectiveUploadConcurrency =
       lastPipelineHealth.recommendedAction === "slow_down" ? 1 : uploadConcurrency;
 
@@ -1009,6 +1027,10 @@ function bulkUploadLimitForHealth(limit: number, health: BulkPipelineHealthSnaps
   if (health.recommendedAction === "pause_top_up") return 0;
   if (health.recommendedAction === "slow_down") return Math.max(1, Math.ceil(limit / 2));
   return limit;
+}
+
+function isRecoverableBulkStatusPollError(error: unknown): error is HttpError {
+  return error instanceof HttpError && error.retryable;
 }
 
 function bulkPollIntervalForHealth(
@@ -1334,22 +1356,30 @@ async function batchDocumentStatuses(
   config: KbConfig,
   documentIds: string[],
 ): Promise<BulkStatusItem[]> {
-  try {
-    const payload = await jsonRequest(config, "documents/status:batch", {
-      method: "POST",
-      body: JSON.stringify({ documentIds }),
-    });
-    return batchStatusItems(payload);
-  } catch (error) {
-    if (error instanceof HttpError && error.status && [404, 405, 501].includes(error.status)) {
-      return Promise.all(
-        documentIds.map(async (documentId) =>
-          statusItemFromPayload(await getDocumentStatus(config, documentId), documentId),
-        ),
-      );
+  const statuses: BulkStatusItem[] = [];
+  for (let index = 0; index < documentIds.length; index += KB_DOCUMENT_STATUS_BATCH_LIMIT) {
+    const chunk = documentIds.slice(index, index + KB_DOCUMENT_STATUS_BATCH_LIMIT);
+    try {
+      const payload = await jsonRequest(config, "documents/status:batch", {
+        method: "POST",
+        body: JSON.stringify({ documentIds: chunk }),
+      });
+      statuses.push(...batchStatusItems(payload));
+    } catch (error) {
+      if (error instanceof HttpError && error.status && [404, 405, 501].includes(error.status)) {
+        statuses.push(
+          ...(await Promise.all(
+            chunk.map(async (documentId) =>
+              statusItemFromPayload(await getDocumentStatus(config, documentId), documentId),
+            ),
+          )),
+        );
+        continue;
+      }
+      throw error;
     }
-    throw error;
   }
+  return statuses;
 }
 
 async function getDocumentStatus(config: KbConfig, documentId: string): Promise<unknown> {
