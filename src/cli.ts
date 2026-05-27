@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, openAsBlob, readFileSync, statSync } from "node:fs";
+import { createReadStream, openAsBlob, statSync } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import {
@@ -14,14 +14,48 @@ import {
   sep,
 } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 import { deflateRawSync, inflateRawSync } from "node:zlib";
 
 import type { PDFDocument as PdfDocument } from "pdf-lib";
 import sharp from "sharp";
 
-export const DEFAULT_API_BASE_URL = "https://thuenv.tiangong.world:7300";
-export const DEFAULT_API_PATH_PREFIX = "/api/v1/kb";
+import {
+  getBoolean,
+  getNonNegativeInteger,
+  getPositiveInteger,
+  getPositiveNumber,
+  getString,
+  nonNegativeIntegerValue,
+  parseArgs,
+  positiveIntegerValue,
+  positiveNumberValue,
+  type ParsedArgs,
+} from "./args.js";
+import { isObject, responseData, stringField } from "./data.js";
+import { firstEnv, loadDotenv } from "./env.js";
+import { CliError, HttpError } from "./errors.js";
+import { jsonRequest } from "./http.js";
+import { runEducationCommand } from "./education/commands.js";
+import {
+  collectionKey,
+  collectionPath,
+  listCollections,
+  resolveCollection,
+  resolveSelectorFields,
+  type CollectionSelector,
+} from "./kb/client.js";
+import { resolveKbConfig as resolveConfig, type KbConfig } from "./kb/config.js";
+import { readBulkPipelineHealth, type BulkPipelineHealthSnapshot } from "./kb/pipeline-health.js";
+import { resolveCollectionSelector } from "./kb/selector.js";
+import { batchDocumentStatuses, getDocumentStatus, type BulkStatusItem } from "./kb/status.js";
+import type { CliIO, Output } from "./io.js";
+import { write } from "./io.js";
+import { runResearchCommand } from "./research/commands.js";
+
+export type { CliIO, Output } from "./io.js";
+export { parseArgs } from "./args.js";
+export { DEFAULT_API_BASE_URL, DEFAULT_API_PATH_PREFIX } from "./kb/config.js";
+export { resolveCollectionSelector } from "./kb/selector.js";
 
 const DEFAULT_RETRIES = 3;
 const DEFAULT_BULK_WINDOW_SIZE = 100;
@@ -31,11 +65,9 @@ const DEFAULT_BULK_POLL_INTERVAL_SECONDS = 30;
 const DEFAULT_BULK_MAX_POLLS = 0;
 const DEFAULT_BULK_MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 const DEFAULT_BULK_DERIVED_DIR = ".tiangong-kb-ingest-derived";
-const KB_DOCUMENT_STATUS_BATCH_LIMIT = 100;
 const DOCX_TARGET_IMAGE_DPI = 300;
 const DOCX_NORMALIZE_MIN_BYTES = 10 * 1024 * 1024;
 const EMUS_PER_INCH = 914400;
-const RETRYABLE_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const BULK_FAILED_STATUSES = new Set(["failed", "deleted", "dead", "timeout"]);
 const BULK_IN_FLIGHT_STATUSES = new Set(["uploaded", "waiting_for_index_flags", "uploading"]);
 const BULK_SUPPORTED_EXTENSIONS = new Set([
@@ -54,40 +86,6 @@ const BULK_SUPPORTED_EXTENSIONS = new Set([
   ".xls",
   ".xlsx",
 ]);
-interface Output {
-  write(text: string): unknown;
-}
-
-export interface CliIO {
-  env: NodeJS.ProcessEnv;
-  stdout: Output;
-  stderr: Output;
-}
-
-interface ParsedArgs {
-  positionals: string[];
-  flags: Map<string, string | true>;
-}
-
-interface KbConfig {
-  apiBaseUrl: string;
-  apiPathPrefix: string;
-  apiKey: string;
-  timeoutSeconds: number;
-}
-
-interface CollectionSelector {
-  field: "primary_collection_id" | "collection_path" | "collection_key" | "collection_name";
-  value: string;
-}
-
-interface CollectionItem {
-  id?: string;
-  key?: string;
-  path?: string;
-  name?: string;
-  [key: string]: unknown;
-}
 
 interface FilePlan {
   path: string;
@@ -265,32 +263,6 @@ interface MetadataDryRunSummary {
   preflight?: BulkPreflightSummary;
 }
 
-interface BulkStatusItem {
-  documentId: string;
-  status?: string | undefined;
-  terminal?: boolean | undefined;
-  opensearchIndexed?: boolean | undefined;
-  pineconeIndexed?: boolean | undefined;
-  indexRecordCount?: number | undefined;
-  lastError?: string | undefined;
-  lastErrorStage?: string | undefined;
-  itemError?: {
-    code: string;
-    message: string;
-    retryable: boolean;
-  };
-  raw: unknown;
-}
-
-interface BulkPipelineHealthSnapshot {
-  healthy: boolean;
-  pressure: "ok" | "degraded" | "paused" | "unknown";
-  recommendedAction: "continue" | "slow_down" | "pause_top_up";
-  recommendedPollAfterSeconds: number;
-  checkedAt?: string | undefined;
-  message?: string | undefined;
-}
-
 type BulkPreflightClassification =
   | "direct_upload"
   | "unsupported"
@@ -353,26 +325,6 @@ interface ZipEntry {
   uncompressedSize: number;
   compressedData: Buffer;
   data: Buffer;
-}
-
-class CliError extends Error {
-  constructor(
-    message: string,
-    readonly exitCode = 1,
-  ) {
-    super(message);
-  }
-}
-
-class HttpError extends CliError {
-  constructor(
-    message: string,
-    readonly status: number | undefined,
-    readonly retryAfterSeconds: number | undefined,
-    readonly retryable: boolean,
-  ) {
-    super(message);
-  }
 }
 
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
@@ -442,6 +394,14 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       return 1;
     }
 
+    if (command === "research") {
+      return await runResearchCommand(subcommand ? [subcommand, ...rest] : rest, io);
+    }
+
+    if (command === "education") {
+      return await runEducationCommand(subcommand ? [subcommand, ...rest] : rest, io);
+    }
+
     throw new CliError(`Unknown command: ${command}`);
   } catch (error) {
     if (error instanceof CliError) {
@@ -450,76 +410,6 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
     }
     throw error;
   }
-}
-
-export function parseArgs(argv: string[]): ParsedArgs {
-  const positionals: string[] = [];
-  const flags = new Map<string, string | true>();
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (!arg) continue;
-    if (!arg.startsWith("--")) {
-      positionals.push(arg);
-      continue;
-    }
-
-    const withoutPrefix = arg.slice(2);
-    const equalsIndex = withoutPrefix.indexOf("=");
-    if (equalsIndex >= 0) {
-      flags.set(withoutPrefix.slice(0, equalsIndex), withoutPrefix.slice(equalsIndex + 1));
-      continue;
-    }
-
-    const next = argv[index + 1];
-    if (next && !next.startsWith("--")) {
-      flags.set(withoutPrefix, next);
-      index += 1;
-    } else {
-      flags.set(withoutPrefix, true);
-    }
-  }
-
-  return { positionals, flags };
-}
-
-export function resolveCollectionSelector(
-  args: ParsedArgs,
-  env: NodeJS.ProcessEnv,
-): CollectionSelector {
-  const selectors: CollectionSelector[] = [];
-  addSelector(selectors, "primary_collection_id", getString(args, "collection-id"));
-  addSelector(selectors, "collection_path", getString(args, "collection-path"));
-  addSelector(selectors, "collection_key", getString(args, "collection-key"));
-  addSelector(selectors, "collection_name", getString(args, "collection-name"));
-
-  if (selectors.length > 1) {
-    throw new CliError("Provide exactly one collection selector.");
-  }
-  if (selectors.length === 1) return selectors[0] as CollectionSelector;
-
-  const envName = firstEnv(env, "TIANGONG_KB_DEFAULT_COLLECTION_NAME");
-  if (envName) return { field: "collection_name", value: envName };
-
-  const legacyName = firstEnv(env, "TIANGONG_KB_DEFAULT_COLLECTION_ID");
-  if (legacyName) {
-    if (isUuid(legacyName)) {
-      throw new CliError(
-        "TIANGONG_KB_DEFAULT_COLLECTION_ID is treated as a collection name. Use --collection-id for UUID uploads.",
-      );
-    }
-    return { field: "collection_name", value: legacyName };
-  }
-
-  const envPath = firstEnv(env, "TIANGONG_KB_DEFAULT_COLLECTION_PATH");
-  if (envPath) return { field: "collection_path", value: envPath };
-
-  const envKey = firstEnv(env, "TIANGONG_KB_DEFAULT_COLLECTION_KEY");
-  if (envKey) return { field: "collection_key", value: envKey };
-
-  throw new CliError(
-    "Missing collection selector. Provide --collection-name, --collection-key, --collection-path, --collection-id, or set TIANGONG_KB_DEFAULT_COLLECTION_NAME.",
-  );
 }
 
 async function doctor(argv: string[], io: CliIO): Promise<number> {
@@ -1352,148 +1242,6 @@ function judgeBulkStatus(item: BulkStatusItem): { status: string; lastError?: st
   return { status: "uploaded" };
 }
 
-async function batchDocumentStatuses(
-  config: KbConfig,
-  documentIds: string[],
-): Promise<BulkStatusItem[]> {
-  const statuses: BulkStatusItem[] = [];
-  for (let index = 0; index < documentIds.length; index += KB_DOCUMENT_STATUS_BATCH_LIMIT) {
-    const chunk = documentIds.slice(index, index + KB_DOCUMENT_STATUS_BATCH_LIMIT);
-    try {
-      const payload = await jsonRequest(config, "documents/status:batch", {
-        method: "POST",
-        body: JSON.stringify({ documentIds: chunk }),
-      });
-      statuses.push(...batchStatusItems(payload));
-    } catch (error) {
-      if (error instanceof HttpError && error.status && [404, 405, 501].includes(error.status)) {
-        statuses.push(
-          ...(await Promise.all(
-            chunk.map(async (documentId) =>
-              statusItemFromPayload(await getDocumentStatus(config, documentId), documentId),
-            ),
-          )),
-        );
-        continue;
-      }
-      throw error;
-    }
-  }
-  return statuses;
-}
-
-async function getDocumentStatus(config: KbConfig, documentId: string): Promise<unknown> {
-  return jsonRequest(config, `documents/${encodeURIComponent(documentId)}/status`);
-}
-
-function batchStatusItems(payload: unknown): BulkStatusItem[] {
-  const data = responseData(payload);
-  const items =
-    isObject(data) && Array.isArray(data.documents)
-      ? data.documents
-      : isObject(data) && Array.isArray(data.results)
-        ? data.results
-        : Array.isArray(data)
-          ? data
-          : [];
-  return items.filter(isObject).map((item) => batchStatusItemFromPayload(item));
-}
-
-function statusItemFromPayload(payload: unknown, fallbackDocumentId = ""): BulkStatusItem {
-  const data = responseData(payload);
-  const item = isObject(data) ? data : {};
-  return {
-    documentId:
-      stringField(item, "documentId") ?? stringField(item, "document_id") ?? fallbackDocumentId,
-    status: stringField(item, "status"),
-    terminal: typeof item.terminal === "boolean" ? item.terminal : undefined,
-    opensearchIndexed:
-      typeof item.opensearchIndexed === "boolean" ? item.opensearchIndexed : undefined,
-    pineconeIndexed: typeof item.pineconeIndexed === "boolean" ? item.pineconeIndexed : undefined,
-    indexRecordCount: typeof item.indexRecordCount === "number" ? item.indexRecordCount : undefined,
-    lastError: typeof item.lastError === "string" ? item.lastError : undefined,
-    lastErrorStage: typeof item.lastErrorStage === "string" ? item.lastErrorStage : undefined,
-    raw: payload,
-  };
-}
-
-async function readBulkPipelineHealth(
-  config: KbConfig,
-  fallbackPollAfterSeconds: number,
-  selectorFields: Record<string, string> = {},
-): Promise<BulkPipelineHealthSnapshot> {
-  try {
-    const payload = await jsonRequest(config, pipelineHealthPath(selectorFields));
-    return pipelineHealthFromPayload(payload, fallbackPollAfterSeconds);
-  } catch (error) {
-    if (error instanceof HttpError && error.status && [404, 405, 501].includes(error.status)) {
-      return {
-        healthy: true,
-        pressure: "unknown",
-        recommendedAction: "continue",
-        recommendedPollAfterSeconds: fallbackPollAfterSeconds,
-        message: "Pipeline health endpoint is unavailable; continuing without backpressure.",
-      };
-    }
-    if (error instanceof HttpError) {
-      return {
-        healthy: false,
-        pressure: "paused",
-        recommendedAction: "pause_top_up",
-        recommendedPollAfterSeconds:
-          error.retryAfterSeconds ?? Math.max(fallbackPollAfterSeconds, 30),
-        message: error.message,
-      };
-    }
-    return {
-      healthy: false,
-      pressure: "paused",
-      recommendedAction: "pause_top_up",
-      recommendedPollAfterSeconds: Math.max(fallbackPollAfterSeconds, 30),
-      message: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
-
-function pipelineHealthPath(selectorFields: Record<string, string>) {
-  const params = new URLSearchParams();
-  for (const key of ["primary_collection_id", "collection_path", "collection_key"]) {
-    const value = selectorFields[key];
-    if (value) params.set(key, value);
-  }
-
-  const query = params.toString();
-  return query ? `pipeline/health?${query}` : "pipeline/health";
-}
-
-function pipelineHealthFromPayload(
-  payload: unknown,
-  fallbackPollAfterSeconds: number,
-): BulkPipelineHealthSnapshot {
-  const data = responseData(payload);
-  if (!isObject(data)) {
-    throw new CliError("Pipeline health response did not contain an object payload.");
-  }
-  const action = stringField(data, "recommendedAction");
-  if (action !== "continue" && action !== "slow_down" && action !== "pause_top_up") {
-    throw new CliError("Pipeline health response did not contain a valid recommendedAction.");
-  }
-  const pressure = stringField(data, "pressure");
-  const pollAfter = Number(data.recommendedPollAfterSeconds);
-  return {
-    healthy: typeof data.healthy === "boolean" ? data.healthy : action === "continue",
-    pressure:
-      pressure === "ok" || pressure === "degraded" || pressure === "paused" ? pressure : "unknown",
-    recommendedAction: action,
-    recommendedPollAfterSeconds:
-      Number.isFinite(pollAfter) && pollAfter > 0 ? pollAfter : fallbackPollAfterSeconds,
-    checkedAt: stringField(data, "checkedAt"),
-    message:
-      stringField(data, "message") ??
-      (isObject(data.indexPreflight) ? stringField(data.indexPreflight, "message") : undefined),
-  };
-}
-
 async function saveBulkPipelineHealth(
   statePath: string,
   health: BulkPipelineHealthSnapshot,
@@ -1509,26 +1257,6 @@ async function saveBulkPipelineHealth(
   } finally {
     db.close();
   }
-}
-
-function batchStatusItemFromPayload(item: Record<string, unknown>): BulkStatusItem {
-  const documentId = stringField(item, "documentId") ?? stringField(item, "document_id") ?? "";
-  if (item.ok === true && isObject(item.status)) {
-    return statusItemFromPayload(item.status, documentId);
-  }
-  if (item.ok === false && isObject(item.error)) {
-    const error = item.error;
-    return {
-      documentId,
-      itemError: {
-        code: stringField(error, "code") ?? "STATUS_ITEM_ERROR",
-        message: stringField(error, "message") ?? "Document status lookup failed.",
-        retryable: typeof error.retryable === "boolean" ? error.retryable : false,
-      },
-      raw: item,
-    };
-  }
-  return statusItemFromPayload(item, documentId);
 }
 
 async function initializeBulkJob(input: {
@@ -3167,17 +2895,6 @@ async function loadOptionalSchemaSnapshot(
   }
 }
 
-async function resolveCollection(
-  config: KbConfig,
-  selector: CollectionSelector,
-  options: { includeSchema: boolean },
-): Promise<unknown> {
-  const params = new URLSearchParams({ action: "upload" });
-  params.set(selector.field, selector.value);
-  if (options.includeSchema) params.set("include_schema", "true");
-  return jsonRequest(config, `collections/resolve?${params.toString()}`);
-}
-
 async function loadMetadataMap(args: ParsedArgs): Promise<MetadataMap> {
   const metadataMapFile = getString(args, "metadata-map");
   if (!metadataMapFile) {
@@ -3656,140 +3373,6 @@ async function uploadOne(input: {
   });
 }
 
-async function resolveSelectorFields(
-  config: KbConfig,
-  selector: CollectionSelector,
-): Promise<Record<string, string>> {
-  if (selector.field !== "collection_name") {
-    return { [selector.field]: selector.value };
-  }
-
-  const matches = (await listCollections(config, "upload", 100)).filter(
-    (item) => item.name === selector.value,
-  );
-  if (matches.length === 0)
-    throw new CliError(`No uploadable collection matched name: ${selector.value}`);
-  if (matches.length > 1) {
-    const choices = matches.map((item) => item.key ?? item.path ?? item.id ?? "").join(", ");
-    throw new CliError(
-      `Collection name is not unique: ${selector.value}. Use --collection-key or --collection-path. Matches: ${choices}`,
-    );
-  }
-
-  const match = matches[0] as CollectionItem;
-  const key = collectionKey(match);
-  if (key) return { collection_key: key };
-  const path = collectionPath(match);
-  if (path) return { collection_path: path };
-  if (typeof match.id === "string" && match.id) return { primary_collection_id: match.id };
-  throw new CliError(
-    `Collection matched name ${selector.value}, but response had no key, path, or id.`,
-  );
-}
-
-async function listCollections(
-  config: KbConfig,
-  capability: string,
-  limit: number,
-): Promise<CollectionItem[]> {
-  const collections: CollectionItem[] = [];
-  let offset = 0;
-
-  while (true) {
-    const payload = await jsonRequest(
-      config,
-      `collections?${new URLSearchParams({
-        capability,
-        limit: String(limit),
-        offset: String(offset),
-      }).toString()}`,
-    );
-    const page = collectionItems(payload);
-    collections.push(...page);
-    if (page.length < limit) return collections;
-    offset += limit;
-  }
-}
-
-async function jsonRequest(
-  config: KbConfig,
-  path: string,
-  init: RequestInit & { headers?: Record<string, string> } = {},
-): Promise<unknown> {
-  const url = `${config.apiBaseUrl}${config.apiPathPrefix}/${path.replace(/^\/+/, "")}`;
-  const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${config.apiKey}`);
-  headers.set("Accept", "application/json");
-  if (init.body && !(init.body instanceof FormData)) {
-    headers.set("Content-Type", "application/json");
-  }
-
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      ...init,
-      headers,
-      signal: AbortSignal.timeout(config.timeoutSeconds * 1000),
-    });
-  } catch (error) {
-    throw new HttpError(
-      `Request failed for ${url}: ${error instanceof Error ? error.message : String(error)}`,
-      undefined,
-      undefined,
-      true,
-    );
-  }
-
-  const text = await response.text();
-  if (!response.ok) {
-    throw new HttpError(
-      `HTTP ${response.status} from ${url}: ${text}`,
-      response.status,
-      retryAfterSeconds(response.headers),
-      RETRYABLE_HTTP_STATUSES.has(response.status),
-    );
-  }
-
-  if (!text.trim()) return {};
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new CliError(`Expected JSON from ${url}, got: ${text.slice(0, 200)}`);
-  }
-}
-
-function resolveConfig(
-  args: ParsedArgs,
-  env: NodeJS.ProcessEnv,
-  options: { requireKey?: boolean } = {},
-): KbConfig {
-  const requireKey = options.requireKey ?? true;
-  const apiKey =
-    getString(args, "api-key") ?? firstEnv(env, "TIANGONG_AI_API_KEY", "TIANGONG_KB_API_KEY") ?? "";
-  if (requireKey && !apiKey) {
-    throw new CliError("Missing API key. Provide --api-key or set TIANGONG_AI_API_KEY.");
-  }
-
-  return {
-    apiBaseUrl: (
-      getString(args, "api-base-url") ??
-      firstEnv(env, "TIANGONG_KB_API_BASE_URL") ??
-      DEFAULT_API_BASE_URL
-    ).replace(/\/+$/, ""),
-    apiPathPrefix: normalizePrefix(
-      getString(args, "api-path-prefix") ??
-        firstEnv(env, "TIANGONG_KB_API_PATH_PREFIX") ??
-        DEFAULT_API_PATH_PREFIX,
-    ),
-    apiKey,
-    timeoutSeconds: positiveNumberValue(
-      getString(args, "timeout") ?? firstEnv(env, "TIANGONG_KB_TIMEOUT"),
-      120,
-      "--timeout",
-    ),
-  };
-}
-
 async function collectFiles(
   path: string,
   recursive: boolean,
@@ -3858,45 +3441,6 @@ async function runPool<T, R>(
   return results;
 }
 
-function collectionItems(payload: unknown): CollectionItem[] {
-  const data = responseData(payload);
-  if (Array.isArray(data)) return data.filter(isObject) as CollectionItem[];
-  if (isObject(data) && Array.isArray(data.collections))
-    return data.collections.filter(isObject) as CollectionItem[];
-  if (isObject(data) && Array.isArray(data.data))
-    return data.data.filter(isObject) as CollectionItem[];
-  if (isObject(payload) && Array.isArray(payload.data))
-    return payload.data.filter(isObject) as CollectionItem[];
-  throw new CliError("Collection list response did not contain a data array.");
-}
-
-function collectionKey(item: CollectionItem): string | undefined {
-  return (
-    stringField(item, "key") ??
-    stringField(item, "collectionKey") ??
-    stringField(item, "collection_key")
-  );
-}
-
-function collectionPath(item: CollectionItem): string | undefined {
-  return (
-    stringField(item, "path") ??
-    stringField(item, "collectionPath") ??
-    stringField(item, "collection_path")
-  );
-}
-
-function responseData(payload: unknown): unknown {
-  if (
-    isObject(payload) &&
-    "data" in payload &&
-    ("api_version" in payload || "request_id" in payload || isObject(payload.data))
-  ) {
-    return payload.data;
-  }
-  return payload;
-}
-
 function documentIdFromUpload(payload: unknown): string | undefined {
   const data = responseData(payload);
   if (!isObject(data)) return undefined;
@@ -3936,91 +3480,6 @@ function formatUploadLine(result: UploadResult): string {
   return `OK ${result.path} document=${result.documentId ?? ""}${duplicate}${existing}\n`;
 }
 
-function addSelector(
-  selectors: CollectionSelector[],
-  field: CollectionSelector["field"],
-  value: string | undefined,
-): void {
-  if (value) selectors.push({ field, value });
-}
-
-function getString(args: ParsedArgs, name: string): string | undefined {
-  const value = args.flags.get(name);
-  if (typeof value !== "string" || value.trim() === "") return undefined;
-  return value.trim();
-}
-
-function getBoolean(args: ParsedArgs, name: string): boolean {
-  return args.flags.get(name) === true || args.flags.get(name) === "true";
-}
-
-function getPositiveInteger(args: ParsedArgs, name: string, defaultValue: number): number {
-  return positiveIntegerValue(getString(args, name), defaultValue, `--${name}`);
-}
-
-function positiveIntegerValue(
-  value: string | undefined,
-  defaultValue: number,
-  label: string,
-): number {
-  if (!value) return defaultValue;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0)
-    throw new CliError(`${label} must be a positive integer.`);
-  return parsed;
-}
-
-function getNonNegativeInteger(args: ParsedArgs, name: string, defaultValue: number): number {
-  return nonNegativeIntegerValue(getString(args, name), defaultValue, `--${name}`);
-}
-
-function nonNegativeIntegerValue(
-  value: string | undefined,
-  defaultValue: number,
-  label: string,
-): number {
-  if (!value) return defaultValue;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0)
-    throw new CliError(`${label} must be a non-negative integer.`);
-  return parsed;
-}
-
-function getPositiveNumber(args: ParsedArgs, name: string, defaultValue: number): number {
-  return positiveNumberValue(getString(args, name), defaultValue, `--${name}`);
-}
-
-function positiveNumberValue(
-  value: string | undefined,
-  defaultValue: number,
-  label: string,
-): number {
-  if (!value) return defaultValue;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0)
-    throw new CliError(`${label} must be a positive number.`);
-  return parsed;
-}
-
-function firstEnv(env: NodeJS.ProcessEnv, ...names: string[]): string | undefined {
-  for (const name of names) {
-    const value = env[name]?.trim();
-    if (value) return value;
-  }
-  return undefined;
-}
-
-function normalizePrefix(value: string): string {
-  return `/${value.replace(/^\/+|\/+$/g, "")}`;
-}
-
-function retryAfterSeconds(headers: Headers): number | undefined {
-  const value = headers.get("Retry-After");
-  if (!value) return undefined;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-}
-
 function retryDelay(error: unknown, attempt: number): number {
   if (error instanceof HttpError && error.retryAfterSeconds)
     return Math.min(error.retryAfterSeconds, 30);
@@ -4044,51 +3503,6 @@ function mimeType(path: string): string {
   return "application/octet-stream";
 }
 
-function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function stringField(value: Record<string, unknown>, field: string): string | undefined {
-  const candidate = value[field];
-  return typeof candidate === "string" && candidate ? candidate : undefined;
-}
-
-function write(output: Output, text: string): void {
-  output.write(text);
-}
-
-function loadDotenv(env: NodeJS.ProcessEnv): void {
-  const cwd = dirname(fileURLToPath(import.meta.url));
-  const candidates = [resolve(process.cwd(), ".env"), resolve(cwd, "../.env")];
-  for (const candidate of candidates) {
-    const content = readEnvFile(candidate);
-    if (!content) continue;
-    for (const line of content.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
-      const [rawKey, ...rawValue] = trimmed.replace(/^export\s+/, "").split("=");
-      const key = rawKey?.trim();
-      if (!key || env[key]) continue;
-      env[key] = rawValue
-        .join("=")
-        .trim()
-        .replace(/^["']|["']$/g, "");
-    }
-  }
-}
-
-function readEnvFile(path: string): string | undefined {
-  try {
-    return readFileSync(path, "utf8");
-  } catch {
-    return undefined;
-  }
-}
-
 function topHelp(): string {
   return `Tiangong AI CLI
 
@@ -4098,8 +3512,12 @@ Usage:
   tiangong-ai kb ingest jobs
   tiangong-ai kb ingest status <document-id>
   tiangong-ai kb collections list [--capability upload]
+  tiangong-ai research search --input <request.json>|--query <query> [--sources default|all|sci|report|patent]
+  tiangong-ai education search --input <request.json>|--query <query> [--sources default|all|course|edu|textbook]
 
 Run "tiangong-ai kb --help" for KB options.
+Run "tiangong-ai research --help" for research options.
+Run "tiangong-ai education --help" for education options.
 `;
 }
 

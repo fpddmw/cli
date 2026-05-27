@@ -16,8 +16,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-05-17
-lastReviewedCommit: d56d2633c2d69354d2cc787fe241459d887f22b9
+lastReviewedAt: 2026-05-26
+lastReviewedCommit: 6a05f20d5e167b770fce1aa3286a7dbdd2e1cd0d
 ---
 
 # Repo Validation
@@ -68,5 +68,5 @@ The coverage gate uses `c8` and fails when coverage drops below the thresholds
 encoded in `scripts/run-test-coverage.cjs`. Coverage ignore pragmas are
 forbidden; cover the branch or remove dead code.
 
-The initial v0 threshold is intentionally lower than the mature LCA CLI gate.
-Raise it as command coverage grows.
+The initial v0 threshold is intentionally conservative. Raise it as command
+coverage grows.

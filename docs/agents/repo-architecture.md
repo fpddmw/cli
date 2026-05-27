@@ -32,8 +32,24 @@ storage writes, queueing, and document status transitions.
 
 - `bin/tiangong-ai.js`: stable executable launcher.
 - `src/main.ts`: process entrypoint.
-- `src/cli.ts`: command dispatch, KB ingest/status clients, bulk scan,
+- `src/cli.ts`: command dispatch, KB ingest/status orchestration, bulk scan,
   metadata dry-run, SQLite checkpointing, and sliding-window bulk runner.
+- `src/args.ts`, `src/data.ts`, `src/env.ts`, `src/errors.ts`, `src/http.ts`,
+  and `src/io.ts`: shared CLI primitives for argument parsing, JSON envelope
+  parsing, environment loading, structured error payloads, bearer-token JSON
+  HTTP requests, edge-function `postJson`, JSON file input, JSON output, and
+  process IO.
+- `src/kb/**`: KB API boundary modules for config resolution, collection
+  selection/list/resolve, document status polling, and pipeline health checks.
+- `src/research/**`: research search command handling and source specs for SCI
+  journal, report, and patent edge-search functions.
+- `src/education/**`: education search command handling and source specs for
+  course, education, and textbook edge-search functions.
+- `src/edge-search.ts`: shared edge-search forwarding helper. It derives
+  Supabase Functions base URLs from project root, `/functions/v1`, or
+  `/rest/v1` inputs; builds exact POST request plans with `Content-Type`,
+  region, input path, and timeout milliseconds; masks credentials for dry-runs;
+  and returns raw edge responses without normalizing them.
 - `scripts/**`: validation helpers.
 - `test/**`: Node test runner suites.
 

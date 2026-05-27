@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-05-17
-lastReviewedCommit: d56d2633c2d69354d2cc787fe241459d887f22b9
+lastReviewedAt: 2026-05-26
+lastReviewedCommit: 6a05f20d5e167b770fce1aa3286a7dbdd2e1cd0d
 ---
 
 # Tiangong AI CLI
@@ -149,6 +149,63 @@ Check document status:
 ```bash
 tiangong-ai kb ingest status <document-id>
 ```
+
+## Research Search
+
+Forward research-oriented search requests to SCI, report, and patent edge
+search sources:
+
+```bash
+tiangong-ai research search \
+  --input ./sci-request.json \
+  --sources all \
+  --dry-run \
+  --json
+```
+
+Required environment:
+
+```bash
+TIANGONG_AI_APIKEY=
+```
+
+`--input <file>` reads a JSON object and forwards it unchanged as the POST body
+to every selected source. Use `--dry-run` to emit the exact request plan,
+including method, URL, masked headers, input path, body, and timeout
+milliseconds, without remote calls.
+For quick calls, `--query <text>` builds a minimal body with `query` plus
+optional `--top-k`, `--ext-k`, and `--get-meta`.
+
+`--sources` accepts concrete IDs and presets. `default` expands to `sci`; `all`
+expands to `sci,report,patent`. Use source-specific endpoint or credential
+overrides with `--sci-url`, `--report-url`, `--patent-url`,
+`--sci-api-key`, `--report-api-key`, and `--patent-api-key`. When source URLs
+are not provided, `--api-base-url` or `TIANGONG_AI_API_BASE_URL` may be a
+Supabase project root, `/functions/v1`, or `/rest/v1`; the CLI derives the
+Functions base URL and appends `sci_search`, `report_search`, or
+`patent_search`.
+
+## Education Search
+
+Forward education-oriented search requests to course, education, and textbook
+edge search sources:
+
+```bash
+tiangong-ai education search \
+  --query "activated sludge process principles" \
+  --sources all \
+  --json
+```
+
+`--input <file>` forwards the JSON request body unchanged. `--query <text>`
+builds a minimal body with `query` plus optional `--top-k` and `--ext-k`.
+`--sources default` expands to `course`; `--sources all` expands to
+`course,edu,textbook`. `course` search can use a scoped bearer token through
+`--bearer-token` or `TIANGONG_EDUCATION_BEARER_TOKEN`; all education sources can
+use `--api-key` or `TIANGONG_AI_APIKEY`. When source URLs are not provided,
+`--api-base-url` or `TIANGONG_AI_API_BASE_URL` may be a Supabase project root,
+`/functions/v1`, or `/rest/v1`; the CLI derives the Functions base URL and
+appends `course_search`, `edu_search`, or `textbook_search`.
 
 ## Boundary
 
