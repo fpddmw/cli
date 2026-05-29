@@ -45,6 +45,7 @@ import {
   type CollectionSelector,
 } from "./kb/client.js";
 import { resolveKbConfig as resolveConfig, type KbConfig } from "./kb/config.js";
+import { runCourseFulltextCommand } from "./kb/course-fulltext.js";
 import { readBulkPipelineHealth, type BulkPipelineHealthSnapshot } from "./kb/pipeline-health.js";
 import { resolveCollectionSelector } from "./kb/selector.js";
 import { batchDocumentStatuses, getDocumentStatus, type BulkStatusItem } from "./kb/status.js";
@@ -386,6 +387,13 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
           return await kbCollections(rest.slice(1), io);
         }
         return await kbCollections(rest, io);
+      }
+      if (subcommand === "course") {
+        if (rest[0] === "fulltext") {
+          return await runCourseFulltextCommand(rest.slice(1), io);
+        }
+        write(io.stdout, kbHelp());
+        return 1;
       }
       if (subcommand === "status") {
         return await kbStatus(rest, io);
@@ -3512,6 +3520,7 @@ Usage:
   tiangong-ai kb ingest jobs
   tiangong-ai kb ingest status <document-id>
   tiangong-ai kb collections list [--capability upload]
+  tiangong-ai kb course fulltext --document-id <id> --tags <tag>
   tiangong-ai research search --input <request.json>|--query <query> [--sources default|all|sci|report|patent]
   tiangong-ai education search --input <request.json>|--query <query> [--sources default|all|course|edu|textbook]
 
@@ -3537,6 +3546,7 @@ Usage:
   tiangong-ai kb ingest export <job-id> [--format jsonl|json|csv]
   tiangong-ai kb collections list [--capability upload] [--json]
   tiangong-ai kb collections schema --collection-path <path> [--json]
+  tiangong-ai kb course fulltext --document-id <id> --tags <tag> [--json]
 
 Common options:
   --api-key <token>

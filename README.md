@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-05-26
-lastReviewedCommit: 6a05f20d5e167b770fce1aa3286a7dbdd2e1cd0d
+lastReviewedAt: 2026-05-29
+lastReviewedCommit: 8bd0ba63b906789761fc21f450f9979bd5e1b0b9
 ---
 
 # Tiangong AI CLI
@@ -149,6 +149,23 @@ Check document status:
 ```bash
 tiangong-ai kb ingest status <document-id>
 ```
+
+Read course fulltext from the processed S3 bucket:
+
+```bash
+tiangong-ai kb course fulltext \
+  --document-id 000125ed-c4d9-4fe3-9380-000000000000 \
+  --tags thu_humanities
+```
+
+The command lists exactly one `.txt` object under
+`s3://tiangong/processed_docs/course_pickle/<tags>_pickle/<document-id>/` and
+prints its content. Override the location with `--bucket`, `--prefix`, or the
+`TIANGONG_COURSE_FULLTEXT_S3_BUCKET` and
+`TIANGONG_COURSE_FULLTEXT_S3_PREFIX` environment variables. AWS credentials and
+region are resolved by the AWS SDK, including `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, `AWS_REGION`, and
+`AWS_DEFAULT_REGION`.
 
 ## Research Search
 
