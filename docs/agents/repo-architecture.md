@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-05-29
-lastReviewedCommit: e7c93297a906bcab2d166af43fbb6a077a30b6d9
+lastReviewedAt: 2026-06-01
+lastReviewedCommit: 09572bea5a50c07a5a8e023a2b7e180cbd037d75
 ---
 
 # Repo Architecture
@@ -78,7 +78,11 @@ metadata. Empty `.docx` files with no body text and no media are marked skipped
 before upload.
 Bulk polling sends the resolved collection selector to `pipeline/health` so the
 backend can scope index preflight/backpressure to the target collection's
-search partition rather than unrelated active partitions.
+search partition rather than unrelated active partitions. Upload-scoped callers
+may receive a redacted health payload containing only `healthy`, `pressure`,
+`recommendedAction`, `recommendedPollAfterSeconds`, `checkedAt`, and an
+optional coarse `reason`; the CLI must not depend on admin-only queue or worker
+details.
 
 ## Skill Boundary
 

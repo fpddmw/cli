@@ -9,6 +9,7 @@ export interface BulkPipelineHealthSnapshot {
   recommendedAction: "continue" | "slow_down" | "pause_top_up";
   recommendedPollAfterSeconds: number;
   checkedAt?: string | undefined;
+  reason?: string | undefined;
   message?: string | undefined;
 }
 
@@ -83,8 +84,10 @@ function pipelineHealthFromPayload(
     recommendedPollAfterSeconds:
       Number.isFinite(pollAfter) && pollAfter > 0 ? pollAfter : fallbackPollAfterSeconds,
     checkedAt: stringField(data, "checkedAt"),
+    reason: stringField(data, "reason"),
     message:
       stringField(data, "message") ??
+      stringField(data, "reason") ??
       (isObject(data.indexPreflight) ? stringField(data.indexPreflight, "message") : undefined),
   };
 }
