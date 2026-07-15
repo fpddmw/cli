@@ -62,7 +62,8 @@ const DEFAULT_RETRIES = 3;
 const DEFAULT_BULK_WINDOW_SIZE = 100;
 const DEFAULT_BULK_TOP_UP_MAX = 50;
 const DEFAULT_BULK_UPLOAD_CONCURRENCY = 4;
-const DEFAULT_BULK_POLL_INTERVAL_SECONDS = 30;
+export const DEFAULT_BULK_POLL_INTERVAL_SECONDS = 30;
+export const DEFAULT_BULK_PIPELINE_HEALTH_POLL_INTERVAL_SECONDS = 60;
 const DEFAULT_BULK_MAX_POLLS = 0;
 const DEFAULT_BULK_MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 const DEFAULT_BULK_DERIVED_DIR = ".tiangong-kb-ingest-derived";
@@ -813,6 +814,12 @@ async function runBulkLoop(input: {
     DEFAULT_BULK_POLL_INTERVAL_SECONDS,
     "--poll-interval",
   );
+  const healthPollInterval = positiveNumberValue(
+    getString(input.args, "health-poll-interval") ??
+      firstEnv(input.env, "TIANGONG_KB_PIPELINE_HEALTH_POLL_INTERVAL"),
+    DEFAULT_BULK_PIPELINE_HEALTH_POLL_INTERVAL_SECONDS,
+    "--health-poll-interval",
+  );
   const retries = nonNegativeIntegerValue(
     getString(input.args, "retries") ?? firstEnv(input.env, "TIANGONG_KB_UPLOAD_RETRIES"),
     DEFAULT_RETRIES,
@@ -832,6 +839,7 @@ async function runBulkLoop(input: {
   await resetInterruptedBulkUploads(input.statePath);
   await updateJobStatus(input.statePath, "running");
   let lastPipelineHealth: BulkPipelineHealthSnapshot | undefined;
+  let nextPipelineHealthPollAt = 0;
 
   while (true) {
     polls += 1;
@@ -850,12 +858,16 @@ async function runBulkLoop(input: {
     }
     const summary = await bulkJobSummary(input.statePath);
     const capacity = Math.max(0, windowSize - summary.inflight);
-    lastPipelineHealth = await readBulkPipelineHealth(
-      input.config,
-      pollInterval,
-      input.selectorFields,
-    );
-    await saveBulkPipelineHealth(input.statePath, lastPipelineHealth);
+    if (!lastPipelineHealth || Date.now() >= nextPipelineHealthPollAt) {
+      lastPipelineHealth = await readBulkPipelineHealth(
+        input.config,
+        healthPollInterval,
+        input.selectorFields,
+      );
+      await saveBulkPipelineHealth(input.statePath, lastPipelineHealth);
+      nextPipelineHealthPollAt =
+        Date.now() + bulkPipelineHealthPollInterval(healthPollInterval, lastPipelineHealth) * 1000;
+    }
     const uploadLimit = statusPollError
       ? 0
       : bulkUploadLimitForHealth(Math.min(capacity, topUpMax), lastPipelineHealth);
@@ -916,7 +928,7 @@ async function runBulkLoop(input: {
         pipelineHealth: lastPipelineHealth,
       };
     }
-    await sleep(bulkPollIntervalForHealth(pollInterval, lastPipelineHealth) * 1000);
+    await sleep(pollInterval * 1000);
   }
 }
 
@@ -931,7 +943,7 @@ function isRecoverableBulkStatusPollError(error: unknown): error is HttpError {
   return error instanceof HttpError && error.retryable;
 }
 
-function bulkPollIntervalForHealth(
+function bulkPipelineHealthPollInterval(
   baseSeconds: number,
   health: BulkPipelineHealthSnapshot | undefined,
 ): number {
@@ -3566,7 +3578,8 @@ Ingest options:
   --top-up-max <n>
   --upload-concurrency <n>
   --retries <n>
-  --poll-interval <seconds>
+  --poll-interval <seconds> (default 30)
+  --health-poll-interval <seconds> (default 60)
   --max-polls <n> (default 0, no client-side polling limit)
 `;
 }
@@ -3590,7 +3603,8 @@ Bulk options:
   --window-size <n>
   --top-up-max <n>
   --upload-concurrency <n>
-  --poll-interval <seconds>
+  --poll-interval <seconds> (default 30)
+  --health-poll-interval <seconds> (default 60)
   --max-polls <n> (default 0, no client-side polling limit)
   --json
 `;

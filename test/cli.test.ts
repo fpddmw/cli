@@ -8,7 +8,14 @@ import { inflateRawSync } from "node:zlib";
 
 import sharp from "sharp";
 
-import { DEFAULT_API_BASE_URL, parseArgs, resolveCollectionSelector, runCli } from "../src/cli.js";
+import {
+  DEFAULT_API_BASE_URL,
+  DEFAULT_BULK_PIPELINE_HEALTH_POLL_INTERVAL_SECONDS,
+  DEFAULT_BULK_POLL_INTERVAL_SECONDS,
+  parseArgs,
+  resolveCollectionSelector,
+  runCli,
+} from "../src/cli.js";
 
 function pipelineHealthPayload(action: "continue" | "slow_down" | "pause_top_up" = "continue") {
   return {
@@ -62,6 +69,11 @@ describe("resolveCollectionSelector", () => {
 describe("defaults", () => {
   it("uses the shared KB API base URL", () => {
     assert.equal(DEFAULT_API_BASE_URL, "https://thuenv.tiangong.world:7300");
+  });
+
+  it("keeps bulk status polling at 30 seconds and health polling at 60 seconds", () => {
+    assert.equal(DEFAULT_BULK_POLL_INTERVAL_SECONDS, 30);
+    assert.equal(DEFAULT_BULK_PIPELINE_HEALTH_POLL_INTERVAL_SECONDS, 60);
   });
 });
 
@@ -821,6 +833,8 @@ describe("runCli", () => {
     await writeFile(schemaPath, JSON.stringify({ metadataSchema: { fields: [] } }));
 
     const previousFetch = globalThis.fetch;
+    let healthPolls = 0;
+    let documentStatusPolls = 0;
     globalThis.fetch = (async (input, init) => {
       const url = String(input);
       if (url.endsWith("/documents") && init?.method === "POST") {
@@ -836,12 +850,14 @@ describe("runCli", () => {
         });
       }
       if (url.endsWith("/documents/doc_wait/status")) {
+        documentStatusPolls += 1;
         return new Response(
           JSON.stringify({ data: { documentId: "doc_wait", status: "completed", terminal: true } }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
       if (isPipelineHealthUrl(url)) {
+        healthPolls += 1;
         return new Response(JSON.stringify(pipelineHealthPayload()), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -871,7 +887,7 @@ describe("runCli", () => {
           "--poll-interval",
           "0.01",
           "--max-polls",
-          "2",
+          "3",
           "--json",
         ],
         {
@@ -885,6 +901,34 @@ describe("runCli", () => {
       const payload = JSON.parse(stdout);
       assert.equal(payload.completed, 0);
       assert.equal(payload.waitingForIndexFlags, 1);
+      assert.equal(documentStatusPolls, 2);
+      assert.equal(healthPolls, 1);
+
+      const healthPollsBeforeResume = healthPolls;
+      let resumeOut = "";
+      const resumeCode = await runCli(
+        [
+          "kb",
+          "ingest",
+          "resume",
+          statePath,
+          "--poll-interval",
+          "0.01",
+          "--health-poll-interval",
+          "0.005",
+          "--max-polls",
+          "3",
+          "--json",
+        ],
+        {
+          env: { TIANGONG_AI_API_KEY: "fake" },
+          stdout: { write: (chunk: string) => void (resumeOut += chunk) },
+          stderr: { write: () => undefined },
+        },
+      );
+      assert.equal(resumeCode, 0);
+      assert.equal(JSON.parse(resumeOut).waitingForIndexFlags, 1);
+      assert.equal(healthPolls - healthPollsBeforeResume, 3);
 
       let statusOut = "";
       const statusCode = await runCli(["kb", "ingest", "status", statePath, "--json"], {

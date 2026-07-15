@@ -48,7 +48,8 @@ Run a resumable sliding-window ingest for one file or a folder:
 ```bash
 tiangong-ai kb ingest bulk /path/to/document.pdf \
   --collection-path /course/thu_humanities \
-  --poll-interval 30
+  --poll-interval 30 \
+  --health-poll-interval 60
 ```
 
 Run a larger folder ingest:
@@ -59,7 +60,8 @@ tiangong-ai kb ingest bulk /path/to/folder \
   --window-size 100 \
   --top-up-max 50 \
   --upload-concurrency 4 \
-  --poll-interval 30
+  --poll-interval 30 \
+  --health-poll-interval 60
 ```
 
 Bulk scan a large folder and emit a structural JSON summary:
@@ -95,7 +97,8 @@ tiangong-ai kb ingest bulk /path/to/folder \
   --window-size 100 \
   --top-up-max 50 \
   --upload-concurrency 4 \
-  --poll-interval 30
+  --poll-interval 30 \
+  --health-poll-interval 60
 ```
 
 `tiangong-ai kb ingest bulk run /path/to/folder` is accepted as an explicit
@@ -111,7 +114,12 @@ stored under the OS app-data directory:
 Use `--state /path/to/job.sqlite` to override the checkpoint path. Bulk ingest
 does not impose a client-side polling limit by default, so it can keep topping
 up the sliding upload window until all rows complete. Use `--max-polls <n>` only
-when a wrapper or operator needs a bounded run.
+when a wrapper or operator needs a bounded run. Status checks and upload-window
+top-up run every 30 seconds by default. Pipeline health is cached independently
+and refreshed every 60 seconds by default, so health backpressure does not slow
+status progress. Override the intervals with `--poll-interval` and
+`--health-poll-interval`, or with `TIANGONG_KB_BULK_POLL_INTERVAL` and
+`TIANGONG_KB_PIPELINE_HEALTH_POLL_INTERVAL`.
 
 Bulk ingest scans and fingerprints files first, then lazily creates derived
 files only when a row enters the active upload window. `.docx` files larger than

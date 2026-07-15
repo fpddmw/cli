@@ -82,7 +82,10 @@ search partition rather than unrelated active partitions. Upload-scoped callers
 may receive a redacted health payload containing only `healthy`, `pressure`,
 `recommendedAction`, `recommendedPollAfterSeconds`, `checkedAt`, and an
 optional coarse `reason`; the CLI must not depend on admin-only queue or worker
-details.
+details. Status polling and upload-window top-up keep their 30-second default
+loop. Pipeline health is cached separately and refreshed every 60 seconds by
+default; explicit CLI or environment overrides still win, and degraded/paused
+server recommendations may lengthen only the health refresh interval.
 
 ## Skill Boundary
 
