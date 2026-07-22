@@ -42,7 +42,7 @@ storage writes, queueing, and document status transitions.
 - `src/kb/**`: KB API boundary modules for config resolution, collection
   selection/list/resolve, document status polling, and pipeline health checks.
 - `src/research/**`: research search command handling and source specs for SCI
-  journal, report, and patent edge-search functions.
+  journal, report, patent, and ESG edge-search functions.
 - `src/education/**`: education search command handling and source specs for
   course, education, and textbook edge-search functions.
 - `src/edge-search.ts`: shared edge-search forwarding helper. It derives

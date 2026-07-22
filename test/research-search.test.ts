@@ -21,9 +21,11 @@ const RESEARCH_OPTIONS = {
   "sci-api-key": "string",
   "report-api-key": "string",
   "patent-api-key": "string",
+  "esg-api-key": "string",
   "sci-url": "string",
   "report-url": "string",
   "patent-url": "string",
+  "esg-url": "string",
   region: "string",
   timeout: "string",
   "top-k": "string",
@@ -35,8 +37,13 @@ describe("research search config", () => {
   it("parses research source presets and explicit sources", () => {
     assert.deepEqual(parseResearchSources(undefined), ["sci"]);
     assert.deepEqual(parseResearchSources("default"), ["sci"]);
-    assert.deepEqual(parseResearchSources("all"), ["sci", "report", "patent"]);
-    assert.deepEqual(parseResearchSources("report,patent,sci,report"), ["report", "patent", "sci"]);
+    assert.deepEqual(parseResearchSources("all"), ["sci", "report", "patent", "esg"]);
+    assert.deepEqual(parseResearchSources("report,esg,patent,sci,esg"), [
+      "report",
+      "esg",
+      "patent",
+      "sci",
+    ]);
     assert.throws(
       () => parseResearchSources("edu"),
       (error) =>
@@ -58,12 +65,16 @@ describe("research search config", () => {
           "report-key",
           "--patent-api-key",
           "patent-key",
+          "--esg-api-key",
+          "esg-key",
           "--sci-url",
           "https://example.test/sci",
           "--report-url",
           "https://example.test/report",
           "--patent-url",
           "https://example.test/patent",
+          "--esg-url",
+          "https://example.test/esg",
           "--region",
           "ap-southeast-1",
           "--timeout",
@@ -97,6 +108,13 @@ describe("research search config", () => {
       authStrategy: "apiKey",
       includeRegion: true,
     });
+    assert.deepEqual(config.sources.esg, {
+      url: "https://example.test/esg",
+      apiKey: "esg-key",
+      region: "ap-southeast-1",
+      authStrategy: "apiKey",
+      includeRegion: true,
+    });
   });
 
   it("resolves env fallbacks and validates timeout", () => {
@@ -105,9 +123,11 @@ describe("research search config", () => {
       TIANGONG_SCI_APIKEY: "sci-env-key",
       TIANGONG_REPORT_APIKEY: "report-env-key",
       TIANGONG_PATENT_APIKEY: "patent-env-key",
+      TIANGONG_ESG_APIKEY: "esg-env-key",
       TIANGONG_SCI_SEARCH_URL: "https://env.test/sci",
       TIANGONG_REPORT_SEARCH_URL: "https://env.test/report",
       TIANGONG_PATENT_SEARCH_URL: "https://env.test/patent",
+      TIANGONG_ESG_SEARCH_URL: "https://env.test/esg",
       TIANGONG_REGION: "eu-central-1",
       TIANGONG_RESEARCH_TIMEOUT: "33",
     });
@@ -116,9 +136,11 @@ describe("research search config", () => {
     assert.equal(config.sources.sci.apiKey, "sci-env-key");
     assert.equal(config.sources.report.apiKey, "report-env-key");
     assert.equal(config.sources.patent.apiKey, "patent-env-key");
+    assert.equal(config.sources.esg.apiKey, "esg-env-key");
     assert.equal(config.sources.sci.url, "https://env.test/sci");
     assert.equal(config.sources.report.url, "https://env.test/report");
     assert.equal(config.sources.patent.url, "https://env.test/patent");
+    assert.equal(config.sources.esg.url, "https://env.test/esg");
     assert.equal(config.sources.sci.region, "eu-central-1");
     assert.throws(
       () =>
@@ -153,6 +175,10 @@ describe("research search config", () => {
     assert.equal(
       fromProject.sources.patent.url,
       "https://example.supabase.co/functions/v1/patent_search",
+    );
+    assert.equal(
+      fromProject.sources.esg.url,
+      "https://example.supabase.co/functions/v1/esg_search",
     );
 
     const fromFunctions = resolveResearchConfig(
@@ -251,12 +277,16 @@ describe("research search command", () => {
           "https://example.test/report_search",
           "--patent-url",
           "https://example.test/patent_search",
+          "--esg-url",
+          "https://example.test/esg_search",
           "--sci-api-key",
           "sci-key",
           "--report-api-key",
           "report-key",
           "--patent-api-key",
           "patent-key",
+          "--esg-api-key",
+          "esg-key",
           "--region",
           "ap-northeast-1",
           "--timeout",
@@ -288,7 +318,7 @@ describe("research search command", () => {
       assert.equal(payload.dryRun, true);
       assert.deepEqual(
         payload.requests.map((request) => request.source),
-        ["sci", "report", "patent"],
+        ["sci", "report", "patent", "esg"],
       );
       assert.deepEqual(
         payload.requests.map((request) => request.request.url),
@@ -296,6 +326,7 @@ describe("research search command", () => {
           "https://example.test/sci_search",
           "https://example.test/report_search",
           "https://example.test/patent_search",
+          "https://example.test/esg_search",
         ],
       );
       for (const request of payload.requests) {
@@ -306,6 +337,73 @@ describe("research search command", () => {
         assert.equal(request.request.headers["x-region"], "ap-northeast-1");
         assert.equal(request.request.timeoutMs, 23000);
       }
+    } finally {
+      globalThis.fetch = previousFetch;
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("dry-runs an exact ESG filter payload through the native ESG source", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "tiangong-esg-search-test-"));
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("dry-run should not fetch");
+    }) as typeof fetch;
+
+    try {
+      const body = {
+        query: "scope 3 emissions",
+        filter: {
+          rec_id: ["record-1"],
+          country: ["China"],
+        },
+        datefilter: {
+          publication_date: {
+            gte: 1672531200,
+            lte: 1704067199,
+          },
+        },
+        meta_contains: "annual report",
+        topK: 5,
+        extK: 1,
+      };
+      const inputPath = join(tempDir, "esg-request.json");
+      await writeFile(inputPath, JSON.stringify(body));
+
+      let stdout = "";
+      const exitCode = await runCli(
+        [
+          "research",
+          "search",
+          "--input",
+          inputPath,
+          "--sources",
+          "esg",
+          "--esg-url",
+          "https://example.test/esg_search",
+          "--esg-api-key",
+          "esg-key",
+          "--dry-run",
+          "--json",
+        ],
+        {
+          env: {},
+          stdout: { write: (chunk: string) => void (stdout += chunk) },
+          stderr: { write: () => undefined },
+        },
+      );
+
+      assert.equal(exitCode, 0);
+      const payload = JSON.parse(stdout) as {
+        requests: Array<{
+          source: string;
+          request: { url: string; headers: Record<string, string>; body: unknown };
+        }>;
+      };
+      assert.equal(payload.requests[0]?.source, "esg");
+      assert.equal(payload.requests[0]?.request.url, "https://example.test/esg_search");
+      assert.equal(payload.requests[0]?.request.headers["x-api-key"], "****");
+      assert.deepEqual(payload.requests[0]?.request.body, body);
     } finally {
       globalThis.fetch = previousFetch;
       await rm(tempDir, { recursive: true, force: true });

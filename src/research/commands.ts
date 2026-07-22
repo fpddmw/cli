@@ -18,9 +18,11 @@ const RESEARCH_SEARCH_OPTIONS = {
   "sci-api-key": "string",
   "report-api-key": "string",
   "patent-api-key": "string",
+  "esg-api-key": "string",
   "sci-url": "string",
   "report-url": "string",
   "patent-url": "string",
+  "esg-url": "string",
   region: "string",
   timeout: "string",
   "top-k": "string",
@@ -45,22 +47,22 @@ function researchHelp(): string {
   return `Tiangong research commands
 
 Usage:
-  tiangong-ai research search --input <request.json> [--sources default|all|sci|report|patent] [--dry-run] [--json]
-  tiangong-ai research search --query <query> [--sources default|all|sci|report|patent] [--dry-run] [--json]
+  tiangong-ai research search --input <request.json> [--sources default|all|sci|report|patent|esg] [--dry-run] [--json]
+  tiangong-ai research search --query <query> [--sources default|all|sci|report|patent|esg] [--dry-run] [--json]
 
 Research search options:
   --input <file>
     JSON request body to forward unchanged to each selected edge function.
   --query <text>
     Convenience mode; builds {"query": text} plus optional --top-k/--ext-k/--get-meta.
-  --sources <csv> (default sci; all = sci,report,patent)
+  --sources <csv> (default sci; all = sci,report,patent,esg)
   --dry-run
     Print the exact POST request plan with masked credentials.
   --api-key <token> or TIANGONG_AI_APIKEY
   --api-base-url <url>
     Supabase project root, /functions/v1, or /rest/v1 base URL.
-  --sci-api-key <token>, --report-api-key <token>, --patent-api-key <token>
-  --sci-url <url>, --report-url <url>, --patent-url <url>
+  --sci-api-key <token>, --report-api-key <token>, --patent-api-key <token>, --esg-api-key <token>
+  --sci-url <url>, --report-url <url>, --patent-url <url>, --esg-url <url>
   --region <name>
   --timeout <seconds>
   --top-k <n>

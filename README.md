@@ -177,7 +177,7 @@ region are resolved by the AWS SDK, including `AWS_ACCESS_KEY_ID`,
 
 ## Research Search
 
-Forward research-oriented search requests to SCI, report, and patent edge
+Forward research-oriented search requests to SCI, report, patent, and ESG edge
 search sources:
 
 ```bash
@@ -202,13 +202,14 @@ For quick calls, `--query <text>` builds a minimal body with `query` plus
 optional `--top-k`, `--ext-k`, and `--get-meta`.
 
 `--sources` accepts concrete IDs and presets. `default` expands to `sci`; `all`
-expands to `sci,report,patent`. Use source-specific endpoint or credential
-overrides with `--sci-url`, `--report-url`, `--patent-url`,
-`--sci-api-key`, `--report-api-key`, and `--patent-api-key`. When source URLs
-are not provided, `--api-base-url` or `TIANGONG_AI_API_BASE_URL` may be a
-Supabase project root, `/functions/v1`, or `/rest/v1`; the CLI derives the
-Functions base URL and appends `sci_search`, `report_search`, or
-`patent_search`.
+expands to `sci,report,patent,esg`. Use source-specific endpoint or credential
+overrides with `--sci-url`, `--report-url`, `--patent-url`, `--esg-url`,
+`--sci-api-key`, `--report-api-key`, `--patent-api-key`, and `--esg-api-key`.
+The equivalent ESG environment variables are `TIANGONG_ESG_SEARCH_URL` and
+`TIANGONG_ESG_APIKEY`. When source URLs are not provided, `--api-base-url` or
+`TIANGONG_AI_API_BASE_URL` may be a Supabase project root, `/functions/v1`, or
+`/rest/v1`; the CLI derives the Functions base URL and appends `sci_search`,
+`report_search`, `patent_search`, or `esg_search`.
 
 ## Education Search
 

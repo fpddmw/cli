@@ -1,1 +1,1 @@
-export type ResearchSourceId = "sci" | "report" | "patent";
+export type ResearchSourceId = "sci" | "report" | "patent" | "esg";

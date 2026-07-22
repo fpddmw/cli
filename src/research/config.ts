@@ -12,8 +12,9 @@ import type { ResearchSourceId } from "./types.js";
 export const DEFAULT_SCI_SEARCH_ENDPOINT = "sci_search";
 export const DEFAULT_REPORT_SEARCH_ENDPOINT = "report_search";
 export const DEFAULT_PATENT_SEARCH_ENDPOINT = "patent_search";
+export const DEFAULT_ESG_SEARCH_ENDPOINT = "esg_search";
 export const DEFAULT_RESEARCH_SOURCES: ResearchSourceId[] = ["sci"];
-export const ALL_RESEARCH_SOURCES: ResearchSourceId[] = ["sci", "report", "patent"];
+export const ALL_RESEARCH_SOURCES: ResearchSourceId[] = ["sci", "report", "patent", "esg"];
 export const RESEARCH_SEARCH_SOURCES: Record<ResearchSourceId, EdgeSearchSourceSpec> = {
   sci: {
     endpoint: DEFAULT_SCI_SEARCH_ENDPOINT,
@@ -27,6 +28,11 @@ export const RESEARCH_SEARCH_SOURCES: Record<ResearchSourceId, EdgeSearchSourceS
   },
   patent: {
     endpoint: DEFAULT_PATENT_SEARCH_ENDPOINT,
+    includeRegion: true,
+    authStrategy: "apiKey",
+  },
+  esg: {
+    endpoint: DEFAULT_ESG_SEARCH_ENDPOINT,
     includeRegion: true,
     authStrategy: "apiKey",
   },
@@ -101,6 +107,16 @@ export function resolveResearchConfig(
         authStrategy: RESEARCH_SEARCH_SOURCES.patent.authStrategy,
         includeRegion: RESEARCH_SEARCH_SOURCES.patent.includeRegion,
       },
+      esg: {
+        url:
+          strictString(args, "esg-url") ??
+          firstEnv(env, "TIANGONG_ESG_SEARCH_URL") ??
+          edgeFunctionUrl(apiBaseUrl, RESEARCH_SEARCH_SOURCES.esg.endpoint),
+        apiKey: strictString(args, "esg-api-key") ?? firstEnv(env, "TIANGONG_ESG_APIKEY") ?? apiKey,
+        region,
+        authStrategy: RESEARCH_SEARCH_SOURCES.esg.authStrategy,
+        includeRegion: RESEARCH_SEARCH_SOURCES.esg.includeRegion,
+      },
     },
   };
 }
@@ -131,6 +147,7 @@ function parseResearchSource(source: string): ResearchSourceId {
   if (source === "sci") return source;
   if (source === "report") return source;
   if (source === "patent") return source;
+  if (source === "esg") return source;
   throw new CliError(`Unsupported research source: ${source}`, {
     code: "RESEARCH_SOURCE_UNSUPPORTED",
     exitCode: 2,

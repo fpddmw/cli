@@ -3533,7 +3533,7 @@ Usage:
   tiangong-ai kb ingest status <document-id>
   tiangong-ai kb collections list [--capability upload]
   tiangong-ai kb course fulltext --document-id <id> --tags <tag>
-  tiangong-ai research search --input <request.json>|--query <query> [--sources default|all|sci|report|patent]
+  tiangong-ai research search --input <request.json>|--query <query> [--sources default|all|sci|report|patent|esg]
   tiangong-ai education search --input <request.json>|--query <query> [--sources default|all|course|edu|textbook]
 
 Run "tiangong-ai kb --help" for KB options.
