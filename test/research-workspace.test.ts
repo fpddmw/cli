@@ -312,7 +312,7 @@ describe("research project execution", () => {
           environment: { PATH: process.env.PATH },
           brokerUrl: null,
         });
-        assert.equal(result.exitCode, 0);
+        assert.equal(result.exitCode, 0, result.stderr);
         assert.equal(result.stdout, "bounded result");
         assert.equal(result.tokens, 5);
       } finally {

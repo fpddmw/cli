@@ -16,8 +16,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-07-22
-lastReviewedCommit: 2a1945321c66b1a2215b515e4d2b477572a3d6ac
+lastReviewedAt: 2026-08-04
+lastReviewedCommit: efa8fede05fb6b8e743390179e613591934af0ef
 ---
 
 # Repo Validation
@@ -55,6 +55,12 @@ publish attempt.
 
 Publishing starts when a `v*` tag is pushed. The tag must match
 `package.json` version exactly, for example `v0.1.0` for version `0.1.0`.
+
+Linux CI installs Bubblewrap and smoke-tests an unprivileged capsule before the
+test suite. On ephemeral Ubuntu runners that expose the AppArmor user-namespace
+restriction, the workflow disables that restriction for the runner lifetime so
+the test exercises the same unprivileged Bubblewrap boundary required at
+runtime.
 
 The workflow uses npm Trusted Publishing through GitHub OIDC. Configure npm
 trusted publisher metadata for this repository and workflow before first use;

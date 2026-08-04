@@ -311,7 +311,7 @@ async function createCapsule(
     if ((await sha256File(input.path)) !== input.sha256) {
       throw new Error(`input drift detected: ${input.id}`);
     }
-    const logical = join("inputs", input.id, basename(input.path));
+    const logical = join("inputs", input.id, basename(input.path)).replaceAll("\\", "/");
     const destination = join(capsuleProject, logical);
     await ensureDirectory(dirname(destination));
     await cp(input.path, destination, { force: false });

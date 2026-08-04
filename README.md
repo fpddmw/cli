@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-06-01
-lastReviewedCommit: 09572bea5a50c07a5a8e023a2b7e180cbd037d75
+lastReviewedAt: 2026-08-04
+lastReviewedCommit: efa8fede05fb6b8e743390179e613591934af0ef
 ---
 
 # Tiangong AI CLI

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { ALLOWED_CAPABILITY_PERMISSIONS } from "./constants.js";
@@ -189,7 +189,7 @@ function parseCapability(value: unknown, index: number): CapabilityDeclaration {
   if (typeof id !== "string" || !/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(id)) {
     invalid(index, "id must be a namespaced logical identifier");
   }
-  if (typeof skillPath !== "string" || !skillPath.startsWith("/")) {
+  if (typeof skillPath !== "string" || !isAbsolute(skillPath)) {
     invalid(index, "skillPath must be absolute");
   }
   if (
