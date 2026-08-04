@@ -175,6 +175,69 @@ region are resolved by the AWS SDK, including `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, `AWS_REGION`, and
 `AWS_DEFAULT_REGION`.
 
+## Research Workspaces
+
+Create a bounded research workspace and register a question:
+
+```bash
+tiangong-ai research workspace init /absolute/path/to/workspace
+tiangong-ai research project init gpu-resource-impact \
+  --workspace /absolute/path/to/workspace \
+  --question "How do advanced GPU process nodes change environmental resource burdens?"
+```
+
+The workspace stores its current protocol state under `.tiangong-research/`.
+Each project follows five ordered stages: evidence discovery, analysis,
+synthesis, independent review, and mechanical closure. Producer work defaults
+to Codex, independent review defaults to Claude, and a run is blocked when both
+routes use the same agent family.
+
+Research execution requires `/usr/bin/sandbox-exec` on macOS or Bubblewrap
+(`bwrap`) on Linux. Windows can inspect and configure workspaces but does not
+execute research packages.
+
+Add immutable local evidence, verify the workspace, and execute ready work:
+
+```bash
+tiangong-ai research project input add gpu-resource-impact \
+  --workspace /absolute/path/to/workspace \
+  --path /absolute/path/to/inventory.csv \
+  --role primary
+tiangong-ai research workspace doctor --workspace /absolute/path/to/workspace
+tiangong-ai research run --workspace /absolute/path/to/workspace --max-parallel 2
+tiangong-ai research status --workspace /absolute/path/to/workspace --json
+```
+
+Inputs are admitted by SHA-256. Agent work runs in an ephemeral platform
+sandbox, only declared outputs are imported, and the workspace journal is a
+hash chain. Token, reported-cost, wall-time, output-count, output-size, and retry
+limits are hard budgets in `.tiangong-research/config.json`.
+
+Every evidence source must resolve to an admitted input or a completed broker
+receipt. Findings may reference only admitted source IDs. Independent review
+binds a runtime-generated packet containing the question, inputs, and artifact
+hashes before mechanical closure can succeed.
+
+Method skills are declared in `.tiangong-research/capabilities.json` with
+absolute skill paths and explicit permissions, then frozen before execution:
+
+```bash
+tiangong-ai research capability lock --workspace /absolute/path/to/workspace
+tiangong-ai research capability verify --workspace /absolute/path/to/workspace
+```
+
+A capability using `brokered-network` must declare exact `allowedHosts`.
+Optional credentials declare logical IDs, exact host scopes, header names, and
+prefixes. Put only the logical value map in `.tiangong-research/.env`:
+
+```bash
+TIANGONG_RESEARCH_CAPABILITY_CREDENTIALS_JSON={"source.example.api":"owner-provided-value"}
+```
+
+The broker injects declared credentials only for admitted HTTPS hosts. Agent
+processes do not receive this variable. Keep the file owner-only (`chmod 600`)
+and use `research workspace doctor` before a run.
+
 ## Research Search
 
 Forward research-oriented search requests to SCI, report, patent, and ESG edge
@@ -235,8 +298,13 @@ appends `course_search`, `edu_search`, or `textbook_search`.
 
 ## Boundary
 
-The CLI is a thin local client. It sends bearer-token requests to the Tiangong
-KB ingest API and records SQLite checkpoints for batch recovery. Ingest uses
+The CLI owns local operator workflows. Research workspaces keep bounded local
+state, capability locks, isolated agent runs, usage accounting, provenance,
+independent review, and deterministic closure. Research capability credentials
+remain in the workspace broker and are not forwarded to agent processes.
+
+For KB operations, the CLI sends bearer-token requests to the Tiangong KB
+ingest API and records SQLite checkpoints for batch recovery. Ingest uses
 the bulk runner and releases sliding-window capacity only when document status
 is `completed` and both `opensearchIndexed` and `pineconeIndexed` are true. If
 the status API does not return those index flags yet, the file remains in

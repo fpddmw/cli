@@ -41,8 +41,15 @@ storage writes, queueing, and document status transitions.
   process IO.
 - `src/kb/**`: KB API boundary modules for config resolution, collection
   selection/list/resolve, document status polling, and pipeline health checks.
-- `src/research/**`: research search command handling and source specs for SCI
-  journal, report, patent, and ESG edge-search functions.
+- `src/research/commands.ts` and `src/research/config.ts`: the public research
+  command router and edge-search source configuration.
+- `src/research/orchestration.ts`: strict parsing for research context,
+  workspace, capability, project, status, and run commands.
+- `src/research/workspace/**`: the versioned research workspace protocol. It
+  owns context classification, immutable input admission, capability policy
+  locks, a scoped HTTPS MCP broker, ephemeral platform capsules, agent routing,
+  hard budgets, hash-chain provenance, independent review, and mechanical
+  closure.
 - `src/education/**`: education search command handling and source specs for
   course, education, and textbook edge-search functions.
 - `src/edge-search.ts`: shared edge-search forwarding helper. It derives
@@ -89,6 +96,8 @@ server recommendations may lengthen only the health refresh interval.
 
 ## Skill Boundary
 
-Reusable skills may call this CLI as a wrapper. Skills should collect task
-intent and report CLI output; they should not duplicate long-running batch
-logic, API request construction, retries, or checkpoint semantics.
+Reusable skills may call this CLI as a wrapper. Skills collect task intent and
+report CLI output; they do not duplicate workspace state transitions,
+capability admission, scheduling, sandboxing, budget enforcement, provenance,
+review, closure, batch logic, API request construction, retries, or checkpoint
+semantics.

@@ -44,6 +44,12 @@ This repository owns the Tiangong AI command-line interface.
 - `tiangong-ai kb ingest export`
 - `tiangong-ai kb collections`
 - `tiangong-ai kb status`
+- `tiangong-ai research context`
+- `tiangong-ai research workspace`
+- `tiangong-ai research capability`
+- `tiangong-ai research project`
+- `tiangong-ai research status`
+- `tiangong-ai research run`
 - `tiangong-ai research search`
 - `tiangong-ai education search`
 

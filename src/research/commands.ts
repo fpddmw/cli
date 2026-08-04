@@ -4,6 +4,7 @@ import type { CliIO } from "../io.js";
 import { readJsonInput, stringifyJson, write } from "../io.js";
 import { parseStrictArgs, strictBoolean, strictString } from "../strict-args.js";
 import { parseResearchSources, researchSourceConfig, resolveResearchConfig } from "./config.js";
+import { researchOrchestrationHelp, runResearchOrchestrationCommand } from "./orchestration.js";
 
 const RESEARCH_SEARCH_OPTIONS = {
   help: "boolean",
@@ -39,6 +40,8 @@ export async function runResearchCommand(argv: string[], io: CliIO): Promise<num
   if (subcommand === "search") {
     return runResearchSearchCommand(rest, io);
   }
+  const orchestrationExitCode = await runResearchOrchestrationCommand(subcommand, rest, io);
+  if (orchestrationExitCode !== undefined) return orchestrationExitCode;
   write(io.stdout, researchHelp());
   return 1;
 }
@@ -49,6 +52,8 @@ function researchHelp(): string {
 Usage:
   tiangong-ai research search --input <request.json> [--sources default|all|sci|report|patent|esg] [--dry-run] [--json]
   tiangong-ai research search --query <query> [--sources default|all|sci|report|patent|esg] [--dry-run] [--json]
+
+${researchOrchestrationHelp()}
 
 Research search options:
   --input <file>

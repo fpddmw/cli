@@ -28,6 +28,7 @@ lastReviewedCommit: 2a1945321c66b1a2215b515e4d2b477572a3d6ac
 - Package manager: `npm`
 - Source: TypeScript
 - Stable launcher: `bin/tiangong-ai.js`
+- Research execution sandbox: macOS `sandbox-exec` or Linux Bubblewrap
 - Repository text checkout uses LF line endings through `.gitattributes`; this
   keeps Prettier behavior consistent across Linux and Windows CI runners.
 
@@ -70,3 +71,8 @@ forbidden; cover the branch or remove dead code.
 
 The initial v0 threshold is intentionally conservative. Raise it as command
 coverage grows.
+
+`test/research-workspace.test.ts` exercises context classification, current
+workspace initialization, environment rejection, capability locks, the MCP
+broker boundary, platform sandbox invocation, multi-project scheduling, hard
+budget enforcement, independent review, closure, and the public command family.
