@@ -1,6 +1,7 @@
 import { appendFile, readFile } from "node:fs/promises";
 
 import { CliError } from "../../errors.js";
+import { sanitizeResearchRecord } from "./sanitization.js";
 import { canonicalJson, pathExists, sha256Text } from "./storage.js";
 import type { JournalEvent } from "./types.js";
 
@@ -44,7 +45,7 @@ async function appendJournalEventNow(
     timestamp: new Date().toISOString(),
     type,
     scope,
-    payload,
+    payload: sanitizeResearchRecord(payload),
     previousHash: previous?.hash ?? GENESIS_HASH,
   };
   const event: JournalEvent = { ...unsigned, hash: sha256Text(canonicalJson(unsigned)) };

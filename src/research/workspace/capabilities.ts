@@ -185,6 +185,8 @@ function parseCapability(value: unknown, index: number): CapabilityDeclaration {
   const skillPath = value.skillPath;
   const permissions = value.permissions;
   const allowedHosts = value.allowedHosts ?? [];
+  const http = value.http;
+  const coverage = value.coverage;
   const credentials = value.credentials ?? [];
   if (typeof id !== "string" || !/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(id)) {
     invalid(index, "id must be a namespaced logical identifier");
@@ -214,6 +216,10 @@ function parseCapability(value: unknown, index: number): CapabilityDeclaration {
   }
   if (!brokeredNetwork && parsedAllowedHosts.length > 0) {
     invalid(index, "cannot declare allowedHosts without brokered-network");
+  }
+  const parsedHttp = brokeredNetwork ? parseHttpPolicy(http, index) : null;
+  if (!brokeredNetwork && http !== undefined && http !== null) {
+    invalid(index, "cannot declare http policy without brokered-network");
   }
   const parsedCredentials = credentials.map((credential, credentialIndex) => {
     if (!isObject(credential)) invalid(index, `credential ${credentialIndex} must be an object`);
@@ -253,6 +259,8 @@ function parseCapability(value: unknown, index: number): CapabilityDeclaration {
     skillPath,
     permissions: [...new Set(permissions)],
     allowedHosts: parsedAllowedHosts,
+    http: parsedHttp,
+    coverage: parseCoverage(coverage, index),
     credentials: parsedCredentials,
   };
 }
@@ -282,6 +290,8 @@ function policyHash(declaration: CapabilityDeclaration): string {
     canonicalJson({
       permissions: [...declaration.permissions].sort(),
       allowedHosts: [...declaration.allowedHosts].sort(),
+      http: declaration.http,
+      coverage: declaration.coverage,
       credentials: declaration.credentials
         .map((credential) => ({
           id: credential.id,
@@ -292,6 +302,69 @@ function policyHash(declaration: CapabilityDeclaration): string {
         .sort((left, right) => left.id.localeCompare(right.id)),
     }),
   );
+}
+
+function parseCoverage(value: unknown, index: number): CapabilityDeclaration["coverage"] {
+  if (value === undefined || value === null) return null;
+  if (
+    !isObject(value) ||
+    !Array.isArray(value.dimensions) ||
+    value.dimensions.some((item) => !validCoverageId(item)) ||
+    !Array.isArray(value.sourceTypes) ||
+    value.sourceTypes.some((item) => !validCoverageId(item)) ||
+    typeof value.fullText !== "boolean" ||
+    typeof value.publicationDates !== "boolean"
+  ) {
+    invalid(index, "coverage declaration is malformed");
+  }
+  return {
+    dimensions: [...new Set(value.dimensions)].sort(),
+    sourceTypes: [...new Set(value.sourceTypes)].sort(),
+    fullText: value.fullText,
+    publicationDates: value.publicationDates,
+  };
+}
+
+function validCoverageId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(value);
+}
+
+function parseHttpPolicy(value: unknown, index: number): CapabilityDeclaration["http"] {
+  if (value === undefined || value === null) {
+    return {
+      accept: "application/json",
+      allowedContentTypes: ["application/json"],
+      maxResponseBytes: 512 * 1024,
+      maxItems: 100,
+    };
+  }
+  if (
+    !isObject(value) ||
+    typeof value.accept !== "string" ||
+    !value.accept.trim() ||
+    /[\r\n]/.test(value.accept) ||
+    !Array.isArray(value.allowedContentTypes) ||
+    value.allowedContentTypes.length === 0 ||
+    value.allowedContentTypes.some(
+      (item) => typeof item !== "string" || !/^[a-z0-9.+-]+\/[a-z0-9.+*-]+$/i.test(item),
+    ) ||
+    typeof value.maxResponseBytes !== "number" ||
+    !Number.isInteger(value.maxResponseBytes) ||
+    value.maxResponseBytes < 1 ||
+    value.maxResponseBytes > 20 * 1024 * 1024 ||
+    typeof value.maxItems !== "number" ||
+    !Number.isInteger(value.maxItems) ||
+    value.maxItems < 1 ||
+    value.maxItems > 10_000
+  ) {
+    invalid(index, "http policy is malformed");
+  }
+  return {
+    accept: value.accept.trim(),
+    allowedContentTypes: [...new Set(value.allowedContentTypes.map((item) => item.toLowerCase()))],
+    maxResponseBytes: value.maxResponseBytes,
+    maxItems: value.maxItems,
+  };
 }
 
 function hashText(value: string): string {

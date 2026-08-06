@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 
 import { CliError } from "../errors.js";
 import type { CliIO } from "../io.js";
@@ -7,17 +8,23 @@ import { parseStrictArgs, strictBoolean, strictString } from "../strict-args.js"
 import { lockCapabilities, verifyCapabilities } from "./workspace/capabilities.js";
 import { inspectResearchContext } from "./workspace/context.js";
 import { appendJournalEvent } from "./workspace/journal.js";
+import { readAndVerifyProjectInputPlan } from "./workspace/input-plan.js";
 import {
   addProjectInput,
   initializeProject,
+  forkProject,
   listProjects,
   loadProject,
   nextReadyPackage,
+  normalizeEvidenceRequirements,
   refreshProject,
+  retryProjectPackage,
 } from "./workspace/projects.js";
+import { evaluateProjectPreflight } from "./workspace/preflight.js";
 import { runResearchWorkspace } from "./workspace/runtime.js";
+import { schemaForStage } from "./workspace/schemas.js";
 import { workspacePaths } from "./workspace/storage.js";
-import type { ProjectInput } from "./workspace/types.js";
+import type { ProjectEvidenceRequirements, ProjectInput, ResearchMode } from "./workspace/types.js";
 import {
   doctorResearchWorkspace,
   initializeResearchWorkspace,
@@ -37,6 +44,7 @@ export async function runResearchOrchestrationCommand(
   if (subcommand === "workspace") return runWorkspace(argv, io);
   if (subcommand === "capability") return runCapability(argv, io);
   if (subcommand === "project") return runProject(argv, io);
+  if (subcommand === "schema") return runSchema(argv, io);
   if (subcommand === "status") return runStatus(argv, io);
   if (subcommand === "run") return runWorkspaceExecution(argv, io);
   return undefined;
@@ -45,15 +53,41 @@ export async function runResearchOrchestrationCommand(
 export function researchOrchestrationHelp(): string {
   return `Research workspace commands:
   tiangong-ai research context inspect [--path <absolute-path>] [--json]
-  tiangong-ai research workspace init <absolute-path> [--name <name>] [--json]
-  tiangong-ai research workspace doctor [--workspace <absolute-path>] [--json]
+  tiangong-ai research workspace init <absolute-path> [--name <name>] [--mode smoke-test|production-research] [--json]
+  tiangong-ai research workspace doctor [--workspace <absolute-path>] [--agent-smoke] [--json]
   tiangong-ai research capability lock [--workspace <absolute-path>] [--json]
   tiangong-ai research capability verify [--workspace <absolute-path>] [--json]
-  tiangong-ai research project init <project-id> --question <question> [--workspace <path>] [--json]
+  tiangong-ai research project init <project-id> --question <question> [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
+  tiangong-ai research project preflight --question <question> [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--workspace <path>] [--json]
+  tiangong-ai research project retry <project-id> [--package <package-id>] [--workspace <path>] [--json]
+  tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|analyze|synthesize] [--workspace <path>] [--json]
+  tiangong-ai research schema show <discover|analyze|synthesize|review|doctor> [--json]
   tiangong-ai research status [--project <project-id>] [--workspace <absolute-path>] [--json]
-  tiangong-ai research run [--max-parallel <1-8>] [--max-cycles <1-100>] [--dry-run] [--workspace <absolute-path>] [--json]
+  tiangong-ai research run [--project <project-id>] [--max-parallel <1-8>] [--max-cycles <1-100>] [--dry-run] [--progress-jsonl] [--workspace <absolute-path>] [--json]
 `;
+}
+
+async function runSchema(argv: string[], io: CliIO): Promise<number> {
+  const [action, ...rest] = argv;
+  if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action !== "show") throw unknownAction("research schema", action);
+  const args = parseStrictArgs(rest, COMMON_OPTIONS, "research schema show");
+  const stage = onePositional(args.positionals, "research schema show");
+  if (
+    stage !== "discover" &&
+    stage !== "analyze" &&
+    stage !== "synthesize" &&
+    stage !== "review" &&
+    stage !== "doctor"
+  ) {
+    throw new CliError(`Unsupported research schema stage: ${stage}`, {
+      code: "RESEARCH_SCHEMA_INVALID",
+      exitCode: 2,
+    });
+  }
+  writeJson(io, schemaForStage(stage), args);
+  return 0;
 }
 
 async function runContext(argv: string[], io: CliIO): Promise<number> {
@@ -77,18 +111,29 @@ async function runWorkspace(argv: string[], io: CliIO): Promise<number> {
   if (action === "init") {
     const args = parseStrictArgs(
       rest,
-      { ...COMMON_OPTIONS, name: "string" },
+      { ...COMMON_OPTIONS, name: "string", mode: "string" },
       "research workspace init",
     );
     const target = onePositional(args.positionals, "research workspace init");
-    const result = await initializeResearchWorkspace(target, strictString(args, "name"));
+    const result = await initializeResearchWorkspace(
+      target,
+      strictString(args, "name"),
+      researchMode(strictString(args, "mode")),
+    );
     writeJson(io, result, args);
     return 0;
   }
   if (action === "doctor") {
-    const args = parseStrictArgs(rest, WORKSPACE_OPTIONS, "research workspace doctor");
+    const args = parseStrictArgs(
+      rest,
+      { ...WORKSPACE_OPTIONS, "agent-smoke": "boolean" },
+      "research workspace doctor",
+    );
     rejectPositionals(args.positionals, "research workspace doctor");
-    const result = await doctorResearchWorkspace(strictString(args, "workspace") ?? process.cwd());
+    const result = await doctorResearchWorkspace(strictString(args, "workspace") ?? process.cwd(), {
+      agentSmoke: strictBoolean(args, "agent-smoke"),
+      environment: io.env,
+    });
     writeJson(io, result, args);
     return result.status === "ready" ? 0 : 3;
   }
@@ -125,7 +170,13 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   if (action === "init") {
     const args = parseStrictArgs(
       rest,
-      { ...WORKSPACE_OPTIONS, question: "string" },
+      {
+        ...WORKSPACE_OPTIONS,
+        question: "string",
+        requirements: "string",
+        "input-plan": "string",
+        "confirm-budget": "boolean",
+      },
       "research project init",
     );
     const projectId = onePositional(args.positionals, "research project init");
@@ -137,9 +188,46 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       });
     }
     const root = await workspaceFromArgs(args);
-    const project = await initializeProject(root, projectId, question);
+    const requirementsPath = strictString(args, "requirements");
+    const inputPlanPath = strictString(args, "input-plan");
+    const project = await initializeProject(
+      root,
+      projectId,
+      question,
+      requirementsPath ? await readEvidenceRequirements(requirementsPath) : undefined,
+      strictBoolean(args, "confirm-budget"),
+      inputPlanPath ? await readAndVerifyProjectInputPlan(inputPlanPath) : undefined,
+    );
     writeJson(io, project, args);
     return 0;
+  }
+  if (action === "preflight") {
+    const args = parseStrictArgs(
+      rest,
+      {
+        ...WORKSPACE_OPTIONS,
+        question: "string",
+        requirements: "string",
+        "input-plan": "string",
+      },
+      "research project preflight",
+    );
+    rejectPositionals(args.positionals, "research project preflight");
+    const question = strictString(args, "question")?.trim();
+    if (!question) {
+      throw new CliError("research project preflight requires --question.", {
+        code: "RESEARCH_QUESTION_REQUIRED",
+        exitCode: 2,
+      });
+    }
+    const root = await workspaceFromArgs(args);
+    const requirementsPath = strictString(args, "requirements");
+    const requirements = requirementsPath ? await readEvidenceRequirements(requirementsPath) : null;
+    const inputPlanPath = strictString(args, "input-plan");
+    const inputPlan = inputPlanPath ? await readAndVerifyProjectInputPlan(inputPlanPath) : null;
+    const result = await evaluateProjectPreflight(root, question, requirements, inputPlan);
+    writeJson(io, result, args);
+    return result.readyToInitialize ? 0 : 3;
   }
   if (action === "input") {
     const [inputAction, ...inputRest] = rest;
@@ -161,6 +249,42 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     const root = await workspaceFromArgs(args);
     const input = await addProjectInput(root, projectId, inputPath, role);
     writeJson(io, input, args);
+    return 0;
+  }
+  if (action === "retry") {
+    const args = parseStrictArgs(
+      rest,
+      { ...WORKSPACE_OPTIONS, package: "string" },
+      "research project retry",
+    );
+    const projectId = onePositional(args.positionals, "research project retry");
+    const root = await workspaceFromArgs(args);
+    const project = await retryProjectPackage(root, projectId, strictString(args, "package"));
+    writeJson(io, project, args);
+    return 0;
+  }
+  if (action === "fork") {
+    const args = parseStrictArgs(
+      rest,
+      { ...WORKSPACE_OPTIONS, to: "string", "resume-through": "string" },
+      "research project fork",
+    );
+    const sourceProjectId = onePositional(args.positionals, "research project fork");
+    const targetProjectId = strictString(args, "to");
+    if (!targetProjectId) {
+      throw new CliError("research project fork requires --to.", {
+        code: "RESEARCH_PROJECT_FORK_INVALID",
+        exitCode: 2,
+      });
+    }
+    const root = await workspaceFromArgs(args);
+    const project = await forkProject(
+      root,
+      sourceProjectId,
+      targetProjectId,
+      resumeStage(strictString(args, "resume-through")),
+    );
+    writeJson(io, project, args);
     return 0;
   }
   throw unknownAction("research project", action);
@@ -201,20 +325,89 @@ async function runWorkspaceExecution(argv: string[], io: CliIO): Promise<number>
       ...WORKSPACE_OPTIONS,
       "max-parallel": "string",
       "max-cycles": "string",
+      project: "string",
       "dry-run": "boolean",
+      "progress-jsonl": "boolean",
     },
     "research run",
   );
   rejectPositionals(args.positionals, "research run");
   const root = await workspaceFromArgs(args);
+  const progressJsonl = strictBoolean(args, "progress-jsonl");
+  const projectId = strictString(args, "project");
   const result = await runResearchWorkspace(root, {
     maxParallel: integerOption(strictString(args, "max-parallel"), 1, "--max-parallel"),
     maxCycles: integerOption(strictString(args, "max-cycles"), 20, "--max-cycles"),
     dryRun: strictBoolean(args, "dry-run"),
     environment: io.env,
+    ...(projectId ? { projectId } : {}),
+    ...(progressJsonl
+      ? { onProgress: (event: unknown) => write(io.stderr, `${JSON.stringify(event)}\n`) }
+      : {}),
   });
   writeJson(io, result, args);
   return result.status === "blocked" ? 3 : 0;
+}
+
+async function readEvidenceRequirements(path: string): Promise<ProjectEvidenceRequirements> {
+  if (!isAbsolute(path)) {
+    throw new CliError("--requirements must be an absolute JSON file path.", {
+      code: "RESEARCH_EVIDENCE_REQUIREMENTS_INVALID",
+      exitCode: 2,
+    });
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(path, "utf8")) as unknown;
+  } catch (error) {
+    throw new CliError("Evidence requirements file is missing or invalid JSON.", {
+      code: "RESEARCH_EVIDENCE_REQUIREMENTS_INVALID",
+      exitCode: 2,
+      details: { error: String(error) },
+    });
+  }
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !Array.isArray((value as ProjectEvidenceRequirements).dimensions) ||
+    !Array.isArray((value as ProjectEvidenceRequirements).sourceTypes) ||
+    typeof (value as ProjectEvidenceRequirements).minSources !== "number" ||
+    typeof (value as ProjectEvidenceRequirements).minFullTextSources !== "number" ||
+    typeof (value as ProjectEvidenceRequirements).minDatedSources !== "number" ||
+    !(
+      (value as ProjectEvidenceRequirements).publicationDateFrom === null ||
+      typeof (value as ProjectEvidenceRequirements).publicationDateFrom === "string"
+    ) ||
+    !(
+      (value as ProjectEvidenceRequirements).publicationDateTo === null ||
+      typeof (value as ProjectEvidenceRequirements).publicationDateTo === "string"
+    )
+  ) {
+    throw new CliError("Evidence requirements file has an unsupported shape.", {
+      code: "RESEARCH_EVIDENCE_REQUIREMENTS_INVALID",
+      exitCode: 2,
+    });
+  }
+  return normalizeEvidenceRequirements(value as ProjectEvidenceRequirements);
+}
+
+function researchMode(value: string | undefined): ResearchMode {
+  if (!value || value === "smoke-test") return "smoke-test";
+  if (value === "production-research") return value;
+  throw new CliError(`Unsupported research mode: ${value}`, {
+    code: "RESEARCH_MODE_INVALID",
+    exitCode: 2,
+  });
+}
+
+function resumeStage(value: string | undefined): "discover" | "analyze" | "synthesize" | undefined {
+  if (!value) return undefined;
+  if (value === "discover" || value === "analyze" || value === "synthesize") return value;
+  throw new CliError(`Unsupported --resume-through stage: ${value}`, {
+    code: "RESEARCH_PROJECT_FORK_INVALID",
+    exitCode: 2,
+  });
 }
 
 async function workspaceFromArgs(args: ReturnType<typeof parseStrictArgs>): Promise<string> {

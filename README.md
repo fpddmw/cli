@@ -177,7 +177,7 @@ region are resolved by the AWS SDK, including `AWS_ACCESS_KEY_ID`,
 
 ## Research Workspaces
 
-Create a bounded research workspace and register a question:
+Create a bounded smoke-test workspace and register a question:
 
 ```bash
 tiangong-ai research workspace init /absolute/path/to/workspace
@@ -185,6 +185,38 @@ tiangong-ai research project init gpu-resource-impact \
   --workspace /absolute/path/to/workspace \
   --question "How do advanced GPU process nodes change environmental resource burdens?"
 ```
+
+`smoke-test` is the default and is intended for deterministic fixtures and
+low-cost canaries. Formal work must use `--mode production-research`, explicit
+producer/reviewer model IDs and pricing in `config.json`, a requirements JSON
+file, and budget confirmation when `maxCostUsd` exceeds
+`confirmationCostUsd`:
+
+```bash
+tiangong-ai research workspace init /absolute/path/to/workspace \
+  --mode production-research
+tiangong-ai research project preflight \
+  --workspace /absolute/path/to/workspace \
+  --question "How do advanced GPU process nodes change environmental resource burdens?" \
+  --requirements /absolute/path/to/evidence-requirements.json --json
+tiangong-ai research project init gpu-resource-impact \
+  --workspace /absolute/path/to/workspace \
+  --question "How do advanced GPU process nodes change environmental resource burdens?" \
+  --requirements /absolute/path/to/evidence-requirements.json \
+  --confirm-budget --json
+```
+
+The requirements object declares `dimensions`, `sourceTypes`, `minSources`,
+`minFullTextSources`, `minDatedSources`, and optional inclusive
+`publicationDateFrom` / `publicationDateTo` boundaries (`YYYY-MM-DD` or
+`null`). After discovery, a mechanical coverage gate verifies the declared
+source, full-text, publication-date, and dimension summary before analysis.
+For large local sources, pass an immutable `--input-plan` to both preflight and
+project initialization. Each plan entry may expose either a separate
+`contextPath` or non-overlapping, one-based `contextRanges`; the producer sees
+only that bounded context, while independent review receives the hash-verified
+full source. Symlinks, duplicate content, changed hashes, and context above
+`maxInputContextTokens` are rejected.
 
 The workspace stores its current protocol state under `.tiangong-research/`.
 Each project follows five ordered stages: evidence discovery, analysis,
@@ -204,19 +236,98 @@ tiangong-ai research project input add gpu-resource-impact \
   --path /absolute/path/to/inventory.csv \
   --role primary
 tiangong-ai research workspace doctor --workspace /absolute/path/to/workspace
-tiangong-ai research run --workspace /absolute/path/to/workspace --max-parallel 2
+tiangong-ai research workspace doctor --workspace /absolute/path/to/workspace \
+  --agent-smoke
+tiangong-ai research run --workspace /absolute/path/to/workspace \
+  --project gpu-resource-impact --progress-jsonl
 tiangong-ai research status --workspace /absolute/path/to/workspace --json
 ```
 
-Inputs are admitted by SHA-256. Agent work runs in an ephemeral platform
-sandbox, only declared outputs are imported, and the workspace journal is a
-hash chain. Token, reported-cost, wall-time, output-count, output-size, and retry
-limits are hard budgets in `.tiangong-research/config.json`.
+Use `research run --project <id>` for an auditable project-scoped run: only
+that project is checked, scheduled, summarized, and bound to the top-level
+JSON/JSONL `projectId`, so historical blocked siblings do not alter its exit
+status. Omit `--project` and use `--max-parallel` only for an intentional
+workspace-wide run.
+
+Inputs are admitted by SHA-256. Agent work runs with a dedicated capsule HOME
+in an ephemeral platform sandbox. Only the minimal supported agent auth file is
+copied into that HOME. For Claude, an owner-only user `settings.json` is never
+copied; only the whitelisted API key/token and HTTPS base URL fields from its
+`env` object are injected in memory. Permissions, hooks, additional directories,
+and unrelated settings are not admitted. The workspace credential file and the
+rest of the host home are not admitted. Production doctor is blocked until
+`--agent-smoke` actually starts both routes inside this boundary. A successful
+smoke creates a 24-hour attestation bound to workspace config, capability lock,
+output schema, and the resolved agent binary/wrapper fingerprints. Production
+execution stops before invocation if the attestation expires or any bound value
+drifts.
+Use the exact `codex` / `claude` route by default. A custom wrapper must use an
+absolute `binary` plus an absolute `wrapperTargetBinary`; the runtime injects
+the resolved target path and independently hashes the target executable, route
+launcher/wrapper, and internal adapter. A wrapper that performs an unpinned
+PATH lookup is not a reproducible route.
+
+The CLI owns the authoritative JSON Schemas for discovery, analysis,
+synthesis, and review. Inspect one with `research schema show <stage> --json`.
+Codex and Claude receive the schema through their structured-output options;
+the CLI materializes the validated final object. A syntax/schema failure gets
+at most one separately budgeted formatting repair, never a full blind retry.
+The same isolated repair may correct mechanically diagnosed provenance or
+finding/source bindings; it has no broker or research tools and cannot add new
+facts.
+
+Total, per-package, output, repair, broker-response bytes, estimated broker
+context tokens, context items, wall-time, output-count, output-size, and attempt
+limits live in `.tiangong-research/config.json`.
+Before an agent starts, the runtime reserves the package token and conservative
+price budget. The call-level check accounts for prompt and schema bytes at
+three bytes per token, repeats input allowance for every permitted API turn,
+and adds primary output plus a potential isolated repair's input and output;
+insufficient package or remaining project budget prevents invocation. The
+provider cost cap is the current package reservation, not the remaining
+workspace allowance. Tool-free primary stages allow two protocol turns because
+Claude structured output uses a `StructuredOutput` call plus its follow-up
+result; external tools remain disabled. Formatting repair omits the provider
+schema tool, uses one plain-JSON turn, and remains subject to the CLI schema and
+semantic validators. Current Codex and Claude CLI adapters report
+output usage only after execution, so preflight identifies
+`outputTokenLimitEnforcement` as `post-execution`; captured bytes provide a
+separate process bound, and over-limit output fails without promotion.
+Preflight also reports per-stage `maxTurns` and `turnLimitEnforcement`: Claude
+receives a provider-side turn cap, while the current Codex CLI exposes no such
+flag, so its turn allowance is reservation guidance plus post-execution
+accounting and rejection. Usage records separate input, cached-input, and output
+tokens; `inputTokens` excludes
+the separately reported cached portion. Configured pricing fills cost when the
+provider does not report it. Run records and JSONL progress also preserve
+sanitized event/item counts, provider turns, tool calls, reasoning tokens, and
+bounded provider errors.
 
 Every evidence source must resolve to an admitted input or a completed broker
-receipt. Findings may reference only admitted source IDs. Independent review
-binds a runtime-generated packet containing the question, inputs, and artifact
-hashes before mechanical closure can succeed.
+receipt. Successful broker bodies are immutable content-addressed objects under
+`.tiangong-research/evidence/objects`; receipts are project-scoped and verified
+for existence, size, and SHA-256 before every capsule stages them. Independent
+review binds the requirements, receipts, permanent evidence objects, inputs,
+and artifact hashes. Its exact packet and merged bounded evidence context are
+also content-addressed under the project `review/packets/` and
+`review/contexts/` directories. Mechanical closure re-verifies the packet,
+context, broker objects, and registered local input hashes before recording
+their safe locators. Capsule deletion therefore does not delete the durable
+review chain.
+
+Discovery alone may use the capability broker and workspace-read tools.
+Analyze and synthesize receive bounded, hash-verified prior-stage artifacts in
+their prompt with tools disabled. Review is also tool-free and limited to the
+two turns required by the structured-output protocol:
+its prompt embeds the complete generated artifacts, persistent packet, local
+bounded contexts, and each cited broker receipt's exact bounded view. Full
+local files and raw broker objects are hash-bound for durable human/mechanical
+audit, but the model must not claim to have read beyond those embedded views.
+The CLI mechanically derives local full-text availability, source types,
+counts, date coverage, source IDs, and the coverage decision. A `partial`
+dimension is usable but incomplete; a missing dimension or unmet declared
+minimum blocks downstream work. Qualitative gaps remain visible without
+silently changing those mechanical fields.
 
 Method skills are declared in `.tiangong-research/capabilities.json` with
 absolute skill paths and explicit permissions, then frozen before execution:
@@ -226,7 +337,11 @@ tiangong-ai research capability lock --workspace /absolute/path/to/workspace
 tiangong-ai research capability verify --workspace /absolute/path/to/workspace
 ```
 
-A capability using `brokered-network` must declare exact `allowedHosts`.
+A capability using `brokered-network` must declare exact `allowedHosts` and may
+declare an `http` policy with one exact `accept` value,
+`allowedContentTypes`, `maxResponseBytes`, and `maxItems`. Its optional
+`coverage` block declares dimensions, source types, full-text availability,
+and publication-date availability for the preflight gap report.
 Optional credentials declare logical IDs, exact host scopes, header names, and
 prefixes. Put only the logical value map in `.tiangong-research/.env`:
 
@@ -236,7 +351,29 @@ TIANGONG_RESEARCH_CAPABILITY_CREDENTIALS_JSON={"source.example.api":"owner-provi
 
 The broker injects declared credentials only for admitted HTTPS hosts. Agent
 processes do not receive this variable. Keep the file owner-only (`chmod 600`)
-and use `research workspace doctor` before a run.
+and use `research workspace doctor` before a run. The broker preserves a
+sanitized non-2xx excerpt, safe request ID, and `Retry-After`; it supports JSON
+Pointer extraction, bounded item and estimated-token views, and an explicit
+public-response cache. For a JSON collection, use the returned
+`contextNextOffset` as the next `item_offset`; this creates a distinct bounded
+context receipt while reusing the same verified raw object instead of
+refetching it. Follow upstream pagination with its next admitted HTTPS URL.
+The recorded estimate is `ceil(contextBytes / 3)`. Use `cache_mode=bypass` for
+a fresh public request and always for credentialed requests. Raw URLs and
+credential values are never journaled.
+
+Retry policy is classified: deterministic configuration/4xx/output failures
+stop, schema failures use the formatting repair path, and rate limits or
+transient server failures alone may schedule another attempt. Explicit recovery
+uses append-only management events:
+
+```bash
+tiangong-ai research project retry gpu-resource-impact --package analyze \
+  --workspace /absolute/path/to/workspace
+tiangong-ai research project fork gpu-resource-impact \
+  --to gpu-resource-impact-v2 --resume-through analyze \
+  --workspace /absolute/path/to/workspace
+```
 
 ## Research Search
 

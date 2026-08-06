@@ -1,0 +1,92 @@
+const SENSITIVE_KEY =
+  /(^|[_-])(authorization|auth|cookie|credential|password|passwd|private[_-]?key|proxy[_-]?password|secret|session|token|access[_-]?key|api[_-]?key)([_-]|$)/i;
+const SENSITIVE_QUERY_KEY =
+  /^(access[_-]?token|api[_-]?key|apikey|auth|authorization|awsaccesskeyid|code|cookie|credential|key|password|secret|session(?:[_-]?id)?|sig|signature|token|x[_-]amz[_-](credential|security[_-]token|signature)|x[_-]goog[_-](credential|signature))$/i;
+const SENSITIVE_URL_FRAGMENT =
+  /(^|[&#;?])(?:access[_-]?token|api[_-]?key|apikey|auth|authorization|code|cookie|credential|key|password|secret|session(?:[_-]?id)?|sig|signature|token)=/i;
+
+export function sanitizeResearchValue(value: unknown, secrets: readonly string[] = []): unknown {
+  if (typeof value === "string") return sanitizeResearchText(value, secrets);
+  if (Array.isArray(value)) return value.map((item) => sanitizeResearchValue(item, secrets));
+  if (!value || typeof value !== "object") return value;
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    sanitized[key] = SENSITIVE_KEY.test(key)
+      ? item === null
+        ? null
+        : "[REDACTED]"
+      : sanitizeResearchValue(item, secrets);
+  }
+  return sanitized;
+}
+
+export function sanitizeResearchRecord(
+  value: Record<string, unknown>,
+  secrets: readonly string[] = [],
+): Record<string, unknown> {
+  return sanitizeResearchValue(value, secrets) as Record<string, unknown>;
+}
+
+export function sanitizeResearchText(value: string, secrets: readonly string[] = []): string {
+  let sanitized = value;
+  for (const secret of [...secrets].filter((item) => item.length >= 8).sort(longestFirst)) {
+    sanitized = sanitized.replaceAll(secret, "[REDACTED]");
+  }
+  sanitized = sanitized
+    .replace(
+      /(["']?(?:access[_-]?token|api[_-]?key|apikey|auth|authorization|cookie|credential|password|secret|session(?:[_-]?id)?|token)["']?\s*:\s*["'])([^"']*)(["'])/gi,
+      "$1[REDACTED]$3",
+    )
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/-]+=*/gi, "$1 [REDACTED]")
+    .replace(
+      /\b(access_token|api[_-]?key|apikey|auth|authorization|cookie|password|secret|session|token)\s*=\s*[^\s,;}&]+/gi,
+      "$1=[REDACTED]",
+    )
+    .replace(
+      /\b(authorization|cookie|set-cookie|x-api-key|api-key)\s*:\s*[^\s,;}]+/gi,
+      "$1: [REDACTED]",
+    );
+  return sanitizeUrls(sanitized);
+}
+
+export function configuredResearchSecrets(source: NodeJS.ProcessEnv): string[] {
+  return [
+    ...new Set(
+      Object.entries(source)
+        .filter(
+          ([name, value]) =>
+            SENSITIVE_KEY.test(name) && typeof value === "string" && value.length >= 8,
+        )
+        .map(([, value]) => value as string),
+    ),
+  ].sort(longestFirst);
+}
+
+export function isSensitiveEnvironmentName(name: string): boolean {
+  return SENSITIVE_KEY.test(name);
+}
+
+function sanitizeUrls(value: string): string {
+  return value.replace(/https?:\/\/[^\s"'<>]+/gi, (candidate) => {
+    const trailing = candidate.match(/[),.;!?]+$/)?.[0] ?? "";
+    const source = trailing ? candidate.slice(0, -trailing.length) : candidate;
+    try {
+      const url = new URL(source);
+      if (url.username || url.password) {
+        url.username = "REDACTED";
+        url.password = "";
+      }
+      for (const key of [...url.searchParams.keys()]) {
+        if (SENSITIVE_QUERY_KEY.test(key)) url.searchParams.set(key, "[REDACTED]");
+      }
+      if (SENSITIVE_URL_FRAGMENT.test(url.hash)) url.hash = "REDACTED";
+      return `${url.toString()}${trailing}`;
+    } catch {
+      return candidate;
+    }
+  });
+}
+
+function longestFirst(left: string, right: string): number {
+  return right.length - left.length;
+}
