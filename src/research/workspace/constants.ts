@@ -19,7 +19,11 @@ export const WORKSPACE_OPERATIONS = [
   "research.capability.lock",
   "research.capability.verify",
   "research.project.init",
+  "research.project.preflight",
   "research.project.input.add",
+  "research.project.retry",
+  "research.project.fork",
+  "research.schema.show",
   "research.status",
   "research.run",
 ] as const;

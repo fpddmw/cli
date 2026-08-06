@@ -47,9 +47,14 @@ storage writes, queueing, and document status transitions.
   workspace, capability, project, status, and run commands.
 - `src/research/workspace/**`: the versioned research workspace protocol. It
   owns context classification, immutable input admission, capability policy
-  locks, a scoped HTTPS MCP broker, ephemeral platform capsules, agent routing,
-  hard budgets, hash-chain provenance, independent review, and mechanical
-  closure.
+  locks, bounded local-input plans, a scoped HTTPS MCP broker,
+  content-addressed permanent evidence, paged broker views/cache,
+  schema-driven agent output and isolated repair, dedicated capsule homes,
+  separately fingerprinted agent targets/wrappers/adapters, doctor
+  attestations, complete pre-call package reservations, classified retries,
+  project-scoped scheduling/exit status, JSONL progress, recovery events,
+  persistent review packets/bounded evidence contexts, tool-free independent
+  review, and mechanical closure-time hash verification.
 - `src/education/**`: education search command handling and source specs for
   course, education, and textbook edge-search functions.
 - `src/edge-search.ts`: shared edge-search forwarding helper. It derives
@@ -96,8 +101,9 @@ server recommendations may lengthen only the health refresh interval.
 
 ## Skill Boundary
 
-Reusable skills may call this CLI as a wrapper. Skills collect task intent and
-report CLI output; they do not duplicate workspace state transitions,
-capability admission, scheduling, sandboxing, budget enforcement, provenance,
-review, closure, batch logic, API request construction, retries, or checkpoint
-semantics.
+Reusable skills may call this CLI as a wrapper. Skills collect task intent,
+select smoke or production mode, prepare evidence requirements, obtain budget
+confirmation, and report CLI output. They do not duplicate the CLI's output
+schemas, coverage gate, workspace state transitions, capability admission,
+scheduling, sandboxing, budget enforcement, provenance, review, closure, batch
+logic, API request construction, retries, or checkpoint semantics.

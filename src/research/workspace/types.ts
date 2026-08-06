@@ -8,10 +8,28 @@ export type PackageKind = "agent" | "verify";
 
 export type AgentKind = "codex" | "claude";
 
+export type AgentReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export type AgentVerbosity = "low" | "medium" | "high";
+
+export type ResearchMode = "smoke-test" | "production-research";
+
+export type AgentPackageStage = "discover" | "analyze" | "synthesize" | "review";
+
+export interface AgentPricing {
+  inputUsdPerMillionTokens: number;
+  cachedInputUsdPerMillionTokens: number;
+  outputUsdPerMillionTokens: number;
+}
+
 export interface AgentRoute {
   agent: AgentKind;
   binary: string;
+  wrapperTargetBinary?: string;
   model: string | null;
+  effort?: AgentReasoningEffort;
+  verbosity?: AgentVerbosity;
+  pricing?: AgentPricing;
 }
 
 export interface ResearchBudget {
@@ -21,6 +39,15 @@ export interface ResearchBudget {
   maxFilesPerPackage: number;
   maxBytesPerPackage: number;
   maxAttemptsPerPackage: number;
+  confirmationCostUsd: number;
+  packageMaxTokens: Record<AgentPackageStage, number>;
+  packageMaxWallSeconds: Record<AgentPackageStage, number>;
+  maxOutputTokens: number;
+  maxRepairTokens: number;
+  maxBrokerResponseBytes: number;
+  maxBrokerContextTokens: number;
+  maxBrokerItems: number;
+  maxInputContextTokens: number;
 }
 
 export interface WorkspaceMarker {
@@ -33,6 +60,7 @@ export interface WorkspaceMarker {
 
 export interface WorkspaceConfig {
   schemaVersion: 1;
+  mode: ResearchMode;
   producer: AgentRoute;
   reviewer: AgentRoute;
   budget: ResearchBudget;
@@ -58,6 +86,18 @@ export interface CapabilityDeclaration {
   skillPath: string;
   permissions: string[];
   allowedHosts: string[];
+  http: {
+    accept: string;
+    allowedContentTypes: string[];
+    maxResponseBytes: number;
+    maxItems: number;
+  } | null;
+  coverage: {
+    dimensions: string[];
+    sourceTypes: string[];
+    fullText: boolean;
+    publicationDates: boolean;
+  } | null;
   credentials: CapabilityCredentialDeclaration[];
 }
 
@@ -88,7 +128,56 @@ export interface ProjectInput {
   path: string;
   sha256: string;
   bytes: number;
+  contextPath?: string;
+  contextSha256?: string;
+  contextBytes?: number;
+  contextRanges?: ProjectInputLineRange[];
   addedAt: string;
+}
+
+export interface ProjectInputLineRange {
+  startLine: number;
+  endLine: number;
+}
+
+export interface ProjectInputPlanEntry {
+  path: string;
+  contextPath?: string | null;
+  contextRanges?: ProjectInputLineRange[] | null;
+  role: ProjectInput["role"];
+  dimensions: string[];
+  sourceType: string;
+  fullText: boolean;
+  publicationDate: string | null;
+}
+
+export interface ProjectInputPlan {
+  schemaVersion: 1;
+  inputs: ProjectInputPlanEntry[];
+}
+
+export interface VerifiedProjectInputPlanEntry extends ProjectInputPlanEntry {
+  id: string;
+  sha256: string;
+  bytes: number;
+  contextSha256: string | null;
+  contextBytes: number | null;
+}
+
+export interface VerifiedProjectInputPlan {
+  schemaVersion: 1;
+  sha256: string;
+  inputs: VerifiedProjectInputPlanEntry[];
+}
+
+export interface ProjectEvidenceRequirements {
+  dimensions: string[];
+  sourceTypes: string[];
+  minSources: number;
+  minFullTextSources: number;
+  minDatedSources: number;
+  publicationDateFrom: string | null;
+  publicationDateTo: string | null;
 }
 
 export interface WorkPackage {
@@ -102,12 +191,17 @@ export interface WorkPackage {
   attempts: number;
   maxAttempts: number;
   lastError: string | null;
+  lastFailureKind: FailureKind | null;
+  retryNotBefore: string | null;
   startedAt: string | null;
   completedAt: string | null;
 }
 
 export interface ProjectUsage {
   tokens: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
   costUsd: number;
   wallSeconds: number;
 }
@@ -119,7 +213,9 @@ export interface ProjectState {
   status: ProjectStatus;
   createdAt: string;
   updatedAt: string;
+  budgetConfirmedAt: string | null;
   inputs: ProjectInput[];
+  evidenceRequirements: ProjectEvidenceRequirements;
   packages: WorkPackage[];
   usage: ProjectUsage;
 }
@@ -135,9 +231,47 @@ export interface ExecutionResult {
   stdout: string;
   stderr: string;
   tokens: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
   costUsd: number;
   wallSeconds: number;
+  model: string | null;
+  runtime: AgentRuntimeFingerprint | null;
+  telemetry?: AgentExecutionTelemetry | undefined;
 }
+
+export interface AgentExecutionTelemetry {
+  eventCounts: Record<string, number>;
+  itemCounts: Record<string, number>;
+  toolCalls: number;
+  providerTurns: number | null;
+  reasoningOutputTokens: number;
+  providerErrors: string[];
+}
+
+export interface AgentRuntimeFingerprint {
+  agent: AgentKind;
+  model: string | null;
+  effort?: AgentReasoningEffort;
+  verbosity?: AgentVerbosity | null;
+  binarySha256: string;
+  wrapperSha256: string;
+  adapterSha256: string;
+  binaryVersion: string;
+  platform: NodeJS.Platform;
+  architecture: string;
+}
+
+export type FailureKind =
+  | "configuration"
+  | "authentication"
+  | "rate-limit"
+  | "server"
+  | "structured-output"
+  | "budget"
+  | "transient"
+  | "deterministic";
 
 export interface RunRecord {
   schemaVersion: 1;
@@ -149,11 +283,18 @@ export interface RunRecord {
   completedAt: string;
   exitCode: number;
   tokens: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
   costUsd: number;
   wallSeconds: number;
   outputs: OutputRecord[];
   stdoutSha256: string;
   stderrSha256: string;
+  failureKind: FailureKind | null;
+  failureDetails?: Record<string, unknown> | null | undefined;
+  runtime: AgentRuntimeFingerprint | null;
+  telemetry?: AgentExecutionTelemetry | undefined;
 }
 
 export interface JournalEvent {
@@ -187,6 +328,30 @@ export interface WorkspaceDoctorResult {
   checks: DoctorCheck[];
 }
 
+export interface WorkspaceDoctorAttestation {
+  schemaVersion: 1;
+  workspaceId: string;
+  checkedAt: string;
+  expiresAt: string;
+  configSha256: string;
+  runtimeLockSha256: string;
+  capabilityDeclarationsSha256: string;
+  capabilityLockSha256: string;
+  doctorSchemaSha256: string;
+  runtimes: AgentRuntimeFingerprint[];
+  smokeUsage: Array<{
+    agent: AgentKind;
+    tokens: number;
+    inputTokens: number;
+    cachedInputTokens: number;
+    outputTokens: number;
+    costUsd: number;
+    wallSeconds: number;
+    telemetry?: AgentExecutionTelemetry | undefined;
+  }>;
+  attestationSha256: string;
+}
+
 export interface WorkspacePaths {
   root: string;
   control: string;
@@ -195,10 +360,35 @@ export interface WorkspacePaths {
   runtimeLock: string;
   capabilityDeclarations: string;
   capabilityLock: string;
+  doctorAttestation: string;
   env: string;
   envExample: string;
   journal: string;
+  evidence: string;
+  evidenceCache: string;
+  evidenceObjects: string;
   projects: string;
   runtime: string;
   locks: string;
+}
+
+export interface ResearchProgressEvent {
+  schemaVersion: 1;
+  type:
+    | "run.started"
+    | "package.started"
+    | "package.heartbeat"
+    | "package.completed"
+    | "package.failed"
+    | "run.completed";
+  timestamp: string;
+  requestId: string;
+  projectId: string | null;
+  packageId: string | null;
+  remainingBudget: {
+    tokens: number;
+    costUsd: number;
+    wallSeconds: number;
+  } | null;
+  detail?: Record<string, unknown>;
 }

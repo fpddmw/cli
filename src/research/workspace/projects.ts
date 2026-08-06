@@ -1,19 +1,30 @@
 import { randomUUID } from "node:crypto";
-import { lstat, readdir } from "node:fs/promises";
-import { basename, join, resolve, sep } from "node:path";
+import { cp, lstat, readdir } from "node:fs/promises";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { RESEARCH_CONTROL_DIRECTORY } from "./constants.js";
 import { appendJournalEvent } from "./journal.js";
+import { cloneProjectEvidenceReceipts } from "./evidence.js";
+import { projectInputsFromPlan, reverifyProjectInputPlan } from "./input-plan.js";
+import { evaluateProjectPreflight } from "./preflight.js";
 import {
   ensureDirectory,
+  fileRecord,
   fileSize,
   readJsonFile,
   sha256File,
   workspacePaths,
   writeJsonAtomic,
 } from "./storage.js";
-import type { ProjectInput, ProjectState, WorkPackage, WorkspaceConfig } from "./types.js";
+import type {
+  ProjectEvidenceRequirements,
+  ProjectInput,
+  ProjectState,
+  WorkPackage,
+  WorkspaceConfig,
+  VerifiedProjectInputPlan,
+} from "./types.js";
 import { loadWorkspaceConfig, withWorkspaceLock } from "./workspace.js";
 
 const PROJECT_ID_PATTERN = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -22,6 +33,9 @@ export async function initializeProject(
   root: string,
   projectId: string,
   question: string,
+  evidenceRequirements?: ProjectEvidenceRequirements,
+  budgetConfirmed = false,
+  inputPlan?: VerifiedProjectInputPlan,
 ): Promise<ProjectState> {
   validateProjectId(projectId);
   const normalizedQuestion = question.trim();
@@ -43,6 +57,48 @@ export async function initializeProject(
       });
     }
     const config = await loadWorkspaceConfig(root);
+    if (config.mode === "production-research" && !evidenceRequirements) {
+      throw new CliError("Production research requires explicit evidence requirements.", {
+        code: "RESEARCH_EVIDENCE_REQUIREMENTS_REQUIRED",
+        exitCode: 2,
+      });
+    }
+    if (
+      config.mode === "production-research" &&
+      config.budget.maxCostUsd > config.budget.confirmationCostUsd &&
+      !budgetConfirmed
+    ) {
+      throw new CliError(
+        `Production budget requires explicit confirmation above $${config.budget.confirmationCostUsd}.`,
+        {
+          code: "RESEARCH_BUDGET_CONFIRMATION_REQUIRED",
+          exitCode: 2,
+          details: {
+            maxCostUsd: config.budget.maxCostUsd,
+            confirmationCostUsd: config.budget.confirmationCostUsd,
+          },
+        },
+      );
+    }
+    const requirements = normalizeEvidenceRequirements(
+      evidenceRequirements ?? defaultEvidenceRequirements(config),
+    );
+    const admittedInputPlan = inputPlan ? await reverifyProjectInputPlan(inputPlan) : undefined;
+    if (config.mode === "production-research") {
+      const preflight = await evaluateProjectPreflight(
+        root,
+        normalizedQuestion,
+        requirements,
+        admittedInputPlan ?? null,
+      );
+      if (!preflight.readyToInitialize) {
+        throw new CliError("Production project initialization was blocked by preflight.", {
+          code: "RESEARCH_PREFLIGHT_BLOCKED",
+          exitCode: 3,
+          details: { gaps: preflight.gaps, preflightSha256: preflight.preflightSha256 },
+        });
+      }
+    }
     const now = new Date().toISOString();
     const project: ProjectState = {
       schemaVersion: 1,
@@ -51,9 +107,18 @@ export async function initializeProject(
       status: "ready",
       createdAt: now,
       updatedAt: now,
-      inputs: [],
+      budgetConfirmedAt: budgetConfirmed ? now : null,
+      inputs: admittedInputPlan ? projectInputsFromPlan(admittedInputPlan, now) : [],
+      evidenceRequirements: requirements,
       packages: defaultWorkPackages(config),
-      usage: { tokens: 0, costUsd: 0, wallSeconds: 0 },
+      usage: {
+        tokens: 0,
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        costUsd: 0,
+        wallSeconds: 0,
+      },
     };
     await Promise.all([
       ensureDirectory(projectRoot),
@@ -64,6 +129,13 @@ export async function initializeProject(
     await appendJournalEvent(paths.journal, "project.initialized", projectId, {
       projectId,
       questionSha256: await hashQuestion(normalizedQuestion),
+      inputPlanSha256: admittedInputPlan?.sha256 ?? null,
+      inputs: project.inputs.map((input) => ({
+        id: input.id,
+        role: input.role,
+        sha256: input.sha256,
+        bytes: input.bytes,
+      })),
     });
     return project;
   });
@@ -149,9 +221,170 @@ export async function saveProject(root: string, project: ProjectState): Promise<
   await writeJsonAtomic(join(workspacePaths(root).projects, project.id, "project.json"), project);
 }
 
+export async function retryProjectPackage(
+  root: string,
+  projectId: string,
+  packageId?: string,
+): Promise<ProjectState> {
+  validateProjectId(projectId);
+  return withWorkspaceLock(root, "project.retry", async () => {
+    const project = await loadProject(root, projectId);
+    const selected = packageId
+      ? packageById(project, packageId)
+      : project.packages.find((item) => item.status === "failed" || item.status === "retry");
+    if (!selected || (selected.status !== "failed" && selected.status !== "retry")) {
+      throw new CliError("Project retry requires a failed or retryable package.", {
+        code: "RESEARCH_RETRY_NOT_AVAILABLE",
+        exitCode: 2,
+      });
+    }
+    const selectedIndex = project.packages.indexOf(selected);
+    const previous = {
+      status: selected.status,
+      attempts: selected.attempts,
+      failureKind: selected.lastFailureKind,
+    };
+    for (const [index, workPackage] of project.packages.entries()) {
+      if (index < selectedIndex) continue;
+      workPackage.status = index === selectedIndex ? "ready" : "pending";
+      workPackage.maxAttempts = Math.max(workPackage.maxAttempts, workPackage.attempts + 1);
+      workPackage.startedAt = null;
+      workPackage.completedAt = null;
+      workPackage.lastError = null;
+      workPackage.lastFailureKind = null;
+      workPackage.retryNotBefore = null;
+    }
+    project.status = "ready";
+    project.updatedAt = new Date().toISOString();
+    await saveProject(root, project);
+    await appendJournalEvent(workspacePaths(root).journal, "project.retry.requested", projectId, {
+      projectId,
+      packageId: selected.id,
+      previous,
+      preservedOutputs: true,
+    });
+    return project;
+  });
+}
+
+export async function forkProject(
+  root: string,
+  sourceProjectId: string,
+  targetProjectId: string,
+  resumeThrough?: "discover" | "analyze" | "synthesize",
+): Promise<ProjectState> {
+  validateProjectId(sourceProjectId);
+  validateProjectId(targetProjectId);
+  if (sourceProjectId === targetProjectId) {
+    throw new CliError("Fork target must use a different project ID.", {
+      code: "RESEARCH_PROJECT_FORK_INVALID",
+      exitCode: 2,
+    });
+  }
+  return withWorkspaceLock(root, "project.fork", async () => {
+    const source = await loadProject(root, sourceProjectId);
+    const targetRoot = join(workspacePaths(root).projects, targetProjectId);
+    if (await lstat(targetRoot).catch(() => undefined)) {
+      throw new CliError(`Research project already exists: ${targetProjectId}`, {
+        code: "RESEARCH_PROJECT_EXISTS",
+        exitCode: 2,
+      });
+    }
+    const config = await loadWorkspaceConfig(root);
+    const packages = defaultWorkPackages(config);
+    const inheritedStages = resumeThrough
+      ? ["discover", "analyze", "synthesize"].slice(
+          0,
+          ["discover", "analyze", "synthesize"].indexOf(resumeThrough) + 1,
+        )
+      : [];
+    for (const stage of inheritedStages) {
+      const sourcePackage = source.packages.find((item) => item.stage === stage);
+      if (sourcePackage?.status !== "complete") {
+        throw new CliError(`Cannot fork through incomplete package: ${stage}.`, {
+          code: "RESEARCH_PROJECT_FORK_INVALID",
+          exitCode: 2,
+        });
+      }
+    }
+    const now = new Date().toISOString();
+    for (const workPackage of packages) {
+      if (inheritedStages.includes(workPackage.stage)) {
+        workPackage.status = "complete";
+        workPackage.completedAt = now;
+      }
+    }
+    const project: ProjectState = {
+      schemaVersion: 1,
+      id: targetProjectId,
+      question: source.question,
+      status: "ready",
+      createdAt: now,
+      updatedAt: now,
+      budgetConfirmedAt: source.budgetConfirmedAt,
+      inputs: source.inputs.map((input) => ({ ...input })),
+      evidenceRequirements: {
+        ...source.evidenceRequirements,
+        dimensions: [...source.evidenceRequirements.dimensions],
+        sourceTypes: [...source.evidenceRequirements.sourceTypes],
+      },
+      packages,
+      usage: {
+        tokens: 0,
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        costUsd: 0,
+        wallSeconds: 0,
+      },
+    };
+    await Promise.all([
+      ensureDirectory(targetRoot),
+      ensureDirectory(join(targetRoot, "outputs")),
+      ensureDirectory(join(targetRoot, "runs")),
+    ]);
+    const inheritedOutputs: Array<{ path: string; sha256: string; bytes: number }> = [];
+    const stageOutput: Record<string, string> = {
+      discover: "outputs/evidence.json",
+      analyze: "outputs/analysis.json",
+      synthesize: "outputs/report.md",
+    };
+    for (const stage of inheritedStages) {
+      const logicalPath = stageOutput[stage]!;
+      const sourcePath = join(workspacePaths(root).projects, sourceProjectId, logicalPath);
+      const record = await fileRecord(sourcePath, logicalPath);
+      const destination = join(targetRoot, logicalPath);
+      await ensureDirectory(dirname(destination));
+      await cp(sourcePath, destination, { errorOnExist: true, force: false });
+      inheritedOutputs.push(record);
+    }
+    if (inheritedStages.includes("discover")) {
+      await cloneProjectEvidenceReceipts(root, sourceProjectId, targetProjectId);
+    }
+    refreshProject(project);
+    await writeJsonAtomic(join(targetRoot, "project.json"), project);
+    await appendJournalEvent(workspacePaths(root).journal, "project.forked", targetProjectId, {
+      sourceProjectId,
+      targetProjectId,
+      resumeThrough: resumeThrough ?? null,
+      inheritedOutputs,
+      inheritedUsage: false,
+    });
+    return project;
+  });
+}
+
 export function refreshProject(project: ProjectState): ProjectState {
+  const now = Date.now();
   for (const workPackage of project.packages) {
     if (workPackage.status !== "pending" && workPackage.status !== "retry") continue;
+    if (
+      workPackage.status === "retry" &&
+      workPackage.retryNotBefore &&
+      Date.parse(workPackage.retryNotBefore) > now
+    ) {
+      continue;
+    }
     const dependenciesComplete = workPackage.dependencies.every(
       (dependency) =>
         project.packages.find((candidate) => candidate.id === dependency)?.status === "complete",
@@ -246,6 +479,8 @@ function workPackage(
     attempts: 0,
     maxAttempts,
     lastError: null,
+    lastFailureKind: null,
+    retryNotBefore: null,
     startedAt: null,
     completedAt: null,
   };
@@ -257,10 +492,15 @@ function validateProjectShape(project: ProjectState, expectedId: string): void {
     project.id !== expectedId ||
     !PROJECT_ID_PATTERN.test(project.id) ||
     typeof project.question !== "string" ||
+    (project.budgetConfirmedAt !== null && typeof project.budgetConfirmedAt !== "string") ||
     !Array.isArray(project.inputs) ||
+    !isEvidenceRequirements(project.evidenceRequirements) ||
     !Array.isArray(project.packages) ||
     !project.usage ||
     typeof project.usage.tokens !== "number" ||
+    typeof project.usage.inputTokens !== "number" ||
+    typeof project.usage.cachedInputTokens !== "number" ||
+    typeof project.usage.outputTokens !== "number" ||
     typeof project.usage.costUsd !== "number" ||
     typeof project.usage.wallSeconds !== "number"
   ) {
@@ -285,6 +525,100 @@ function validateProjectShape(project: ProjectState, expectedId: string): void {
       exitCode: 2,
     });
   }
+}
+
+function defaultEvidenceRequirements(config: WorkspaceConfig): ProjectEvidenceRequirements {
+  return config.mode === "production-research"
+    ? {
+        dimensions: ["research-question"],
+        sourceTypes: ["primary"],
+        minSources: 3,
+        minFullTextSources: 1,
+        minDatedSources: 1,
+        publicationDateFrom: null,
+        publicationDateTo: null,
+      }
+    : {
+        dimensions: ["research-question"],
+        sourceTypes: [],
+        minSources: 1,
+        minFullTextSources: 0,
+        minDatedSources: 0,
+        publicationDateFrom: null,
+        publicationDateTo: null,
+      };
+}
+
+export function normalizeEvidenceRequirements(
+  value: ProjectEvidenceRequirements,
+): ProjectEvidenceRequirements {
+  const normalized = {
+    dimensions: [...new Set(value.dimensions.map(normalizeRequirementId))].sort(),
+    sourceTypes: [...new Set(value.sourceTypes.map(normalizeRequirementId))].sort(),
+    minSources: value.minSources,
+    minFullTextSources: value.minFullTextSources,
+    minDatedSources: value.minDatedSources,
+    publicationDateFrom: value.publicationDateFrom,
+    publicationDateTo: value.publicationDateTo,
+  };
+  if (!isEvidenceRequirements(normalized)) {
+    throw new CliError("Evidence requirements are invalid.", {
+      code: "RESEARCH_EVIDENCE_REQUIREMENTS_INVALID",
+      exitCode: 2,
+    });
+  }
+  return normalized;
+}
+
+function isEvidenceRequirements(value: unknown): value is ProjectEvidenceRequirements {
+  return (
+    Boolean(value) &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Array.isArray((value as ProjectEvidenceRequirements).dimensions) &&
+    (value as ProjectEvidenceRequirements).dimensions.length > 0 &&
+    (value as ProjectEvidenceRequirements).dimensions.every(validRequirementId) &&
+    Array.isArray((value as ProjectEvidenceRequirements).sourceTypes) &&
+    (value as ProjectEvidenceRequirements).sourceTypes.every(validRequirementId) &&
+    Number.isInteger((value as ProjectEvidenceRequirements).minSources) &&
+    (value as ProjectEvidenceRequirements).minSources > 0 &&
+    Number.isInteger((value as ProjectEvidenceRequirements).minFullTextSources) &&
+    (value as ProjectEvidenceRequirements).minFullTextSources >= 0 &&
+    (value as ProjectEvidenceRequirements).minFullTextSources <=
+      (value as ProjectEvidenceRequirements).minSources &&
+    Number.isInteger((value as ProjectEvidenceRequirements).minDatedSources) &&
+    (value as ProjectEvidenceRequirements).minDatedSources >= 0 &&
+    (value as ProjectEvidenceRequirements).minDatedSources <=
+      (value as ProjectEvidenceRequirements).minSources &&
+    validDateBoundary((value as ProjectEvidenceRequirements).publicationDateFrom) &&
+    validDateBoundary((value as ProjectEvidenceRequirements).publicationDateTo) &&
+    dateRangeOrdered(
+      (value as ProjectEvidenceRequirements).publicationDateFrom,
+      (value as ProjectEvidenceRequirements).publicationDateTo,
+    )
+  );
+}
+
+function validDateBoundary(value: unknown): value is string | null {
+  if (value === null) return true;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const timestamp = Date.parse(`${value}T00:00:00.000Z`);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString().slice(0, 10) === value;
+}
+
+function dateRangeOrdered(from: string | null, to: string | null): boolean {
+  return from === null || to === null || from <= to;
+}
+
+function normalizeRequirementId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._:-]+/g, "-");
+}
+
+function validRequirementId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(value);
 }
 
 function validateProjectId(projectId: string): void {

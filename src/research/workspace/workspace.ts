@@ -1,19 +1,25 @@
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { chmod, lstat, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { basename, isAbsolute, join, resolve } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { declaredCredentialIds, verifyCapabilities } from "./capabilities.js";
 import { packageVersion, RESEARCH_PACKAGE_NAME, RESEARCH_PROTOCOL_VERSION } from "./constants.js";
 import { inspectResearchContext, isWorkspaceMarker } from "./context.js";
 import { appendJournalEvent, verifyJournal } from "./journal.js";
+import { loadProjectEvidenceReceipts } from "./evidence.js";
+import { executeAgent, type AgentExecutionRequest } from "./executor.js";
+import { parseStructuredStageOutput, schemaForStage } from "./schemas.js";
 import {
   acquireFileLock,
+  canonicalJson,
   ensureDirectory,
   isObject,
   pathExists,
   readJsonFile,
   requireAbsolutePath,
+  sha256File,
+  sha256Text,
   workspacePaths,
   writeJsonAtomic,
 } from "./storage.js";
@@ -25,20 +31,46 @@ import type {
   WorkspaceConfig,
   WorkspaceDoctorResult,
   WorkspaceMarker,
+  ResearchMode,
+  ExecutionResult,
+  AgentRuntimeFingerprint,
+  WorkspaceDoctorAttestation,
 } from "./types.js";
 
+const DOCTOR_ATTESTATION_TTL_MS = 24 * 60 * 60 * 1000;
+
 const DEFAULT_BUDGET = {
-  maxTokens: 250_000,
+  maxTokens: 320_000,
   maxCostUsd: 60,
   maxWallSeconds: 72 * 60 * 60,
   maxFilesPerPackage: 20,
   maxBytesPerPackage: 20 * 1024 * 1024,
   maxAttemptsPerPackage: 3,
+  confirmationCostUsd: 10,
+  packageMaxTokens: {
+    discover: 80_000,
+    analyze: 55_000,
+    synthesize: 60_000,
+    review: 120_000,
+  },
+  packageMaxWallSeconds: {
+    discover: 2 * 60 * 60,
+    analyze: 2 * 60 * 60,
+    synthesize: 60 * 60,
+    review: 60 * 60,
+  },
+  maxOutputTokens: 4_000,
+  maxRepairTokens: 4_000,
+  maxBrokerResponseBytes: 512 * 1024,
+  maxBrokerContextTokens: 12_000,
+  maxBrokerItems: 100,
+  maxInputContextTokens: 12_000,
 } as const;
 
 export async function initializeResearchWorkspace(
   targetPath: string,
   name: string | undefined,
+  mode: ResearchMode = "smoke-test",
 ): Promise<{ workspace: string; workspaceId: string; created: string[] }> {
   const root = requireAbsolutePath(targetPath, "Workspace path");
   await mkdir(root, { recursive: true, mode: 0o755 });
@@ -69,8 +101,15 @@ export async function initializeResearchWorkspace(
   };
   const config: WorkspaceConfig = {
     schemaVersion: 1,
-    producer: { agent: "codex", binary: "codex", model: null },
-    reviewer: { agent: "claude", binary: "claude", model: null },
+    mode,
+    producer: {
+      agent: "codex",
+      binary: "codex",
+      model: null,
+      effort: "low",
+      verbosity: "low",
+    },
+    reviewer: { agent: "claude", binary: "claude", model: null, effort: "low" },
     budget: { ...DEFAULT_BUDGET },
   };
   const runtimeLock: RuntimeLock = {
@@ -83,6 +122,8 @@ export async function initializeResearchWorkspace(
 
   await ensureDirectory(paths.control);
   await Promise.all([
+    ensureDirectory(paths.evidenceCache),
+    ensureDirectory(paths.evidenceObjects),
     ensureDirectory(paths.projects),
     ensureDirectory(paths.runtime),
     ensureDirectory(paths.locks),
@@ -157,7 +198,16 @@ export async function loadWorkspaceConfig(root: string): Promise<WorkspaceConfig
   return config;
 }
 
-export async function doctorResearchWorkspace(inputPath: string): Promise<WorkspaceDoctorResult> {
+export interface DoctorOptions {
+  agentSmoke?: boolean;
+  environment?: NodeJS.ProcessEnv;
+  executor?: (request: AgentExecutionRequest) => Promise<ExecutionResult>;
+}
+
+export async function doctorResearchWorkspace(
+  inputPath: string,
+  options: DoctorOptions = {},
+): Promise<WorkspaceDoctorResult> {
   const workspace = await requireResearchWorkspace(inputPath);
   const paths = workspacePaths(workspace);
   const checks: DoctorCheck[] = [];
@@ -199,6 +249,14 @@ export async function doctorResearchWorkspace(inputPath: string): Promise<Worksp
     const projects = await readProjectStates(paths.projects);
     return { value: projects, detail: `${projects.length} project(s)` };
   });
+  await checked(checks, "evidence-store", async () => {
+    const projects = await readProjectStates(paths.projects);
+    let receipts = 0;
+    for (const project of projects) {
+      receipts += (await loadProjectEvidenceReceipts(workspace, project.id)).length;
+    }
+    return { value: receipts, detail: `${receipts} verified broker evidence receipt(s)` };
+  });
   if (config && config.producer.agent === config.reviewer.agent) {
     checks.push({
       id: "independent-review-route",
@@ -212,12 +270,329 @@ export async function doctorResearchWorkspace(inputPath: string): Promise<Worksp
       detail: `${config.producer.agent} -> ${config.reviewer.agent}`,
     });
   }
+  if (
+    config?.mode === "production-research" &&
+    (!config.producer.model || !config.reviewer.model)
+  ) {
+    checks.push({
+      id: "explicit-model-routes",
+      status: "fail",
+      detail: "Production research requires explicit producer and reviewer model IDs.",
+    });
+  } else if (config) {
+    checks.push({
+      id: "explicit-model-routes",
+      status: config.mode === "production-research" ? "pass" : "warn",
+      detail:
+        config.mode === "production-research"
+          ? `${config.producer.model} -> ${config.reviewer.model}`
+          : "Smoke-test mode does not require pinned model IDs.",
+    });
+  }
+  if (
+    config?.mode === "production-research" &&
+    (!config.producer.pricing || !config.reviewer.pricing)
+  ) {
+    checks.push({
+      id: "explicit-agent-pricing",
+      status: "fail",
+      detail: "Production research requires explicit input, cached-input, and output prices.",
+    });
+  } else if (config) {
+    checks.push({
+      id: "explicit-agent-pricing",
+      status: config.mode === "production-research" ? "pass" : "warn",
+      detail:
+        config.mode === "production-research"
+          ? "Producer and reviewer pricing are configured."
+          : "Smoke-test mode permits zero/unknown price accounting.",
+    });
+  }
+  if (config) {
+    if (options.agentSmoke) {
+      const smokeResults: AgentSmokeResult[] = [];
+      for (const route of [config.producer, config.reviewer]) {
+        const result = await checked(checks, `agent-sandbox-smoke.${route.agent}`, async () => {
+          const value = await runAgentSmokeCheck(
+            workspace,
+            config,
+            route,
+            options.environment ?? process.env,
+            options.executor ?? executeAgent,
+          );
+          return { value, detail: agentSmokeDetail(value) };
+        });
+        if (result) smokeResults.push(result);
+      }
+      const smoke =
+        smokeResults.length === 2
+          ? {
+              runtimes: smokeResults
+                .map((result) => result.runtime)
+                .sort((left, right) => left.agent.localeCompare(right.agent)),
+              smokeUsage: smokeResults
+                .map((result) => result.usage)
+                .sort((left, right) => left.agent.localeCompare(right.agent)),
+            }
+          : undefined;
+      checks.push({
+        id: "agent-sandbox-smoke",
+        status: smoke ? "pass" : "fail",
+        detail: smoke
+          ? "Both isolated producer and reviewer smoke checks passed."
+          : `${smokeResults.length}/2 isolated agent smoke checks passed.`,
+      });
+      if (
+        smoke &&
+        config.mode === "production-research" &&
+        !checks.some((check) => check.status === "fail")
+      ) {
+        await checked(checks, "doctor-attestation", async () => {
+          const value = await persistDoctorAttestation(workspace, config, marker!, smoke);
+          return {
+            value,
+            detail: `valid until ${value.expiresAt}; sha256=${value.attestationSha256.slice(0, 12)}`,
+          };
+        });
+      }
+    } else {
+      checks.push({
+        id: "agent-sandbox-smoke",
+        status: config.mode === "production-research" ? "fail" : "warn",
+        detail:
+          "Producer/reviewer execution smoke was not run; rerun doctor with --agent-smoke before production research.",
+      });
+    }
+  }
 
   return {
     workspace,
     status: checks.some((check) => check.status === "fail") ? "blocked" : "ready",
     checks,
   };
+}
+
+interface AgentSmokeResult {
+  runtime: AgentRuntimeFingerprint;
+  usage: WorkspaceDoctorAttestation["smokeUsage"][number];
+}
+
+interface DoctorSmokeBundle {
+  runtimes: AgentRuntimeFingerprint[];
+  smokeUsage: WorkspaceDoctorAttestation["smokeUsage"];
+}
+
+async function runAgentSmokeCheck(
+  workspace: string,
+  config: WorkspaceConfig,
+  route: AgentRoute,
+  environment: NodeJS.ProcessEnv,
+  executor: (request: AgentExecutionRequest) => Promise<ExecutionResult>,
+): Promise<AgentSmokeResult> {
+  const smokeRoot = join(
+    workspacePaths(workspace).runtime,
+    `doctor-${route.agent}-${randomUUID()}`,
+  );
+  await ensureDirectory(smokeRoot);
+  try {
+    const projectRoot = join(smokeRoot, "project");
+    await ensureDirectory(projectRoot);
+    const result = await executor({
+      route,
+      prompt:
+        'Return exactly the JSON object {"ok":true}. This checks executable, authentication, structured output, and capsule sandbox readiness only.',
+      outputSchema: schemaForStage("doctor"),
+      requestId: randomUUID(),
+      purpose: "doctor",
+      capsuleRoot: smokeRoot,
+      projectRoot,
+      workspaceRoot: workspace,
+      timeoutSeconds: 120,
+      maxTurns: 2,
+      maxOutputTokens: 128,
+      maxCostUsd: Math.min(0.25, config.budget.maxCostUsd),
+      toolPolicy: "none",
+      environment,
+      brokerUrl: null,
+    });
+    if (result.exitCode !== 0) {
+      const diagnostic = [result.stderr.trim(), result.stdout.trim()]
+        .filter(Boolean)
+        .join("\n")
+        .slice(0, 2_000);
+      throw new Error(
+        `${route.agent} smoke failed: ${diagnostic || `executor exited ${result.exitCode}`}`,
+      );
+    }
+    parseStructuredStageOutput("doctor", result.stdout);
+    if (!result.runtime) {
+      throw new Error(`${route.agent} smoke did not return a runtime fingerprint`);
+    }
+    return {
+      runtime: result.runtime,
+      usage: {
+        agent: route.agent,
+        tokens: result.tokens,
+        inputTokens: result.inputTokens,
+        cachedInputTokens: result.cachedInputTokens,
+        outputTokens: result.outputTokens,
+        costUsd: result.costUsd,
+        wallSeconds: result.wallSeconds,
+        telemetry: result.telemetry,
+      },
+    };
+  } finally {
+    await rm(smokeRoot, { recursive: true, force: true });
+  }
+}
+
+function agentSmokeDetail(result: AgentSmokeResult): string {
+  const usage = result.usage;
+  const detail = [
+    `${result.runtime.agent}@${result.runtime.binaryVersion}`,
+    `model=${result.runtime.model ?? "unknown"}`,
+    `effort=${result.runtime.effort ?? "unknown"}`,
+    `tokens=${usage.tokens}`,
+    `input=${usage.inputTokens}`,
+    `cached=${usage.cachedInputTokens}`,
+    `output=${usage.outputTokens}`,
+    `costUsd=${usage.costUsd}`,
+    `wallSeconds=${Math.round(usage.wallSeconds * 1000) / 1000}`,
+  ];
+  if (usage.telemetry?.providerErrors.length) {
+    detail.push(`providerErrors=${JSON.stringify(usage.telemetry.providerErrors)}`);
+  }
+  return detail.join(" ");
+}
+
+async function persistDoctorAttestation(
+  root: string,
+  expectedConfig: WorkspaceConfig,
+  marker: WorkspaceMarker,
+  smoke: DoctorSmokeBundle,
+): Promise<WorkspaceDoctorAttestation> {
+  return withWorkspaceLock(root, "workspace.doctor.attest", async () => {
+    const paths = workspacePaths(root);
+    const config = await loadWorkspaceConfig(root);
+    if (canonicalJson(config) !== canonicalJson(expectedConfig)) {
+      throw new Error("workspace configuration changed during doctor smoke");
+    }
+    const capabilities = await verifyCapabilities(root);
+    if (capabilities.status !== "verified") {
+      throw new Error("capability lock changed during doctor smoke");
+    }
+    const checkedAt = new Date().toISOString();
+    const core = {
+      schemaVersion: 1 as const,
+      workspaceId: marker.workspaceId,
+      checkedAt,
+      expiresAt: new Date(Date.parse(checkedAt) + DOCTOR_ATTESTATION_TTL_MS).toISOString(),
+      configSha256: sha256Text(canonicalJson(config)),
+      runtimeLockSha256: await sha256File(paths.runtimeLock),
+      capabilityDeclarationsSha256: await sha256File(paths.capabilityDeclarations),
+      capabilityLockSha256: await sha256File(paths.capabilityLock),
+      doctorSchemaSha256: sha256Text(canonicalJson(schemaForStage("doctor"))),
+      runtimes: smoke.runtimes,
+      smokeUsage: smoke.smokeUsage,
+    };
+    const value: WorkspaceDoctorAttestation = {
+      ...core,
+      attestationSha256: sha256Text(canonicalJson(core)),
+    };
+    await writeJsonAtomic(paths.doctorAttestation, value);
+    await appendJournalEvent(paths.journal, "workspace.doctor.attested", marker.workspaceId, {
+      attestationSha256: value.attestationSha256,
+      checkedAt: value.checkedAt,
+      expiresAt: value.expiresAt,
+      runtimes: value.runtimes,
+      smokeUsage: value.smokeUsage,
+    });
+    return value;
+  });
+}
+
+export async function verifyDoctorAttestation(root: string): Promise<{
+  status: "verified" | "missing" | "invalid" | "expired" | "drifted";
+  errors: string[];
+  attestation: WorkspaceDoctorAttestation | null;
+}> {
+  const paths = workspacePaths(root);
+  const value = await readJsonFile<unknown>(paths.doctorAttestation, "Doctor attestation").catch(
+    () => null,
+  );
+  if (!isDoctorAttestation(value)) {
+    return {
+      status: value === null ? "missing" : "invalid",
+      errors: ["doctor attestation is missing or invalid"],
+      attestation: null,
+    };
+  }
+  const { attestationSha256, ...core } = value;
+  const errors: string[] = [];
+  if (sha256Text(canonicalJson(core)) !== attestationSha256)
+    errors.push("attestation hash mismatch");
+  const marker = await loadWorkspaceMarker(root);
+  const config = await loadWorkspaceConfig(root);
+  if (value.workspaceId !== marker.workspaceId) errors.push("workspace ID drifted");
+  if (value.configSha256 !== sha256Text(canonicalJson(config)))
+    errors.push("workspace config drifted");
+  if (value.runtimeLockSha256 !== (await sha256File(paths.runtimeLock)))
+    errors.push("runtime lock drifted");
+  if (value.capabilityDeclarationsSha256 !== (await sha256File(paths.capabilityDeclarations))) {
+    errors.push("capability declarations drifted");
+  }
+  if (value.capabilityLockSha256 !== (await sha256File(paths.capabilityLock).catch(() => ""))) {
+    errors.push("capability lock drifted");
+  }
+  if (value.doctorSchemaSha256 !== sha256Text(canonicalJson(schemaForStage("doctor")))) {
+    errors.push("doctor schema drifted");
+  }
+  if (errors.length) return { status: "drifted", errors, attestation: value };
+  if (Date.parse(value.expiresAt) <= Date.now()) {
+    return { status: "expired", errors: ["doctor attestation expired"], attestation: value };
+  }
+  return { status: "verified", errors: [], attestation: value };
+}
+
+function isDoctorAttestation(value: unknown): value is WorkspaceDoctorAttestation {
+  if (!isObject(value) || value.schemaVersion !== 1) return false;
+  const hashFields = [
+    value.configSha256,
+    value.runtimeLockSha256,
+    value.capabilityDeclarationsSha256,
+    value.capabilityLockSha256,
+    value.doctorSchemaSha256,
+    value.attestationSha256,
+  ];
+  if (
+    typeof value.workspaceId !== "string" ||
+    typeof value.checkedAt !== "string" ||
+    !Number.isFinite(Date.parse(value.checkedAt)) ||
+    typeof value.expiresAt !== "string" ||
+    !Number.isFinite(Date.parse(value.expiresAt)) ||
+    hashFields.some((hash) => typeof hash !== "string" || !/^[0-9a-f]{64}$/.test(hash)) ||
+    !Array.isArray(value.runtimes) ||
+    value.runtimes.length !== 2 ||
+    !Array.isArray(value.smokeUsage) ||
+    value.smokeUsage.length !== 2
+  ) {
+    return false;
+  }
+  return value.runtimes.every(
+    (runtime) =>
+      isObject(runtime) &&
+      (runtime.agent === "codex" || runtime.agent === "claude") &&
+      (runtime.model === null || typeof runtime.model === "string") &&
+      typeof runtime.binarySha256 === "string" &&
+      /^[0-9a-f]{64}$/.test(runtime.binarySha256) &&
+      typeof runtime.wrapperSha256 === "string" &&
+      /^[0-9a-f]{64}$/.test(runtime.wrapperSha256) &&
+      typeof runtime.adapterSha256 === "string" &&
+      /^[0-9a-f]{64}$/.test(runtime.adapterSha256) &&
+      typeof runtime.binaryVersion === "string" &&
+      typeof runtime.platform === "string" &&
+      typeof runtime.architecture === "string",
+  );
 }
 
 export async function withWorkspaceLock<T>(
@@ -326,6 +701,7 @@ async function readProjectStates(projectsPath: string): Promise<ProjectState[]> 
 
 function isWorkspaceConfig(value: unknown): value is WorkspaceConfig {
   if (!isObject(value) || value.schemaVersion !== 1) return false;
+  if (value.mode !== "smoke-test" && value.mode !== "production-research") return false;
   if (!isAgentRoute(value.producer) || !isAgentRoute(value.reviewer)) return false;
   const budget = value.budget;
   return (
@@ -335,17 +711,74 @@ function isWorkspaceConfig(value: unknown): value is WorkspaceConfig {
     positiveInteger(budget.maxWallSeconds) &&
     positiveInteger(budget.maxFilesPerPackage) &&
     positiveInteger(budget.maxBytesPerPackage) &&
-    positiveInteger(budget.maxAttemptsPerPackage)
+    positiveInteger(budget.maxAttemptsPerPackage) &&
+    positiveNumber(budget.confirmationCostUsd) &&
+    isObject(budget.packageMaxTokens) &&
+    positiveInteger(budget.packageMaxTokens.discover) &&
+    positiveInteger(budget.packageMaxTokens.analyze) &&
+    positiveInteger(budget.packageMaxTokens.synthesize) &&
+    positiveInteger(budget.packageMaxTokens.review) &&
+    isObject(budget.packageMaxWallSeconds) &&
+    positiveInteger(budget.packageMaxWallSeconds.discover) &&
+    positiveInteger(budget.packageMaxWallSeconds.analyze) &&
+    positiveInteger(budget.packageMaxWallSeconds.synthesize) &&
+    positiveInteger(budget.packageMaxWallSeconds.review) &&
+    positiveInteger(budget.maxOutputTokens) &&
+    positiveInteger(budget.maxRepairTokens) &&
+    budget.maxRepairTokens <= budget.maxOutputTokens &&
+    positiveInteger(budget.maxBrokerResponseBytes) &&
+    positiveInteger(budget.maxBrokerContextTokens) &&
+    budget.maxBrokerContextTokens >= 16 &&
+    positiveInteger(budget.maxBrokerItems) &&
+    positiveInteger(budget.maxInputContextTokens)
   );
 }
 
 function isAgentRoute(value: unknown): value is AgentRoute {
+  if (
+    !(
+      isObject(value) &&
+      (value.agent === "codex" || value.agent === "claude") &&
+      typeof value.binary === "string" &&
+      value.binary.length > 0 &&
+      (value.wrapperTargetBinary === undefined ||
+        (typeof value.wrapperTargetBinary === "string" &&
+          isAbsolute(value.wrapperTargetBinary) &&
+          isAbsolute(value.binary) &&
+          value.wrapperTargetBinary !== value.binary)) &&
+      (value.model === null || (typeof value.model === "string" && value.model.length > 0)) &&
+      (value.pricing === undefined || isAgentPricing(value.pricing))
+    )
+  ) {
+    return false;
+  }
+  const effort = value.effort;
+  if (
+    effort !== undefined &&
+    !(
+      (value.agent === "codex" &&
+        ["minimal", "low", "medium", "high", "xhigh"].includes(String(effort))) ||
+      (value.agent === "claude" &&
+        ["low", "medium", "high", "xhigh", "max"].includes(String(effort)))
+    )
+  ) {
+    return false;
+  }
+  if (
+    value.verbosity !== undefined &&
+    (value.agent !== "codex" || !["low", "medium", "high"].includes(String(value.verbosity)))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isAgentPricing(value: unknown): boolean {
   return (
     isObject(value) &&
-    (value.agent === "codex" || value.agent === "claude") &&
-    typeof value.binary === "string" &&
-    value.binary.length > 0 &&
-    (value.model === null || (typeof value.model === "string" && value.model.length > 0))
+    nonNegativeNumber(value.inputUsdPerMillionTokens) &&
+    nonNegativeNumber(value.cachedInputUsdPerMillionTokens) &&
+    nonNegativeNumber(value.outputUsdPerMillionTokens)
   );
 }
 
@@ -366,10 +799,15 @@ function isProjectStateShape(value: unknown): value is ProjectState {
     value.schemaVersion === 1 &&
     typeof value.id === "string" &&
     typeof value.question === "string" &&
+    (value.budgetConfirmedAt === null || typeof value.budgetConfirmedAt === "string") &&
     ["ready", "running", "blocked", "complete"].includes(String(value.status)) &&
     Array.isArray(value.inputs) &&
+    isObject(value.evidenceRequirements) &&
     Array.isArray(value.packages) &&
-    isObject(value.usage)
+    isObject(value.usage) &&
+    typeof value.usage.inputTokens === "number" &&
+    typeof value.usage.cachedInputTokens === "number" &&
+    typeof value.usage.outputTokens === "number"
   );
 }
 
@@ -409,6 +847,10 @@ function positiveInteger(value: unknown): value is number {
 
 function positiveNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function nonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
 function isLogicalCredentialId(value: string): boolean {

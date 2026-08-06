@@ -80,5 +80,17 @@ coverage grows.
 
 `test/research-workspace.test.ts` exercises context classification, current
 workspace initialization, environment rejection, capability locks, the MCP
-broker boundary, platform sandbox invocation, multi-project scheduling, hard
-budget enforcement, independent review, closure, and the public command family.
+broker boundary, platform sandbox invocation, multi-project scheduling,
+project-scoped scheduling/exit semantics, pre-call budget enforcement,
+independent review, closure, and the public command family.
+`test/research-runtime-production.test.ts` adds zero-cost
+production evals for permanent evidence and review packets, exact HTTP policy,
+byte/item/offset/estimated-token extraction bounds and raw-object cache reuse,
+sanitized 429/422 handling, structured-output and provenance repair,
+mechanically normalized dimension/full-text/publication-date coverage,
+bounded local context with full-source review, stage tool isolation, runtime
+target/wrapper/adapter fingerprinting and drift rejection, telemetry redaction,
+owner-only whitelisted Claude settings authentication, production doctor
+attestation, two-protocol-turn tool-free review with exact local/broker bounded views,
+persistent packet/context tamper rejection at closure, JSONL progress, and
+append-only retry/fork recovery.

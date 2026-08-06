@@ -3534,7 +3534,7 @@ Usage:
   tiangong-ai kb collections list [--capability upload]
   tiangong-ai kb course fulltext --document-id <id> --tags <tag>
   tiangong-ai research workspace init <absolute-path>
-  tiangong-ai research run [--workspace <absolute-path>] [--max-parallel 1]
+  tiangong-ai research run [--workspace <absolute-path>] [--project <project-id>] [--max-parallel 1]
   tiangong-ai research search --input <request.json>|--query <query> [--sources default|all|sci|report|patent|esg]
   tiangong-ai education search --input <request.json>|--query <query> [--sources default|all|course|edu|textbook]
 
