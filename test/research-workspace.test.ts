@@ -810,12 +810,26 @@ describe("research project execution", () => {
       await addProjectInput(root, "project-beta", sharedInput, "primary");
       let active = 0;
       let maximumActive = 0;
+      let releaseConcurrentExecutors!: () => void;
+      let rejectConcurrentExecutors!: (error: Error) => void;
+      const concurrentExecutorsReady = new Promise<void>((resolvePromise, rejectPromise) => {
+        releaseConcurrentExecutors = resolvePromise;
+        rejectConcurrentExecutors = rejectPromise;
+      });
+      const concurrencyTimeout = setTimeout(
+        () => rejectConcurrentExecutors(new Error("Two independent executors did not overlap.")),
+        5_000,
+      );
       const base = fakeExecutor([]);
       const concurrentExecutor: PackageExecutor = async (request) => {
         active += 1;
         maximumActive = Math.max(maximumActive, active);
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 15));
         try {
+          if (active >= 2) {
+            clearTimeout(concurrencyTimeout);
+            releaseConcurrentExecutors();
+          }
+          await concurrentExecutorsReady;
           return await base(request);
         } finally {
           active -= 1;
@@ -826,7 +840,9 @@ describe("research project execution", () => {
         root,
         { maxParallel: 2, maxCycles: 10, dryRun: false, environment: {} },
         concurrentExecutor,
-      );
+      ).finally(() => {
+        clearTimeout(concurrencyTimeout);
+      });
       assert.equal(result.status, "complete", JSON.stringify(result));
       assert.ok(maximumActive >= 2);
       assert.equal(result.projects.length, 2);
