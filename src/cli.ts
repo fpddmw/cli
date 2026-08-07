@@ -19,6 +19,7 @@ import { deflateRawSync, inflateRawSync } from "node:zlib";
 import type { PDFDocument as PdfDocument } from "pdf-lib";
 import sharp from "sharp";
 
+import packageMetadata from "../package.json" with { type: "json" };
 import {
   getBoolean,
   getNonNegativeInteger,
@@ -57,6 +58,8 @@ export type { CliIO, Output } from "./io.js";
 export { parseArgs } from "./args.js";
 export { DEFAULT_API_BASE_URL, DEFAULT_API_PATH_PREFIX } from "./kb/config.js";
 export { resolveCollectionSelector } from "./kb/selector.js";
+
+export const CLI_VERSION = packageMetadata.version;
 
 const DEFAULT_RETRIES = 3;
 const DEFAULT_BULK_WINDOW_SIZE = 100;
@@ -331,6 +334,11 @@ interface ZipEntry {
 
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
   try {
+    if (argv.length === 1 && (argv[0] === "--version" || argv[0] === "-v")) {
+      write(io.stdout, `${CLI_VERSION}\n`);
+      return 0;
+    }
+
     loadDotenv(io.env);
 
     if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
@@ -3537,6 +3545,10 @@ Usage:
   tiangong-ai research run [--workspace <absolute-path>] [--project <project-id>] [--max-parallel 1]
   tiangong-ai research search --input <request.json>|--query <query> [--sources default|all|sci|report|patent|esg]
   tiangong-ai education search --input <request.json>|--query <query> [--sources default|all|course|edu|textbook]
+
+Options:
+  -h, --help      Show this help.
+  -v, --version   Show the CLI version.
 
 Run "tiangong-ai kb --help" for KB options.
 Run "tiangong-ai research --help" for research options.

@@ -9,6 +9,7 @@ import { inflateRawSync } from "node:zlib";
 import sharp from "sharp";
 
 import {
+  CLI_VERSION,
   DEFAULT_API_BASE_URL,
   DEFAULT_BULK_PIPELINE_HEALTH_POLL_INTERVAL_SECONDS,
   DEFAULT_BULK_POLL_INTERVAL_SECONDS,
@@ -78,6 +79,37 @@ describe("defaults", () => {
 });
 
 describe("runCli", () => {
+  it("prints the package version for top-level version flags", async () => {
+    for (const flag of ["--version", "-v"]) {
+      let stdout = "";
+      let stderr = "";
+      const exitCode = await runCli([flag], {
+        env: {},
+        stdout: { write: (chunk: string) => void (stdout += chunk) },
+        stderr: { write: (chunk: string) => void (stderr += chunk) },
+      });
+
+      assert.equal(exitCode, 0);
+      assert.equal(stdout, `${CLI_VERSION}\n`);
+      assert.equal(stderr, "");
+    }
+  });
+
+  it("does not treat a subcommand version argument as a top-level flag", async () => {
+    let stdout = "";
+    let stderr = "";
+    const exitCode = await runCli(["kb", "--version"], {
+      env: {},
+      stdout: { write: (chunk: string) => void (stdout += chunk) },
+      stderr: { write: (chunk: string) => void (stderr += chunk) },
+    });
+
+    assert.equal(exitCode, 1);
+    assert.match(stdout, /^Tiangong KB commands/);
+    assert.doesNotMatch(stdout, new RegExp(`^${CLI_VERSION}\\n$`));
+    assert.equal(stderr, "");
+  });
+
   it("formats async CLI errors without throwing stack traces", async () => {
     let stdout = "";
     let stderr = "";

@@ -15,8 +15,8 @@ checkPaths:
   - .docpact/config.yaml
   - docs/agents/**
   - src/**
-lastReviewedAt: 2026-08-06
-lastReviewedCommit: f5d031588a8eb2694573b8c3c83ff07c6ecd2b6f
+lastReviewedAt: 2026-08-07
+lastReviewedCommit: bc5f73c8418605892b9905263347044c11d8a7a3
 ---
 
 # Tiangong AI CLI Contract
@@ -36,6 +36,7 @@ This repository owns the Tiangong AI command-line interface.
 
 ## Current Command Surface
 
+- `tiangong-ai --version`
 - `tiangong-ai doctor`
 - `tiangong-ai kb ingest`
 - `tiangong-ai kb ingest bulk`
