@@ -5,8 +5,22 @@ import { CliError } from "../errors.js";
 import type { CliIO } from "../io.js";
 import { stringifyJson, write } from "../io.js";
 import { parseStrictArgs, strictBoolean, strictString } from "../strict-args.js";
-import { lockCapabilities, verifyCapabilities } from "./workspace/capabilities.js";
+import {
+  loadCapabilityDeclarations,
+  lockCapabilities,
+  verifyCapabilities,
+} from "./workspace/capabilities.js";
 import { inspectResearchContext } from "./workspace/context.js";
+import { setCapabilityCredentialFromEnvironment } from "./workspace/credentials.js";
+import {
+  configureExternalSkillProfile,
+  doctorExternalCapabilities,
+  EXTERNAL_SKILL_CONTEXT_PROFILE,
+  EXTERNAL_SKILL_MEDIA_PROFILE,
+  EXTERNAL_SKILL_PROFILE,
+  importExternalCapability,
+  inspectExternalSkillCatalog,
+} from "./workspace/external-skills.js";
 import { appendJournalEvent } from "./workspace/journal.js";
 import { readAndVerifyProjectInputPlan } from "./workspace/input-plan.js";
 import {
@@ -23,7 +37,7 @@ import {
 import { evaluateProjectPreflight } from "./workspace/preflight.js";
 import { runResearchWorkspace } from "./workspace/runtime.js";
 import { schemaForStage } from "./workspace/schemas.js";
-import { workspacePaths } from "./workspace/storage.js";
+import { sha256Text, workspacePaths } from "./workspace/storage.js";
 import type { ProjectEvidenceRequirements, ProjectInput, ResearchMode } from "./workspace/types.js";
 import {
   doctorResearchWorkspace,
@@ -54,7 +68,12 @@ export function researchOrchestrationHelp(): string {
   return `Research workspace commands:
   tiangong-ai research context inspect [--path <absolute-path>] [--json]
   tiangong-ai research workspace init <absolute-path> [--name <name>] [--mode smoke-test|production-research] [--json]
-  tiangong-ai research workspace doctor [--workspace <absolute-path>] [--agent-smoke] [--json]
+  tiangong-ai research workspace doctor [--workspace <absolute-path>] [--agent-smoke] [--capability-smoke] [--json]
+  tiangong-ai research capability catalog [--path <absolute-path>] [--workspace <absolute-path>] [--skill-root <absolute-path>] [--json]
+  tiangong-ai research capability configure [--profile ${EXTERNAL_SKILL_PROFILE}|${EXTERNAL_SKILL_CONTEXT_PROFILE}|${EXTERNAL_SKILL_MEDIA_PROFILE}] [--skill-root <absolute-path>] [--workspace <absolute-path>] [--json]
+  tiangong-ai research capability import --definition <absolute-json> [--workspace <absolute-path>] [--json]
+  tiangong-ai research capability doctor [--live] [--workspace <absolute-path>] [--json]
+  tiangong-ai research capability credential set --id <logical-id> --from-env <name> [--workspace <absolute-path>] [--json]
   tiangong-ai research capability lock [--workspace <absolute-path>] [--json]
   tiangong-ai research capability verify [--workspace <absolute-path>] [--json]
   tiangong-ai research project init <project-id> --question <question> [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
@@ -126,12 +145,17 @@ async function runWorkspace(argv: string[], io: CliIO): Promise<number> {
   if (action === "doctor") {
     const args = parseStrictArgs(
       rest,
-      { ...WORKSPACE_OPTIONS, "agent-smoke": "boolean" },
+      {
+        ...WORKSPACE_OPTIONS,
+        "agent-smoke": "boolean",
+        "capability-smoke": "boolean",
+      },
       "research workspace doctor",
     );
     rejectPositionals(args.positionals, "research workspace doctor");
     const result = await doctorResearchWorkspace(strictString(args, "workspace") ?? process.cwd(), {
       agentSmoke: strictBoolean(args, "agent-smoke"),
+      capabilitySmoke: strictBoolean(args, "capability-smoke"),
       environment: io.env,
     });
     writeJson(io, result, args);
@@ -143,6 +167,137 @@ async function runWorkspace(argv: string[], io: CliIO): Promise<number> {
 async function runCapability(argv: string[], io: CliIO): Promise<number> {
   const [action, ...rest] = argv;
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action === "credential") {
+    const [credentialAction, ...credentialRest] = rest;
+    if (credentialAction !== "set") {
+      throw unknownAction("research capability credential", credentialAction ?? "missing");
+    }
+    const args = parseStrictArgs(
+      credentialRest,
+      { ...WORKSPACE_OPTIONS, id: "string", "from-env": "string" },
+      "research capability credential set",
+    );
+    rejectPositionals(args.positionals, "research capability credential set");
+    const credentialId = strictString(args, "id");
+    const environmentName = strictString(args, "from-env");
+    if (!credentialId || !environmentName) {
+      throw new CliError("research capability credential set requires --id and --from-env.", {
+        code: "RESEARCH_CAPABILITY_CREDENTIAL_INVALID",
+        exitCode: 2,
+      });
+    }
+    const root = await workspaceFromArgs(args);
+    const result = await withWorkspaceLock(root, "capability.credential.set", async () => {
+      const declarations = await loadCapabilityDeclarations(root);
+      const value = await setCapabilityCredentialFromEnvironment({
+        root,
+        capabilities: declarations.capabilities,
+        credentialId,
+        environmentName,
+        environment: io.env,
+      });
+      await appendJournalEvent(
+        workspacePaths(root).journal,
+        "capability.credential.configured",
+        "workspace",
+        {
+          credentialId: value.credentialId,
+          sourceEnvironmentNameSha256: sha256Text(value.sourceEnvironmentName),
+          configuredCredentialIds: value.configuredCredentialIds,
+        },
+      );
+      return value;
+    });
+    writeJson(io, result, args);
+    return 0;
+  }
+  if (action === "catalog") {
+    const args = parseStrictArgs(
+      rest,
+      { ...WORKSPACE_OPTIONS, path: "string", "skill-root": "string" },
+      "research capability catalog",
+    );
+    rejectPositionals(args.positionals, "research capability catalog");
+    const workspaceArgument = strictString(args, "workspace");
+    const workspace = workspaceArgument ? await requireResearchWorkspace(workspaceArgument) : null;
+    const selectedPath = strictString(args, "path") ?? workspace ?? process.cwd();
+    const result = await inspectExternalSkillCatalog({
+      selectedPath,
+      workspace,
+      skillRoot: strictString(args, "skill-root") ?? null,
+    });
+    writeJson(io, result, args);
+    return 0;
+  }
+  if (action === "configure") {
+    const args = parseStrictArgs(
+      rest,
+      { ...WORKSPACE_OPTIONS, profile: "string", "skill-root": "string" },
+      "research capability configure",
+    );
+    rejectPositionals(args.positionals, "research capability configure");
+    const root = await workspaceFromArgs(args);
+    const result = await withWorkspaceLock(root, "capability.configure", async () => {
+      const value = await configureExternalSkillProfile({
+        workspace: root,
+        profile: strictString(args, "profile") ?? EXTERNAL_SKILL_PROFILE,
+        skillRoot: strictString(args, "skill-root") ?? null,
+      });
+      await appendJournalEvent(
+        workspacePaths(root).journal,
+        "capability.profile.configured",
+        "workspace",
+        {
+          profile: value.profile,
+          capabilities: value.configured.map((capability) => ({
+            id: capability.id,
+            treeSha256: capability.treeSha256,
+            requiredForDiscovery: capability.requiredForDiscovery,
+          })),
+        },
+      );
+      return value;
+    });
+    writeJson(io, result, args);
+    return 0;
+  }
+  if (action === "import") {
+    const args = parseStrictArgs(
+      rest,
+      { ...WORKSPACE_OPTIONS, definition: "string" },
+      "research capability import",
+    );
+    rejectPositionals(args.positionals, "research capability import");
+    const definitionPath = strictString(args, "definition");
+    if (!definitionPath) {
+      throw new CliError("research capability import requires --definition.", {
+        code: "RESEARCH_CAPABILITY_IMPORT_INVALID",
+        exitCode: 2,
+      });
+    }
+    const root = await workspaceFromArgs(args);
+    const result = await withWorkspaceLock(root, "capability.import", async () => {
+      const value = await importExternalCapability({ workspace: root, definitionPath });
+      await appendJournalEvent(workspacePaths(root).journal, "capability.imported", "workspace", {
+        ...value.imported,
+      });
+      return value;
+    });
+    writeJson(io, result, args);
+    return 0;
+  }
+  if (action === "doctor") {
+    const args = parseStrictArgs(
+      rest,
+      { ...WORKSPACE_OPTIONS, live: "boolean" },
+      "research capability doctor",
+    );
+    rejectPositionals(args.positionals, "research capability doctor");
+    const root = await workspaceFromArgs(args);
+    const result = await doctorExternalCapabilities(root, { live: strictBoolean(args, "live") });
+    writeJson(io, result, args);
+    return result.status === "ready" ? 0 : 3;
+  }
   if (action !== "lock" && action !== "verify") throw unknownAction("research capability", action);
   const args = parseStrictArgs(rest, WORKSPACE_OPTIONS, `research capability ${action}`);
   rejectPositionals(args.positionals, `research capability ${action}`);

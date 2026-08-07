@@ -16,8 +16,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-07
-lastReviewedCommit: bc5f73c8418605892b9905263347044c11d8a7a3
+lastReviewedAt: 2026-08-08
+lastReviewedCommit: c55eab450de73bed783c7417c43db20ef56c0c43
 ---
 
 # Repo Validation
@@ -93,4 +93,22 @@ target/wrapper/adapter fingerprinting and drift rejection, telemetry redaction,
 owner-only whitelisted Claude settings authentication, production doctor
 attestation, two-protocol-turn tool-free review with exact local/broker bounded views,
 persistent packet/context tamper rejection at closure, JSONL progress, and
-append-only retry/fork recovery.
+append-only retry/fork recovery. `test/research-external-skills.test.ts`
+validates the pinned external recommendation catalog, actionable missing-install
+errors, owner-environment credential configuration without disclosure, custom
+database Skill admission, whole-tree locks and staged manifests, static/live
+provider checks, bounded 429 retry, authentication/rate-limit redaction,
+source-to-installed-tree binding, refusal to bless drift through lock/configure/import,
+internal-source rejection, invalid-definition errors, sensitive health-URL
+rejection, and blocked catalog/doctor status for symlinked credential files.
+Production tests additionally require an external
+public-internet plan and block downstream work when any capability marked
+`requiredForDiscovery` lacks a broker receipt.
+
+Executor regression coverage also verifies that Codex receives exactly one
+external-sandbox bypass flag and no nested `--sandbox read-only` flag, while
+shell and unified-exec remain disabled. A deterministic fake Codex emits a
+90 KiB MCP result to prove the capture reservation includes bounded tool
+context instead of failing at the historical 64 KiB floor. Runtime tests verify
+that discovery has no filesystem tool policy and receives the exact locked
+manifest and staged top-level Skill documentation inline.

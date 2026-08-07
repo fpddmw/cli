@@ -1,4 +1,5 @@
 import { loadCapabilityDeclarations, verifyCapabilities } from "./capabilities.js";
+import { hasPublicInternetCapability } from "./external-skills.js";
 import { canonicalJson, sha256Text } from "./storage.js";
 import type {
   AgentPackageStage,
@@ -38,6 +39,7 @@ export async function evaluateProjectPreflight(
       accept: capability.http?.accept ?? null,
       maxResponseBytes: capability.http?.maxResponseBytes ?? null,
       maxItems: capability.http?.maxItems ?? null,
+      requiredForDiscovery: capability.requiredForDiscovery,
       coverage: capability.coverage,
     }));
   const packageTokens = config.budget.packageMaxTokens;
@@ -81,6 +83,9 @@ export async function evaluateProjectPreflight(
     gaps.push("independent-review-route-missing");
   }
   if (!networkCapabilities.length && !inputPlan) gaps.push("no-evidence-acquisition-plan");
+  if (config.mode === "production-research" && !hasPublicInternetCapability(capabilities)) {
+    gaps.push("production-public-internet-capability-missing");
+  }
   if (capabilityVerification.status !== "verified") {
     gaps.push("capability-lock-missing-or-drifted");
   }
@@ -151,6 +156,7 @@ export async function evaluateProjectPreflight(
       estimatedInputContextTokens,
       maxTurns.discover,
       config,
+      config.budget.maxBrokerContextTokens * maxTurns.discover,
     ),
     analyze: estimatedStageTokenReservation(
       config.producer,
@@ -271,6 +277,7 @@ function estimatedStageTokenReservation(
   embeddedContextTokens: number,
   primaryMaxTurns: number,
   config: WorkspaceConfig,
+  potentialToolContextTokens = 0,
 ): number {
   const protocolOverhead = RESEARCH_AGENT_PROTOCOL_OVERHEAD_TOKENS[route.agent];
   const primaryPromptAndSchemaAllowance = 4_000;
@@ -281,6 +288,7 @@ function estimatedStageTokenReservation(
     Math.ceil((RESEARCH_MAX_REPAIR_SOURCE_BYTES + 2_048) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN);
   return (
     primaryInput +
+    potentialToolContextTokens +
     config.budget.maxOutputTokens +
     repairInput * RESEARCH_REPAIR_MAX_TURNS +
     config.budget.maxRepairTokens
@@ -334,10 +342,12 @@ function appendEvidencePlanGaps(
     ...(inputPlan?.inputs.map((input) => input.sourceType) ?? []),
   ]);
   for (const dimension of requirements.dimensions) {
-    if (!dimensions.has(dimension)) gaps.push(`evidence-plan-dimension-uncovered:${dimension}`);
+    if (!dimensions.has("*") && !dimensions.has(dimension)) {
+      gaps.push(`evidence-plan-dimension-uncovered:${dimension}`);
+    }
   }
   for (const sourceType of requirements.sourceTypes) {
-    if (!sourceTypes.has(sourceType)) {
+    if (!sourceTypes.has("*") && !sourceTypes.has(sourceType)) {
       gaps.push(`evidence-plan-source-type-uncovered:${sourceType}`);
     }
   }

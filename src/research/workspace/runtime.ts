@@ -3,10 +3,15 @@ import { cp, lstat, readFile, rm } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 
 import { CliError } from "../../errors.js";
-import { stageLockedCapabilities, verifyCapabilities } from "./capabilities.js";
+import {
+  loadCapabilityDeclarations,
+  stageLockedCapabilities,
+  verifyCapabilities,
+} from "./capabilities.js";
 import { startCapabilityBroker, type CapabilityBroker } from "./broker.js";
 import { loadProjectEvidenceReceipts, stageProjectEvidence } from "./evidence.js";
 import { executeAgent, type AgentExecutionRequest } from "./executor.js";
+import { requiredDiscoveryCapabilityIds } from "./external-skills.js";
 import { renderInputLineContext } from "./input-plan.js";
 import { appendJournalEvent, verifyJournal } from "./journal.js";
 import {
@@ -255,7 +260,7 @@ async function executeWorkPackage(
       promotedOutputs = await outputRecords(root, project, workPackage.expectedOutputs);
     } else {
       const reservation = reservePackageBudget(project, workPackage, config);
-      const capsule = await createCapsule(root, project, workPackage, runId);
+      const capsule = await createCapsule(root, project, workPackage, runId, config);
       capsuleRoot = capsule.capsuleRoot;
       if (capsule.reviewPacketRecord) {
         await appendJournalEvent(
@@ -299,6 +304,7 @@ async function executeWorkPackage(
           workPackage,
           capsule.inputManifest,
           capsule.stagedSkills,
+          capsule.capabilityDocumentation,
           capsule.reviewPacketSha256,
           capsule.contextBundle,
           capsule.contextBundleContent,
@@ -566,6 +572,7 @@ interface Capsule {
   contextBundle: OutputRecord;
   contextBundleContent: string;
   stagedSkills: string[];
+  capabilityDocumentation: string;
   reviewPacketSha256: string | null;
   reviewPacketRecord: OutputRecord | null;
 }
@@ -587,6 +594,7 @@ async function createCapsule(
   project: ProjectState,
   workPackage: WorkPackage,
   runId: string,
+  config: WorkspaceConfig,
 ): Promise<Capsule> {
   const paths = workspacePaths(root);
   const capsuleRoot = join(paths.runtime, runId);
@@ -687,6 +695,11 @@ async function createCapsule(
     })),
   });
   const stagedSkills = await stageLockedCapabilities(root, join(capsuleProject, "skills"));
+  const capabilityDocumentation = await buildCapabilityDocumentation(
+    capsuleProject,
+    stagedSkills,
+    config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
+  );
   const reviewEvidenceContext =
     workPackage.stage === "review"
       ? await writeReviewEvidenceContext(
@@ -714,9 +727,41 @@ async function createCapsule(
     contextBundle,
     contextBundleContent,
     stagedSkills,
+    capabilityDocumentation,
     reviewPacketSha256: reviewPacket?.sha256 ?? null,
     reviewPacketRecord: reviewPacket?.record ?? null,
   };
+}
+
+async function buildCapabilityDocumentation(
+  capsuleProject: string,
+  stagedSkills: string[],
+  maxBytes: number,
+): Promise<string> {
+  const documents = [
+    {
+      path: "skills/manifest.json",
+      content: await readFile(join(capsuleProject, "skills", "manifest.json"), "utf8"),
+    },
+  ];
+  for (const skillPath of stagedSkills) {
+    documents.push({
+      path: `skills/${basename(skillPath)}/SKILL.md`,
+      content: await readFile(join(skillPath, "SKILL.md"), "utf8"),
+    });
+  }
+  const bundle = documents
+    .map((document) => `--- ${document.path} ---\n${document.content.trimEnd()}`)
+    .join("\n\n");
+  const bytes = Buffer.byteLength(bundle, "utf8");
+  if (bytes > maxBytes) {
+    throw new CliError("Staged external Skill documentation exceeds the input context budget.", {
+      code: "RESEARCH_CAPABILITY_CONTEXT_BUDGET_EXCEEDED",
+      exitCode: 3,
+      details: { bytes, maxBytes, skills: stagedSkills.map((path) => basename(path)) },
+    });
+  }
+  return bundle;
 }
 
 async function buildInputContextBundle(
@@ -1053,14 +1098,13 @@ function agentRequest(input: {
   maxWallSeconds?: number;
   expectedRuntime?: WorkspaceDoctorAttestation["runtimes"][number] | undefined;
 }): AgentExecutionRequest {
-  const toolPolicy =
-    input.purpose === "repair" ||
-    input.workPackage.stage === "analyze" ||
-    input.workPackage.stage === "synthesize" ||
-    input.workPackage.stage === "review" ||
-    (input.workPackage.stage === "discover" && input.brokerUrl === null)
-      ? "none"
-      : "workspace-read";
+  const toolPolicy = "none" as const;
+  const maxTurns =
+    input.purpose === "repair"
+      ? RESEARCH_REPAIR_MAX_TURNS
+      : input.brokerUrl
+        ? RESEARCH_BROKER_MAX_TURNS
+        : RESEARCH_STRUCTURED_OUTPUT_MAX_TURNS;
   return {
     route: input.route,
     prompt: input.prompt,
@@ -1081,13 +1125,11 @@ function agentRequest(input: {
       input.maxWallSeconds ??
         input.config.budget.packageMaxWallSeconds[input.workPackage.stage as AgentPackageStage],
     ),
-    maxTurns:
-      input.purpose === "repair"
-        ? RESEARCH_REPAIR_MAX_TURNS
-        : toolPolicy === "none"
-          ? RESEARCH_STRUCTURED_OUTPUT_MAX_TURNS
-          : RESEARCH_BROKER_MAX_TURNS,
+    maxTurns,
     maxOutputTokens: input.maxOutputTokens,
+    maxToolContextTokens: input.brokerUrl
+      ? input.config.budget.maxBrokerContextTokens * maxTurns
+      : 0,
     maxCostUsd: input.maxCostUsd,
     expectedRuntime: input.expectedRuntime,
     toolPolicy,
@@ -1442,6 +1484,17 @@ async function assertEvidenceCoverage(root: string, project: ProjectState): Prom
   const declared = value.coverage as Record<string, unknown>;
   const computed = computeEvidenceCoverage(project, sources, declared);
   const gaps = [...computed.mechanicalGaps];
+  const requiredCapabilities = requiredDiscoveryCapabilityIds(
+    await loadCapabilityDeclarations(root),
+  );
+  const exercisedCapabilities = new Set(
+    (await loadProjectEvidenceReceipts(root, project.id)).map((receipt) => receipt.capabilityId),
+  );
+  for (const capabilityId of requiredCapabilities) {
+    if (!exercisedCapabilities.has(capabilityId)) {
+      gaps.push(`required discovery capability was not exercised: ${capabilityId}`);
+    }
+  }
   if (
     canonicalJson(declared.dimensions) !== canonicalJson(computed.dimensions) ||
     canonicalJson(declared.sourceTypes) !== canonicalJson(computed.sourceTypes) ||
@@ -1647,6 +1700,7 @@ function packagePrompt(
   workPackage: WorkPackage,
   inputs: CapsuleInputRecord[],
   stagedSkills: string[],
+  capabilityDocumentation: string,
   reviewPacketSha256: string | null,
   contextBundle: OutputRecord,
   contextBundleContent: string,
@@ -1672,7 +1726,10 @@ function packagePrompt(
     `Bounded input context bundle: ${JSON.stringify(contextBundle)}`,
     `Staged capability directories: ${JSON.stringify(stagedSkills.map((path) => `skills/${basename(path)}`))}`,
     workPackage.stage === "discover"
-      ? "Keep broker inspection within the package budget and use bounded views."
+      ? "The exact capability manifest and each staged external SKILL.md are embedded below. Use this documentation directly; filesystem tools are disabled."
+      : "Capability files are provenance-bound but are not available as execution tools in this stage.",
+    workPackage.stage === "discover"
+      ? "Use the broker only. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. Translate its documented allowed GET endpoint into fetch_candidate_source with the manifest capability ID. The broker automatically selects a sole declared logical credential and disables caching for credentialed requests. The tool result includes the exact bounded context together with its receipt; use that inline context and its provenance fields. Exercise every manifest capability with requiredForDiscovery=true, or the mechanical coverage gate will stop downstream work."
       : "Use only the complete embedded stage context; no tools or additional source reads are allowed.",
     stageInstructions[workPackage.stage],
     "Do not write stage output files directly. Your final response must be only the JSON object required by the supplied output schema; the CLI will validate and atomically materialize it.",
@@ -1680,6 +1737,8 @@ function packagePrompt(
   ];
   if (workPackage.stage === "discover") {
     prompt.push(
+      "The complete external capability documentation bundle is embedded below:",
+      capabilityDocumentation,
       `Exact local-input provenance mappings: ${JSON.stringify(
         inputs.map((input) => ({ kind: "input", id: input.id, locator: input.path })),
       )}`,
@@ -1721,6 +1780,7 @@ function assertPreCallTokenReservation(
   const callInputTokensPerTurn =
     protocolOverhead + Math.ceil((schemaBytes + promptBytes) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN);
   const callInputTokens = callInputTokensPerTurn * request.maxTurns;
+  const potentialToolContextTokens = request.maxToolContextTokens ?? 0;
   const repairTokens = reserveRepair
     ? (protocolOverhead +
         Math.ceil(
@@ -1736,8 +1796,14 @@ function assertPreCallTokenReservation(
     estimatedCallInputTokensPerTurn: callInputTokensPerTurn,
     estimatedCallInputTokens: callInputTokens,
     outputTokens: request.maxOutputTokens,
+    potentialToolContextTokens,
     potentialRepairTokens: repairTokens,
-    totalTokens: alreadyUsedTokens + callInputTokens + request.maxOutputTokens + repairTokens,
+    totalTokens:
+      alreadyUsedTokens +
+      callInputTokens +
+      potentialToolContextTokens +
+      request.maxOutputTokens +
+      repairTokens,
   };
   const packageMaxTokens = config.budget.packageMaxTokens[workPackage.stage as AgentPackageStage];
   const projectRemainingTokens = Math.max(0, config.budget.maxTokens - project.usage.tokens);

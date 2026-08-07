@@ -73,7 +73,7 @@ export async function writeJsonAtomic(path: string, value: unknown, mode = 0o600
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode });
   await chmod(temporary, mode).catch(() => undefined);
-  await rename(temporary, path);
+  await replaceAtomicFile(temporary, path);
 }
 
 export async function writeTextAtomic(path: string, value: string, mode = 0o600): Promise<void> {
@@ -81,7 +81,41 @@ export async function writeTextAtomic(path: string, value: string, mode = 0o600)
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temporary, value, { encoding: "utf8", mode });
   await chmod(temporary, mode).catch(() => undefined);
-  await rename(temporary, path);
+  await replaceAtomicFile(temporary, path);
+}
+
+async function replaceAtomicFile(temporary: string, destination: string): Promise<void> {
+  let previousMode: number | undefined;
+  let destinationWasMadeWritable = false;
+  try {
+    const destinationInfo = await lstat(destination);
+    if (destinationInfo.isFile() && !destinationInfo.isSymbolicLink()) {
+      previousMode = destinationInfo.mode & 0o7777;
+      if ((previousMode & 0o200) === 0) {
+        // Windows refuses to replace a read-only destination even though POSIX
+        // rename(2) permits it. Change only the file metadata; the content
+        // replacement remains one atomic rename.
+        await chmod(destination, previousMode | 0o200);
+        destinationWasMadeWritable = true;
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  try {
+    await rename(temporary, destination);
+  } catch (error) {
+    if (destinationWasMadeWritable && previousMode !== undefined) {
+      await chmod(destination, previousMode).catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
 }
 
 export function canonicalJson(value: unknown): string {

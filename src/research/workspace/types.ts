@@ -81,9 +81,26 @@ export interface CapabilityCredentialDeclaration {
   prefix: string;
 }
 
+export interface CapabilitySourceDeclaration {
+  type: "git" | "registry" | "local";
+  locator: string;
+  immutableRef: string;
+  expectedTreeSha256: string;
+  license: string;
+  catalogId: string | null;
+}
+
+export interface CapabilityHealthCheckDeclaration {
+  url: string;
+  credentialId: string | null;
+  expectedContentTypes: string[];
+}
+
 export interface CapabilityDeclaration {
   id: string;
   skillPath: string;
+  source: CapabilitySourceDeclaration | null;
+  requiredForDiscovery: boolean;
   permissions: string[];
   allowedHosts: string[];
   http: {
@@ -95,10 +112,12 @@ export interface CapabilityDeclaration {
   coverage: {
     dimensions: string[];
     sourceTypes: string[];
+    discoveryScopes: string[];
     fullText: boolean;
     publicationDates: boolean;
   } | null;
   credentials: CapabilityCredentialDeclaration[];
+  healthCheck: CapabilityHealthCheckDeclaration | null;
 }
 
 export interface CapabilityDeclarations {
@@ -112,8 +131,12 @@ export interface CapabilityLockRecord {
   skillPath: string;
   treeSha256: string;
   policySha256: string;
+  source: CapabilitySourceDeclaration | null;
+  requiredForDiscovery: boolean;
   permissions: string[];
   credentialIds: string[];
+  discoveryScopes: string[];
+  healthTargetSha256: string | null;
 }
 
 export interface CapabilityLock {
@@ -339,6 +362,14 @@ export interface WorkspaceDoctorAttestation {
   capabilityLockSha256: string;
   doctorSchemaSha256: string;
   runtimes: AgentRuntimeFingerprint[];
+  capabilitySmoke: Array<{
+    id: string;
+    status: "pass" | "not-applicable";
+    code: string;
+    host: string | null;
+    targetSha256: string | null;
+    httpStatus: number | null;
+  }>;
   smokeUsage: Array<{
     agent: AgentKind;
     tokens: number;

@@ -16,6 +16,11 @@ export const ALLOWED_CAPABILITY_PERMISSIONS = new Set([
 export const WORKSPACE_OPERATIONS = [
   "research.context.inspect",
   "research.workspace.doctor",
+  "research.capability.catalog",
+  "research.capability.configure",
+  "research.capability.import",
+  "research.capability.doctor",
+  "research.capability.credential.set",
   "research.capability.lock",
   "research.capability.verify",
   "research.project.init",
@@ -30,6 +35,7 @@ export const WORKSPACE_OPERATIONS = [
 
 export const UNMANAGED_OPERATIONS = [
   "research.context.inspect",
+  "research.capability.catalog",
   "research.workspace.init",
 ] as const;
 

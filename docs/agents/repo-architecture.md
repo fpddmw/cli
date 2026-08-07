@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-07
-lastReviewedCommit: bc5f73c8418605892b9905263347044c11d8a7a3
+lastReviewedAt: 2026-08-08
+lastReviewedCommit: c55eab450de73bed783c7417c43db20ef56c0c43
 ---
 
 # Repo Architecture
@@ -47,11 +47,16 @@ storage writes, queueing, and document status transitions.
   workspace, capability, project, status, and run commands.
 - `src/research/workspace/**`: the versioned research workspace protocol. It
   owns context classification, immutable input admission, capability policy
-  locks, bounded local-input plans, a scoped HTTPS MCP broker,
+  locks, an external-only recommended Skill catalog, reproducible detached
+  source checkout/install plans, custom external capability admission,
+  owner-environment-to-logical-credential configuration, static/live provider
+  diagnostics, required-discovery receipt gates, bounded local-input plans, a
+  scoped HTTPS MCP broker with inline bounded result contexts,
   content-addressed permanent evidence, paged broker views/cache,
   schema-driven agent output and isolated repair, dedicated capsule homes,
   separately fingerprinted agent targets/wrappers/adapters, doctor
-  attestations, complete pre-call package reservations, classified retries,
+  attestations, complete pre-call package and tool-context reservations,
+  tool-context-aware process capture, classified retries,
   project-scoped scheduling/exit status, JSONL progress, recovery events,
   persistent review packets/bounded evidence contexts, tool-free independent
   review, and mechanical closure-time hash verification.
@@ -107,3 +112,24 @@ confirmation, and report CLI output. They do not duplicate the CLI's output
 schemas, coverage gate, workspace state transitions, capability admission,
 scheduling, sandboxing, budget enforcement, provenance, review, closure, batch
 logic, API request construction, retries, or checkpoint semantics.
+
+Research method implementations are external Skills. The CLI may recommend and
+content-lock reviewed external trees, but it does not install them during a
+research run and the Tiangong Skills repository is not an evidence-provider
+source. Brokered Skills document allowlisted GET APIs; credentials remain in an
+owner-only logical map and are injected only by the broker. A selected
+production profile must include an external public-internet capability, while
+owner-whitelisted databases are imported with explicit source identity, hosts,
+health checks, and discovery scope. Source commit/version and expected
+whole-tree SHA-256 must both match before locking; configure/import never
+re-locks an already drifting capability. The catalog also records reviewed but
+unselected upstream Skills and their admission or execution limitation so the
+recommendation boundary is explicit.
+
+The platform `sandbox-exec`/Bubblewrap capsule is the agent security boundary.
+Codex does not nest its own sandbox inside that capsule because nested macOS
+Seatbelt prevents reliable MCP execution. The adapter disables shell,
+unified-exec, filesystem, and undeclared integration tools for discovery, then
+embeds the locked capability manifest and each staged top-level `SKILL.md` in
+the prompt. The only discovery execution tool is the scoped broker. Later
+stages are tool-free and receive only bounded, hash-verified context.
