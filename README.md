@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-04
-lastReviewedCommit: 7429c2ab92509920a2728dc38685ad5c4f2c8f13
+lastReviewedAt: 2026-08-07
+lastReviewedCommit: bc5f73c8418605892b9905263347044c11d8a7a3
 ---
 
 # Tiangong AI CLI
@@ -26,10 +26,18 @@ Package: `@tiangong-ai/cli` Executable: `tiangong-ai` Node: `>=24`
 npm install
 npm run build
 node ./bin/tiangong-ai.js --help
+node ./bin/tiangong-ai.js --version
 ```
 
 Use Node `24.x`; this package declares `>=24 <25` and includes `.nvmrc` for
 compatible version managers.
+
+After installation, print the package version with either top-level flag:
+
+```bash
+tiangong-ai --version
+tiangong-ai -v
+```
 
 ## KB Ingest
 
