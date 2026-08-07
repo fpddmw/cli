@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { loadCapabilityDeclarations, verifyCapabilities } from "./capabilities.js";
+import { loadCapabilityCredentialMap } from "./credentials.js";
 import {
   loadBrokerEvidenceCache,
   persistBrokerEvidence,
@@ -51,7 +52,7 @@ export async function startCapabilityBroker(
       details: verification,
     });
   }
-  const credentialMap = await loadCredentialMap(root, declarations.capabilities);
+  const credentialMap = await loadCapabilityCredentialMap(root, declarations.capabilities);
   const config = await loadWorkspaceConfig(root);
   const routeToken = randomUUID().replaceAll("-", "");
   const route = `/mcp/${routeToken}`;
@@ -136,12 +137,20 @@ async function handleMcpRequest(input: {
               required: ["capability_id", "url"],
               properties: {
                 capability_id: { type: "string" },
-                credential_id: { type: "string" },
+                credential_id: {
+                  type: "string",
+                  description:
+                    "Logical credential ID. It is selected automatically when the capability declares exactly one credential.",
+                },
                 url: { type: "string" },
                 json_pointer: { type: "string" },
                 item_offset: { type: "integer", minimum: 0 },
                 max_items: { type: "integer", minimum: 1 },
-                cache_mode: { enum: ["prefer", "bypass"] },
+                cache_mode: {
+                  enum: ["prefer", "bypass"],
+                  description:
+                    "Defaults to bypass for credentialed requests and prefer for public requests. Credentialed responses are never cached.",
+                },
               },
             },
           },
@@ -216,7 +225,7 @@ async function fetchCandidateSource(input: {
   const jsonPointer = input.arguments.json_pointer;
   const requestedItemOffset = input.arguments.item_offset ?? 0;
   const requestedMaxItems = input.arguments.max_items;
-  const cacheMode = input.arguments.cache_mode ?? "prefer";
+  const requestedCacheMode = input.arguments.cache_mode;
   if (typeof capabilityId !== "string" || typeof rawUrl !== "string") {
     throw new Error("capability_id and url are required strings");
   }
@@ -244,7 +253,11 @@ async function fetchCandidateSource(input: {
   ) {
     throw new Error("max_items must be a positive integer when provided");
   }
-  if (cacheMode !== "prefer" && cacheMode !== "bypass") {
+  if (
+    requestedCacheMode !== undefined &&
+    requestedCacheMode !== "prefer" &&
+    requestedCacheMode !== "bypass"
+  ) {
     throw new Error('cache_mode must be "prefer" or "bypass"');
   }
   const capability = input.capabilities.find((candidate) => candidate.id === capabilityId);
@@ -254,10 +267,17 @@ async function fetchCandidateSource(input: {
   if (!capability.http) throw new Error(`capability has no broker HTTP policy: ${capabilityId}`);
   const credential = credentialId
     ? capability.credentials.find((candidate) => candidate.id === credentialId)
-    : undefined;
+    : capability.credentials.length === 1
+      ? capability.credentials[0]
+      : undefined;
   if (credentialId && !credential) {
     throw new Error(`credential is not declared by capability ${capabilityId}: ${credentialId}`);
   }
+  if (!credentialId && capability.credentials.length > 1) {
+    throw new Error(`credential_id is required by capability ${capabilityId}`);
+  }
+  const effectiveCredentialId = credential?.id ?? null;
+  const cacheMode = requestedCacheMode ?? (credential ? "bypass" : "prefer");
   if (credential && cacheMode === "prefer") {
     throw new Error("credentialed broker requests require cache_mode=bypass");
   }
@@ -284,7 +304,7 @@ async function fetchCandidateSource(input: {
       attemptId,
       projectId: input.projectId,
       capabilityId,
-      credentialId: credentialId ?? null,
+      credentialId: effectiveCredentialId,
       targetSha256: sha256Text(target.toString()),
       cacheMode,
       cacheKeySha256,
@@ -328,7 +348,7 @@ async function fetchCandidateSource(input: {
         );
         await stageContextObject(input.capsuleProject, receipt.contextLocator, context.bytes);
         await appendCompletedReceipt(input.root, input.projectId, receipt, cacheKeySha256);
-        return { ...receipt };
+        return brokerToolResult(receipt, context.bytes, cached.contentType);
       }
     }
     const headers = new Headers({ Accept: capability.http.accept });
@@ -395,7 +415,7 @@ async function fetchCandidateSource(input: {
         attemptId,
         projectId: input.projectId,
         capabilityId,
-        credentialId: credentialId ?? null,
+        credentialId: effectiveCredentialId,
         status: response.status,
         contentType,
         sourceSha256: sha256Text(finalUrl.toString()),
@@ -413,7 +433,7 @@ async function fetchCandidateSource(input: {
     await stageContextObject(input.capsuleProject, receipt.contextLocator, context.bytes);
     if (!credential) await storeBrokerEvidenceCache(input.root, cacheKeySha256, receipt);
     await appendCompletedReceipt(input.root, input.projectId, receipt, cacheKeySha256);
-    return { ...receipt };
+    return brokerToolResult(receipt, context.bytes, contentType);
   } catch (error) {
     const safeDetails =
       error instanceof CliError && isObject(error.details)
@@ -426,7 +446,7 @@ async function fetchCandidateSource(input: {
       {
         attemptId,
         capabilityId,
-        credentialId: credentialId ?? null,
+        credentialId: effectiveCredentialId,
         error: bounded(
           sanitizeResearchText(error instanceof Error ? error.message : String(error), [
             ...input.credentialMap.values(),
@@ -439,6 +459,21 @@ async function fetchCandidateSource(input: {
     );
     throw error;
   }
+}
+
+function brokerToolResult(
+  receipt: object,
+  context: Buffer,
+  contentType: string,
+): Record<string, unknown> {
+  const inline = contentType.includes("json") || contentType.startsWith("text/");
+  return {
+    ...Object.fromEntries(Object.entries(receipt)),
+    boundedContext: {
+      encoding: inline ? "utf8" : "not-inlined",
+      text: inline ? context.toString("utf8") : null,
+    },
+  };
 }
 
 function assertNoSensitiveResponseMaterial(bytes: Buffer, contentType: string): void {
@@ -522,42 +557,6 @@ async function appendCompletedReceipt(
     cacheHit: receipt.cacheHit,
     cacheKeySha256,
   });
-}
-
-async function loadCredentialMap(
-  root: string,
-  capabilities: CapabilityDeclaration[],
-): Promise<Map<string, string>> {
-  const path = workspacePaths(root).env;
-  if (!(await pathExists(path))) return new Map();
-  const content = await readFile(path, "utf8");
-  const configured = new Map<string, string>();
-  let foundConfiguration = false;
-  const declared = new Set(
-    capabilities.flatMap((capability) => capability.credentials.map((credential) => credential.id)),
-  );
-  for (const sourceLine of content.split(/\r?\n/)) {
-    const line = sourceLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const equals = line.indexOf("=");
-    const key = equals > 0 ? line.slice(0, equals).trim() : "";
-    if (key !== "TIANGONG_RESEARCH_CAPABILITY_CREDENTIALS_JSON") {
-      throw new Error(`unsupported research environment key: ${key || "missing"}`);
-    }
-    if (foundConfiguration) throw new Error("research credential configuration is duplicated");
-    foundConfiguration = true;
-    const value = JSON.parse(line.slice(equals + 1).trim() || "{}") as unknown;
-    if (!isObject(value)) throw new Error("capability credentials must be a JSON object");
-    for (const [credentialId, credentialValue] of Object.entries(value)) {
-      if (!declared.has(credentialId))
-        throw new Error(`credential is not declared: ${credentialId}`);
-      if (typeof credentialValue !== "string" || Buffer.byteLength(credentialValue, "utf8") < 8) {
-        throw new Error(`credential value is invalid: ${credentialId}`);
-      }
-      configured.set(credentialId, credentialValue);
-    }
-  }
-  return configured;
 }
 
 async function fetchWithRedirectPolicy(

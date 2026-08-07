@@ -34,6 +34,7 @@ import type {
 const MAX_CAPTURE_BYTES = 5 * 1024 * 1024;
 const MIN_CAPTURE_BYTES = 64 * 1024;
 const BYTES_PER_OUTPUT_TOKEN = 16;
+const BYTES_PER_TOOL_CONTEXT_TOKEN = 3;
 const EXECUTOR_WRAPPER_PATH = fileURLToPath(import.meta.url);
 const WRAPPER_TARGET_ENV = "TIANGONG_RESEARCH_AGENT_BINARY";
 const CODEX_DISABLED_FEATURES = [
@@ -84,6 +85,7 @@ export interface AgentExecutionRequest {
   timeoutSeconds: number;
   maxTurns: number;
   maxOutputTokens: number;
+  maxToolContextTokens?: number;
   maxCostUsd: number;
   expectedRuntime?: AgentRuntimeFingerprint | undefined;
   toolPolicy?: "none" | "workspace-read";
@@ -166,7 +168,11 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
       timeoutMs: request.timeoutSeconds * 1000,
       maxCaptureBytes: Math.min(
         MAX_CAPTURE_BYTES,
-        Math.max(MIN_CAPTURE_BYTES, request.maxOutputTokens * BYTES_PER_OUTPUT_TOKEN),
+        Math.max(
+          MIN_CAPTURE_BYTES,
+          request.maxOutputTokens * BYTES_PER_OUTPUT_TOKEN +
+            (request.maxToolContextTokens ?? 0) * BYTES_PER_TOOL_CONTEXT_TOKEN,
+        ),
       ),
     });
   } catch (error) {
@@ -248,8 +254,10 @@ async function buildInvocation(
       "--ephemeral",
       "--color",
       "never",
-      "--sandbox",
-      "read-only",
+      // The process is already confined by sandbox-exec/Bubblewrap below. A nested Codex
+      // sandbox fails on macOS and can cancel MCP calls; this flag is intended for an
+      // externally sandboxed automation boundary.
+      "--dangerously-bypass-approvals-and-sandbox",
       "-c",
       'web_search="disabled"',
       "--output-schema",

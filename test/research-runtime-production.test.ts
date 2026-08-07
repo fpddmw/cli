@@ -30,7 +30,11 @@ import {
   retryProjectPackage,
 } from "../src/research/workspace/projects.js";
 import { runResearchWorkspace, type PackageExecutor } from "../src/research/workspace/runtime.js";
-import { regularTreeFiles, workspacePaths } from "../src/research/workspace/storage.js";
+import {
+  hashRegularTree,
+  regularTreeFiles,
+  workspacePaths,
+} from "../src/research/workspace/storage.js";
 import type { ExecutionResult } from "../src/research/workspace/types.js";
 import {
   doctorResearchWorkspace,
@@ -871,6 +875,59 @@ describe("production research control plane", () => {
     }
   });
 
+  it("blocks downstream work when a required external discovery Skill was not exercised", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await installNetworkCapability(root, skillParent);
+      const declarations = JSON.parse(
+        await readFile(workspacePaths(root).capabilityDeclarations, "utf8"),
+      ) as {
+        capabilities: Array<{ requiredForDiscovery?: boolean }>;
+      };
+      declarations.capabilities[0]!.requiredForDiscovery = true;
+      await writeFile(
+        workspacePaths(root).capabilityDeclarations,
+        `${JSON.stringify(declarations, null, 2)}\n`,
+      );
+      await lockCapabilities(root);
+      await initializeProject(
+        root,
+        "required-external-skill",
+        "What does the external and local evidence jointly establish?",
+      );
+      const input = join(root, "input.txt");
+      await writeFile(input, "Local evidence cannot substitute for a required external search.\n");
+      await addProjectInput(root, "required-external-skill", input, "primary");
+      let calls = 0;
+      const result = await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 5, dryRun: false, environment: {} },
+        async (request) => {
+          calls += 1;
+          assert.match(request.prompt, /requiredForDiscovery=true/);
+          assert.match(request.prompt, /skills\/manifest\.json/);
+          return deterministicExecutor()(request);
+        },
+      );
+      assert.equal(result.status, "blocked");
+      assert.equal(calls, 1);
+      const project = await loadProject(root, "required-external-skill");
+      assert.equal(project.packages[0]?.lastFailureKind, "configuration");
+      assert.match(
+        project.packages[0]?.lastError ?? "",
+        /was not exercised: method\.public-source/,
+      );
+      assert.equal(project.packages[1]?.status, "pending");
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("normalizes derived coverage fields while preserving usable partial coverage", async () => {
     const root = await temporaryDirectory();
     try {
@@ -1061,8 +1118,10 @@ describe("production research control plane", () => {
 
   it("requires production preflight inputs and an explicit real sandbox smoke", async () => {
     const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
     try {
       await initializeResearchWorkspace(root, undefined, "production-research");
+      await installNetworkCapability(root, skillParent);
       const paths = workspacePaths(root);
       const config = JSON.parse(await readFile(paths.config, "utf8")) as {
         producer: { model: string | null; pricing?: Record<string, number> };
@@ -1108,6 +1167,12 @@ describe("production research control plane", () => {
       const smokeRequests: AgentExecutionRequest[] = [];
       const withSmoke = await doctorResearchWorkspace(root, {
         agentSmoke: true,
+        capabilitySmoke: true,
+        capabilityFetcher: async () =>
+          new Response('{"status":"ok"}', {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
         environment: {},
         executor: async (request) => {
           smokeRequests.push(request);
@@ -1137,7 +1202,10 @@ describe("production research control plane", () => {
       await writeFile(paths.config, `${JSON.stringify(driftedConfig, null, 2)}\n`);
       assert.equal((await verifyDoctorAttestation(root)).status, "drifted");
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
     }
   });
 
@@ -1297,6 +1365,7 @@ async function installNetworkCapability(
     join(skillPath, "SKILL.md"),
     "---\nname: public-source-fetch\ndescription: Fetch bounded public evidence.\n---\n\n# Fetch\n",
   );
+  const expectedTreeSha256 = await hashRegularTree(skillPath);
   await writeFile(
     workspacePaths(root).capabilityDeclarations,
     `${JSON.stringify(
@@ -1306,16 +1375,30 @@ async function installNetworkCapability(
           {
             id: "method.public-source",
             skillPath,
+            source: {
+              type: "git",
+              locator: "https://github.com/example/public-source-skill.git",
+              immutableRef: "a".repeat(40),
+              expectedTreeSha256,
+              license: "MIT",
+              catalogId: null,
+            },
             permissions: ["project-read", "candidate-write", "brokered-network"],
             allowedHosts: ["source.test"],
             http,
             coverage: {
-              dimensions: ["research-question"],
-              sourceTypes: ["primary"],
+              dimensions: ["*"],
+              sourceTypes: ["*"],
+              discoveryScopes: ["public-internet"],
               fullText: true,
               publicationDates: true,
             },
             credentials: [],
+            healthCheck: {
+              url: "https://source.test/health?query=connectivity",
+              credentialId: null,
+              expectedContentTypes: ["application/json"],
+            },
           },
         ],
       },
@@ -1330,6 +1413,9 @@ function brokerBackedExecutor(onReview: () => void): PackageExecutor {
   return async (request) => {
     const stage = stageFrom(request);
     if (stage === "discover") {
+      assert.equal(request.toolPolicy, "none");
+      assert.match(request.prompt, /complete external capability documentation bundle/i);
+      assert.match(request.prompt, /name: public-source-fetch/);
       const [receipt] = JSON.parse(
         await readFile(join(request.projectRoot, "inputs", "evidence-receipts.json"), "utf8"),
       ) as Array<Record<string, unknown>>;

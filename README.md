@@ -203,6 +203,18 @@ file, and budget confirmation when `maxCostUsd` exceeds
 ```bash
 tiangong-ai research workspace init /absolute/path/to/workspace \
   --mode production-research
+tiangong-ai research capability catalog \
+  --path /absolute/path/to/workspace \
+  --workspace /absolute/path/to/workspace --json
+# Run the returned pinned project installation plan outside the research runtime.
+tiangong-ai research capability configure \
+  --profile internet-research \
+  --workspace /absolute/path/to/workspace --json
+tiangong-ai research capability credential set \
+  --id brave.search.api-key --from-env BRAVE_SEARCH_API_KEY \
+  --workspace /absolute/path/to/workspace --json
+tiangong-ai research capability doctor --live \
+  --workspace /absolute/path/to/workspace --json
 tiangong-ai research project preflight \
   --workspace /absolute/path/to/workspace \
   --question "How do advanced GPU process nodes change environmental resource burdens?" \
@@ -213,6 +225,27 @@ tiangong-ai research project init gpu-resource-impact \
   --requirements /absolute/path/to/evidence-requirements.json \
   --confirm-budget --json
 ```
+
+Production admission requires at least one locked external capability with
+`brokered-network` and `discoveryScopes: ["public-internet"]`; an input plan or
+local files alone cannot represent internet coverage. The machine-readable
+catalog contains only external Skills and reports every required, enhanced,
+and conditional recommendation; exact source commit and whole-tree hash; a
+pinned installer version and checkout/install plan; credential requirements;
+and installed, configured, locked, and live provider status. Installation is
+never performed by the research runtime. It also reports the other Skills
+evaluated from the pinned upstream package and why each is not selected:
+custom question-specific admission, query assistance without evidence, or an
+execution model that the bounded GET broker does not authorize.
+
+The default `internet-research` profile selects Brave Web Search and News
+Search. `internet-research-with-context` additionally selects the
+subscription-dependent LLM Context endpoint, while
+`internet-research-with-media` also selects image and video discovery. A
+provider-plan or authentication failure blocks the selected profile instead of
+silently dropping a Skill. `credential set` reads the value only from the
+explicit owner environment name and stores it under the declared logical ID;
+the value is never returned or journaled.
 
 The requirements object declares `dimensions`, `sourceTypes`, `minSources`,
 `minFullTextSources`, `minDatedSources`, and optional inclusive
@@ -234,7 +267,11 @@ routes use the same agent family.
 
 Research execution requires `/usr/bin/sandbox-exec` on macOS or Bubblewrap
 (`bwrap`) on Linux. Windows can inspect and configure workspaces but does not
-execute research packages.
+execute research packages. That outer platform sandbox is the execution
+boundary. Codex is therefore started with its nested sandbox disabled: nesting
+Seatbelt on macOS can cancel MCP calls even though the process is already
+confined. Shell and unified-exec tools remain disabled, as do undeclared Codex
+integrations.
 
 Add immutable local evidence, verify the workspace, and execute ready work:
 
@@ -245,7 +282,7 @@ tiangong-ai research project input add gpu-resource-impact \
   --role primary
 tiangong-ai research workspace doctor --workspace /absolute/path/to/workspace
 tiangong-ai research workspace doctor --workspace /absolute/path/to/workspace \
-  --agent-smoke
+  --agent-smoke --capability-smoke
 tiangong-ai research run --workspace /absolute/path/to/workspace \
   --project gpu-resource-impact --progress-jsonl
 tiangong-ai research status --workspace /absolute/path/to/workspace --json
@@ -287,9 +324,15 @@ facts.
 Total, per-package, output, repair, broker-response bytes, estimated broker
 context tokens, context items, wall-time, output-count, output-size, and attempt
 limits live in `.tiangong-research/config.json`.
+New workspaces reserve 500,000 total tokens by default, including 200,000 for
+discovery; the remaining package defaults are 55,000 for analysis, 60,000 for
+synthesis, and 120,000 for review. These are admission ceilings rather than a
+target spend and can be lowered only when the resulting pre-call reservations
+still fit.
 Before an agent starts, the runtime reserves the package token and conservative
 price budget. The call-level check accounts for prompt and schema bytes at
 three bytes per token, repeats input allowance for every permitted API turn,
+adds the maximum bounded broker context for every permitted discovery turn,
 and adds primary output plus a potential isolated repair's input and output;
 insufficient package or remaining project budget prevents invocation. The
 provider cost cap is the current package reservation, not the remaining
@@ -300,7 +343,9 @@ schema tool, uses one plain-JSON turn, and remains subject to the CLI schema and
 semantic validators. Current Codex and Claude CLI adapters report
 output usage only after execution, so preflight identifies
 `outputTokenLimitEnforcement` as `post-execution`; captured bytes provide a
-separate process bound, and over-limit output fails without promotion.
+separate process bound. Discovery capture allowance includes the bounded MCP
+tool contexts as well as the requested model output, and over-limit output fails
+without promotion.
 Preflight also reports per-stage `maxTurns` and `turnLimitEnforcement`: Claude
 receives a provider-side turn cap, while the current Codex CLI exposes no such
 flag, so its turn allowance is reservation guidance plus post-execution
@@ -323,7 +368,12 @@ context, broker objects, and registered local input hashes before recording
 their safe locators. Capsule deletion therefore does not delete the durable
 review chain.
 
-Discovery alone may use the capability broker and workspace-read tools.
+Discovery receives only the capability broker as an execution tool. The CLI
+embeds the exact staged capability manifest and each external Skill's top-level
+`SKILL.md` in the prompt, so the producer does not need filesystem or shell
+access and cannot execute provider examples directly. Broker responses include
+the exact bounded context inline with the hash-bound receipt; raw objects remain
+in the permanent evidence store for audit.
 Analyze and synthesize receive bounded, hash-verified prior-stage artifacts in
 their prompt with tools disabled. Review is also tool-free and limited to the
 two turns required by the structured-output protocol:
@@ -337,8 +387,31 @@ dimension is usable but incomplete; a missing dimension or unmet declared
 minimum blocks downstream work. Qualitative gaps remain visible without
 silently changing those mechanical fields.
 
-Method skills are declared in `.tiangong-research/capabilities.json` with
-absolute skill paths and explicit permissions, then frozen before execution:
+Method Skills are external to this project. Recommended evidence Skills are
+selected through `research capability configure`; an owner-selected database,
+domain index, or other external method is admitted from an absolute reviewed
+definition:
+
+```bash
+tiangong-ai research capability import \
+  --definition /absolute/path/to/external-capability.json \
+  --workspace /absolute/path/to/workspace --json
+```
+
+`research capability catalog --json` returns the authoritative custom
+definition template. Its source must identify an external git, registry, or
+local artifact with an immutable reference, explicit `expectedTreeSha256`, and
+license. Git references must be full 40-character commits; registry references
+must be exact versions; local references must equal
+`sha256:<expectedTreeSha256>`. Every source type must match the installed whole
+tree before a lock can be written. Skill trees reject symlinks and excessive
+file counts/sizes. Project-owned Tiangong Skills are rejected as imported
+evidence providers. Configure/import refuses to rewrite the lock if any
+existing capability has drifted; restore it or explicitly update its source
+identity and expected hash first.
+
+External Skills use absolute paths and explicit permissions, then freeze
+before execution:
 
 ```bash
 tiangong-ai research capability lock --workspace /absolute/path/to/workspace
@@ -349,7 +422,14 @@ A capability using `brokered-network` must declare exact `allowedHosts` and may
 declare an `http` policy with one exact `accept` value,
 `allowedContentTypes`, `maxResponseBytes`, and `maxItems`. Its optional
 `coverage` block declares dimensions, source types, full-text availability,
-and publication-date availability for the preflight gap report.
+publication-date availability, and named discovery scopes for the preflight gap
+report. Mark `requiredForDiscovery: true` for every public index or
+owner-whitelisted database the question must exercise. Downstream work is
+blocked unless each such capability produces its own verified broker receipt;
+another local file cannot substitute for it. The current evidence broker
+authorizes bounded GET endpoints only. A non-network external method-guidance
+Skill stages reviewed instructions but does not grant an undeclared tool or
+service call.
 Optional credentials declare logical IDs, exact host scopes, header names, and
 prefixes. Put only the logical value map in `.tiangong-research/.env`:
 
@@ -357,9 +437,21 @@ prefixes. Put only the logical value map in `.tiangong-research/.env`:
 TIANGONG_RESEARCH_CAPABILITY_CREDENTIALS_JSON={"source.example.api":"owner-provided-value"}
 ```
 
+Prefer the non-echoing configuration command over hand editing:
+
+```bash
+tiangong-ai research capability credential set \
+  --id source.example.api --from-env OWNER_DATABASE_API_KEY \
+  --workspace /absolute/path/to/workspace --json
+```
+
 The broker injects declared credentials only for admitted HTTPS hosts. Agent
 processes do not receive this variable. Keep the file owner-only (`chmod 600`)
-and use `research workspace doctor` before a run. The broker preserves a
+and run `research capability doctor --live` plus production
+`research workspace doctor --agent-smoke --capability-smoke` before a run.
+Capability doctor retries only one 429 response with bounded `Retry-After`
+backoff; deterministic 4xx, missing subscription, authentication, drift, and
+content-type failures stop explicitly. The broker preserves a
 sanitized non-2xx excerpt, safe request ID, and `Retry-After`; it supports JSON
 Pointer extraction, bounded item and estimated-token views, and an explicit
 public-response cache. For a JSON collection, use the returned

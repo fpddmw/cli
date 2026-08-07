@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { lstat, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { CliError } from "../../errors.js";
@@ -22,11 +22,19 @@ import type {
   CapabilityLockRecord,
 } from "./types.js";
 
+const MAX_CAPABILITY_FILES = 512;
+const MAX_CAPABILITY_BYTES = 32 * 1024 * 1024;
+const MAX_CAPABILITY_FILE_BYTES = 8 * 1024 * 1024;
+
 export async function loadCapabilityDeclarations(root: string): Promise<CapabilityDeclarations> {
   const value = await readJsonFile<unknown>(
     workspacePaths(root).capabilityDeclarations,
     "Research capability declarations",
   );
+  return parseCapabilityDeclarations(value);
+}
+
+export function parseCapabilityDeclarations(value: unknown): CapabilityDeclarations {
   if (!isObject(value) || value.schemaVersion !== 1 || !Array.isArray(value.capabilities)) {
     throw new CliError("Research capability declarations have an unsupported shape.", {
       code: "RESEARCH_CAPABILITY_INVALID",
@@ -38,15 +46,20 @@ export async function loadCapabilityDeclarations(root: string): Promise<Capabili
     capabilities.map((item) => item.id),
     "capability ID",
   );
-  assertUnique(
-    capabilities.flatMap((item) => item.credentials.map((credential) => credential.id)),
-    "credential ID",
-  );
+  assertConsistentCredentials(capabilities);
   return { schemaVersion: 1, capabilities };
 }
 
 export async function lockCapabilities(root: string): Promise<CapabilityLock> {
   const declarations = await loadCapabilityDeclarations(root);
+  const lock = await buildCapabilityLock(declarations);
+  await writeJsonAtomic(workspacePaths(root).capabilityLock, lock, 0o444);
+  return lock;
+}
+
+export async function buildCapabilityLock(
+  declarations: CapabilityDeclarations,
+): Promise<CapabilityLock> {
   const records = await Promise.all(
     declarations.capabilities.map(async (declaration) => lockCapability(declaration)),
   );
@@ -60,7 +73,6 @@ export async function lockCapabilities(root: string): Promise<CapabilityLock> {
     generatedAt: new Date().toISOString(),
     capabilities: records,
   };
-  await writeJsonAtomic(workspacePaths(root).capabilityLock, lock, 0o444);
   return lock;
 }
 
@@ -115,7 +127,14 @@ export async function stageLockedCapabilities(
   destination: string,
 ): Promise<string[]> {
   const declarations = await loadCapabilityDeclarations(root);
-  if (declarations.capabilities.length === 0) return [];
+  await ensureDirectory(destination);
+  if (declarations.capabilities.length === 0) {
+    await writeJsonAtomic(join(destination, "manifest.json"), {
+      schemaVersion: 1,
+      capabilities: [],
+    });
+    return [];
+  }
   const verification = await verifyCapabilities(root);
   if (verification.status !== "verified") {
     throw new CliError("Research capabilities must be locked and verified before execution.", {
@@ -134,6 +153,27 @@ export async function stageLockedCapabilities(
     await copyRegularTree(record.skillPath, target);
     staged.push(target);
   }
+  const byId = new Map(declarations.capabilities.map((capability) => [capability.id, capability]));
+  await writeJsonAtomic(join(destination, "manifest.json"), {
+    schemaVersion: 1,
+    capabilities: lock.capabilities.map((record) => {
+      const declaration = byId.get(record.id)!;
+      return {
+        id: record.id,
+        skillName: record.skillName,
+        path: `skills/${record.skillName}`,
+        treeSha256: record.treeSha256,
+        policySha256: record.policySha256,
+        catalogId: declaration.source?.catalogId ?? null,
+        requiredForDiscovery: declaration.requiredForDiscovery,
+        permissions: record.permissions,
+        allowedHosts: declaration.allowedHosts,
+        http: declaration.http,
+        coverage: declaration.coverage,
+        credentialIds: record.credentialIds,
+      };
+    }),
+  });
   return staged;
 }
 
@@ -168,14 +208,37 @@ async function lockCapability(declaration: CapabilityDeclaration): Promise<Capab
       exitCode: 2,
     });
   }
+  const treeSha256 = await hashCapabilityTree(skillPath);
+  if (declaration.source && declaration.source.expectedTreeSha256 !== treeSha256) {
+    throw new CliError(`Capability source tree hash does not match installed bytes: ${skillPath}`, {
+      code: "RESEARCH_CAPABILITY_INVALID",
+      exitCode: 2,
+    });
+  }
+  if (
+    declaration.source?.type === "local" &&
+    declaration.source.immutableRef !== `sha256:${treeSha256}`
+  ) {
+    throw new CliError(
+      `Local capability source hash does not match installed bytes: ${skillPath}`,
+      {
+        code: "RESEARCH_CAPABILITY_INVALID",
+        exitCode: 2,
+      },
+    );
+  }
   return {
     id: declaration.id,
     skillName,
     skillPath,
-    treeSha256: await hashRegularTree(skillPath),
+    treeSha256,
     policySha256: policyHash(declaration),
+    source: declaration.source,
+    requiredForDiscovery: declaration.requiredForDiscovery,
     permissions: [...declaration.permissions].sort(),
     credentialIds: declaration.credentials.map((item) => item.id).sort(),
+    discoveryScopes: declaration.coverage?.discoveryScopes ?? [],
+    healthTargetSha256: declaration.healthCheck ? hashText(declaration.healthCheck.url) : null,
   };
 }
 
@@ -183,11 +246,14 @@ function parseCapability(value: unknown, index: number): CapabilityDeclaration {
   if (!isObject(value)) invalid(index, "must be an object");
   const id = value.id;
   const skillPath = value.skillPath;
+  const source = value.source;
+  const requiredForDiscovery = value.requiredForDiscovery ?? false;
   const permissions = value.permissions;
   const allowedHosts = value.allowedHosts ?? [];
   const http = value.http;
   const coverage = value.coverage;
   const credentials = value.credentials ?? [];
+  const healthCheck = value.healthCheck;
   if (typeof id !== "string" || !/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(id)) {
     invalid(index, "id must be a namespaced logical identifier");
   }
@@ -211,6 +277,12 @@ function parseCapability(value: unknown, index: number): CapabilityDeclaration {
     ...new Set(allowedHosts.map((host) => normalizeAllowedHost(host, index))),
   ].sort();
   const brokeredNetwork = permissions.includes("brokered-network");
+  if (typeof requiredForDiscovery !== "boolean") {
+    invalid(index, "requiredForDiscovery must be a boolean");
+  }
+  if (requiredForDiscovery && !brokeredNetwork) {
+    invalid(index, "cannot require discovery without brokered-network");
+  }
   if (brokeredNetwork && parsedAllowedHosts.length === 0) {
     invalid(index, "must declare allowedHosts for brokered-network");
   }
@@ -254,14 +326,25 @@ function parseCapability(value: unknown, index: number): CapabilityDeclaration {
     parsedCredentials.map((item) => item.id),
     `credential ID in ${id}`,
   );
+  const parsedHealthCheck = parseHealthCheck(
+    healthCheck,
+    index,
+    brokeredNetwork,
+    parsedAllowedHosts,
+    parsedHttp,
+    parsedCredentials.map((credential) => credential.id),
+  );
   return {
     id,
     skillPath,
+    source: parseSource(source, index),
+    requiredForDiscovery,
     permissions: [...new Set(permissions)],
     allowedHosts: parsedAllowedHosts,
     http: parsedHttp,
     coverage: parseCoverage(coverage, index),
     credentials: parsedCredentials,
+    healthCheck: parsedHealthCheck,
   };
 }
 
@@ -279,8 +362,12 @@ function isCapabilityLock(value: unknown): value is CapabilityLock {
         typeof record.skillPath === "string" &&
         typeof record.treeSha256 === "string" &&
         typeof record.policySha256 === "string" &&
+        (record.source === null || isObject(record.source)) &&
+        typeof record.requiredForDiscovery === "boolean" &&
         Array.isArray(record.permissions) &&
-        Array.isArray(record.credentialIds),
+        Array.isArray(record.credentialIds) &&
+        Array.isArray(record.discoveryScopes) &&
+        (record.healthTargetSha256 === null || typeof record.healthTargetSha256 === "string"),
     )
   );
 }
@@ -288,10 +375,18 @@ function isCapabilityLock(value: unknown): value is CapabilityLock {
 function policyHash(declaration: CapabilityDeclaration): string {
   return hashText(
     canonicalJson({
+      source: declaration.source,
+      requiredForDiscovery: declaration.requiredForDiscovery,
       permissions: [...declaration.permissions].sort(),
       allowedHosts: [...declaration.allowedHosts].sort(),
       http: declaration.http,
       coverage: declaration.coverage,
+      healthCheck: declaration.healthCheck
+        ? {
+            ...declaration.healthCheck,
+            expectedContentTypes: [...declaration.healthCheck.expectedContentTypes].sort(),
+          }
+        : null,
       credentials: declaration.credentials
         .map((credential) => ({
           id: credential.id,
@@ -304,14 +399,148 @@ function policyHash(declaration: CapabilityDeclaration): string {
   );
 }
 
+function parseSource(value: unknown, index: number): CapabilityDeclaration["source"] {
+  if (value === undefined || value === null) return null;
+  if (
+    !isObject(value) ||
+    (value.type !== "git" && value.type !== "registry" && value.type !== "local") ||
+    typeof value.locator !== "string" ||
+    !value.locator.trim() ||
+    value.locator.length > 500 ||
+    /[\u0000-\u001f]/.test(value.locator) ||
+    /(^|[?&#;\s])(?:access[_-]?token|api[_-]?key|apikey|auth|authorization|cookie|credential|password|secret|session|sig|signature|token)=/i.test(
+      value.locator,
+    ) ||
+    typeof value.immutableRef !== "string" ||
+    !value.immutableRef.trim() ||
+    value.immutableRef.length > 128 ||
+    /[\u0000-\u0020]/.test(value.immutableRef) ||
+    typeof value.expectedTreeSha256 !== "string" ||
+    !/^[0-9a-f]{64}$/i.test(value.expectedTreeSha256) ||
+    typeof value.license !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9.+-]{0,127}$/.test(value.license) ||
+    !(
+      value.catalogId === undefined ||
+      value.catalogId === null ||
+      (typeof value.catalogId === "string" &&
+        /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(value.catalogId))
+    )
+  ) {
+    invalid(index, "source declaration is malformed");
+  }
+  if (value.type === "git") {
+    let locator: URL;
+    try {
+      locator = new URL(value.locator);
+    } catch {
+      invalid(index, "git source locator must be an HTTPS URL");
+    }
+    if (locator.protocol !== "https:" || locator.username || locator.password) {
+      invalid(index, "git source locator must be credential-free HTTPS");
+    }
+    if (!/^[0-9a-f]{40}$/i.test(value.immutableRef)) {
+      invalid(index, "git source immutableRef must be a full 40-character commit SHA");
+    }
+  }
+  if (
+    value.type === "registry" &&
+    !/^v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/.test(value.immutableRef)
+  ) {
+    invalid(index, "registry source immutableRef must be an exact version");
+  }
+  if (value.type === "local" && !/^sha256:[0-9a-f]{64}$/i.test(value.immutableRef)) {
+    invalid(index, "local source immutableRef must be a SHA-256 content identity");
+  }
+  return {
+    type: value.type,
+    locator: value.locator.trim(),
+    immutableRef:
+      value.type === "git" || value.type === "local"
+        ? value.immutableRef.trim().toLowerCase()
+        : value.immutableRef.trim(),
+    expectedTreeSha256: value.expectedTreeSha256.toLowerCase(),
+    license: value.license,
+    catalogId: value.catalogId ?? null,
+  };
+}
+
+function parseHealthCheck(
+  value: unknown,
+  index: number,
+  brokeredNetwork: boolean,
+  allowedHosts: string[],
+  http: CapabilityDeclaration["http"],
+  credentialIds: string[],
+): CapabilityDeclaration["healthCheck"] {
+  if (value === undefined || value === null) return null;
+  if (
+    !brokeredNetwork ||
+    !http ||
+    !isObject(value) ||
+    typeof value.url !== "string" ||
+    !Array.isArray(value.expectedContentTypes) ||
+    value.expectedContentTypes.length === 0 ||
+    value.expectedContentTypes.some(
+      (item) => typeof item !== "string" || !/^[a-z0-9.+-]+\/[a-z0-9.+*-]+$/i.test(item),
+    ) ||
+    !(
+      value.credentialId === undefined ||
+      value.credentialId === null ||
+      (typeof value.credentialId === "string" && credentialIds.includes(value.credentialId))
+    )
+  ) {
+    invalid(index, "healthCheck declaration is malformed");
+  }
+  let target: URL;
+  try {
+    target = new URL(value.url);
+  } catch {
+    invalid(index, "healthCheck URL is invalid");
+  }
+  if (
+    target.protocol !== "https:" ||
+    target.username ||
+    target.password ||
+    !allowedHosts.includes(target.host.toLowerCase())
+  ) {
+    invalid(index, "healthCheck URL must use an allowed credential-free HTTPS host");
+  }
+  const sensitiveParameter = [...target.searchParams.keys()].find((key) =>
+    /(^|[-_])(api[-_]?key|authorization|cookie|credential|password|secret|session|token)($|[-_])/i.test(
+      key,
+    ),
+  );
+  if (sensitiveParameter) {
+    invalid(index, "healthCheck URL cannot contain sensitive query parameters");
+  }
+  const expectedContentTypes = [
+    ...new Set(value.expectedContentTypes.map((item) => item.toLowerCase())),
+  ].sort();
+  if (
+    expectedContentTypes.some(
+      (contentType) => !contentTypeAllowedByPolicy(contentType, http.allowedContentTypes),
+    )
+  ) {
+    invalid(index, "healthCheck content types must be allowed by the HTTP policy");
+  }
+  return {
+    url: target.toString(),
+    credentialId: value.credentialId ?? null,
+    expectedContentTypes,
+  };
+}
+
 function parseCoverage(value: unknown, index: number): CapabilityDeclaration["coverage"] {
   if (value === undefined || value === null) return null;
+  const discoveryScopes = isObject(value) ? (value.discoveryScopes ?? []) : [];
   if (
     !isObject(value) ||
     !Array.isArray(value.dimensions) ||
     value.dimensions.some((item) => !validCoverageId(item)) ||
     !Array.isArray(value.sourceTypes) ||
     value.sourceTypes.some((item) => !validCoverageId(item)) ||
+    !Array.isArray(discoveryScopes) ||
+    discoveryScopes.some((item) => !validCoverageId(item) || item === "*") ||
     typeof value.fullText !== "boolean" ||
     typeof value.publicationDates !== "boolean"
   ) {
@@ -320,13 +549,24 @@ function parseCoverage(value: unknown, index: number): CapabilityDeclaration["co
   return {
     dimensions: [...new Set(value.dimensions)].sort(),
     sourceTypes: [...new Set(value.sourceTypes)].sort(),
+    discoveryScopes: [...new Set(discoveryScopes)].sort(),
     fullText: value.fullText,
     publicationDates: value.publicationDates,
   };
 }
 
 function validCoverageId(value: unknown): value is string {
-  return typeof value === "string" && /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(value);
+  return (
+    value === "*" || (typeof value === "string" && /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(value))
+  );
+}
+
+function contentTypeAllowedByPolicy(value: string, allowed: string[]): boolean {
+  return allowed.some((candidate) => {
+    if (candidate === value || candidate === "*/*") return true;
+    if (candidate.endsWith("/*")) return value.startsWith(candidate.slice(0, -1));
+    return false;
+  });
 }
 
 function parseHttpPolicy(value: unknown, index: number): CapabilityDeclaration["http"] {
@@ -418,6 +658,34 @@ async function copyRegularTree(source: string, target: string): Promise<void> {
   }
 }
 
+async function hashCapabilityTree(root: string): Promise<string> {
+  const files = await regularTreeFiles(root);
+  if (files.length > MAX_CAPABILITY_FILES) {
+    throw new CliError(`Capability tree contains too many files: ${root}`, {
+      code: "RESEARCH_CAPABILITY_INVALID",
+      exitCode: 2,
+    });
+  }
+  let totalBytes = 0;
+  for (const path of files) {
+    const bytes = (await lstat(path)).size;
+    if (bytes > MAX_CAPABILITY_FILE_BYTES) {
+      throw new CliError(`Capability tree contains an oversized file: ${path}`, {
+        code: "RESEARCH_CAPABILITY_INVALID",
+        exitCode: 2,
+      });
+    }
+    totalBytes += bytes;
+    if (totalBytes > MAX_CAPABILITY_BYTES) {
+      throw new CliError(`Capability tree exceeds the total size limit: ${root}`, {
+        code: "RESEARCH_CAPABILITY_INVALID",
+        exitCode: 2,
+      });
+    }
+  }
+  return hashRegularTree(root);
+}
+
 function assertUnique(values: string[], label: string): void {
   const seen = new Set<string>();
   for (const value of values) {
@@ -428,6 +696,25 @@ function assertUnique(values: string[], label: string): void {
       });
     }
     seen.add(value);
+  }
+}
+
+function assertConsistentCredentials(capabilities: CapabilityDeclaration[]): void {
+  const seen = new Map<string, string>();
+  for (const credential of capabilities.flatMap((capability) => capability.credentials)) {
+    const identity = canonicalJson({
+      allowedHosts: credential.allowedHosts,
+      headerName: credential.headerName.toLowerCase(),
+      prefix: credential.prefix,
+    });
+    const previous = seen.get(credential.id);
+    if (previous !== undefined && previous !== identity) {
+      throw new CliError(`Credential ID has conflicting declarations: ${credential.id}`, {
+        code: "RESEARCH_CAPABILITY_INVALID",
+        exitCode: 2,
+      });
+    }
+    seen.set(credential.id, identity);
   }
 }
 

@@ -1,15 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, join, resolve } from "node:path";
 
 import { CliError } from "../../errors.js";
-import { declaredCredentialIds, verifyCapabilities } from "./capabilities.js";
+import { loadCapabilityDeclarations, verifyCapabilities } from "./capabilities.js";
 import { packageVersion, RESEARCH_PACKAGE_NAME, RESEARCH_PROTOCOL_VERSION } from "./constants.js";
 import { inspectResearchContext, isWorkspaceMarker } from "./context.js";
+import { inspectCapabilityCredentialEnvironment } from "./credentials.js";
 import { appendJournalEvent, verifyJournal } from "./journal.js";
 import { loadProjectEvidenceReceipts } from "./evidence.js";
 import { executeAgent, type AgentExecutionRequest } from "./executor.js";
+import { doctorExternalCapabilities, hasPublicInternetCapability } from "./external-skills.js";
 import { parseStructuredStageOutput, schemaForStage } from "./schemas.js";
+import { sanitizeResearchText } from "./sanitization.js";
 import {
   acquireFileLock,
   canonicalJson,
@@ -40,7 +43,7 @@ import type {
 const DOCTOR_ATTESTATION_TTL_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_BUDGET = {
-  maxTokens: 320_000,
+  maxTokens: 500_000,
   maxCostUsd: 60,
   maxWallSeconds: 72 * 60 * 60,
   maxFilesPerPackage: 20,
@@ -48,7 +51,7 @@ const DEFAULT_BUDGET = {
   maxAttemptsPerPackage: 3,
   confirmationCostUsd: 10,
   packageMaxTokens: {
-    discover: 80_000,
+    discover: 200_000,
     analyze: 55_000,
     synthesize: 60_000,
     review: 120_000,
@@ -200,6 +203,8 @@ export async function loadWorkspaceConfig(root: string): Promise<WorkspaceConfig
 
 export interface DoctorOptions {
   agentSmoke?: boolean;
+  capabilitySmoke?: boolean;
+  capabilityFetcher?: typeof fetch;
   environment?: NodeJS.ProcessEnv;
   executor?: (request: AgentExecutionRequest) => Promise<ExecutionResult>;
 }
@@ -231,20 +236,71 @@ export async function doctorResearchWorkspace(
     const result = await verifyJournal(paths.journal);
     return { value: result, detail: `${result.events} event(s), head=${result.head.slice(0, 12)}` };
   });
-  const credentialIds = await checked(checks, "capability-policy", async () => {
+  const capabilityDeclarations = await checked(checks, "capability-policy", async () => {
     const result = await verifyCapabilities(workspace);
     if (result.status !== "verified") {
       throw new Error(result.errors.join("; ") || "capability verification failed");
     }
+    const value = await loadCapabilityDeclarations(workspace);
     return {
-      value: await declaredCredentialIds(workspace),
+      value,
       detail: `${result.checked} locked capability declaration(s)`,
     };
   });
   await checked(checks, "credential-environment", async () => {
-    const result = await inspectCredentialEnvironment(paths.env, credentialIds ?? new Set());
-    return { value: result, detail: result };
+    const result = await inspectCapabilityCredentialEnvironment(
+      workspace,
+      capabilityDeclarations?.capabilities ?? [],
+    );
+    if (result.missingIds.length > 0) {
+      throw new Error(`missing declared credential values: ${result.missingIds.join(", ")}`);
+    }
+    return { value: result, detail: result.detail };
   });
+  if (config?.mode === "production-research" && capabilityDeclarations) {
+    checks.push({
+      id: "public-internet-capability",
+      status: hasPublicInternetCapability(capabilityDeclarations) ? "pass" : "fail",
+      detail: hasPublicInternetCapability(capabilityDeclarations)
+        ? "At least one locked brokered capability declares discoveryScopes=[public-internet]."
+        : "Production research requires an external public-internet capability; local evidence alone is not sufficient.",
+    });
+  }
+  const externalCapabilityDoctor = capabilityDeclarations
+    ? await checked(checks, "external-skill-readiness", async () => {
+        const value = await doctorExternalCapabilities(workspace, {
+          live: options.capabilitySmoke === true,
+          ...(options.capabilityFetcher ? { fetcher: options.capabilityFetcher } : {}),
+        });
+        if (value.status !== "ready") {
+          throw new Error(value.failures.join("; ") || "external capability readiness failed");
+        }
+        return {
+          value,
+          detail: `${value.capabilities.length} capability declaration(s); mode=${value.mode}`,
+        };
+      })
+    : undefined;
+  const hasNetworkCapabilities = Boolean(
+    capabilityDeclarations?.capabilities.some((capability) =>
+      capability.permissions.includes("brokered-network"),
+    ),
+  );
+  if (hasNetworkCapabilities) {
+    checks.push({
+      id: "capability-live-smoke",
+      status:
+        options.capabilitySmoke && externalCapabilityDoctor?.status === "ready"
+          ? "pass"
+          : config?.mode === "production-research"
+            ? "fail"
+            : "warn",
+      detail:
+        options.capabilitySmoke && externalCapabilityDoctor?.status === "ready"
+          ? "All configured brokered capability health checks passed."
+          : "Live provider checks were not completed; rerun doctor with --capability-smoke.",
+    });
+  }
   await checked(checks, "project-state", async () => {
     const projects = await readProjectStates(paths.projects);
     return { value: projects, detail: `${projects.length} project(s)` };
@@ -333,6 +389,19 @@ export async function doctorResearchWorkspace(
               smokeUsage: smokeResults
                 .map((result) => result.usage)
                 .sort((left, right) => left.agent.localeCompare(right.agent)),
+              capabilitySmoke:
+                options.capabilitySmoke && externalCapabilityDoctor?.status === "ready"
+                  ? externalCapabilityDoctor.capabilities
+                      .filter((capability) => capability.health.status !== "not-applicable")
+                      .map((capability) => ({
+                        id: capability.id,
+                        status: "pass" as const,
+                        code: capability.health.code,
+                        host: capability.health.host,
+                        targetSha256: capability.health.targetSha256,
+                        httpStatus: capability.health.httpStatus,
+                      }))
+                  : [],
             }
           : undefined;
       checks.push({
@@ -380,6 +449,7 @@ interface AgentSmokeResult {
 interface DoctorSmokeBundle {
   runtimes: AgentRuntimeFingerprint[];
   smokeUsage: WorkspaceDoctorAttestation["smokeUsage"];
+  capabilitySmoke: WorkspaceDoctorAttestation["capabilitySmoke"];
 }
 
 async function runAgentSmokeCheck(
@@ -493,6 +563,7 @@ async function persistDoctorAttestation(
       capabilityLockSha256: await sha256File(paths.capabilityLock),
       doctorSchemaSha256: sha256Text(canonicalJson(schemaForStage("doctor"))),
       runtimes: smoke.runtimes,
+      capabilitySmoke: smoke.capabilitySmoke,
       smokeUsage: smoke.smokeUsage,
     };
     const value: WorkspaceDoctorAttestation = {
@@ -505,6 +576,7 @@ async function persistDoctorAttestation(
       checkedAt: value.checkedAt,
       expiresAt: value.expiresAt,
       runtimes: value.runtimes,
+      capabilitySmoke: value.capabilitySmoke,
       smokeUsage: value.smokeUsage,
     });
     return value;
@@ -533,6 +605,7 @@ export async function verifyDoctorAttestation(root: string): Promise<{
     errors.push("attestation hash mismatch");
   const marker = await loadWorkspaceMarker(root);
   const config = await loadWorkspaceConfig(root);
+  const declarations = await loadCapabilityDeclarations(root);
   if (value.workspaceId !== marker.workspaceId) errors.push("workspace ID drifted");
   if (value.configSha256 !== sha256Text(canonicalJson(config)))
     errors.push("workspace config drifted");
@@ -546,6 +619,16 @@ export async function verifyDoctorAttestation(root: string): Promise<{
   }
   if (value.doctorSchemaSha256 !== sha256Text(canonicalJson(schemaForStage("doctor")))) {
     errors.push("doctor schema drifted");
+  }
+  if (config.mode === "production-research") {
+    const expectedCapabilityIds = declarations.capabilities
+      .filter((capability) => capability.permissions.includes("brokered-network"))
+      .map((capability) => capability.id)
+      .sort();
+    const observedCapabilityIds = value.capabilitySmoke.map((row) => row.id).sort();
+    if (canonicalJson(expectedCapabilityIds) !== canonicalJson(observedCapabilityIds)) {
+      errors.push("capability smoke coverage drifted");
+    }
   }
   if (errors.length) return { status: "drifted", errors, attestation: value };
   if (Date.parse(value.expiresAt) <= Date.now()) {
@@ -573,6 +656,10 @@ function isDoctorAttestation(value: unknown): value is WorkspaceDoctorAttestatio
     hashFields.some((hash) => typeof hash !== "string" || !/^[0-9a-f]{64}$/.test(hash)) ||
     !Array.isArray(value.runtimes) ||
     value.runtimes.length !== 2 ||
+    !Array.isArray(value.capabilitySmoke) ||
+    !value.capabilitySmoke.every(isCapabilitySmokeRow) ||
+    new Set(value.capabilitySmoke.map((row) => (isObject(row) ? row.id : null))).size !==
+      value.capabilitySmoke.length ||
     !Array.isArray(value.smokeUsage) ||
     value.smokeUsage.length !== 2
   ) {
@@ -592,6 +679,26 @@ function isDoctorAttestation(value: unknown): value is WorkspaceDoctorAttestatio
       typeof runtime.binaryVersion === "string" &&
       typeof runtime.platform === "string" &&
       typeof runtime.architecture === "string",
+  );
+}
+
+function isCapabilitySmokeRow(
+  value: unknown,
+): value is WorkspaceDoctorAttestation["capabilitySmoke"][number] {
+  return (
+    isObject(value) &&
+    typeof value.id === "string" &&
+    /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(value.id) &&
+    (value.status === "pass" || value.status === "not-applicable") &&
+    typeof value.code === "string" &&
+    (value.host === null || typeof value.host === "string") &&
+    (value.targetSha256 === null ||
+      (typeof value.targetSha256 === "string" && /^[0-9a-f]{64}$/.test(value.targetSha256))) &&
+    (value.httpStatus === null ||
+      (typeof value.httpStatus === "number" &&
+        Number.isInteger(value.httpStatus) &&
+        value.httpStatus >= 100 &&
+        value.httpStatus <= 599))
   );
 }
 
@@ -641,45 +748,6 @@ export async function requireCurrentRuntimeLock(
     );
   }
   return lock;
-}
-
-async function inspectCredentialEnvironment(
-  path: string,
-  declaredIds: Set<string>,
-): Promise<string> {
-  if (!(await pathExists(path))) return "not configured; no credentials loaded";
-  const info = await stat(path);
-  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) {
-    throw new Error("credential environment must have owner-only permissions");
-  }
-  const lines = (await readFile(path, "utf8")).split(/\r?\n/);
-  let found = false;
-  for (const sourceLine of lines) {
-    const line = sourceLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const equals = line.indexOf("=");
-    if (equals < 1) throw new Error("credential environment contains a malformed line");
-    const key = line.slice(0, equals).trim();
-    if (key !== "TIANGONG_RESEARCH_CAPABILITY_CREDENTIALS_JSON" || found) {
-      throw new Error(`credential environment contains an unsupported key: ${key}`);
-    }
-    const raw = line.slice(equals + 1).trim();
-    const value = JSON.parse(raw || "{}") as unknown;
-    if (
-      !isObject(value) ||
-      Object.entries(value).some(
-        ([credentialId, credentialValue]) =>
-          !isLogicalCredentialId(credentialId) ||
-          !declaredIds.has(credentialId) ||
-          typeof credentialValue !== "string" ||
-          Buffer.byteLength(credentialValue, "utf8") < 8,
-      )
-    ) {
-      throw new Error("credential map must contain logical IDs and non-trivial string values");
-    }
-    found = true;
-  }
-  return found ? "configured with owner-only permissions" : "configured without credentials";
 }
 
 async function readProjectStates(projectsPath: string): Promise<ProjectState[]> {
@@ -824,7 +892,7 @@ async function checked<T>(
     checks.push({
       id,
       status: "fail",
-      detail: error instanceof Error ? error.message : String(error),
+      detail: sanitizeResearchText(error instanceof Error ? error.message : String(error)),
     });
     return undefined;
   }
@@ -851,8 +919,4 @@ function positiveNumber(value: unknown): value is number {
 
 function nonNegativeNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
-}
-
-function isLogicalCredentialId(value: string): boolean {
-  return /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/.test(value);
 }

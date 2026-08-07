@@ -34,7 +34,7 @@ import {
 } from "./args.js";
 import { isObject, responseData, stringField } from "./data.js";
 import { firstEnv, loadDotenv } from "./env.js";
-import { CliError, HttpError } from "./errors.js";
+import { CliError, HttpError, toErrorPayload } from "./errors.js";
 import { jsonRequest } from "./http.js";
 import { runEducationCommand } from "./education/commands.js";
 import {
@@ -51,8 +51,13 @@ import { readBulkPipelineHealth, type BulkPipelineHealthSnapshot } from "./kb/pi
 import { resolveCollectionSelector } from "./kb/selector.js";
 import { batchDocumentStatuses, getDocumentStatus, type BulkStatusItem } from "./kb/status.js";
 import type { CliIO, Output } from "./io.js";
-import { write } from "./io.js";
+import { stringifyJson, write } from "./io.js";
 import { runResearchCommand } from "./research/commands.js";
+import {
+  configuredResearchSecrets,
+  sanitizeResearchText,
+  sanitizeResearchValue,
+} from "./research/workspace/sanitization.js";
 
 export type { CliIO, Output } from "./io.js";
 export { parseArgs } from "./args.js";
@@ -422,7 +427,19 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
     throw new CliError(`Unknown command: ${command}`);
   } catch (error) {
     if (error instanceof CliError) {
-      write(io.stderr, `${error.message}\n`);
+      if (argv[0] === "research") {
+        const secrets = configuredResearchSecrets(io.env);
+        if (argv.includes("--json")) {
+          write(
+            io.stderr,
+            stringifyJson(sanitizeResearchValue(toErrorPayload(error), secrets), true),
+          );
+        } else {
+          write(io.stderr, `${sanitizeResearchText(error.message, secrets)}\n`);
+        }
+      } else {
+        write(io.stderr, `${error.message}\n`);
+      }
       return error.exitCode;
     }
     throw error;

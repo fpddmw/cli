@@ -19,8 +19,9 @@ import {
   initializeProject,
   loadProject,
 } from "../src/research/workspace/projects.js";
+import { evaluateProjectPreflight } from "../src/research/workspace/preflight.js";
 import { runResearchWorkspace, type PackageExecutor } from "../src/research/workspace/runtime.js";
-import { sha256File, workspacePaths } from "../src/research/workspace/storage.js";
+import { hashRegularTree, sha256File, workspacePaths } from "../src/research/workspace/storage.js";
 import {
   doctorResearchWorkspace,
   initializeResearchWorkspace,
@@ -34,6 +35,7 @@ describe("research workspace lifecycle", () => {
       assert.equal(before.role, "unmanaged");
       assert.deepEqual(before.allowedOperations, [
         "research.context.inspect",
+        "research.capability.catalog",
         "research.workspace.init",
       ]);
 
@@ -298,7 +300,11 @@ describe("research project execution", () => {
           [
             "#!/bin/sh",
             'if [ "$1" = "--version" ]; then printf \'%s\\n\' "fake-codex 1.0"; exit 0; fi',
-            'case "$*" in *"--sandbox read-only"*"--disable apps"*"--disable shell_tool"*"--disable unified_exec"*"include_environment_context=false"*\'model_reasoning_effort="minimal"\'*\'model_verbosity="high"\'*) ;; *)',
+            'case "$*" in *"--dangerously-bypass-approvals-and-sandbox"*"--dangerously-bypass-approvals-and-sandbox"*|*"--sandbox read-only"*)',
+            '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"conflicting isolation flags"}}\'',
+            "  exit 0;;",
+            "esac",
+            'case "$*" in *"--dangerously-bypass-approvals-and-sandbox"*"--disable apps"*"--disable shell_tool"*"--disable unified_exec"*"include_environment_context=false"*\'model_reasoning_effort="minimal"\'*\'model_verbosity="high"\'*) ;; *)',
             '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"missing isolation flags"}}\'',
             "  exit 0;;",
             "esac",
@@ -371,6 +377,75 @@ describe("research project execution", () => {
         assert.match(result.runtime?.binarySha256 ?? "", /^[0-9a-f]{64}$/);
         assert.match(result.runtime?.wrapperSha256 ?? "", /^[0-9a-f]{64}$/);
         assert.match(result.runtime?.adapterSha256 ?? "", /^[0-9a-f]{64}$/);
+      } finally {
+        await rm(capsule, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    "reserves capture space for bounded MCP tool context",
+    { skip: platform() !== "darwin" && platform() !== "linux" },
+    async () => {
+      const capsule = await temporaryDirectory();
+      try {
+        const projectRoot = join(capsule, "project");
+        await mkdir(projectRoot);
+        const events = join(capsule, "large-codex-events.jsonl");
+        const boundedContext = "x".repeat(90 * 1024);
+        await writeFile(
+          events,
+          [
+            JSON.stringify({
+              type: "item.completed",
+              item: { type: "mcp_tool_call", result: { boundedContext } },
+            }),
+            JSON.stringify({
+              type: "item.completed",
+              item: { type: "agent_message", text: '{"ok":true}' },
+            }),
+            JSON.stringify({
+              type: "turn.completed",
+              usage: { input_tokens: 10, cached_input_tokens: 0, output_tokens: 3 },
+            }),
+            "",
+          ].join("\n"),
+        );
+        const binary = join(capsule, "fake-codex-large-context");
+        await writeFile(
+          binary,
+          [
+            "#!/bin/sh",
+            'if [ "$1" = "--version" ]; then printf \'%s\\n\' "fake-codex 1.0"; exit 0; fi',
+            `exec /bin/cat ${JSON.stringify(events)}`,
+            "",
+          ].join("\n"),
+        );
+        await chmod(binary, 0o755);
+
+        const result = await executeAgent({
+          route: { agent: "codex", binary, model: null },
+          prompt: "Use the bounded broker context.",
+          outputSchema: schemaForStage("doctor"),
+          requestId: "large-tool-context-test",
+          purpose: "doctor",
+          capsuleRoot: capsule,
+          projectRoot,
+          workspaceRoot: capsule,
+          timeoutSeconds: 10,
+          maxTurns: 1,
+          maxOutputTokens: 100,
+          maxToolContextTokens: 40_000,
+          maxCostUsd: 1,
+          toolPolicy: "none",
+          environment: { PATH: process.env.PATH },
+          brokerUrl: null,
+        });
+
+        assert.equal(result.exitCode, 0, result.stderr);
+        assert.equal(result.stdout, '{"ok":true}');
+        assert.equal(result.telemetry?.toolCalls, 1);
+        assert.equal(result.telemetry?.itemCounts.mcp_tool_call, 1);
       } finally {
         await rm(capsule, { recursive: true, force: true });
       }
@@ -1223,6 +1298,52 @@ describe("research workspace CLI", () => {
     }
   });
 
+  it("blocks production admission when only local evidence is available", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined, "production-research");
+      await lockCapabilities(root);
+      const source = join(root, "local-source.txt");
+      await writeFile(source, "Local evidence alone is not an internet discovery plan.\n");
+      const planPath = join(root, "local-only-plan.json");
+      await writeFile(
+        planPath,
+        `${JSON.stringify({
+          schemaVersion: 1,
+          inputs: [
+            {
+              path: source,
+              role: "primary",
+              dimensions: ["question"],
+              sourceType: "primary",
+              fullText: true,
+              publicationDate: "2026-01-01",
+            },
+          ],
+        })}\n`,
+      );
+      const plan = await readAndVerifyProjectInputPlan(planPath);
+      const preflight = await evaluateProjectPreflight(
+        root,
+        "What does all available evidence say?",
+        {
+          dimensions: ["question"],
+          sourceTypes: ["primary"],
+          minSources: 1,
+          minFullTextSources: 1,
+          minDatedSources: 1,
+          publicationDateFrom: null,
+          publicationDateTo: null,
+        },
+        plan,
+      );
+      assert.equal(preflight.readyToInitialize, false);
+      assert.ok(preflight.gaps.includes("production-public-internet-capability-missing"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects symlinked and duplicate-content project input plans", async () => {
     const root = await temporaryDirectory();
     try {
@@ -1299,8 +1420,9 @@ describe("research workspace CLI", () => {
     }
   });
 
-  it("preflights and atomically admits a verified local input plan without a network capability", async () => {
+  it("preflights and atomically admits local inputs only alongside an external internet capability", async () => {
     const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
     try {
       await invoke([
         "research",
@@ -1325,6 +1447,7 @@ describe("research workspace CLI", () => {
       };
       workspaceConfig.reviewer.pricing = { ...workspaceConfig.producer.pricing };
       await writeFile(workspaceConfigPath, `${JSON.stringify(workspaceConfig, null, 2)}\n`);
+      await declareExternalPublicCapability(root, skillParent);
       const corporateSource = join(root, "corporate-source.txt");
       const peerReviewedSource = join(root, "peer-reviewed-source.txt");
       await writeFile(corporateSource, "Corporate primary evidence.\n");
@@ -1389,6 +1512,12 @@ describe("research workspace CLI", () => {
       assert.equal(locked.exitCode, 0, locked.stderr);
       const doctor = await doctorResearchWorkspace(root, {
         agentSmoke: true,
+        capabilitySmoke: true,
+        capabilityFetcher: async () =>
+          new Response('{"status":"ok"}', {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
         environment: {},
         executor: async (request) => ({
           exitCode: 0,
@@ -1469,7 +1598,7 @@ describe("research workspace CLI", () => {
         reviewer: "post-execution",
       });
       assert.deepEqual(preflightValue.budget.maxTurns, {
-        discover: 2,
+        discover: 6,
         analyze: 2,
         synthesize: 2,
         review: 2,
@@ -1576,7 +1705,10 @@ describe("research workspace CLI", () => {
       assert.equal(journal.includes(corporateSource), false);
       assert.equal(journal.includes(peerReviewedSource), false);
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
     }
   });
 });
@@ -1723,6 +1855,62 @@ async function invoke(
     stderr: { write: (chunk: string) => void (stderr += chunk) },
   });
   return { exitCode, stdout, stderr };
+}
+
+async function declareExternalPublicCapability(root: string, skillParent: string): Promise<void> {
+  const skillPath = join(skillParent, "external-public-search");
+  await mkdir(skillPath, { recursive: true });
+  await writeFile(
+    join(skillPath, "SKILL.md"),
+    "---\nname: external-public-search\ndescription: Search a bounded external public index.\n---\n\n# Search\n",
+  );
+  const expectedTreeSha256 = await hashRegularTree(skillPath);
+  await writeFile(
+    workspacePaths(root).capabilityDeclarations,
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        capabilities: [
+          {
+            id: "method.external-public-search",
+            skillPath,
+            source: {
+              type: "git",
+              locator: "https://github.com/example/external-public-search.git",
+              immutableRef: "a".repeat(40),
+              expectedTreeSha256,
+              license: "MIT",
+              catalogId: null,
+            },
+            requiredForDiscovery: false,
+            permissions: ["project-read", "candidate-write", "brokered-network"],
+            allowedHosts: ["search.example.test"],
+            http: {
+              accept: "application/json",
+              allowedContentTypes: ["application/json"],
+              maxResponseBytes: 64 * 1024,
+              maxItems: 10,
+            },
+            coverage: {
+              dimensions: ["*"],
+              sourceTypes: ["*"],
+              discoveryScopes: ["public-internet"],
+              fullText: false,
+              publicationDates: true,
+            },
+            credentials: [],
+            healthCheck: {
+              url: "https://search.example.test/health?query=connectivity",
+              credentialId: null,
+              expectedContentTypes: ["application/json"],
+            },
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+  );
 }
 
 async function temporaryDirectory(): Promise<string> {
