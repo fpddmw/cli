@@ -21,13 +21,33 @@ import {
 } from "../src/research/workspace/projects.js";
 import { evaluateProjectPreflight } from "../src/research/workspace/preflight.js";
 import { runResearchWorkspace, type PackageExecutor } from "../src/research/workspace/runtime.js";
-import { hashRegularTree, sha256File, workspacePaths } from "../src/research/workspace/storage.js";
+import {
+  hashRegularTree,
+  sha256File,
+  workspacePaths,
+  writeJsonAtomic,
+} from "../src/research/workspace/storage.js";
 import {
   doctorResearchWorkspace,
   initializeResearchWorkspace,
 } from "../src/research/workspace/workspace.js";
 
 describe("research workspace lifecycle", () => {
+  it("atomically replaces a read-only JSON destination", async () => {
+    const root = await temporaryDirectory();
+    const destination = join(root, "capabilities.lock.json");
+    try {
+      await writeJsonAtomic(destination, { revision: 1 }, 0o444);
+      await writeJsonAtomic(destination, { revision: 2 }, 0o444);
+      assert.deepEqual(JSON.parse(await readFile(destination, "utf8")), { revision: 2 });
+      if (platform() !== "win32") {
+        assert.equal((await lstat(destination)).mode & 0o222, 0);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("initializes one current workspace format and resolves its role", async () => {
     const root = await temporaryDirectory();
     try {
