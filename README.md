@@ -253,6 +253,9 @@ presentation Skills are post-closure authoring only. Run selected preprocessors
 and acquisition adapters with `research setup companion run`, then admit their
 exact hash-bound output separately. Automatic paper OA exhaustion returns an
 explicit browser handoff and never launches or chooses a browser silently.
+For PPT creation, setup recommends `hugohe3.ppt-master` first;
+`anthropic.pptx` remains a compatible situational option, and both may be
+selected in the same explicit plan.
 
 The requirements object declares `dimensions`, `sourceTypes`, `minSources`,
 `minFullTextSources`, `minDatedSources`, and optional inclusive

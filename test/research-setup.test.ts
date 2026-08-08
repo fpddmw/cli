@@ -72,7 +72,15 @@ describe("research setup catalog and immutable plans", () => {
         catalog.entries.find((entry) => entry.id === "anthropic.docx")?.license.notice ?? "",
         /not open source/i,
       );
-      assert.equal(catalog.conflictGroups[0]?.maximumSelected, 1);
+      assert.deepEqual(catalog.conflictGroups, []);
+      assert.deepEqual(catalog.selectionGuidance.pptCreation, {
+        preferredSkillId: "hugohe3.ppt-master",
+        situationalSkillIds: ["anthropic.pptx"],
+        maySelectTogether: true,
+        automaticSelection: false,
+        guidance:
+          "Prefer PPT Master for creating PPT presentations; use Anthropic PPTX when its workflow better fits the task. Both remain explicit post-closure choices.",
+      });
       assert.ok(
         catalog.entries
           .filter((entry) => entry.sourceId === "tiangong-ai-skills")
@@ -158,17 +166,6 @@ describe("research setup catalog and immutable plans", () => {
           workspace: root,
           mode: "smoke-test",
           evidenceProfile: "none",
-          skillIds: ["anthropic.pptx", "hugohe3.ppt-master"],
-          acceptedLicenseIds: ["anthropic-skills:document-terms", "ppt-master:MIT"],
-          confirmNetworkDownloads: true,
-        }),
-        errorCode("RESEARCH_SETUP_CONFLICT"),
-      );
-      await assert.rejects(
-        createResearchSetupPlan({
-          workspace: root,
-          mode: "smoke-test",
-          evidenceProfile: "none",
           skillIds: [],
           acceptedLicenseIds: [],
           liveChecks: false,
@@ -176,6 +173,27 @@ describe("research setup catalog and immutable plans", () => {
           confirmNetworkDownloads: false,
         }),
         errorCode("RESEARCH_SETUP_CONFIRMATION_REQUIRED"),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("allows PPT Master and Anthropic PPTX in the same explicit setup plan", async () => {
+    const root = await temporaryDirectory();
+    try {
+      const plan = await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: ["anthropic.pptx", "hugohe3.ppt-master"],
+        acceptedLicenseIds: ["anthropic-skills:document-terms", "ppt-master:MIT"],
+        confirmNetworkDownloads: true,
+      });
+      assert.deepEqual(plan.selection.skillIds, ["anthropic.pptx", "hugohe3.ppt-master"]);
+      assert.deepEqual(
+        plan.skills.map((skill) => skill.role),
+        ["post-closure-authoring", "post-closure-authoring"],
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -682,6 +700,14 @@ describe("research setup execution and operator safety", () => {
       assert.equal(serialized.includes(secret), false);
       const plan = await loadAndVerifyResearchSetupPlan(workspacePaths(root).setupPlan);
       assert.equal(plan.selection.evidenceProfile, EXTERNAL_SKILL_CONTEXT_PROFILE);
+      assert.ok(plan.selection.skillIds.includes("hugohe3.ppt-master"));
+      assert.ok(plan.selection.skillIds.includes("anthropic.pptx"));
+      assert.deepEqual(
+        prompt.authoringChoices.slice(0, 2).map((choice) => choice.value),
+        ["hugohe3.ppt-master", "anthropic.pptx"],
+      );
+      assert.match(prompt.authoringChoices[0]?.label ?? "", /Preferred for creating PPT/i);
+      assert.match(prompt.authoringChoices[1]?.label ?? "", /Situational PPTX/i);
       assert.deepEqual(plan.credentialSources, [
         {
           id: "brave.search.api-key",
@@ -898,6 +924,7 @@ async function temporaryDirectory(): Promise<string> {
 
 class ScriptedWizardPrompt implements ResearchSetupWizardPrompt {
   readonly notes: string[] = [];
+  readonly authoringChoices: Array<{ value: string; label: string }> = [];
 
   constructor(readonly workspace: string) {}
 
@@ -911,7 +938,7 @@ class ScriptedWizardPrompt implements ResearchSetupWizardPrompt {
   }
 
   async confirm(message: string, defaultValue: boolean): Promise<boolean> {
-    if (message.includes("post-closure authoring")) return false;
+    if (message.includes("post-closure authoring")) return true;
     if (message.startsWith("I reviewed and accept")) return true;
     if (message.includes("model IDs")) return false;
     if (message.includes("live provider")) return false;
@@ -934,7 +961,14 @@ class ScriptedWizardPrompt implements ResearchSetupWizardPrompt {
     return defaultValue;
   }
 
-  async multiSelect<T extends string>(): Promise<T[]> {
+  async multiSelect<T extends string>(
+    message: string,
+    choices: ReadonlyArray<{ value: T; label: string }>,
+  ): Promise<T[]> {
+    if (message === "Post-closure authoring Skills") {
+      this.authoringChoices.push(...choices);
+      return ["hugohe3.ppt-master", "anthropic.pptx"] as T[];
+    }
     return [];
   }
 

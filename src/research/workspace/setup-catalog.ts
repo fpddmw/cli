@@ -85,6 +85,17 @@ export interface ResearchSetupSetting {
   validation: "https-url" | "email" | "identifier";
 }
 
+export const RESEARCH_SETUP_SELECTION_GUIDANCE = {
+  pptCreation: {
+    preferredSkillId: "hugohe3.ppt-master",
+    situationalSkillIds: ["anthropic.pptx"],
+    maySelectTogether: true,
+    automaticSelection: false,
+    guidance:
+      "Prefer PPT Master for creating PPT presentations; use Anthropic PPTX when its workflow better fits the task. Both remain explicit post-closure choices.",
+  },
+} as const;
+
 const BRAVE_COMMIT = "3e088af66eb61f1c207c22b2be0278ca8744d1d1";
 const TIANGONG_SKILLS_COMMIT = "c371dbc464dc51ac1d8b0d0d59b318942418cc7b";
 const ANTHROPIC_SKILLS_COMMIT = "f17010c9bb483898c1d9c9f42dde2b3a98889434";
@@ -405,14 +416,20 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     expectedTreeSha256: expectedTreeSha256!,
     tier: "authoring" as const,
     role: "post-closure-authoring" as const,
-    purpose: `Optional ${skillName} artifact work after mechanical research closure.`,
-    recommendedFor: [`${skillName}-artifacts`],
+    purpose:
+      skillName === "pptx"
+        ? "Situational PPTX reading, editing, or alternative authoring after mechanical research closure."
+        : `Optional ${skillName} artifact work after mechanical research closure.`,
+    recommendedFor:
+      skillName === "pptx"
+        ? ["pptx-reading", "pptx-editing", "situational-presentation-authoring"]
+        : [`${skillName}-artifacts`],
     defaultSelected: false,
     credentialIds: [],
     settingIds: [],
     dependencies: [],
     license: ANTHROPIC_DOCUMENT_TERMS,
-    conflictGroup: skillName === "pptx" ? "presentation-authoring" : null,
+    conflictGroup: null,
     capabilityKind: null,
     bundled: false as const,
     userInitiatedOnly: true as const,
@@ -425,14 +442,14 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     expectedTreeSha256: "a430995ca9f5e53402dbf8e8b66b27c13e5abeec7e1af4727696213bc4df5732",
     tier: "authoring",
     role: "post-closure-authoring",
-    purpose: "Optional presentation authoring after research closure.",
-    recommendedFor: ["presentation-artifacts"],
+    purpose: "Preferred for creating PPT presentations after research closure.",
+    recommendedFor: ["ppt-creation", "presentation-artifacts"],
     defaultSelected: false,
     credentialIds: [],
     settingIds: [],
     dependencies: [PYTHON_310, PPT_MASTER_LOCK_REQUIRED],
     license: MIT_PPT_MASTER,
-    conflictGroup: "presentation-authoring",
+    conflictGroup: null,
     capabilityKind: null,
     bundled: false,
     userInitiatedOnly: true,
@@ -563,30 +580,6 @@ export function resolveSetupSkills(values: readonly string[]): ResearchSetupSkil
   const resolved = values.map(setupSkill);
   const ids = resolved.map((skill) => skill.id);
   if (new Set(ids).size !== ids.length) throw setupCatalogError("Selected Skills are duplicated.");
-  const conflicts = new Map<string, string[]>();
-  for (const skill of resolved) {
-    if (!skill.conflictGroup) continue;
-    const members = conflicts.get(skill.conflictGroup) ?? [];
-    members.push(skill.id);
-    conflicts.set(skill.conflictGroup, members);
-  }
-  const selectedConflict = [...conflicts.entries()].find(([, members]) => members.length > 1);
-  if (selectedConflict) {
-    throw new CliError(
-      `Conflicting setup Skills were selected: ${selectedConflict[1].join(", ")}`,
-      {
-        code: "RESEARCH_SETUP_CONFLICT",
-        exitCode: 2,
-        details: {
-          step: "selection",
-          reason: `Only one Skill may be selected from ${selectedConflict[0]}.`,
-          minimumAction:
-            "Choose one presentation authoring Skill, or create separate explicit plans.",
-          retryCommand: "tiangong-ai research setup plan --help",
-        },
-      },
-    );
-  }
   return resolved.sort((left, right) => left.id.localeCompare(right.id));
 }
 
@@ -658,15 +651,8 @@ export async function inspectResearchSetupCatalog(input: {
     entries,
     credentials: RESEARCH_SETUP_CREDENTIALS,
     settings: RESEARCH_SETUP_SETTINGS,
-    conflictGroups: [
-      {
-        id: "presentation-authoring",
-        maximumSelected: 1,
-        skillIds: RESEARCH_SETUP_SKILLS.filter(
-          (skill) => skill.conflictGroup === "presentation-authoring",
-        ).map((skill) => skill.id),
-      },
-    ],
+    conflictGroups: [],
+    selectionGuidance: RESEARCH_SETUP_SELECTION_GUIDANCE,
     roles: {
       evidenceCapabilities: RESEARCH_SETUP_SKILLS.filter(
         (skill) => skill.role === "evidence-capability",

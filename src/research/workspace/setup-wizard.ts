@@ -14,6 +14,7 @@ import {
 import {
   RESEARCH_SETUP_CREDENTIALS,
   RESEARCH_SETUP_INSTALLER,
+  RESEARCH_SETUP_SELECTION_GUIDANCE,
   RESEARCH_SETUP_SETTINGS,
   RESEARCH_SETUP_SKILLS,
   resolveSetupSkills,
@@ -208,9 +209,13 @@ export async function executeResearchSetupWizard(input: {
       false,
     )
   ) {
-    const choices = RESEARCH_SETUP_SKILLS.filter(
-      (skill) => skill.role === "post-closure-authoring",
-    ).map((skill) => ({ value: skill.id, label: `${skill.skillName} — ${skill.purpose}` }));
+    const choices = RESEARCH_SETUP_SKILLS.filter((skill) => skill.role === "post-closure-authoring")
+      .sort(
+        (left, right) =>
+          postClosureAuthoringRank(left.id) - postClosureAuthoringRank(right.id) ||
+          left.skillName.localeCompare(right.skillName),
+      )
+      .map((skill) => ({ value: skill.id, label: `${skill.skillName} — ${skill.purpose}` }));
     authoringIds = await prompt.multiSelect("Post-closure authoring Skills", choices, []);
   }
   const explicitSkillIds = [...new Set([...companionIds, ...authoringIds])];
@@ -410,6 +415,13 @@ export async function executeResearchSetupWizard(input: {
     environment: input.environment,
   });
   return { exitCode: value.state.status === "blocked" ? 3 : 0, value };
+}
+
+function postClosureAuthoringRank(skillId: string): number {
+  const guidance = RESEARCH_SETUP_SELECTION_GUIDANCE.pptCreation;
+  if (skillId === guidance.preferredSkillId) return 0;
+  if ((guidance.situationalSkillIds as readonly string[]).includes(skillId)) return 1;
+  return 2;
 }
 
 async function collectSettings(
