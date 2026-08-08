@@ -34,7 +34,7 @@ import { pathExists, workspacePaths } from "./storage.js";
 import type { AgentPricing, ResearchMode } from "./types.js";
 
 export interface ResearchSetupWizardPrompt {
-  note(message: string): void;
+  note(message: string, tone?: ResearchSetupWizardNoteTone): void;
   input(message: string, defaultValue?: string): Promise<string>;
   confirm(message: string, defaultValue: boolean): Promise<boolean>;
   select<T extends string>(
@@ -48,6 +48,82 @@ export interface ResearchSetupWizardPrompt {
     defaultValues: readonly T[],
   ): Promise<T[]>;
   close(): void;
+}
+
+export type ResearchSetupWizardNoteTone =
+  | "brand"
+  | "section"
+  | "info"
+  | "warning"
+  | "success"
+  | "summary";
+
+export interface ResearchSetupWizardTheme {
+  readonly color: boolean;
+  brand(text: string): string;
+  heading(text: string): string;
+  accent(text: string): string;
+  muted(text: string): string;
+  success(text: string): string;
+  warning(text: string): string;
+}
+
+export function shouldUseResearchSetupWizardColor(input: {
+  outputIsTTY: boolean;
+  json: boolean;
+  environment: NodeJS.ProcessEnv;
+}): boolean {
+  return (
+    input.outputIsTTY &&
+    !input.json &&
+    input.environment.NO_COLOR === undefined &&
+    input.environment.TERM !== "dumb"
+  );
+}
+
+export function createResearchSetupWizardTheme(color: boolean): ResearchSetupWizardTheme {
+  const style = (code: string, text: string) => (color ? `\u001B[${code}m${text}\u001B[0m` : text);
+  return {
+    color,
+    brand: (text) => style("1;36", text),
+    heading: (text) => style("1;34", text),
+    accent: (text) => style("36", text),
+    muted: (text) => style("2", text),
+    success: (text) => style("1;32", text),
+    warning: (text) => style("1;33", text),
+  };
+}
+
+export function formatResearchSetupWizardNote(
+  message: string,
+  tone: ResearchSetupWizardNoteTone,
+  theme: ResearchSetupWizardTheme,
+): string {
+  const [first = "", ...rest] = message.split("\n");
+  const glyph = {
+    brand: "◆",
+    section: "◆",
+    info: "›",
+    warning: "!",
+    success: "✓",
+    summary: "◇",
+  }[tone];
+  const styledGlyph =
+    tone === "warning"
+      ? theme.warning(glyph)
+      : tone === "success"
+        ? theme.success(glyph)
+        : theme.accent(glyph);
+  const styledFirst =
+    tone === "brand"
+      ? theme.brand(first)
+      : tone === "warning"
+        ? theme.warning(first)
+        : tone === "success"
+          ? theme.success(first)
+          : theme.heading(first);
+  const body = rest.length ? `\n${rest.map((line) => `  ${line}`).join("\n")}` : "";
+  return `\n${styledGlyph} ${styledFirst}${body}\n`;
 }
 
 const DEFAULT_CREDENTIAL_ENVIRONMENT: Record<string, string> = {
@@ -86,7 +162,18 @@ export async function runResearchSetupWizard(argv: string[], io: CliIO): Promise
       },
     });
   }
-  const prompt = new TextResearchSetupWizardPrompt(io.stdin, io.stderr);
+  const json = strictBoolean(args, "json");
+  const prompt = new TextResearchSetupWizardPrompt(
+    io.stdin,
+    io.stderr,
+    createResearchSetupWizardTheme(
+      shouldUseResearchSetupWizardColor({
+        outputIsTTY: Boolean((io.stderr as Output & { isTTY?: boolean }).isTTY),
+        json,
+        environment: io.env,
+      }),
+    ),
+  );
   try {
     const workspace = strictString(args, "workspace");
     const result = await executeResearchSetupWizard({
@@ -94,7 +181,7 @@ export async function runResearchSetupWizard(argv: string[], io: CliIO): Promise
       environment: io.env,
       prompt,
     });
-    write(io.stdout, stringifyJson(result.value, strictBoolean(args, "json")));
+    write(io.stdout, stringifyJson(result.value, json));
     return result.exitCode;
   } finally {
     prompt.close();
@@ -113,8 +200,10 @@ export async function executeResearchSetupWizard(input: {
       "No Skill is bundled or installed until you review the exact plan and confirm it.",
       "Credentials are read only from owner environment variables; their values are never displayed.",
     ].join("\n"),
+    "brand",
   );
 
+  prompt.note("1. Workspace", "section");
   const defaultWorkspace = resolve(input.workspace ?? process.cwd());
   const workspaceInput = await prompt.input("Absolute workspace directory", defaultWorkspace);
   if (!isAbsolute(workspaceInput)) {
@@ -134,6 +223,10 @@ export async function executeResearchSetupWizard(input: {
   }
 
   if (existingInfo && (await pathExists(workspacePaths(workspace).setupPlan))) {
+    prompt.note(
+      "Existing plans are immutable. Choose replacement after a reviewed catalog update; do not edit a plan in place.",
+      "warning",
+    );
     const existingAction = await prompt.select(
       "An immutable setup plan already exists",
       [
@@ -159,6 +252,7 @@ export async function executeResearchSetupWizard(input: {
     if (existingAction === "cancel") throw wizardCancelled("resume");
   }
 
+  prompt.note("2. Research scope and evidence", "section");
   const mode = await prompt.select<ResearchMode>(
     "Research mode",
     [
@@ -222,6 +316,7 @@ export async function executeResearchSetupWizard(input: {
   const profileSkillIds = evidenceProfileSkillIds(evidenceProfile);
   const selected = resolveSetupSkills([...profileSkillIds, ...explicitSkillIds]);
 
+  prompt.note("3. Installation targets", "section");
   const evidenceSelected = selected.some((skill) => skill.role === "evidence-capability");
   const agentChoice = await prompt.select(
     "Install targets",
@@ -256,6 +351,7 @@ export async function executeResearchSetupWizard(input: {
             `  ${agent}: ${setupTargetRoot({ workspace, scope, agent, environment: input.environment })}`,
         )
         .join("\n")}`,
+      "info",
     );
     confirmGlobalMutation = await prompt.confirm(
       "I understand this writes outside the workspace",
@@ -264,6 +360,7 @@ export async function executeResearchSetupWizard(input: {
     if (!confirmGlobalMutation) throw wizardCancelled("global-confirmation");
   }
 
+  prompt.note("4. Configuration and licenses", "section");
   const settings = await collectSettings(
     selected.map((skill) => skill.id),
     prompt,
@@ -279,6 +376,7 @@ export async function executeResearchSetupWizard(input: {
   );
   const agentRoutes = await collectAgentRoutes(prompt);
 
+  prompt.note("5. Verification options", "section");
   const liveChecks = await prompt.confirm(
     "Run live provider checks after installation? This uses network/quota but does not run model agents.",
     false,
@@ -351,7 +449,8 @@ export async function executeResearchSetupWizard(input: {
     checks: { liveChecks, allowSyntheticUnstructureUpload, agentSmoke },
     networkDownloads: selected.length > 0,
   };
-  prompt.note(`Reviewed setup preview:\n${JSON.stringify(preview, null, 2)}`);
+  prompt.note("6. Review and apply", "section");
+  prompt.note(`Reviewed setup preview:\n${JSON.stringify(preview, null, 2)}`, "summary");
   const confirmNetworkDownloads =
     selected.length === 0 ||
     (await prompt.confirm(
@@ -385,13 +484,17 @@ export async function executeResearchSetupWizard(input: {
     replacePlan,
     environment: input.environment,
   });
-  prompt.note(`Plan created: ${workspacePaths(workspace).setupPlan}\nSHA-256: ${plan.planSha256}`);
+  prompt.note(
+    `Plan created: ${workspacePaths(workspace).setupPlan}\nSHA-256: ${plan.planSha256}`,
+    "success",
+  );
 
   if (missingRequiredCredentialIds.length) {
     prompt.note(
       `Apply is blocked until these required owner environment variables are set: ${missingRequiredCredentialIds.join(
         ", ",
       )}`,
+      "warning",
     );
   }
   const applyNow = await prompt.confirm(
@@ -458,6 +561,7 @@ async function collectCredentialSources(
       credential.minimumUtf8Bytes;
     prompt.note(
       `${credential.provider}\n  credential: ${credential.id}\n  obtain/configure: ${credential.obtainAt}\n  ${defaultEnvironmentName}: ${present ? "present" : "not present"}`,
+      present ? "info" : "warning",
     );
     if (!credential.required && !present) {
       const configure = await prompt.confirm(
@@ -498,6 +602,7 @@ async function collectLicenseAcceptances(
   for (const [licenseId, group] of groups) {
     prompt.note(
       `License review\n  Skills: ${group.skillIds.join(", ")}\n  License: ${group.label}\n  URL: ${group.url}\n  Notice: ${group.notice}`,
+      "section",
     );
     if (
       !(await prompt.confirm(`I reviewed and accept ${licenseId} for these selected Skills`, false))
@@ -573,9 +678,11 @@ function requiredCredentialIds(selectedSkillIds: string[]): string[] {
 class TextResearchSetupWizardPrompt implements ResearchSetupWizardPrompt {
   readonly #readline: Interface;
   readonly #output: Output;
+  readonly #theme: ResearchSetupWizardTheme;
 
-  constructor(input: NodeJS.ReadableStream, output: Output) {
+  constructor(input: NodeJS.ReadableStream, output: Output, theme: ResearchSetupWizardTheme) {
     this.#output = output;
+    this.#theme = theme;
     this.#readline = createInterface({
       input,
       output: output as NodeJS.WritableStream,
@@ -583,24 +690,26 @@ class TextResearchSetupWizardPrompt implements ResearchSetupWizardPrompt {
     });
   }
 
-  note(message: string): void {
-    write(this.#output, `\n${message}\n`);
+  note(message: string, tone: ResearchSetupWizardNoteTone = "info"): void {
+    write(this.#output, formatResearchSetupWizardNote(message, tone, this.#theme));
   }
 
   async input(message: string, defaultValue = ""): Promise<string> {
-    const suffix = defaultValue ? ` [${defaultValue}]` : "";
-    const answer = (await this.#readline.question(`${message}${suffix}: `)).trim();
+    const suffix = defaultValue ? this.#theme.muted(` [${defaultValue}]`) : "";
+    const question = `${this.#theme.accent("?")} ${this.#theme.heading(message)}${suffix}: `;
+    const answer = (await this.#readline.question(question)).trim();
     return answer || defaultValue;
   }
 
   async confirm(message: string, defaultValue: boolean): Promise<boolean> {
-    const suffix = defaultValue ? " [Y/n]" : " [y/N]";
+    const suffix = this.#theme.muted(defaultValue ? " [Y/n]" : " [y/N]");
     for (;;) {
-      const answer = (await this.#readline.question(`${message}${suffix}: `)).trim().toLowerCase();
+      const question = `${this.#theme.accent("?")} ${this.#theme.heading(message)}${suffix}: `;
+      const answer = (await this.#readline.question(question)).trim().toLowerCase();
       if (!answer) return defaultValue;
       if (answer === "y" || answer === "yes") return true;
       if (answer === "n" || answer === "no") return false;
-      this.note("Enter y or n.");
+      this.note("Enter y or n.", "warning");
     }
   }
 
@@ -613,9 +722,12 @@ class TextResearchSetupWizardPrompt implements ResearchSetupWizardPrompt {
       `${message}:\n${choices
         .map(
           (choice, index) =>
-            `  ${index + 1}. ${choice.label}${choice.value === defaultValue ? " [default]" : ""}`,
+            `  ${this.#theme.accent(`${index + 1}.`)} ${choice.label}${
+              choice.value === defaultValue ? this.#theme.success(" [default]") : ""
+            }`,
         )
         .join("\n")}`,
+      "section",
     );
     for (;;) {
       const answer = await this.input("Choose one", "");
@@ -624,7 +736,7 @@ class TextResearchSetupWizardPrompt implements ResearchSetupWizardPrompt {
       if (Number.isInteger(index) && choices[index]) return choices[index]!.value;
       const byValue = choices.find((choice) => choice.value === answer);
       if (byValue) return byValue.value;
-      this.note("Enter one displayed number or exact value.");
+      this.note("Enter one displayed number or exact value.", "warning");
     }
   }
 
@@ -637,9 +749,12 @@ class TextResearchSetupWizardPrompt implements ResearchSetupWizardPrompt {
       `${message}:\n${choices
         .map(
           (choice, index) =>
-            `  ${index + 1}. ${choice.label}${defaultValues.includes(choice.value) ? " [default]" : ""}`,
+            `  ${this.#theme.accent(`${index + 1}.`)} ${choice.label}${
+              defaultValues.includes(choice.value) ? this.#theme.success(" [default]") : ""
+            }`,
         )
         .join("\n")}`,
+      "section",
     );
     for (;;) {
       const answer = await this.input(
@@ -655,7 +770,7 @@ class TextResearchSetupWizardPrompt implements ResearchSetupWizardPrompt {
       ) {
         return indexes.map((index) => choices[index]!.value);
       }
-      this.note("Enter unique displayed numbers separated by commas, or none.");
+      this.note("Enter unique displayed numbers separated by commas, or none.", "warning");
     }
   }
 

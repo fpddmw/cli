@@ -10,6 +10,7 @@ import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import { inspectResearchContext } from "../src/research/workspace/context.js";
 import {
   EXTERNAL_SKILL_CONTEXT_PROFILE,
+  EXTERNAL_SKILL_MEDIA_PROFILE,
   EXTERNAL_SKILL_PROFILE,
 } from "../src/research/workspace/external-skills.js";
 import {
@@ -28,7 +29,11 @@ import {
   runResearchSetupCompanion,
 } from "../src/research/workspace/setup.js";
 import {
+  createResearchSetupWizardTheme,
   executeResearchSetupWizard,
+  formatResearchSetupWizardNote,
+  shouldUseResearchSetupWizardColor,
+  type ResearchSetupWizardNoteTone,
   type ResearchSetupWizardPrompt,
 } from "../src/research/workspace/setup-wizard.js";
 import {
@@ -64,6 +69,20 @@ describe("research setup catalog and immutable plans", () => {
       assert.ok(catalog.roles.inputPreprocessors.includes("tiangong.document-granular-decompose"));
       assert.ok(catalog.roles.acquisitionAdapters.includes("tiangong.academic-paper-download"));
       assert.ok(catalog.roles.postClosureAuthoring.includes("anthropic.docx"));
+      assert.deepEqual(
+        Object.fromEntries(
+          catalog.entries
+            .filter((entry) => entry.sourceId === "brave-search-skills")
+            .map((entry) => [entry.skillName, entry.sourceRelativePath]),
+        ),
+        {
+          "web-search": "skills/web-search",
+          "news-search": "skills/news-search",
+          "llm-context": "skills/llm-context",
+          "images-search": "skills/images-search",
+          "videos-search": "skills/videos-search",
+        },
+      );
       assert.equal(
         catalog.entries.find((entry) => entry.id === "anthropic.doc-coauthoring")?.license.label,
         "NOASSERTION",
@@ -109,6 +128,52 @@ describe("research setup catalog and immutable plans", () => {
       );
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("binds every Brave evidence profile to the pinned upstream skills directory", async () => {
+    const profiles = [
+      {
+        profile: EXTERNAL_SKILL_PROFILE,
+        expectedPaths: ["skills/web-search", "skills/news-search"],
+      },
+      {
+        profile: EXTERNAL_SKILL_CONTEXT_PROFILE,
+        expectedPaths: ["skills/web-search", "skills/news-search", "skills/llm-context"],
+      },
+      {
+        profile: EXTERNAL_SKILL_MEDIA_PROFILE,
+        expectedPaths: [
+          "skills/web-search",
+          "skills/news-search",
+          "skills/llm-context",
+          "skills/images-search",
+          "skills/videos-search",
+        ],
+      },
+    ] as const;
+    for (const testCase of profiles) {
+      const root = await temporaryDirectory();
+      try {
+        const plan = await createResearchSetupPlan({
+          workspace: root,
+          mode: "production-research",
+          evidenceProfile: testCase.profile,
+          skillIds: [],
+          acceptedLicenseIds: ["brave-search-skills:MIT"],
+          credentialEnvironment: { "brave.search.api-key": "BRAVE_API_KEY" },
+          confirmNetworkDownloads: true,
+        });
+        assert.deepEqual(
+          plan.skills
+            .filter((skill) => skill.sourceId === "brave-search-skills")
+            .map((skill) => skill.sourceRelativePath)
+            .sort(),
+          [...testCase.expectedPaths].sort(),
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     }
   });
 
@@ -708,6 +773,10 @@ describe("research setup execution and operator safety", () => {
       );
       assert.match(prompt.authoringChoices[0]?.label ?? "", /Preferred for creating PPT/i);
       assert.match(prompt.authoringChoices[1]?.label ?? "", /Situational PPTX/i);
+      assert.equal(prompt.noteTones[0], "brand");
+      assert.ok(prompt.noteTones.includes("section"));
+      assert.ok(prompt.noteTones.includes("summary"));
+      assert.ok(prompt.noteTones.includes("success"));
       assert.deepEqual(plan.credentialSources, [
         {
           id: "brave.search.api-key",
@@ -718,6 +787,40 @@ describe("research setup execution and operator safety", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("uses semantic Wizard colors only for human TTY output", () => {
+    assert.equal(
+      shouldUseResearchSetupWizardColor({
+        outputIsTTY: true,
+        json: false,
+        environment: {},
+      }),
+      true,
+    );
+    for (const disabled of [
+      { outputIsTTY: false, json: false, environment: {} },
+      { outputIsTTY: true, json: true, environment: {} },
+      { outputIsTTY: true, json: false, environment: { NO_COLOR: "" } },
+      { outputIsTTY: true, json: false, environment: { TERM: "dumb" } },
+    ]) {
+      assert.equal(shouldUseResearchSetupWizardColor(disabled), false);
+    }
+
+    const colored = createResearchSetupWizardTheme(true);
+    const success = formatResearchSetupWizardNote("Plan created\nSHA-256: abc", "success", colored);
+    const warning = formatResearchSetupWizardNote("Credential missing", "warning", colored);
+    assert.match(success, /\u001B\[1;32m/);
+    assert.match(warning, /\u001B\[1;33m/);
+    assert.match(success, /✓/);
+
+    const plain = formatResearchSetupWizardNote(
+      "Plan created\nSHA-256: abc",
+      "success",
+      createResearchSetupWizardTheme(false),
+    );
+    assert.equal(plain, "\n✓ Plan created\n  SHA-256: abc\n");
+    assert.doesNotMatch(plain, /\u001B\[/);
   });
 
   it("exposes catalog automation without creating files", async () => {
@@ -924,12 +1027,14 @@ async function temporaryDirectory(): Promise<string> {
 
 class ScriptedWizardPrompt implements ResearchSetupWizardPrompt {
   readonly notes: string[] = [];
+  readonly noteTones: ResearchSetupWizardNoteTone[] = [];
   readonly authoringChoices: Array<{ value: string; label: string }> = [];
 
   constructor(readonly workspace: string) {}
 
-  note(message: string): void {
+  note(message: string, tone: ResearchSetupWizardNoteTone = "info"): void {
     this.notes.push(message);
+    this.noteTones.push(tone);
   }
 
   async input(message: string, defaultValue = ""): Promise<string> {

@@ -206,7 +206,7 @@ tiangong-ai research setup catalog \
 # Interactive and user-initiated: select external Skills, credential variable
 # names, licenses, install scope, and checks.
 tiangong-ai research setup \
-  --workspace /absolute/path/to/workspace --json
+  --workspace /absolute/path/to/workspace
 tiangong-ai research setup status \
   --workspace /absolute/path/to/workspace --json
 tiangong-ai research project preflight \
@@ -245,6 +245,18 @@ provider-plan or authentication failure blocks the selected profile instead of
 silently dropping a Skill. `credential set` reads the value only from the
 explicit owner environment name and stores it under the declared logical ID;
 the value is never returned or journaled.
+
+The pinned Brave checkout is verified at `skills/<skill-name>` before install.
+CLI `0.0.25` generated incorrect root-relative Brave paths; an immutable plan
+created by that release must not be edited or retried in place. Upgrade the CLI,
+run the Wizard again, and choose the explicitly reviewed replacement-plan
+option. Automation may recreate the same reviewed selection with
+`research setup plan --replace-plan`.
+
+The interactive Wizard uses restrained semantic colors and section markers
+only when its terminal output is a TTY. Set `NO_COLOR` or `TERM=dumb` for plain
+text; `--json` also disables Wizard styling so structured output never contains
+ANSI escape sequences.
 
 Optional setup entries have explicit roles. Tiangong SCI is an
 owner-whitelisted POST evidence capability; document decomposition is an input

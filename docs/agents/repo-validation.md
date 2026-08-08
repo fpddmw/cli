@@ -86,9 +86,10 @@ independent review, closure, and the public command family.
 `test/research-setup.test.ts` covers the separately sourced recommendation
 catalog, immutable plan/tamper checks, explicit licenses and global mutation,
 credential preflight before downloads, resumable setup state, TTY Wizard
-automation, minimal secret environments, exact document/paper artifact binding,
-no-overwrite/no-directory-scan behavior, explicit browser handoff, and bounded
-JSON POST broker credential/body redaction.
+automation and color suppression, pinned Brave source-layout paths across every
+evidence profile, minimal secret environments, exact document/paper artifact
+binding, no-overwrite/no-directory-scan behavior, explicit browser handoff, and
+bounded JSON POST broker credential/body redaction.
 `test/research-runtime-production.test.ts` adds zero-cost
 production evals for permanent evidence and review packets, exact HTTP policy,
 byte/item/offset/estimated-token extraction bounds and raw-object cache reuse,
