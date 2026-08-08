@@ -57,6 +57,8 @@ describe("research workspace lifecycle", () => {
         "research.context.inspect",
         "research.capability.catalog",
         "research.workspace.init",
+        "research.setup.catalog",
+        "research.setup.plan",
       ]);
 
       const initialized = await initializeResearchWorkspace(root, "Climate materials study");

@@ -8,6 +8,7 @@ export interface Output {
 
 export interface CliIO {
   env: NodeJS.ProcessEnv;
+  stdin?: NodeJS.ReadableStream & { isTTY?: boolean | undefined };
   stdout: Output;
   stderr: Output;
 }

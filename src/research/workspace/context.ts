@@ -4,6 +4,7 @@ import { dirname, join, parse, resolve } from "node:path";
 import {
   INVALID_OPERATIONS,
   RESEARCH_CONTROL_DIRECTORY,
+  SETUP_OPERATIONS,
   UNMANAGED_OPERATIONS,
   WORKSPACE_OPERATIONS,
 } from "./constants.js";
@@ -20,6 +21,15 @@ export async function inspectResearchContext(selectedPath: string): Promise<Cont
     if (await pathExists(control)) {
       const markerPath = join(control, "workspace.json");
       if (!(await pathExists(markerPath))) {
+        if (await isSetupOnlyControlDirectory(control)) {
+          return {
+            role: "setup",
+            selectedPath: canonical,
+            root: cursor,
+            allowedOperations: [...SETUP_OPERATIONS],
+            violations: [],
+          };
+        }
         return {
           role: "invalid",
           selectedPath: canonical,
@@ -61,6 +71,23 @@ export async function inspectResearchContext(selectedPath: string): Promise<Cont
     allowedOperations: [...UNMANAGED_OPERATIONS],
     violations: [],
   };
+}
+
+async function isSetupOnlyControlDirectory(control: string): Promise<boolean> {
+  const planPath = join(control, "setup-plan.json");
+  if (!(await pathExists(planPath))) return false;
+  try {
+    const plan = await readJsonFile<unknown>(planPath, "Research setup plan");
+    return (
+      isObject(plan) &&
+      plan.schemaVersion === 1 &&
+      plan.kind === "tiangong-research-setup-plan" &&
+      typeof plan.planSha256 === "string" &&
+      /^[0-9a-f]{64}$/.test(plan.planSha256)
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function isWorkspaceMarker(value: unknown): value is WorkspaceMarker {

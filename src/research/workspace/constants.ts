@@ -31,12 +31,32 @@ export const WORKSPACE_OPERATIONS = [
   "research.schema.show",
   "research.status",
   "research.run",
+  "research.setup.catalog",
+  "research.setup.plan",
+  "research.setup.apply",
+  "research.setup.status",
+  "research.setup.doctor",
+  "research.setup.credential.set",
+  "research.setup.retry",
+  "research.setup.update",
+  "research.setup.upgrade",
+] as const;
+
+export const SETUP_OPERATIONS = [
+  "research.context.inspect",
+  "research.setup.catalog",
+  "research.setup.plan",
+  "research.setup.apply",
+  "research.setup.status",
+  "research.setup.retry",
 ] as const;
 
 export const UNMANAGED_OPERATIONS = [
   "research.context.inspect",
   "research.capability.catalog",
   "research.workspace.init",
+  "research.setup.catalog",
+  "research.setup.plan",
 ] as const;
 
 export const INVALID_OPERATIONS = ["research.context.inspect"] as const;

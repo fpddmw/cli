@@ -5,6 +5,7 @@ import { CliError } from "../errors.js";
 import type { CliIO } from "../io.js";
 import { stringifyJson, write } from "../io.js";
 import { parseStrictArgs, strictBoolean, strictString } from "../strict-args.js";
+import { researchSetupHelp, runResearchSetupCommand } from "./setup-command.js";
 import {
   loadCapabilityDeclarations,
   lockCapabilities,
@@ -55,6 +56,7 @@ export async function runResearchOrchestrationCommand(
   io: CliIO,
 ): Promise<number | undefined> {
   if (subcommand === "context") return runContext(argv, io);
+  if (subcommand === "setup") return runResearchSetupCommand(argv, io);
   if (subcommand === "workspace") return runWorkspace(argv, io);
   if (subcommand === "capability") return runCapability(argv, io);
   if (subcommand === "project") return runProject(argv, io);
@@ -66,6 +68,8 @@ export async function runResearchOrchestrationCommand(
 
 export function researchOrchestrationHelp(): string {
   return `Research workspace commands:
+  tiangong-ai research setup
+  tiangong-ai research setup --help
   tiangong-ai research context inspect [--path <absolute-path>] [--json]
   tiangong-ai research workspace init <absolute-path> [--name <name>] [--mode smoke-test|production-research] [--json]
   tiangong-ai research workspace doctor [--workspace <absolute-path>] [--agent-smoke] [--capability-smoke] [--json]
@@ -84,6 +88,8 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research schema show <discover|analyze|synthesize|review|doctor> [--json]
   tiangong-ai research status [--project <project-id>] [--workspace <absolute-path>] [--json]
   tiangong-ai research run [--project <project-id>] [--max-parallel <1-8>] [--max-cycles <1-100>] [--dry-run] [--progress-jsonl] [--workspace <absolute-path>] [--json]
+
+${researchSetupHelp()}
 `;
 }
 

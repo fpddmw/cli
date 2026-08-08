@@ -1,0 +1,568 @@
+import { readFile } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
+
+import { CliError } from "../errors.js";
+import type { CliIO } from "../io.js";
+import { stringifyJson, write } from "../io.js";
+import { parseStrictArgs, strictBoolean, strictString } from "../strict-args.js";
+import {
+  EXTERNAL_SKILL_CONTEXT_PROFILE,
+  EXTERNAL_SKILL_MEDIA_PROFILE,
+  EXTERNAL_SKILL_PROFILE,
+} from "./workspace/external-skills.js";
+import { inspectResearchSetupCatalog } from "./workspace/setup-catalog.js";
+import {
+  applyResearchSetupPlan,
+  checkResearchSetupUpdates,
+  createResearchSetupPlan,
+  createResearchSetupUpgradePlan,
+  doctorResearchSetup,
+  inspectResearchSetupStatus,
+  retryResearchSetup,
+  runResearchSetupCompanion,
+  setResearchSetupCredentialFromEnvironment,
+  type ResearchSetupAgentRoutePlan,
+  type ResearchSetupEvidenceProfile,
+} from "./workspace/setup.js";
+import { isObject, workspacePaths } from "./workspace/storage.js";
+import type { ResearchMode } from "./workspace/types.js";
+import { runResearchSetupWizard } from "./workspace/setup-wizard.js";
+
+const COMMON_OPTIONS = { help: "boolean", json: "boolean" } as const;
+const WORKSPACE_OPTIONS = { ...COMMON_OPTIONS, workspace: "string" } as const;
+
+export async function runResearchSetupCommand(argv: string[], io: CliIO): Promise<number> {
+  const [action, ...rest] = argv;
+  if (!action || action === "wizard" || action.startsWith("-")) {
+    return runResearchSetupWizard(action === "wizard" ? rest : argv, io);
+  }
+  if (action === "--help" || action === "-h" || action === "help") {
+    write(io.stdout, researchSetupHelp());
+    return 0;
+  }
+  if (action === "catalog") return runCatalog(rest, io);
+  if (action === "plan") return runPlan(rest, io);
+  if (action === "apply") return runApply(rest, io);
+  if (action === "status") return runStatus(rest, io);
+  if (action === "doctor") return runDoctor(rest, io);
+  if (action === "credential") return runCredential(rest, io);
+  if (action === "companion") return runCompanion(rest, io);
+  if (action === "retry") return runRetry(rest, io);
+  if (action === "update") return runUpdate(rest, io);
+  if (action === "upgrade") return runUpgrade(rest, io);
+  throw new CliError(`Unknown research setup action: ${action}`, {
+    code: "INVALID_ARGS",
+    exitCode: 2,
+  });
+}
+
+export function researchSetupHelp(): string {
+  return `Research setup commands:
+  tiangong-ai research setup
+      Interactive, user-initiated setup Wizard (TTY required).
+  tiangong-ai research setup catalog [--workspace <absolute-path>] [--scope project|global] [--agents codex,claude-code] [--json]
+  tiangong-ai research setup plan --workspace <absolute-path> --mode smoke-test|production-research --evidence-profile none|brave-baseline|brave-context|brave-media [--skills <csv>] [--scope project|global] [--agents <csv>] [--accept-license <csv>] [--settings <absolute-json>] [--credential-env <absolute-json>] [--agent-routes <absolute-json>] [--confirm-network-downloads] [--confirm-global] [--live] [--allow-synthetic-unstructure-upload] [--agent-smoke --confirm-agent-smoke-cost] [--replace-plan] [--json]
+  tiangong-ai research setup apply [--plan <absolute-json>] [--workspace <absolute-path>] [--skip-doctor] [--json]
+  tiangong-ai research setup status [--workspace <absolute-path>] [--json]
+  tiangong-ai research setup doctor [--workspace <absolute-path>] [--live] [--allow-synthetic-unstructure-upload] [--agent-smoke --confirm-agent-smoke-cost] [--json]
+  tiangong-ai research setup credential set --id <logical-id> --from-env <name> [--workspace <absolute-path>] [--json]
+  tiangong-ai research setup companion run --id tiangong.document-granular-decompose --input <absolute-file> --output <absolute-new-file> [--timeout <seconds>] [--workspace <absolute-path>] [--json]
+  tiangong-ai research setup companion run --id tiangong.academic-paper-download (--doi <doi> | --title <exact-title> [--author <name>] [--year <yyyy>]) --out <absolute-existing-directory> [--timeout <seconds>] [--workspace <absolute-path>] [--json]
+  tiangong-ai research setup retry --step <recorded-step> [--clear-stale-lock --confirm-clear-stale-lock] [--workspace <absolute-path>] [--json]
+  tiangong-ai research setup update --check [--workspace <absolute-path>] [--json]
+  tiangong-ai research setup upgrade --plan --confirm-upgrade --accept-license <csv> [--workspace <absolute-path>] [--json]
+
+Safety defaults:
+  Skills are never bundled or installed implicitly. Plans pin the installer,
+  source commits, tree hashes, destinations, licenses, and declared mutations.
+  Project-local copy mode is the default. Credentials are accepted only through
+  named owner environment variables and their values are never printed.
+  Every selected Skill requires its displayed license id and an explicit
+  network-download confirmation; an empty smoke-test plan requires neither.
+`;
+}
+
+async function runCatalog(argv: string[], io: CliIO): Promise<number> {
+  const args = parseStrictArgs(
+    argv,
+    { ...WORKSPACE_OPTIONS, scope: "string", agents: "string" },
+    "research setup catalog",
+  );
+  if (strictBoolean(args, "help")) return writeSetupHelp(io);
+  rejectPositionals(args.positionals, "research setup catalog");
+  const result = await inspectResearchSetupCatalog({
+    selectedPath: workspaceArgument(args),
+    scope: setupScope(strictString(args, "scope")),
+    agents: setupAgents(strictString(args, "agents")),
+    environment: io.env,
+  });
+  writeSetupJson(io, result, args);
+  return 0;
+}
+
+async function runPlan(argv: string[], io: CliIO): Promise<number> {
+  const args = parseStrictArgs(
+    argv,
+    {
+      ...WORKSPACE_OPTIONS,
+      name: "string",
+      mode: "string",
+      "evidence-profile": "string",
+      skills: "string",
+      scope: "string",
+      agents: "string",
+      "accept-license": "string",
+      settings: "string",
+      "credential-env": "string",
+      "agent-routes": "string",
+      live: "boolean",
+      "allow-synthetic-unstructure-upload": "boolean",
+      "agent-smoke": "boolean",
+      "confirm-network-downloads": "boolean",
+      "confirm-global": "boolean",
+      "confirm-agent-smoke-cost": "boolean",
+      "replace-plan": "boolean",
+    },
+    "research setup plan",
+  );
+  if (strictBoolean(args, "help")) return writeSetupHelp(io);
+  rejectPositionals(args.positionals, "research setup plan");
+  const workspace = requiredAbsoluteWorkspace(args);
+  const mode = setupMode(strictString(args, "mode"), true);
+  const evidenceProfile = setupEvidenceProfile(strictString(args, "evidence-profile"), true);
+  const settings = await optionalStringRecord(strictString(args, "settings"), "--settings");
+  const credentialEnvironment = await optionalStringRecord(
+    strictString(args, "credential-env"),
+    "--credential-env",
+  );
+  const agentRoutes = await optionalAgentRoutes(strictString(args, "agent-routes"));
+  const name = strictString(args, "name");
+  const plan = await createResearchSetupPlan({
+    workspace,
+    ...(name === undefined ? {} : { name }),
+    mode,
+    evidenceProfile,
+    skillIds: csv(strictString(args, "skills")),
+    scope: setupScope(strictString(args, "scope")),
+    agents: setupAgents(strictString(args, "agents")),
+    acceptedLicenseIds: csv(strictString(args, "accept-license")),
+    credentialEnvironment,
+    settings,
+    agentRoutes,
+    liveChecks: strictBoolean(args, "live"),
+    allowSyntheticUnstructureUpload: strictBoolean(args, "allow-synthetic-unstructure-upload"),
+    agentSmoke: strictBoolean(args, "agent-smoke"),
+    confirmNetworkDownloads: strictBoolean(args, "confirm-network-downloads"),
+    confirmGlobalMutation: strictBoolean(args, "confirm-global"),
+    confirmAgentSmokeCost: strictBoolean(args, "confirm-agent-smoke-cost"),
+    replacePlan: strictBoolean(args, "replace-plan"),
+    environment: io.env,
+  });
+  writeSetupJson(io, plan, args);
+  return 0;
+}
+
+async function runApply(argv: string[], io: CliIO): Promise<number> {
+  const args = parseStrictArgs(
+    argv,
+    { ...WORKSPACE_OPTIONS, plan: "string", "skip-doctor": "boolean" },
+    "research setup apply",
+  );
+  if (strictBoolean(args, "help")) return writeSetupHelp(io);
+  rejectPositionals(args.positionals, "research setup apply");
+  const planPath = strictString(args, "plan");
+  if (planPath && !isAbsolute(planPath)) {
+    throw invalidSetupArgument("--plan must be an absolute file path.");
+  }
+  const root = workspaceArgument(args);
+  const result = await applyResearchSetupPlan(
+    planPath ? resolve(planPath) : workspacePaths(root).setupPlan,
+    { environment: io.env, skipDoctor: strictBoolean(args, "skip-doctor") },
+  );
+  writeSetupJson(io, result, args);
+  return result.state.status === "blocked" ? 3 : 0;
+}
+
+async function runStatus(argv: string[], io: CliIO): Promise<number> {
+  const args = parseStrictArgs(argv, WORKSPACE_OPTIONS, "research setup status");
+  if (strictBoolean(args, "help")) return writeSetupHelp(io);
+  rejectPositionals(args.positionals, "research setup status");
+  const result = await inspectResearchSetupStatus(workspaceArgument(args), io.env);
+  writeSetupJson(io, result, args);
+  return result.state.status === "blocked" ? 3 : 0;
+}
+
+async function runDoctor(argv: string[], io: CliIO): Promise<number> {
+  const args = parseStrictArgs(
+    argv,
+    {
+      ...WORKSPACE_OPTIONS,
+      live: "boolean",
+      "allow-synthetic-unstructure-upload": "boolean",
+      "agent-smoke": "boolean",
+      "confirm-agent-smoke-cost": "boolean",
+    },
+    "research setup doctor",
+  );
+  if (strictBoolean(args, "help")) return writeSetupHelp(io);
+  rejectPositionals(args.positionals, "research setup doctor");
+  if (strictBoolean(args, "allow-synthetic-unstructure-upload") && !strictBoolean(args, "live")) {
+    throw invalidSetupArgument("Synthetic upload confirmation is valid only together with --live.");
+  }
+  if (strictBoolean(args, "agent-smoke") && !strictBoolean(args, "confirm-agent-smoke-cost")) {
+    throw new CliError(
+      "Agent smoke may consume provider quota and requires explicit confirmation.",
+      {
+        code: "RESEARCH_SETUP_CONFIRMATION_REQUIRED",
+        exitCode: 2,
+        details: {
+          step: "doctor",
+          minimumAction: "Pass --confirm-agent-smoke-cost or omit --agent-smoke.",
+        },
+      },
+    );
+  }
+  const result = await doctorResearchSetup(workspaceArgument(args), {
+    live: strictBoolean(args, "live"),
+    allowSyntheticUnstructureUpload: strictBoolean(args, "allow-synthetic-unstructure-upload"),
+    agentSmoke: strictBoolean(args, "agent-smoke"),
+    environment: io.env,
+  });
+  writeSetupJson(io, result, args);
+  return result.readiness === "READY" ? 0 : 3;
+}
+
+async function runCredential(argv: string[], io: CliIO): Promise<number> {
+  const [action, ...rest] = argv;
+  if (action === "--help" || action === "-h") return writeSetupHelp(io);
+  if (action !== "set") {
+    throw new CliError(`Unknown research setup credential action: ${action ?? "missing"}`, {
+      code: "INVALID_ARGS",
+      exitCode: 2,
+    });
+  }
+  const args = parseStrictArgs(
+    rest,
+    { ...WORKSPACE_OPTIONS, id: "string", "from-env": "string" },
+    "research setup credential set",
+  );
+  if (strictBoolean(args, "help")) return writeSetupHelp(io);
+  rejectPositionals(args.positionals, "research setup credential set");
+  const credentialId = strictString(args, "id");
+  const environmentName = strictString(args, "from-env");
+  if (!credentialId || !environmentName) {
+    throw invalidSetupArgument("research setup credential set requires --id and --from-env.");
+  }
+  const result = await setResearchSetupCredentialFromEnvironment({
+    workspace: workspaceArgument(args),
+    credentialId,
+    environmentName,
+    environment: io.env,
+  });
+  writeSetupJson(io, result, args);
+  return 0;
+}
+
+async function runCompanion(argv: string[], io: CliIO): Promise<number> {
+  const [action, ...rest] = argv;
+  if (action === "--help" || action === "-h") return writeSetupHelp(io);
+  if (action !== "run") {
+    throw new CliError(`Unknown research setup companion action: ${action ?? "missing"}`, {
+      code: "INVALID_ARGS",
+      exitCode: 2,
+    });
+  }
+  const args = parseStrictArgs(
+    rest,
+    {
+      ...WORKSPACE_OPTIONS,
+      id: "string",
+      input: "string",
+      output: "string",
+      out: "string",
+      doi: "string",
+      title: "string",
+      author: "string",
+      year: "string",
+      timeout: "string",
+    },
+    "research setup companion run",
+  );
+  if (strictBoolean(args, "help")) return writeSetupHelp(io);
+  rejectPositionals(args.positionals, "research setup companion run");
+  const id = strictString(args, "id");
+  const timeoutSeconds = optionalPositiveInteger(strictString(args, "timeout"), "--timeout");
+  let result;
+  if (id === "tiangong.document-granular-decompose") {
+    const inputPath = strictString(args, "input");
+    const outputPath = strictString(args, "output");
+    if (!inputPath || !outputPath) {
+      throw invalidSetupArgument("The document companion requires --input and --output.");
+    }
+    rejectPresentOptions(args, ["out", "doi", "title", "author", "year"], id);
+    result = await runResearchSetupCompanion(
+      {
+        workspace: workspaceArgument(args),
+        skillId: id,
+        inputPath,
+        outputPath,
+        ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+      },
+      { environment: io.env },
+    );
+  } else if (id === "tiangong.academic-paper-download") {
+    const outputDirectory = strictString(args, "out");
+    if (!outputDirectory) {
+      throw invalidSetupArgument("The academic-paper companion requires --out.");
+    }
+    rejectPresentOptions(args, ["input", "output"], id);
+    const year = optionalPositiveInteger(strictString(args, "year"), "--year");
+    const doi = strictString(args, "doi");
+    const title = strictString(args, "title");
+    const author = strictString(args, "author");
+    result = await runResearchSetupCompanion(
+      {
+        workspace: workspaceArgument(args),
+        skillId: id,
+        outputDirectory,
+        ...(doi === undefined ? {} : { doi }),
+        ...(title === undefined ? {} : { title }),
+        ...(author === undefined ? {} : { author }),
+        ...(year === undefined ? {} : { year }),
+        ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+      },
+      { environment: io.env },
+    );
+  } else {
+    throw invalidSetupArgument(
+      "--id must be tiangong.document-granular-decompose or tiangong.academic-paper-download.",
+    );
+  }
+  writeSetupJson(io, result, args);
+  return result.status === "browser-handoff-required" ? 4 : 0;
+}
+
+async function runRetry(argv: string[], io: CliIO): Promise<number> {
+  const args = parseStrictArgs(
+    argv,
+    {
+      ...WORKSPACE_OPTIONS,
+      step: "string",
+      "clear-stale-lock": "boolean",
+      "confirm-clear-stale-lock": "boolean",
+    },
+    "research setup retry",
+  );
+  if (strictBoolean(args, "help")) return writeSetupHelp(io);
+  rejectPositionals(args.positionals, "research setup retry");
+  const step = strictString(args, "step");
+  if (!step) throw invalidSetupArgument("research setup retry requires --step.");
+  const clear = strictBoolean(args, "clear-stale-lock");
+  if (clear && !strictBoolean(args, "confirm-clear-stale-lock")) {
+    throw new CliError("Clearing a stale setup lock requires a second explicit confirmation.", {
+      code: "RESEARCH_SETUP_CONFIRMATION_REQUIRED",
+      exitCode: 2,
+    });
+  }
+  const result = await retryResearchSetup({
+    workspace: workspaceArgument(args),
+    step,
+    clearStaleLock: clear,
+    options: { environment: io.env },
+  });
+  writeSetupJson(io, result, args);
+  return result.state.status === "blocked" ? 3 : 0;
+}
+
+async function runUpdate(argv: string[], io: CliIO): Promise<number> {
+  const args = parseStrictArgs(
+    argv,
+    { ...WORKSPACE_OPTIONS, check: "boolean" },
+    "research setup update",
+  );
+  if (strictBoolean(args, "help")) return writeSetupHelp(io);
+  rejectPositionals(args.positionals, "research setup update");
+  if (!strictBoolean(args, "check")) {
+    throw invalidSetupArgument("research setup update is read-only and requires --check.");
+  }
+  const result = await checkResearchSetupUpdates(workspaceArgument(args), io.env);
+  writeSetupJson(io, result, args);
+  return 0;
+}
+
+async function runUpgrade(argv: string[], io: CliIO): Promise<number> {
+  const args = parseStrictArgs(
+    argv,
+    {
+      ...WORKSPACE_OPTIONS,
+      plan: "boolean",
+      "confirm-upgrade": "boolean",
+      "accept-license": "string",
+    },
+    "research setup upgrade",
+  );
+  if (strictBoolean(args, "help")) return writeSetupHelp(io);
+  rejectPositionals(args.positionals, "research setup upgrade");
+  if (!strictBoolean(args, "plan")) {
+    throw invalidSetupArgument(
+      "Upgrade is plan-only; pass --plan and review the result before apply.",
+    );
+  }
+  const result = await createResearchSetupUpgradePlan({
+    workspace: workspaceArgument(args),
+    acceptedLicenseIds: csv(strictString(args, "accept-license")),
+    confirmUpgrade: strictBoolean(args, "confirm-upgrade"),
+    environment: io.env,
+  });
+  writeSetupJson(io, result, args);
+  return 0;
+}
+
+function workspaceArgument(args: ReturnType<typeof parseStrictArgs>): string {
+  return resolve(strictString(args, "workspace") ?? process.cwd());
+}
+
+function requiredAbsoluteWorkspace(args: ReturnType<typeof parseStrictArgs>): string {
+  const workspace = strictString(args, "workspace");
+  if (!workspace || !isAbsolute(workspace)) {
+    throw invalidSetupArgument("research setup plan requires an absolute --workspace path.");
+  }
+  return resolve(workspace);
+}
+
+function setupScope(value: string | undefined): "project" | "global" {
+  if (!value || value === "project") return "project";
+  if (value === "global") return value;
+  throw invalidSetupArgument(`Unsupported setup scope: ${value}.`);
+}
+
+function setupAgents(value: string | undefined): Array<"codex" | "claude-code"> {
+  const values = value ? csv(value) : ["codex"];
+  if (values.length === 0 || values.some((agent) => agent !== "codex" && agent !== "claude-code")) {
+    throw invalidSetupArgument("--agents must be codex, claude-code, or both as CSV.");
+  }
+  return [...new Set(values)] as Array<"codex" | "claude-code">;
+}
+
+function setupMode(value: string | undefined, required: boolean): ResearchMode {
+  if (value === "smoke-test" || value === "production-research") return value;
+  if (!value && !required) return "production-research";
+  throw invalidSetupArgument("--mode must be smoke-test or production-research.");
+}
+
+function setupEvidenceProfile(
+  value: string | undefined,
+  required: boolean,
+): ResearchSetupEvidenceProfile {
+  if (
+    value === "none" ||
+    value === EXTERNAL_SKILL_PROFILE ||
+    value === EXTERNAL_SKILL_CONTEXT_PROFILE ||
+    value === EXTERNAL_SKILL_MEDIA_PROFILE
+  ) {
+    return value;
+  }
+  if (value === "brave-baseline") return EXTERNAL_SKILL_PROFILE;
+  if (value === "brave-context") return EXTERNAL_SKILL_CONTEXT_PROFILE;
+  if (value === "brave-media") return EXTERNAL_SKILL_MEDIA_PROFILE;
+  if (!value && !required) return EXTERNAL_SKILL_CONTEXT_PROFILE;
+  throw invalidSetupArgument(
+    "--evidence-profile must be none, brave-baseline, brave-context, or brave-media.",
+  );
+}
+
+function csv(value: string | undefined): string[] {
+  if (!value) return [];
+  const values = value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (new Set(values).size !== values.length) {
+    throw invalidSetupArgument("CSV option values must not contain duplicates.");
+  }
+  return values;
+}
+
+function optionalPositiveInteger(value: string | undefined, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^[1-9][0-9]*$/.test(value)) {
+    throw invalidSetupArgument(`${label} must be a positive base-10 integer.`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw invalidSetupArgument(`${label} is outside the supported integer range.`);
+  }
+  return parsed;
+}
+
+function rejectPresentOptions(
+  args: ReturnType<typeof parseStrictArgs>,
+  names: string[],
+  skillId: string,
+): void {
+  const present = names.filter((name) => args.flags.has(name));
+  if (present.length) {
+    throw invalidSetupArgument(
+      `${present.map((name) => `--${name}`).join(", ")} do not apply to ${skillId}.`,
+    );
+  }
+}
+
+async function optionalStringRecord(
+  path: string | undefined,
+  label: string,
+): Promise<Record<string, string>> {
+  if (!path) return {};
+  const value = await readAbsoluteJson(path, label);
+  if (!isObject(value) || Object.values(value).some((item) => typeof item !== "string")) {
+    throw invalidSetupArgument(`${label} must contain one JSON object of string values.`);
+  }
+  return value as Record<string, string>;
+}
+
+async function optionalAgentRoutes(
+  path: string | undefined,
+): Promise<Partial<ResearchSetupAgentRoutePlan>> {
+  if (!path) return {};
+  const value = await readAbsoluteJson(path, "--agent-routes");
+  if (!isObject(value)) {
+    throw invalidSetupArgument("--agent-routes must contain one JSON object.");
+  }
+  return value as Partial<ResearchSetupAgentRoutePlan>;
+}
+
+async function readAbsoluteJson(path: string, label: string): Promise<unknown> {
+  if (!isAbsolute(path)) throw invalidSetupArgument(`${label} must be an absolute JSON path.`);
+  try {
+    return JSON.parse(await readFile(path, "utf8")) as unknown;
+  } catch (error) {
+    throw new CliError(`${label} is missing or invalid JSON.`, {
+      code: "RESEARCH_SETUP_INPUT_INVALID",
+      exitCode: 2,
+      details: { label, error: String(error) },
+    });
+  }
+}
+
+function rejectPositionals(positionals: string[], command: string): void {
+  if (positionals.length) {
+    throw new CliError(`${command} does not accept positional arguments.`, {
+      code: "INVALID_ARGS",
+      exitCode: 2,
+      details: { positionals },
+    });
+  }
+}
+
+function invalidSetupArgument(message: string): CliError {
+  return new CliError(message, { code: "RESEARCH_SETUP_ARGUMENT_INVALID", exitCode: 2 });
+}
+
+function writeSetupJson(io: CliIO, value: unknown, args: ReturnType<typeof parseStrictArgs>): void {
+  write(io.stdout, stringifyJson(value, strictBoolean(args, "json")));
+}
+
+function writeSetupHelp(io: CliIO): number {
+  write(io.stdout, researchSetupHelp());
+  return 0;
+}

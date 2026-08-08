@@ -523,10 +523,14 @@ function parseHealthCheck(
   ) {
     invalid(index, "healthCheck content types must be allowed by the HTTP policy");
   }
+  const method = parseHttpMethod(value.method ?? http.method, index, "healthCheck");
+  if (method !== http.method) invalid(index, "healthCheck method must match the HTTP policy");
   return {
     url: target.toString(),
     credentialId: value.credentialId ?? null,
     expectedContentTypes,
+    method,
+    body: parseRequestBody(value.body, method, http.maxRequestBytes, index),
   };
 }
 
@@ -572,14 +576,18 @@ function contentTypeAllowedByPolicy(value: string, allowed: string[]): boolean {
 function parseHttpPolicy(value: unknown, index: number): CapabilityDeclaration["http"] {
   if (value === undefined || value === null) {
     return {
+      method: "GET",
       accept: "application/json",
       allowedContentTypes: ["application/json"],
+      staticHeaders: {},
+      maxRequestBytes: 64 * 1024,
       maxResponseBytes: 512 * 1024,
       maxItems: 100,
     };
   }
   if (
     !isObject(value) ||
+    (value.method !== undefined && value.method !== "GET" && value.method !== "POST") ||
     typeof value.accept !== "string" ||
     !value.accept.trim() ||
     /[\r\n]/.test(value.accept) ||
@@ -588,6 +596,11 @@ function parseHttpPolicy(value: unknown, index: number): CapabilityDeclaration["
     value.allowedContentTypes.some(
       (item) => typeof item !== "string" || !/^[a-z0-9.+-]+\/[a-z0-9.+*-]+$/i.test(item),
     ) ||
+    (value.maxRequestBytes !== undefined &&
+      (typeof value.maxRequestBytes !== "number" ||
+        !Number.isInteger(value.maxRequestBytes) ||
+        value.maxRequestBytes < 1 ||
+        value.maxRequestBytes > 1024 * 1024)) ||
     typeof value.maxResponseBytes !== "number" ||
     !Number.isInteger(value.maxResponseBytes) ||
     value.maxResponseBytes < 1 ||
@@ -599,12 +612,75 @@ function parseHttpPolicy(value: unknown, index: number): CapabilityDeclaration["
   ) {
     invalid(index, "http policy is malformed");
   }
+  const staticHeaders = parseStaticHeaders(value.staticHeaders, index);
   return {
+    method: parseHttpMethod(value.method ?? "GET", index, "http"),
     accept: value.accept.trim(),
     allowedContentTypes: [...new Set(value.allowedContentTypes.map((item) => item.toLowerCase()))],
+    staticHeaders,
+    maxRequestBytes: value.maxRequestBytes ?? 64 * 1024,
     maxResponseBytes: value.maxResponseBytes,
     maxItems: value.maxItems,
   };
+}
+
+function parseHttpMethod(value: unknown, index: number, label: string): "GET" | "POST" {
+  if (value !== "GET" && value !== "POST") invalid(index, `${label} method is unsupported`);
+  return value;
+}
+
+function parseStaticHeaders(value: unknown, index: number): Record<string, string> {
+  if (value === undefined || value === null) return {};
+  if (!isObject(value) || Object.keys(value).length > 16) {
+    invalid(index, "http staticHeaders must be a bounded object");
+  }
+  const headers: Record<string, string> = {};
+  for (const [name, headerValue] of Object.entries(value)) {
+    if (
+      !/^[A-Za-z][A-Za-z0-9-]{0,63}$/.test(name) ||
+      /^(authorization|cookie|proxy-authorization|set-cookie|x-api-key)$/i.test(name) ||
+      typeof headerValue !== "string" ||
+      headerValue.length > 256 ||
+      /[\r\n\0]/.test(headerValue)
+    ) {
+      invalid(index, "http staticHeaders contain an unsafe value");
+    }
+    headers[name.toLowerCase()] = headerValue;
+  }
+  return Object.fromEntries(
+    Object.entries(headers).sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function parseRequestBody(
+  value: unknown,
+  method: unknown,
+  maxRequestBytes: number,
+  index: number,
+): Record<string, unknown> | null {
+  const parsedMethod = parseHttpMethod(method, index, "healthCheck");
+  if (parsedMethod === "GET") {
+    if (value !== undefined && value !== null)
+      invalid(index, "GET healthCheck cannot declare a body");
+    return null;
+  }
+  if (!isObject(value)) invalid(index, "POST healthCheck requires an object body");
+  const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
+  if (bytes < 2 || bytes > maxRequestBytes || containsSensitiveBodyField(value)) {
+    invalid(index, "healthCheck body is too large or contains credential-like fields");
+  }
+  return value;
+}
+
+function containsSensitiveBodyField(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsSensitiveBodyField);
+  if (!isObject(value)) return false;
+  return Object.entries(value).some(
+    ([key, item]) =>
+      /^(access[_-]?token|api[_-]?key|apikey|authorization|cookie|credential|password|secret|session|token)$/i.test(
+        key,
+      ) || containsSensitiveBodyField(item),
+  );
 }
 
 function hashText(value: string): string {
