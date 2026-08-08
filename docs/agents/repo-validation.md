@@ -16,8 +16,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-08
-lastReviewedCommit: 4ac3f08530e2795096437f36d8a3f04fb342195a
+lastReviewedAt: 2026-08-09
+lastReviewedCommit: a2ed69478dc9a30b8697eedbafc98acdd4c7c034
 ---
 
 # Repo Validation
@@ -30,7 +30,25 @@ lastReviewedCommit: 4ac3f08530e2795096437f36d8a3f04fb342195a
 - Stable launcher: `bin/tiangong-ai.js`
 - Research execution sandbox: macOS `sandbox-exec` or Linux Bubblewrap
 - Repository text checkout uses LF line endings through `.gitattributes`; this
-  keeps Prettier behavior consistent across Linux and Windows CI runners.
+  keeps Prettier behavior consistent across Linux, macOS, and Windows CI
+  runners.
+
+## Hosted CI Matrix
+
+`.github/workflows/quality-gate.yml` runs for pull requests and pushes to
+`main`, with `fail-fast: false`, across the same four runner/architecture pairs
+used by the reference workspace CLI:
+
+- `ubuntu-latest` / `x64`
+- `windows-latest` / `x64`
+- `macos-latest` / `arm64`
+- `ubuntu-24.04-arm` / `arm64`
+
+The runner label selects the actual GitHub-hosted architecture; the explicit
+`arch` value keeps job names and matrix intent auditable. Both Linux rows
+install Bubblewrap and smoke-test an unprivileged capsule before the test
+suite. The remaining lint, test, and coverage steps stay identical across all
+four rows.
 
 ## Local Gates
 
