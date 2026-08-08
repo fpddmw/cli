@@ -28,6 +28,7 @@ import type {
   CapabilityDeclaration,
   CapabilityDeclarations,
   CapabilityHealthCheckDeclaration,
+  CapabilitySourceDeclaration,
 } from "./types.js";
 
 export const EXTERNAL_SKILLS_CLI_VERSION = "1.5.22";
@@ -606,6 +607,152 @@ export async function configureExternalSkillProfile(input: {
   };
 }
 
+export async function configureTiangongSciCapability(input: {
+  workspace: string;
+  skillPath: string;
+  source: CapabilitySourceDeclaration;
+  endpoint: string;
+  region?: string | null;
+}) {
+  const workspace = resolve(input.workspace);
+  await requireExistingCapabilitiesVerified(workspace);
+  if (
+    input.source.type !== "git" ||
+    input.source.locator.replace(/\/+$/, "") !== "https://github.com/tiangong-ai/skills.git" ||
+    input.source.catalogId !== "first-party.tiangong.kb-sci-search"
+  ) {
+    throw new CliError(
+      "Tiangong SCI capability source identity is not the reviewed first-party catalog entry.",
+      {
+        code: "RESEARCH_SETUP_SOURCE_INVALID",
+        exitCode: 3,
+      },
+    );
+  }
+  const skillInfo = await lstat(input.skillPath).catch(() => undefined);
+  if (!skillInfo?.isDirectory() || skillInfo.isSymbolicLink()) {
+    throw new CliError("Tiangong SCI Skill must be a regular non-symlink directory.", {
+      code: "RESEARCH_EXTERNAL_SKILL_NOT_READY",
+      exitCode: 3,
+    });
+  }
+  const observedTreeSha256 = await hashRegularTree(input.skillPath);
+  if (observedTreeSha256 !== input.source.expectedTreeSha256) {
+    throw new CliError("Tiangong SCI Skill bytes differ from the reviewed tree hash.", {
+      code: "RESEARCH_EXTERNAL_SKILL_NOT_READY",
+      exitCode: 3,
+      details: {
+        expectedTreeSha256: input.source.expectedTreeSha256,
+        observedTreeSha256,
+      },
+    });
+  }
+  let endpoint: URL;
+  try {
+    endpoint = new URL(input.endpoint);
+  } catch {
+    throw new CliError("Tiangong SCI endpoint is invalid.", {
+      code: "RESEARCH_SETUP_SETTING_INVALID",
+      exitCode: 2,
+    });
+  }
+  if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || !endpoint.host) {
+    throw new CliError("Tiangong SCI endpoint must be credential-free HTTPS.", {
+      code: "RESEARCH_SETUP_SETTING_INVALID",
+      exitCode: 2,
+    });
+  }
+  const region = input.region?.trim() || "us-east-1";
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(region)) {
+    throw new CliError("Tiangong SCI region is invalid.", {
+      code: "RESEARCH_SETUP_SETTING_INVALID",
+      exitCode: 2,
+    });
+  }
+  const configured = parseCapabilityDeclarations({
+    schemaVersion: 1,
+    capabilities: [
+      {
+        id: "database.tiangong.sci-search",
+        skillPath: resolve(input.skillPath),
+        source: input.source,
+        requiredForDiscovery: true,
+        permissions: ["project-read", "candidate-write", "brokered-network"],
+        allowedHosts: [endpoint.host.toLowerCase()],
+        http: {
+          method: "POST",
+          accept: "application/json",
+          allowedContentTypes: ["application/json"],
+          staticHeaders: { "x-region": region },
+          maxRequestBytes: 64 * 1024,
+          maxResponseBytes: 2 * 1024 * 1024,
+          maxItems: 100,
+        },
+        coverage: {
+          dimensions: ["*"],
+          sourceTypes: ["academic-paper", "journal-article"],
+          discoveryScopes: ["database:tiangong-sci"],
+          fullText: true,
+          publicationDates: true,
+        },
+        credentials: [
+          {
+            id: "tiangong.sci.api-key",
+            allowedHosts: [endpoint.host.toLowerCase()],
+            headerName: "x-api-key",
+            prefix: "",
+          },
+        ],
+        healthCheck: {
+          url: endpoint.toString(),
+          credentialId: "tiangong.sci.api-key",
+          expectedContentTypes: ["application/json"],
+          method: "POST",
+          body: {
+            query: "tiangong research connectivity check",
+            topK: 1,
+            extK: 0,
+            getMeta: true,
+          },
+        },
+      },
+    ],
+  }).capabilities[0]!;
+  const existing = await loadCapabilityDeclarations(workspace);
+  const conflict = existing.capabilities.find(
+    (capability) =>
+      capability.id === configured.id && capability.source?.catalogId !== input.source.catalogId,
+  );
+  if (conflict) {
+    throw new CliError(`Capability ID conflicts with Tiangong SCI: ${configured.id}`, {
+      code: "RESEARCH_CAPABILITY_CONFLICT",
+      exitCode: 3,
+    });
+  }
+  const merged = parseCapabilityDeclarations({
+    schemaVersion: 1,
+    capabilities: [
+      ...existing.capabilities.filter((capability) => capability.id !== configured.id),
+      configured,
+    ],
+  });
+  const lock = await buildCapabilityLock(merged);
+  await persistDeclarationsAndLock(workspace, merged, lock);
+  return {
+    schemaVersion: 1 as const,
+    workspace,
+    configured: {
+      id: configured.id,
+      skillName: basename(configured.skillPath),
+      treeSha256: observedTreeSha256,
+      credentialIds: configured.credentials.map((credential) => credential.id),
+      requiredForDiscovery: configured.requiredForDiscovery,
+      discoveryScopes: configured.coverage?.discoveryScopes ?? [],
+    },
+    lockStatus: "written" as const,
+  };
+}
+
 export async function importExternalCapability(input: {
   workspace: string;
   definitionPath: string;
@@ -1081,7 +1228,10 @@ async function probeCapability(
   sleeper: (milliseconds: number) => Promise<unknown> = sleep,
 ) {
   const initial = new URL(healthCheck.url);
-  const headers = new Headers({ Accept: capability.http?.accept ?? "application/json" });
+  const headers = new Headers(capability.http?.staticHeaders ?? {});
+  headers.set("Accept", capability.http?.accept ?? "application/json");
+  const body = healthCheck.body === null ? null : JSON.stringify(healthCheck.body);
+  if (body) headers.set("Content-Type", "application/json");
   let credentialHosts: string[] | null = null;
   if (healthCheck.credentialId) {
     const credential = capability.credentials.find(
@@ -1109,12 +1259,17 @@ async function probeCapability(
         throw new Error("health check redirect escaped the credential host policy");
       }
       const response = await fetcher(current, {
-        method: "GET",
+        method: healthCheck.method,
         headers,
+        ...(body === null ? {} : { body }),
         redirect: "manual",
         signal: AbortSignal.timeout(30_000),
       });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
+        if (healthCheck.method === "POST") {
+          await response.body?.cancel();
+          throw new Error("POST health check redirects are not authorized");
+        }
         const location = response.headers.get("location");
         await response.body?.cancel();
         if (!location || redirectCount === 5) {

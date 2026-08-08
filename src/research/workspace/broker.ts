@@ -143,6 +143,11 @@ async function handleMcpRequest(input: {
                     "Logical credential ID. It is selected automatically when the capability declares exactly one credential.",
                 },
                 url: { type: "string" },
+                request_body: {
+                  type: "object",
+                  description:
+                    "JSON request body. Required only when the locked capability explicitly authorizes POST.",
+                },
                 json_pointer: { type: "string" },
                 item_offset: { type: "integer", minimum: 0 },
                 max_items: { type: "integer", minimum: 1 },
@@ -222,6 +227,7 @@ async function fetchCandidateSource(input: {
   const capabilityId = input.arguments.capability_id;
   const credentialId = input.arguments.credential_id;
   const rawUrl = input.arguments.url;
+  const requestBody = input.arguments.request_body;
   const jsonPointer = input.arguments.json_pointer;
   const requestedItemOffset = input.arguments.item_offset ?? 0;
   const requestedMaxItems = input.arguments.max_items;
@@ -265,6 +271,11 @@ async function fetchCandidateSource(input: {
     throw new Error(`capability is not admitted for brokered network: ${capabilityId}`);
   const target = validateHttpsUrl(rawUrl);
   if (!capability.http) throw new Error(`capability has no broker HTTP policy: ${capabilityId}`);
+  const encodedRequestBody = validateBrokerRequestBody(
+    capability.http.method,
+    requestBody,
+    capability.http.maxRequestBytes,
+  );
   const credential = credentialId
     ? capability.credentials.find((candidate) => candidate.id === credentialId)
     : capability.credentials.length === 1
@@ -293,6 +304,8 @@ async function fetchCandidateSource(input: {
     canonicalJson({
       capabilityId,
       targetSha256: sha256Text(target.toString()),
+      method: capability.http.method,
+      requestBodySha256: encodedRequestBody ? sha256Text(encodedRequestBody) : null,
       accept: capability.http.accept,
     }),
   );
@@ -306,6 +319,8 @@ async function fetchCandidateSource(input: {
       capabilityId,
       credentialId: effectiveCredentialId,
       targetSha256: sha256Text(target.toString()),
+      method: capability.http.method,
+      requestBodySha256: encodedRequestBody ? sha256Text(encodedRequestBody) : null,
       cacheMode,
       cacheKeySha256,
     },
@@ -351,7 +366,9 @@ async function fetchCandidateSource(input: {
         return brokerToolResult(receipt, context.bytes, cached.contentType);
       }
     }
-    const headers = new Headers({ Accept: capability.http.accept });
+    const headers = new Headers(capability.http.staticHeaders);
+    headers.set("Accept", capability.http.accept);
+    if (encodedRequestBody) headers.set("Content-Type", "application/json");
     if (credential) {
       const value = input.credentialMap.get(credential.id);
       if (!value) throw new Error(`credential value is not configured: ${credential.id}`);
@@ -362,6 +379,8 @@ async function fetchCandidateSource(input: {
       headers,
       capability.allowedHosts,
       credential?.allowedHosts,
+      capability.http.method,
+      encodedRequestBody,
     );
     const responseLimit = Math.min(capability.http.maxResponseBytes, input.workspaceResponseBytes);
     const announcedLength = Number(response.headers.get("content-length") ?? "0");
@@ -564,19 +583,26 @@ async function fetchWithRedirectPolicy(
   headers: Headers,
   capabilityHosts: string[],
   credentialHosts: string[] | undefined,
+  method: "GET" | "POST",
+  body: string | null,
 ): Promise<{ response: Response; finalUrl: URL }> {
   let current = initialUrl;
   for (let redirects = 0; redirects <= 5; redirects += 1) {
     assertAllowedHost(current, capabilityHosts, "capability");
     if (credentialHosts) assertAllowedHost(current, credentialHosts, "credential");
     const response = await fetch(current, {
-      method: "GET",
+      method,
       headers,
+      ...(body === null ? {} : { body }),
       redirect: "manual",
       signal: AbortSignal.timeout(120_000),
     });
     if (![301, 302, 303, 307, 308].includes(response.status)) {
       return { response, finalUrl: current };
+    }
+    if (method === "POST") {
+      await response.body?.cancel();
+      throw new Error("POST capability redirects are not authorized");
     }
     const location = response.headers.get("location");
     await response.body?.cancel();
@@ -585,6 +611,26 @@ async function fetchWithRedirectPolicy(
     current = validateHttpsUrl(new URL(location, current).toString());
   }
   throw new Error("HTTPS source exceeded the redirect limit");
+}
+
+function validateBrokerRequestBody(
+  method: "GET" | "POST",
+  value: unknown,
+  maxRequestBytes: number,
+): string | null {
+  if (method === "GET") {
+    if (value !== undefined) throw new Error("GET capability does not accept request_body");
+    return null;
+  }
+  if (!isObject(value)) throw new Error("POST capability requires request_body as an object");
+  if (containsSensitiveJsonField(value)) {
+    throw new Error("request_body contains credential-like fields");
+  }
+  const encoded = JSON.stringify(value);
+  if (Buffer.byteLength(encoded, "utf8") > maxRequestBytes) {
+    throw new Error("request_body exceeds the capability request size limit");
+  }
+  return encoded;
 }
 
 function assertAllowedHost(url: URL, allowedHosts: string[], scope: string): void {

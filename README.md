@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-07
-lastReviewedCommit: 5d942d487a7c4592de80e0ac64ac6741c6836942
+lastReviewedAt: 2026-08-08
+lastReviewedCommit: 2aee8339c04d94dc42a8b34d20d59af27dbe756d
 ---
 
 # Tiangong AI CLI
@@ -201,19 +201,13 @@ file, and budget confirmation when `maxCostUsd` exceeds
 `confirmationCostUsd`:
 
 ```bash
-tiangong-ai research workspace init /absolute/path/to/workspace \
-  --mode production-research
-tiangong-ai research capability catalog \
-  --path /absolute/path/to/workspace \
+tiangong-ai research setup catalog \
   --workspace /absolute/path/to/workspace --json
-# Run the returned pinned project installation plan outside the research runtime.
-tiangong-ai research capability configure \
-  --profile internet-research \
+# Interactive and user-initiated: select external Skills, credential variable
+# names, licenses, install scope, and checks.
+tiangong-ai research setup \
   --workspace /absolute/path/to/workspace --json
-tiangong-ai research capability credential set \
-  --id brave.search.api-key --from-env BRAVE_SEARCH_API_KEY \
-  --workspace /absolute/path/to/workspace --json
-tiangong-ai research capability doctor --live \
+tiangong-ai research setup status \
   --workspace /absolute/path/to/workspace --json
 tiangong-ai research project preflight \
   --workspace /absolute/path/to/workspace \
@@ -226,17 +220,22 @@ tiangong-ai research project init gpu-resource-impact \
   --confirm-budget --json
 ```
 
+The guided setup creates an immutable, hash-bound plan before mutation. No Skill
+is bundled or installed implicitly. It pins the installer integrity, source
+commits, Skill tree hashes, exact destinations, license acceptance, credential
+environment names, settings, and checks. Required credential preflight runs
+before downloads. Project-local copy is the default; global writes, network
+downloads, live provider checks, synthetic document uploads, and paid agent
+smokes each require their applicable confirmation.
+
 Production admission requires at least one locked external capability with
 `brokered-network` and `discoveryScopes: ["public-internet"]`; an input plan or
 local files alone cannot represent internet coverage. The machine-readable
-catalog contains only external Skills and reports every required, enhanced,
-and conditional recommendation; exact source commit and whole-tree hash; a
-pinned installer version and checkout/install plan; credential requirements;
-and installed, configured, locked, and live provider status. Installation is
-never performed by the research runtime. It also reports the other Skills
-evaluated from the pinned upstream package and why each is not selected:
-custom question-specific admission, query assistance without evidence, or an
-execution model that the bounded GET broker does not authorize.
+setup catalog contains only separately sourced external Skills and reports each
+evidence, preprocessing, acquisition, and post-closure recommendation; exact
+source commit and tree hash; license and credential requirements; dependencies;
+and installed-byte status. Installation is never performed by a research
+package.
 
 The default `internet-research` profile selects Brave Web Search and News
 Search. `internet-research-with-context` additionally selects the
@@ -246,6 +245,14 @@ provider-plan or authentication failure blocks the selected profile instead of
 silently dropping a Skill. `credential set` reads the value only from the
 explicit owner environment name and stores it under the declared logical ID;
 the value is never returned or journaled.
+
+Optional setup entries have explicit roles. Tiangong SCI is an
+owner-whitelisted POST evidence capability; document decomposition is an input
+preprocessor; academic paper download is an acquisition adapter; document and
+presentation Skills are post-closure authoring only. Run selected preprocessors
+and acquisition adapters with `research setup companion run`, then admit their
+exact hash-bound output separately. Automatic paper OA exhaustion returns an
+explicit browser handoff and never launches or chooses a browser silently.
 
 The requirements object declares `dimensions`, `sourceTypes`, `minSources`,
 `minFullTextSources`, `minDatedSources`, and optional inclusive
@@ -387,10 +394,9 @@ dimension is usable but incomplete; a missing dimension or unmet declared
 minimum blocks downstream work. Qualitative gaps remain visible without
 silently changing those mechanical fields.
 
-Method Skills are external to this project. Recommended evidence Skills are
-selected through `research capability configure`; an owner-selected database,
-domain index, or other external method is admitted from an absolute reviewed
-definition:
+Method Skills are external to this project. Recommended Skills are selected
+through `research setup`; a custom owner-selected database, domain index, or
+other external method is admitted from an absolute reviewed definition:
 
 ```bash
 tiangong-ai research capability import \
@@ -405,8 +411,9 @@ license. Git references must be full 40-character commits; registry references
 must be exact versions; local references must equal
 `sha256:<expectedTreeSha256>`. Every source type must match the installed whole
 tree before a lock can be written. Skill trees reject symlinks and excessive
-file counts/sizes. Project-owned Tiangong Skills are rejected as imported
-evidence providers. Configure/import refuses to rewrite the lock if any
+file counts/sizes. Project-owned Tiangong Skills are rejected through this
+generic import path; the setup catalog has a separate reviewed first-party
+adapter for Tiangong SCI. Configure/import refuses to rewrite the lock if any
 existing capability has drifted; restore it or explicitly update its source
 identity and expected hash first.
 
@@ -419,17 +426,19 @@ tiangong-ai research capability verify --workspace /absolute/path/to/workspace
 ```
 
 A capability using `brokered-network` must declare exact `allowedHosts` and may
-declare an `http` policy with one exact `accept` value,
+declare an `http` policy with `method` (`GET` or bounded JSON `POST`), one exact
+`accept` value, safe `staticHeaders`, `maxRequestBytes`,
 `allowedContentTypes`, `maxResponseBytes`, and `maxItems`. Its optional
 `coverage` block declares dimensions, source types, full-text availability,
 publication-date availability, and named discovery scopes for the preflight gap
 report. Mark `requiredForDiscovery: true` for every public index or
 owner-whitelisted database the question must exercise. Downstream work is
 blocked unless each such capability produces its own verified broker receipt;
-another local file cannot substitute for it. The current evidence broker
-authorizes bounded GET endpoints only. A non-network external method-guidance
-Skill stages reviewed instructions but does not grant an undeclared tool or
-service call.
+another local file cannot substitute for it. POST request bodies may contain
+only documented non-secret fields; credential-like keys are rejected, only the
+body hash is persisted, and redirects are refused. A non-network external
+method-guidance Skill stages reviewed instructions but does not grant an
+undeclared tool or service call.
 Optional credentials declare logical IDs, exact host scopes, header names, and
 prefixes. Put only the logical value map in `.tiangong-research/.env`:
 

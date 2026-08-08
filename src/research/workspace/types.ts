@@ -1,4 +1,4 @@
-export type ContextRole = "workspace" | "unmanaged" | "invalid";
+export type ContextRole = "workspace" | "setup" | "unmanaged" | "invalid";
 
 export type ProjectStatus = "ready" | "running" | "blocked" | "complete";
 
@@ -94,6 +94,8 @@ export interface CapabilityHealthCheckDeclaration {
   url: string;
   credentialId: string | null;
   expectedContentTypes: string[];
+  method: "GET" | "POST";
+  body: Record<string, unknown> | null;
 }
 
 export interface CapabilityDeclaration {
@@ -104,8 +106,11 @@ export interface CapabilityDeclaration {
   permissions: string[];
   allowedHosts: string[];
   http: {
+    method: "GET" | "POST";
     accept: string;
     allowedContentTypes: string[];
+    staticHeaders: Record<string, string>;
+    maxRequestBytes: number;
     maxResponseBytes: number;
     maxItems: number;
   } | null;
@@ -392,6 +397,13 @@ export interface WorkspacePaths {
   capabilityDeclarations: string;
   capabilityLock: string;
   doctorAttestation: string;
+  setupPlan: string;
+  setupState: string;
+  setupReport: string;
+  setupConfig: string;
+  setupAdapterEnv: string;
+  setupSources: string;
+  setupLock: string;
   env: string;
   envExample: string;
   journal: string;

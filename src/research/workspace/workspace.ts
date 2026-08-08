@@ -85,12 +85,7 @@ export async function initializeResearchWorkspace(
     });
   }
   const paths = workspacePaths(root);
-  if (await pathExists(paths.control)) {
-    throw new CliError(`Research workspace state already exists: ${paths.control}`, {
-      code: "RESEARCH_WORKSPACE_EXISTS",
-      exitCode: 2,
-    });
-  }
+  if (await pathExists(paths.control)) await requireSetupOnlyControlDirectory(paths.control);
 
   const workspaceName = normalizeWorkspaceName(name ?? basename(root));
   const workspaceId = randomUUID();
@@ -144,7 +139,11 @@ export async function initializeResearchWorkspace(
     ].join("\n"),
     { encoding: "utf8", mode: 0o600 },
   );
-  await writeFile(join(paths.control, ".gitignore"), ".env\nlocks/\nruntime/\n", "utf8");
+  await writeFile(
+    join(paths.control, ".gitignore"),
+    ".env\nsetup-adapters.env\nsetup-sources/\nsetup.lock\nlocks/\nruntime/\n",
+    "utf8",
+  );
   await appendJournalEvent(paths.journal, "workspace.initialized", workspaceId, {
     workspaceId,
     protocolVersion: RESEARCH_PROTOCOL_VERSION,
@@ -162,6 +161,70 @@ export async function initializeResearchWorkspace(
       paths.journal,
     ],
   };
+}
+
+async function requireSetupOnlyControlDirectory(control: string): Promise<void> {
+  const allowedFiles = new Set([
+    "setup-plan.json",
+    "setup-state.json",
+    "setup-report.json",
+    "setup.lock",
+  ]);
+  const entries = await readdir(control, { withFileTypes: true });
+  if (
+    entries.length === 0 ||
+    entries.some(
+      (entry) =>
+        !(allowedFiles.has(entry.name) && entry.isFile()) &&
+        !(entry.name === "setup-history" && entry.isDirectory() && !entry.isSymbolicLink()),
+    )
+  ) {
+    throw new CliError(`Research workspace state already exists: ${control}`, {
+      code: "RESEARCH_WORKSPACE_EXISTS",
+      exitCode: 2,
+    });
+  }
+  for (const entry of entries) {
+    if (entry.name === "setup-history") {
+      await validateSetupHistoryDirectory(join(control, entry.name));
+      continue;
+    }
+    const info = await lstat(join(control, entry.name));
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new CliError(`Research setup state must use regular non-symlink files: ${entry.name}`, {
+        code: "RESEARCH_WORKSPACE_EXISTS",
+        exitCode: 2,
+      });
+    }
+  }
+}
+
+async function validateSetupHistoryDirectory(root: string): Promise<void> {
+  const generations = await readdir(root, { withFileTypes: true });
+  for (const generation of generations) {
+    if (
+      !/^[0-9a-f]{64}$/.test(generation.name) ||
+      !generation.isDirectory() ||
+      generation.isSymbolicLink()
+    ) {
+      throw new CliError(`Research setup history has an unsupported entry: ${generation.name}`, {
+        code: "RESEARCH_WORKSPACE_EXISTS",
+        exitCode: 2,
+      });
+    }
+    const generationPath = join(root, generation.name);
+    const files = await readdir(generationPath, { withFileTypes: true });
+    const allowed = new Set(["setup-plan.json", "setup-state.json", "setup-report.json"]);
+    if (
+      files.length === 0 ||
+      files.some((file) => !allowed.has(file.name) || !file.isFile() || file.isSymbolicLink())
+    ) {
+      throw new CliError(`Research setup history generation is malformed: ${generation.name}`, {
+        code: "RESEARCH_WORKSPACE_EXISTS",
+        exitCode: 2,
+      });
+    }
+  }
 }
 
 export async function requireResearchWorkspace(inputPath: string): Promise<string> {
