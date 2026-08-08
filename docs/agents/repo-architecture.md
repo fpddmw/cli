@@ -46,7 +46,9 @@ storage writes, queueing, and document status transitions.
 - `src/research/orchestration.ts` and `src/research/setup-command.ts`: strict
   parsing for setup, context, workspace, capability, project, status, and run
   commands. Bare `research setup` is the interactive TTY Wizard; the remaining
-  setup actions are deterministic automation surfaces.
+  setup actions are deterministic automation surfaces. Wizard presentation is
+  semantic and TTY-aware, with plain output for `NO_COLOR`, dumb terminals, and
+  JSON mode; styling never changes plan or command contracts.
 - `src/research/workspace/**`: the versioned research workspace protocol. It
   owns context classification, immutable input admission, capability policy
   locks, a separately sourced external Skill ecosystem catalog, immutable setup
