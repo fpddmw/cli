@@ -55,13 +55,24 @@ storage writes, queueing, and document status transitions.
   plans/state/history, reproducible detached source checkout and exact-copy
   installation, custom external capability admission,
   owner-environment-to-logical-credential configuration, static/live provider
-  diagnostics, role-constrained document/paper companions, required-discovery
-  receipt gates, bounded local-input plans, a scoped HTTPS GET/JSON-POST MCP
+  diagnostics, explicit orchestrator installation, replacement-time
+  setup-managed capability/credential reconciliation, role-constrained
+  document/paper companions, required-discovery
+  receipt gates with distinct never-attempted/attempted-without-evidence
+  diagnostics, bounded local-input plans, a scoped HTTPS GET/JSON-POST MCP
   broker with inline bounded result contexts,
+  one bounded short-delay 429 retry with sanitized journal provenance,
+  a mechanically enforced per-run broker-call budget,
   content-addressed permanent evidence, paged broker views/cache,
   schema-driven agent output and isolated repair, dedicated capsule homes,
-  separately fingerprinted agent targets/wrappers/adapters, doctor
-  attestations, complete pre-call package and tool-context reservations,
+  pre-review deterministic Markdown newline-artifact normalization with
+  content-free journal provenance,
+  hash-verified idempotent capsule-auth reuse across primary/repair calls,
+  separately fingerprinted agent targets/wrappers/adapters, hash-bound doctor
+  attestations with expiry-aware reuse and live runtime-drift verification,
+  complete pre-call package and tool-context reservations,
+  one shared preflight/runtime reservation formula with bounded capability
+  documentation included at admission,
   tool-context-aware process capture, classified retries,
   project-scoped scheduling/exit status, JSONL progress, recovery events,
   persistent review packets/bounded evidence contexts, tool-free independent
@@ -126,6 +137,13 @@ variable names, and declared mutations. It never installs a Skill from a
 research package, resolves system/Python dependencies, silently updates a pin,
 or overwrites drift.
 
+The recommended `tiangong-auto-research` tree is an external orchestrator role,
+not an evidence capability. Wizard selection is explicit and project-local by
+default. Evidence defaults to Brave web/news; context and media profiles remain
+subscription-dependent choices. A replacement removes only deselected
+setup-managed declarations/credentials, preserves custom capabilities, and
+never removes installed Skill directories.
+
 Brokered evidence Skills document allowlisted GET or bounded JSON POST APIs;
 credentials remain in an owner-only logical map and are injected only by the
 broker. POST request bodies reject credential-like fields, persist only their
@@ -150,3 +168,9 @@ unified-exec, filesystem, and undeclared integration tools for discovery, then
 embeds the locked capability manifest and each staged top-level `SKILL.md` in
 the prompt. The only discovery execution tool is the scoped broker. Later
 stages are tool-free and receive only bounded, hash-verified context.
+Every brokered manifest entry carries a locked non-secret HTTPS endpoint;
+initial targets and GET redirects are checked against that endpoint scope
+before a provider request.
+Codex receives a capsule-local project-root marker override so parent host
+`.codex/config.toml` discovery stops at the capsule boundary without widening
+the sandbox's readable roots.

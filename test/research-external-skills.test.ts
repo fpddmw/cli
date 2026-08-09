@@ -12,6 +12,7 @@ import {
 } from "../src/research/workspace/capabilities.js";
 import {
   configureExternalSkillProfile,
+  configureTiangongSciCapability,
   doctorExternalCapabilities,
   importExternalCapability,
   inspectExternalSkillCatalog,
@@ -146,6 +147,48 @@ describe("external research Skill catalog", () => {
 });
 
 describe("external database capability admission and doctor", () => {
+  it("stages the exact configured Tiangong SCI endpoint for broker discovery", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const skillPath = join(root, "installed-skills", "tiangong-kb-sci-search");
+      await mkdir(skillPath, { recursive: true });
+      await writeFile(
+        join(skillPath, "SKILL.md"),
+        "---\nname: tiangong-kb-sci-search\ndescription: Search SCI evidence.\n---\n",
+      );
+      const expectedTreeSha256 = await hashRegularTree(skillPath);
+      const endpoint = "https://database.example.test/functions/v1/sci_search";
+      await configureTiangongSciCapability({
+        workspace: root,
+        skillPath,
+        endpoint,
+        region: "test-region",
+        source: {
+          type: "git",
+          locator: "https://github.com/tiangong-ai/skills.git",
+          immutableRef: "a".repeat(40),
+          expectedTreeSha256,
+          license: "MIT",
+          catalogId: "first-party.tiangong.kb-sci-search",
+        },
+      });
+      const declarations = JSON.parse(
+        await readFile(workspacePaths(root).capabilityDeclarations, "utf8"),
+      ) as { capabilities: Array<{ id: string; http: { endpoint: string } }> };
+      assert.equal(declarations.capabilities[0]?.http.endpoint, endpoint);
+
+      const staged = join(root, "staged-capabilities");
+      await stageLockedCapabilities(root, staged);
+      const manifest = JSON.parse(await readFile(join(staged, "manifest.json"), "utf8")) as {
+        capabilities: Array<{ id: string; http: { endpoint: string } }>;
+      };
+      assert.equal(manifest.capabilities[0]?.http.endpoint, endpoint);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("returns a structured error for an unreadable capability definition", async () => {
     const root = await temporaryDirectory();
     try {
@@ -403,6 +446,56 @@ describe("external database capability admission and doctor", () => {
     }
   });
 
+  it("retains bounded sanitized provider diagnostics for an unsupported subscription option", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    const fakeSecret = "fixture-owner-secret-value";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const definitionPath = await writeDatabaseCapability(root, skillParent);
+      await importExternalCapability({ workspace: root, definitionPath });
+      await writeFile(
+        workspacePaths(root).env,
+        `TIANGONG_RESEARCH_CAPABILITY_CREDENTIALS_JSON={"database.acme.api-key":"${fakeSecret}"}\n`,
+        { mode: 0o600 },
+      );
+      await chmod(workspacePaths(root).env, 0o600);
+
+      const doctor = await doctorExternalCapabilities(root, {
+        live: true,
+        fetcher: async () =>
+          new Response(
+            JSON.stringify({
+              error: {
+                code: "OPTION_NOT_IN_PLAN",
+                detail: `The option is not subscribed; api_key=${fakeSecret}`,
+                id: "req_safe-123",
+                authorization: `Bearer ${fakeSecret}`,
+              },
+            }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          ),
+      });
+
+      assert.equal(doctor.status, "blocked");
+      const health = doctor.capabilities[0]?.health;
+      assert.equal(health?.code, "request-rejected");
+      assert.equal(health?.providerCode, "OPTION_NOT_IN_PLAN");
+      assert.equal(health?.providerRequestId, "req_safe-123");
+      assert.match(health?.detail ?? "", /option is not subscribed/i);
+      assert.match(health?.minimumAction ?? "", /baseline|subscription/i);
+      const serialized = JSON.stringify(doctor);
+      assert.equal(serialized.includes(fakeSecret), false);
+      assert.equal(serialized.includes("Bearer"), false);
+      assert.equal(serialized.includes("query=connectivity"), false);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("binds source identity to the installed tree and never blesses existing drift", async () => {
     const root = await temporaryDirectory();
     const skillParent = await temporaryDirectory();
@@ -547,6 +640,7 @@ async function writeDatabaseCapability(root: string, skillParent: string): Promi
         permissions: ["project-read", "candidate-write", "brokered-network"],
         allowedHosts: ["database.example.test"],
         http: {
+          endpoint: "https://database.example.test/",
           accept: "application/json",
           allowedContentTypes: ["application/json"],
           maxResponseBytes: 262_144,

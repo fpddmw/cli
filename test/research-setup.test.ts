@@ -6,7 +6,11 @@ import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
 import { startCapabilityBroker } from "../src/research/workspace/broker.js";
-import { lockCapabilities } from "../src/research/workspace/capabilities.js";
+import {
+  loadCapabilityDeclarations,
+  lockCapabilities,
+  verifyCapabilities,
+} from "../src/research/workspace/capabilities.js";
 import { inspectResearchContext } from "../src/research/workspace/context.js";
 import {
   EXTERNAL_SKILL_CONTEXT_PROFILE,
@@ -56,16 +60,17 @@ describe("research setup catalog and immutable plans", () => {
       assert.equal(catalog.policy.defaultInstallMode, "copy");
       assert.equal(catalog.policy.floatingUpdates, false);
       assert.deepEqual(catalog.installer, RESEARCH_SETUP_INSTALLER);
-      assert.equal(catalog.entries.length, 14);
+      assert.equal(catalog.entries.length, 15);
       assert.ok(catalog.entries.every((entry) => entry.bundled === false));
       assert.ok(catalog.entries.every((entry) => entry.userInitiatedOnly === true));
       assert.ok(catalog.entries.every((entry) => /^[0-9a-f]{64}$/.test(entry.expectedTreeSha256)));
       assert.ok(catalog.sources.every((source) => /^[0-9a-f]{40}$/.test(source.immutableRef)));
       assert.equal(
         catalog.sources.find((source) => source.id === "tiangong-ai-skills")?.immutableRef,
-        "c371dbc464dc51ac1d8b0d0d59b318942418cc7b",
+        "a300a49803c193b686e7cde55b5f2d170f993af5",
       );
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-sci-search"));
+      assert.deepEqual(catalog.roles.orchestrators, ["tiangong.auto-research"]);
       assert.ok(catalog.roles.inputPreprocessors.includes("tiangong.document-granular-decompose"));
       assert.ok(catalog.roles.acquisitionAdapters.includes("tiangong.academic-paper-download"));
       assert.ok(catalog.roles.postClosureAuthoring.includes("anthropic.docx"));
@@ -100,10 +105,11 @@ describe("research setup catalog and immutable plans", () => {
         guidance:
           "Prefer PPT Master for creating PPT presentations; use Anthropic PPTX when its workflow better fits the task. Both remain explicit post-closure choices.",
       });
-      assert.ok(
+      assert.deepEqual(
         catalog.entries
-          .filter((entry) => entry.sourceId === "tiangong-ai-skills")
-          .every((entry) => entry.defaultSelected === false),
+          .filter((entry) => entry.sourceId === "tiangong-ai-skills" && entry.defaultSelected)
+          .map((entry) => entry.id),
+        ["tiangong.auto-research"],
       );
       assert.equal(
         setupTargetRoot({
@@ -187,7 +193,10 @@ describe("research setup catalog and immutable plans", () => {
         { agent: "codex", root: join(root, ".agents", "skills") },
       ]);
       assert.match(plan.planSha256, /^[0-9a-f]{64}$/);
-      assert.equal(plan.mutations[0]?.target, workspacePaths(root).control);
+      assert.equal(
+        plan.mutations.find((mutation) => mutation.step === "workspace")?.target,
+        workspacePaths(root).control,
+      );
       const context = await inspectResearchContext(root);
       assert.equal(context.role, "setup");
       assert.ok(context.allowedOperations.includes("research.setup.apply"));
@@ -322,6 +331,105 @@ describe("research setup catalog and immutable plans", () => {
       });
       assert.equal(applied.state.status, "partially-ready");
       assert.equal((await inspectResearchContext(root)).role, "workspace");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reconciles all deselected setup-managed capabilities while preserving custom capabilities and Skill bytes", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await createEmptyPlan(root);
+      await applyResearchSetupPlan(workspacePaths(root).setupPlan, { skipDoctor: true });
+      const capabilities = [];
+      for (const [id, skillName, catalogId] of [
+        ["method.brave.llm-context", "llm-context", "external.brave.llm-context"],
+        [
+          "database.tiangong.sci-search",
+          "tiangong-kb-sci-search",
+          "first-party.tiangong.kb-sci-search",
+        ],
+        ["database.owner.custom", "owner-custom-search", null],
+      ] as const) {
+        const skillPath = join(root, ".agents", "skills", skillName);
+        await mkdir(skillPath, { recursive: true });
+        await writeFile(
+          join(skillPath, "SKILL.md"),
+          `---\nname: ${skillName}\ndescription: Fixture capability.\n---\n\n# Fixture\n`,
+        );
+        const expectedTreeSha256 = await hashRegularTree(skillPath);
+        capabilities.push({
+          id,
+          skillPath,
+          source: {
+            type: "git",
+            locator:
+              catalogId === null
+                ? "https://github.com/example/owner-custom-search.git"
+                : catalogId.startsWith("external.brave")
+                  ? "https://github.com/brave/brave-search-skills.git"
+                  : "https://github.com/tiangong-ai/skills.git",
+            immutableRef: "a".repeat(40),
+            expectedTreeSha256,
+            license: "MIT",
+            catalogId,
+          },
+          requiredForDiscovery: false,
+          permissions: ["project-read"],
+          allowedHosts: [],
+          http: null,
+          coverage: null,
+          credentials: [],
+          healthCheck: null,
+        });
+      }
+      await writeFile(
+        workspacePaths(root).capabilityDeclarations,
+        `${JSON.stringify({ schemaVersion: 1, capabilities }, null, 2)}\n`,
+      );
+      await lockCapabilities(root);
+      await writeFile(
+        workspacePaths(root).env,
+        'TIANGONG_RESEARCH_CAPABILITY_CREDENTIALS_JSON={"obsolete.context.key":"obsolete-broker-secret"}\n',
+        { mode: 0o600 },
+      );
+      await writeFile(
+        workspacePaths(root).setupAdapterEnv,
+        'TIANGONG_RESEARCH_ADAPTER_CREDENTIALS_JSON={"semantic-scholar.api-key":"obsolete-adapter-secret"}\n',
+        { mode: 0o600 },
+      );
+
+      await createResearchSetupPlan({
+        workspace: root,
+        name: "reconciled",
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [],
+        acceptedLicenseIds: [],
+        confirmNetworkDownloads: false,
+        replacePlan: true,
+      });
+      await applyResearchSetupPlan(workspacePaths(root).setupPlan, { skipDoctor: true });
+
+      const declarations = await loadCapabilityDeclarations(root);
+      assert.deepEqual(
+        declarations.capabilities.map((capability) => capability.id),
+        ["database.owner.custom"],
+      );
+      assert.equal((await verifyCapabilities(root)).status, "verified");
+      assert.equal(
+        await pathExistsSafe(join(root, ".agents", "skills", "llm-context", "SKILL.md")),
+        true,
+      );
+      assert.equal(
+        await pathExistsSafe(join(root, ".agents", "skills", "tiangong-kb-sci-search", "SKILL.md")),
+        true,
+      );
+      assert.equal((await readFile(workspacePaths(root).env, "utf8")).includes("secret"), false);
+      assert.equal(
+        (await readFile(workspacePaths(root).setupAdapterEnv, "utf8")).includes("secret"),
+        false,
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -513,6 +621,42 @@ describe("research setup execution and operator safety", () => {
         (await readFile(workspacePaths(root).setupReport, "utf8")).includes(secret),
         false,
       );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks setup readiness when an explicitly requested agent smoke fails", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await createEmptyPlan(root);
+      await applyResearchSetupPlan(workspacePaths(root).setupPlan, { skipDoctor: true });
+      const report = await doctorResearchSetup(root, {
+        agentSmoke: true,
+        environment: {},
+        runner: async ({ command }) => ({
+          exitCode: 0,
+          stdout: `${command} fixture-version`,
+          stderr: "",
+        }),
+        executor: async (request) => ({
+          exitCode: 9,
+          stdout: "",
+          stderr: `${request.route.agent} smoke failed`,
+          tokens: 0,
+          inputTokens: 0,
+          cachedInputTokens: 0,
+          outputTokens: 0,
+          costUsd: 0,
+          wallSeconds: 0,
+          model: request.route.model,
+          runtime: null,
+        }),
+      });
+      assert.equal(report.readiness, "BLOCKED");
+      const checks = report.checks as Array<{ id: string; status: string }>;
+      assert.equal(checks.find((check) => check.id === "production-runtime")?.status, "fail");
+      assert.equal((report.workspaceDoctor as { status: string } | null)?.status, "blocked");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -764,7 +908,8 @@ describe("research setup execution and operator safety", () => {
       const serialized = `${JSON.stringify(result.value)}\n${prompt.notes.join("\n")}`;
       assert.equal(serialized.includes(secret), false);
       const plan = await loadAndVerifyResearchSetupPlan(workspacePaths(root).setupPlan);
-      assert.equal(plan.selection.evidenceProfile, EXTERNAL_SKILL_CONTEXT_PROFILE);
+      assert.equal(plan.selection.evidenceProfile, EXTERNAL_SKILL_PROFILE);
+      assert.ok(plan.selection.skillIds.includes("tiangong.auto-research"));
       assert.ok(plan.selection.skillIds.includes("hugohe3.ppt-master"));
       assert.ok(plan.selection.skillIds.includes("anthropic.pptx"));
       assert.deepEqual(
@@ -869,6 +1014,7 @@ describe("POST capability broker compatibility", () => {
             permissions: ["project-read", "candidate-write", "brokered-network"],
             allowedHosts: ["post.example.test"],
             http: {
+              endpoint: "https://post.example.test/",
               method: "POST",
               accept: "application/json",
               allowedContentTypes: ["application/json"],
@@ -1060,7 +1206,7 @@ class ScriptedWizardPrompt implements ResearchSetupWizardPrompt {
     defaultValue: T,
   ): Promise<T> {
     if (message === "Research mode") return "production-research" as T;
-    if (message.includes("public-internet")) return EXTERNAL_SKILL_CONTEXT_PROFILE as T;
+    if (message.includes("public-internet")) return defaultValue;
     if (message === "Install targets") return "codex" as T;
     if (message === "Installation scope") return "project" as T;
     return defaultValue;

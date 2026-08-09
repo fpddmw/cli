@@ -105,35 +105,56 @@ independent review, closure, and the public command family.
 catalog, immutable plan/tamper checks, explicit licenses and global mutation,
 credential preflight before downloads, resumable setup state, TTY Wizard
 automation and color suppression, pinned Brave source-layout paths across every
-evidence profile, minimal secret environments, exact document/paper artifact
+evidence profile, explicit orchestrator/default-baseline selection,
+replacement-time managed capability and credential pruning with custom/Skill
+preservation, explicit smoke-failure blocking, minimal secret environments,
+exact document/paper artifact
 binding, no-overwrite/no-directory-scan behavior, explicit browser handoff, and
 bounded JSON POST broker credential/body redaction.
 `test/research-runtime-production.test.ts` adds zero-cost
 production evals for permanent evidence and review packets, exact HTTP policy,
 byte/item/offset/estimated-token extraction bounds and raw-object cache reuse,
-sanitized 429/422 handling, structured-output and provenance repair,
+sanitized 429/422 handling, bounded broker-level 429 retry, structured-output and provenance repair,
+audited deterministic Markdown newline-artifact normalization before independent review,
 mechanically normalized dimension/full-text/publication-date coverage,
 bounded local context with full-source review, stage tool isolation, runtime
 target/wrapper/adapter fingerprinting and drift rejection, telemetry redaction,
 owner-only whitelisted Claude settings authentication, production doctor
-attestation, two-protocol-turn tool-free review with exact local/broker bounded views,
+attestation creation, default-doctor reuse, current-runtime drift rejection,
+two-protocol-turn tool-free review with exact local/broker bounded views,
 persistent packet/context tamper rejection at closure, JSONL progress, and
 append-only retry/fork recovery. `test/research-external-skills.test.ts`
 validates the pinned external recommendation catalog, actionable missing-install
 errors, owner-environment credential configuration without disclosure, custom
 database Skill admission, whole-tree locks and staged manifests, static/live
 provider checks, bounded 429 retry, authentication/rate-limit redaction,
+exact endpoint staging and pre-fetch/redirect scope rejection,
+bounded sanitized provider code/detail/request-ID retention,
 source-to-installed-tree binding, refusal to bless drift through lock/configure/import,
 internal-source rejection, invalid-definition errors, sensitive health-URL
 rejection, and blocked catalog/doctor status for symlinked credential files.
 Production tests additionally require an external
 public-internet plan and block downstream work when any capability marked
-`requiredForDiscovery` lacks a broker receipt.
+`requiredForDiscovery` lacks a broker receipt. The failure distinguishes a
+capability that was never exercised from one that was attempted but yielded no
+admissible receipt, including only sanitized failure-kind metadata.
 
 Executor regression coverage also verifies that Codex receives exactly one
 external-sandbox bypass flag and no nested `--sandbox read-only` flag, while
-shell and unified-exec remain disabled. A deterministic fake Codex emits a
+shell and unified-exec remain disabled. It also verifies the capsule-local
+project-root marker/config override that prevents parent project-config reads.
+Primary/repair reuse tests verify that an identical owner-only auth copy is
+accepted idempotently while source drift is rejected without overwriting the
+capsule file.
+Leaf-command help tests run from an unmanaged directory before workspace
+resolution. A deterministic fake Codex emits a
 90 KiB MCP result to prove the capture reservation includes bounded tool
 context instead of failing at the historical 64 KiB floor. Runtime tests verify
 that discovery has no filesystem tool policy and receives the exact locked
 manifest and staged top-level Skill documentation inline.
+Preflight/runtime parity coverage verifies that the full bounded capability
+documentation allowance is reserved for every possible broker turn and fits
+the default discovery package before project admission.
+Broker tests also prove that the configured call ceiling rejects an excess
+request before another provider fetch while retaining a sanitized journal
+event and the already admitted receipt.

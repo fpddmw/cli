@@ -13,14 +13,14 @@ import { loadProjectEvidenceReceipts, stageProjectEvidence } from "./evidence.js
 import { executeAgent, type AgentExecutionRequest } from "./executor.js";
 import { requiredDiscoveryCapabilityIds } from "./external-skills.js";
 import { renderInputLineContext } from "./input-plan.js";
-import { appendJournalEvent, verifyJournal } from "./journal.js";
+import { appendJournalEvent, readJournal, verifyJournal } from "./journal.js";
 import {
-  RESEARCH_AGENT_PROTOCOL_OVERHEAD_TOKENS,
+  calculateAgentCallTokenReservation,
   RESEARCH_BROKER_MAX_TURNS,
   RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
   RESEARCH_MAX_REPAIR_SOURCE_BYTES,
   RESEARCH_REPAIR_MAX_TURNS,
-  RESEARCH_STRUCTURED_OUTPUT_MAX_TURNS,
+  researchStructuredOutputMaxTurns,
   reservedAgentPackageCost,
 } from "./preflight.js";
 import {
@@ -309,6 +309,7 @@ async function executeWorkPackage(
           capsule.contextBundle,
           capsule.contextBundleContent,
           stageContextContent,
+          config.budget.maxBrokerCalls,
         ),
         brokerUrl: primaryBrokerUrl,
         inputOnlyProvenance,
@@ -708,6 +709,7 @@ async function createCapsule(
           capsuleProject,
           contextBundleContent,
           evidenceReceipts,
+          config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
         )
       : null;
   const reviewPacket = reviewEvidenceContext
@@ -860,11 +862,18 @@ async function writeReviewEvidenceContext(
   capsuleProject: string,
   inputContextBundle: string,
   evidenceReceipts: Awaited<ReturnType<typeof loadProjectEvidenceReceipts>>,
+  maxBytes: number,
 ): Promise<{ capsule: OutputRecord; persistent: OutputRecord }> {
-  const sections = [
+  const header = [
     "TIANGONG REVIEW EVIDENCE CONTEXT v1",
-    "The following are exact, hash-verified bounded views. Full objects are bound in the review packet.",
-    inputContextBundle.trimEnd(),
+    "The following are deterministic excerpts from hash-verified bounded views. Full objects and original bounded contexts remain bound in the review packet.",
+  ].join("\n");
+  const views: Array<{ prefix: string; content: string; suffix: string }> = [
+    {
+      prefix: "--- LOCAL INPUT CONTEXT BUNDLE ---\n--- BEGIN BOUNDED REVIEW EXCERPT ---\n",
+      content: inputContextBundle.trimEnd(),
+      suffix: "\n--- END BOUNDED REVIEW EXCERPT ---",
+    },
   ];
   const seen = new Set<string>();
   for (const receipt of [...evidenceReceipts].sort((left, right) =>
@@ -876,19 +885,47 @@ async function writeReviewEvidenceContext(
     const content = reviewableTextContentType(receipt.contentType)
       ? await readFile(resolveContained(capsuleProject, receipt.contextLocator), "utf8")
       : "[Binary bounded view omitted from model context; verify the bound file mechanically.]";
-    sections.push(
-      [
+    views.push({
+      prefix: [
         `--- BROKER RECEIPT ${receipt.attemptId} ---`,
         `metadata: ${JSON.stringify(metadata)}`,
-        "--- BEGIN BOUNDED VIEW ---",
-        content.trimEnd(),
-        "--- END BOUNDED VIEW ---",
+        "--- BEGIN BOUNDED REVIEW EXCERPT ---",
+        "",
       ].join("\n"),
-    );
+      content: content.trimEnd(),
+      suffix: "\n--- END BOUNDED REVIEW EXCERPT ---",
+    });
   }
+  const fixedContent = [header, ...views.map((view) => `${view.prefix}${view.suffix}`)].join(
+    "\n\n",
+  );
+  const fixedBytes = Buffer.byteLength(`${fixedContent}\n`, "utf8");
+  if (fixedBytes > maxBytes) {
+    throw new CliError("Review evidence metadata exceeds the configured context budget.", {
+      code: "RESEARCH_REVIEW_CONTEXT_BUDGET_EXCEEDED",
+      exitCode: 3,
+      details: { fixedBytes, maxBytes, views: views.length },
+    });
+  }
+  const contentBudgetPerView = Math.floor((maxBytes - fixedBytes) / views.length);
+  const sections = [
+    header,
+    ...views.map(
+      (view) =>
+        `${view.prefix}${boundedUtf8ReviewExcerpt(view.content, contentBudgetPerView)}${view.suffix}`,
+    ),
+  ];
   const logicalPath = "inputs/review-evidence-context.txt";
   const path = resolveContained(capsuleProject, logicalPath);
   const content = `${sections.join("\n\n")}\n`;
+  const actualBytes = Buffer.byteLength(content, "utf8");
+  if (actualBytes > maxBytes) {
+    throw new CliError("Review evidence context exceeded its deterministic byte budget.", {
+      code: "RESEARCH_REVIEW_CONTEXT_BUDGET_EXCEEDED",
+      exitCode: 3,
+      details: { actualBytes, maxBytes },
+    });
+  }
   await writeTextAtomic(path, content);
   const capsule = await fileRecord(path, logicalPath);
   const persistentLogicalPath = `review/contexts/${capsule.sha256}.txt`;
@@ -915,6 +952,28 @@ function reviewableTextContentType(contentType: string): boolean {
   return /^(?:text\/|application\/(?:[^;]+\+)?(?:json|xml|javascript|xhtml\+xml|csv))(?:;|$)/i.test(
     contentType,
   );
+}
+
+function boundedUtf8ReviewExcerpt(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  const suffix =
+    "\n[TRUNCATED: the full object and original bounded context remain hash-bound in the persistent review packet.]";
+  const suffixBytes = Buffer.byteLength(suffix, "utf8");
+  if (maxBytes <= suffixBytes) return utf8Prefix(suffix, maxBytes);
+  return `${utf8Prefix(value, maxBytes - suffixBytes)}${suffix}`;
+}
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  let bytes = 0;
+  let result = "";
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maxBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
 }
 
 async function persistReviewPacket(
@@ -1104,7 +1163,7 @@ function agentRequest(input: {
       ? RESEARCH_REPAIR_MAX_TURNS
       : input.brokerUrl
         ? RESEARCH_BROKER_MAX_TURNS
-        : RESEARCH_STRUCTURED_OUTPUT_MAX_TURNS;
+        : researchStructuredOutputMaxTurns(input.route);
   return {
     route: input.route,
     prompt: input.prompt,
@@ -1128,7 +1187,7 @@ function agentRequest(input: {
     maxTurns,
     maxOutputTokens: input.maxOutputTokens,
     maxToolContextTokens: input.brokerUrl
-      ? input.config.budget.maxBrokerContextTokens * maxTurns
+      ? input.config.budget.maxBrokerContextTokens * input.config.budget.maxBrokerCalls
       : 0,
     maxCostUsd: input.maxCostUsd,
     expectedRuntime: input.expectedRuntime,
@@ -1177,6 +1236,19 @@ async function materializeAndValidateStageOutput(
       : parsed.fileContent;
   await writeTextAtomic(destination, fileContent);
   await validateOutputShape(root, project, workPackage, destination, reviewPacketSha256);
+  if (parsed.normalizations.length > 0) {
+    await appendJournalEvent(
+      workspacePaths(root).journal,
+      "package.output.normalized",
+      project.id,
+      {
+        projectId: project.id,
+        packageId: workPackage.id,
+        stage: workPackage.stage,
+        normalizations: parsed.normalizations,
+      },
+    );
+  }
 }
 
 async function validateAndImportOutputs(
@@ -1490,10 +1562,38 @@ async function assertEvidenceCoverage(root: string, project: ProjectState): Prom
   const exercisedCapabilities = new Set(
     (await loadProjectEvidenceReceipts(root, project.id)).map((receipt) => receipt.capabilityId),
   );
+  const journalEvents = await readJournal(workspacePaths(root).journal);
+  const attemptedCapabilities = new Map<string, { attempts: number; failureKinds: Set<string> }>();
+  for (const event of journalEvents) {
+    if (event.scope !== project.id || event.type !== "capability.fetch.attempted") continue;
+    const capabilityId = event.payload.capabilityId;
+    if (typeof capabilityId !== "string") continue;
+    const current = attemptedCapabilities.get(capabilityId) ?? {
+      attempts: 0,
+      failureKinds: new Set<string>(),
+    };
+    current.attempts += 1;
+    attemptedCapabilities.set(capabilityId, current);
+  }
+  for (const event of journalEvents) {
+    if (event.scope !== project.id || event.type !== "capability.fetch.failed") continue;
+    const capabilityId = event.payload.capabilityId;
+    const failureKind = event.payload.failureKind;
+    if (typeof capabilityId !== "string" || typeof failureKind !== "string") continue;
+    attemptedCapabilities.get(capabilityId)?.failureKinds.add(failureKind);
+  }
   for (const capabilityId of requiredCapabilities) {
-    if (!exercisedCapabilities.has(capabilityId)) {
+    if (exercisedCapabilities.has(capabilityId)) continue;
+    const attempted = attemptedCapabilities.get(capabilityId);
+    if (!attempted) {
       gaps.push(`required discovery capability was not exercised: ${capabilityId}`);
+      continue;
     }
+    const failureKinds = [...attempted.failureKinds].sort();
+    const detail = failureKinds.length ? `; failure kinds: ${failureKinds.join(", ")}` : "";
+    gaps.push(
+      `required discovery capability produced no admissible receipt after ${attempted.attempts} attempt(s): ${capabilityId}${detail}`,
+    );
   }
   if (
     canonicalJson(declared.dimensions) !== canonicalJson(computed.dimensions) ||
@@ -1664,7 +1764,6 @@ async function stageContextForPackage(
         ? ["outputs/evidence.json", "outputs/analysis.json"]
         : workPackage.stage === "review"
           ? [
-              "inputs/review-packet.json",
               "inputs/review-evidence-context.txt",
               "outputs/evidence.json",
               "outputs/analysis.json",
@@ -1677,8 +1776,18 @@ async function stageContextForPackage(
     sections.push(`### ${logicalPath}\n${content.trimEnd()}`);
   }
   const bundled = sections.join("\n\n");
-  const estimatedTokens = Math.ceil(Buffer.byteLength(bundled, "utf8") / 4);
-  if (estimatedTokens > config.budget.maxInputContextTokens) {
+  const estimatedTokens = Math.ceil(
+    Buffer.byteLength(bundled, "utf8") / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
+  );
+  const maxStageContextTokens =
+    workPackage.stage === "review"
+      ? config.budget.maxInputContextTokens + config.budget.maxOutputTokens * 3
+      : workPackage.stage === "synthesize"
+        ? config.budget.maxOutputTokens * 2
+        : workPackage.stage === "analyze"
+          ? config.budget.maxOutputTokens
+          : 0;
+  if (estimatedTokens > maxStageContextTokens) {
     throw new CliError(
       `Admitted stage context exceeds the configured input context limit for ${workPackage.id}.`,
       {
@@ -1687,7 +1796,7 @@ async function stageContextForPackage(
         details: {
           packageId: workPackage.id,
           estimatedTokens,
-          maxInputContextTokens: config.budget.maxInputContextTokens,
+          maxStageContextTokens,
         },
       },
     );
@@ -1705,6 +1814,7 @@ function packagePrompt(
   contextBundle: OutputRecord,
   contextBundleContent: string,
   stageContextContent: string,
+  maxBrokerCalls: number,
 ): string {
   const stageInstructions: Record<WorkPackage["stage"], string> = {
     discover:
@@ -1712,8 +1822,8 @@ function packagePrompt(
     analyze:
       "Use only the complete embedded admitted evidence below and return the schema-defined analysis object. Every finding must cite admitted evidence source IDs and state uncertainty and applicability.",
     synthesize:
-      "Use only the complete embedded admitted evidence and findings below. Return the schema-defined object whose reportMarkdown separates supported conclusions, uncertainty, limitations, and next actions.",
-    review: `Independently inspect the complete embedded review packet, artifacts, and exact bounded evidence views. The CLI has already verified every bound full evidence object's size and SHA-256 and persistently stored the review packet; do not claim to have read beyond the embedded views. Return the schema-defined review bound to packetSha256 ${reviewPacketSha256 ?? "unavailable"}. Use pass only when every material claim is traceable within the admitted evidence and clearly scoped to its limitations.`,
+      "Use only the complete embedded admitted evidence and findings below. Return the schema-defined object whose reportMarkdown separates supported conclusions, uncertainty, limitations, and next actions. Use real Markdown line breaks encoded exactly once for JSON; never place literal /n or double-escaped \\n markers in reportMarkdown. When the admitted publication-date range is narrower than the requested range, state the exact admitted range and missing interval prominently in the opening summary.",
+    review: `Independently inspect the complete embedded artifacts and globally bounded evidence excerpts. The CLI has already verified every bound full evidence object's size and SHA-256 and persistently stored the complete review packet; its hash is schema-bound even though the packet metadata is not duplicated in model context. Do not claim to have read beyond the embedded excerpts. Return the schema-defined review bound to packetSha256 ${reviewPacketSha256 ?? "unavailable"}. Use pass only when every material claim is traceable within the admitted evidence and clearly scoped to its limitations.`,
     close: "No agent action is allowed for mechanical closure.",
   };
   const prompt = [
@@ -1729,7 +1839,7 @@ function packagePrompt(
       ? "The exact capability manifest and each staged external SKILL.md are embedded below. Use this documentation directly; filesystem tools are disabled."
       : "Capability files are provenance-bound but are not available as execution tools in this stage.",
     workPackage.stage === "discover"
-      ? "Use the broker only. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. Invoke fetch_candidate_source with the manifest capability ID and obey its exact declared HTTP method. GET capabilities use only declared query parameters; POST capabilities require request_body containing only the documented non-secret request JSON. Never place API keys, tokens, authorization data, cookies, or other credential-like fields in request_body. The broker injects the sole declared logical credential, disables caching for credentialed requests, and never persists the POST body (only its hash). The tool result includes the exact bounded context together with its receipt; use that inline context and its provenance fields. Exercise every manifest capability with requiredForDiscovery=true, or the mechanical coverage gate will stop downstream work."
+      ? `Use the broker only, with at most ${maxBrokerCalls} total fetch_candidate_source calls. Prefer broad, high-yield queries and stop querying once the declared coverage minimums are met. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. Invoke fetch_candidate_source with the manifest capability ID and obey its exact declared HTTP method. GET capabilities use only declared query parameters; POST capabilities require request_body containing only the documented non-secret request JSON. Never place API keys, tokens, authorization data, cookies, or other credential-like fields in request_body. The broker injects the sole declared logical credential, disables caching for credentialed requests, and never persists the POST body (only its hash). The tool result includes the exact bounded context together with its receipt and remaining call budget; use that inline context and its provenance fields. Exercise every manifest capability with requiredForDiscovery=true, or the mechanical coverage gate will stop downstream work.`
       : "Use only the complete embedded stage context; no tools or additional source reads are allowed.",
     stageInstructions[workPackage.stage],
     "Do not write stage output files directly. Your final response must be only the JSON object required by the supplied output schema; the CLI will validate and atomically materialize it.",
@@ -1776,35 +1886,21 @@ function assertPreCallTokenReservation(
 ): void {
   const schemaBytes = Buffer.byteLength(JSON.stringify(request.outputSchema), "utf8");
   const promptBytes = Buffer.byteLength(request.prompt, "utf8");
-  const protocolOverhead = RESEARCH_AGENT_PROTOCOL_OVERHEAD_TOKENS[request.route.agent];
-  const callInputTokensPerTurn =
-    protocolOverhead + Math.ceil((schemaBytes + promptBytes) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN);
-  const callInputTokens = callInputTokensPerTurn * request.maxTurns;
-  const potentialToolContextTokens = request.maxToolContextTokens ?? 0;
-  const repairTokens = reserveRepair
-    ? (protocolOverhead +
-        Math.ceil(
-          (schemaBytes + RESEARCH_MAX_REPAIR_SOURCE_BYTES + 2_048) /
-            RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
-        )) *
-        RESEARCH_REPAIR_MAX_TURNS +
-      config.budget.maxRepairTokens
-    : 0;
-  const reservation = {
-    alreadyUsedTokens,
+  const reservation = calculateAgentCallTokenReservation({
+    route: request.route,
+    primaryPayloadTokens: Math.ceil(
+      (schemaBytes + promptBytes) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
+    ),
+    repairPayloadTokens: Math.ceil(
+      (schemaBytes + RESEARCH_MAX_REPAIR_SOURCE_BYTES + 2_048) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
+    ),
     maxTurns: request.maxTurns,
-    estimatedCallInputTokensPerTurn: callInputTokensPerTurn,
-    estimatedCallInputTokens: callInputTokens,
-    outputTokens: request.maxOutputTokens,
-    potentialToolContextTokens,
-    potentialRepairTokens: repairTokens,
-    totalTokens:
-      alreadyUsedTokens +
-      callInputTokens +
-      potentialToolContextTokens +
-      request.maxOutputTokens +
-      repairTokens,
-  };
+    maxOutputTokens: request.maxOutputTokens,
+    maxToolContextTokens: request.maxToolContextTokens ?? 0,
+    maxRepairTokens: config.budget.maxRepairTokens,
+    reserveRepair,
+    alreadyUsedTokens,
+  });
   const packageMaxTokens = config.budget.packageMaxTokens[workPackage.stage as AgentPackageStage];
   const projectRemainingTokens = Math.max(0, config.budget.maxTokens - project.usage.tokens);
   if (

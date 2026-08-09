@@ -237,6 +237,13 @@ describe("research capability locks", () => {
                 skillPath,
                 permissions: ["project-read", "candidate-write", "brokered-network"],
                 allowedHosts: ["example.test"],
+                http: {
+                  endpoint: "https://example.test/",
+                  accept: "application/json",
+                  allowedContentTypes: ["application/json"],
+                  maxResponseBytes: 64 * 1024,
+                  maxItems: 10,
+                },
                 credentials: [],
               },
             ],
@@ -290,7 +297,7 @@ describe("research capability locks", () => {
               )[0] ?? {}
             ).text,
           ),
-          /outside capability scope/,
+          /outside.*capability.*scope/,
         );
       } finally {
         await broker.stop();
@@ -330,8 +337,14 @@ describe("research project execution", () => {
             '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"missing isolation flags"}}\'',
             "  exit 0;;",
             "esac",
+            'case "$*" in *\'project_root_markers=[".tiangong-research-capsule-root"]\'*) ;; *)',
+            '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"missing capsule root boundary"}}\'',
+            "  exit 0;;",
+            "esac",
             `if [ "$HOME" != ${JSON.stringify(join(capsule, "home"))} ]; then`,
             '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"wrong home"}}\'',
+            'elif [ ! -f "$PWD/.tiangong-research-capsule-root" ]; then',
+            '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"missing capsule root marker"}}\'',
             'elif ! mkdir -p "$HOME/.codex" || ! : > "$HOME/.codex/state.sqlite"; then',
             '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"home not writable"}}\'',
             `elif cat ${JSON.stringify(credentialPath)} >/dev/null 2>&1; then`,
@@ -656,6 +669,77 @@ describe("research project execution", () => {
         assert.equal(repair.stdout, '{"ok":true}');
       } finally {
         await rm(capsule, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    "reuses identical capsule authentication for repair and rejects source drift",
+    { skip: platform() !== "darwin" && platform() !== "linux" },
+    async () => {
+      const capsule = await temporaryDirectory();
+      const sourceHome = await temporaryDirectory();
+      try {
+        const projectRoot = join(capsule, "project");
+        const sourceCodex = join(sourceHome, ".codex");
+        await mkdir(projectRoot);
+        await mkdir(sourceCodex, { mode: 0o700 });
+        const sourceAuth = join(sourceCodex, "auth.json");
+        await writeFile(sourceAuth, '{"access_token":"capsule-auth-secret-one"}\n', {
+          mode: 0o600,
+        });
+        const binary = join(capsule, "fake-auth-codex");
+        await writeFile(
+          binary,
+          [
+            "#!/bin/sh",
+            'if [ "$1" = "--version" ]; then printf \'%s\\n\' "fake-auth-codex 1.0"; exit 0; fi',
+            'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"{\\"ok\\":true}"}}\'',
+            'printf \'%s\\n\' \'{"type":"turn.completed","usage":{"input_tokens":2,"cached_input_tokens":0,"output_tokens":1}}\'',
+            "",
+          ].join("\n"),
+        );
+        await chmod(binary, 0o755);
+        const request = {
+          route: { agent: "codex" as const, binary, model: "test-model" },
+          prompt: "Return the doctor result.",
+          outputSchema: schemaForStage("doctor"),
+          requestId: "codex-auth-reuse-test",
+          purpose: "doctor" as const,
+          capsuleRoot: capsule,
+          projectRoot,
+          workspaceRoot: capsule,
+          timeoutSeconds: 10,
+          maxTurns: 1,
+          maxOutputTokens: 100,
+          maxCostUsd: 1,
+          toolPolicy: "none" as const,
+          environment: { HOME: sourceHome, PATH: process.env.PATH },
+          brokerUrl: null,
+        };
+        const first = await executeAgent(request);
+        const destinationAuth = join(capsule, "home", ".codex", "auth.json");
+        const copiedSha256 = await sha256File(destinationAuth);
+        const repair = await executeAgent({
+          ...request,
+          requestId: "codex-auth-reuse-repair-test",
+          purpose: "repair",
+        });
+        assert.equal(first.exitCode, 0, first.stderr);
+        assert.equal(repair.exitCode, 0, repair.stderr);
+        assert.equal(await sha256File(destinationAuth), copiedSha256);
+
+        await writeFile(sourceAuth, '{"access_token":"capsule-auth-secret-two"}\n');
+        await assert.rejects(
+          executeAgent({ ...request, requestId: "codex-auth-drift-test" }),
+          /authentication material changed while the capsule was active/,
+        );
+        assert.equal(await sha256File(destinationAuth), copiedSha256);
+      } finally {
+        await Promise.all([
+          rm(capsule, { recursive: true, force: true }),
+          rm(sourceHome, { recursive: true, force: true }),
+        ]);
       }
     },
   );
@@ -993,12 +1077,12 @@ describe("research project execution", () => {
           packageMaxTokens: Record<"discover" | "analyze" | "synthesize" | "review", number>;
         };
       };
-      config.budget.maxTokens = 220_000;
+      config.budget.maxTokens = 245_000;
       config.budget.packageMaxTokens = {
         discover: 50_000,
         analyze: 50_000,
         synthesize: 45_000,
-        review: 75_000,
+        review: 100_000,
       };
       await writeFile(paths.config, `${JSON.stringify(config, null, 2)}\n`);
       await initializeProject(root, "exact-budget", "Evaluate exact budget closure behavior.");
@@ -1007,7 +1091,7 @@ describe("research project execution", () => {
       await addProjectInput(root, "exact-budget", inputPath, "primary");
 
       const normal = fakeExecutor([]);
-      const packageTokenUsage = [50_000, 50_000, 45_000, 75_000];
+      const packageTokenUsage = [50_000, 50_000, 45_000, 100_000];
       let agentCall = 0;
       const result = await runResearchWorkspace(
         root,
@@ -1029,7 +1113,7 @@ describe("research project execution", () => {
         JSON.stringify({ result, project: await loadProject(root, "exact-budget") }),
       );
       assert.equal(result.stopReason, "all-projects-complete");
-      assert.equal(result.projects[0]?.usage.tokens, 220_000);
+      assert.equal(result.projects[0]?.usage.tokens, 245_000);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1064,6 +1148,31 @@ describe("research project execution", () => {
 });
 
 describe("research workspace CLI", () => {
+  it("renders leaf-command help without resolving or validating a workspace", async () => {
+    for (const argv of [
+      ["research", "context", "inspect", "--help"],
+      ["research", "workspace", "init", "--help"],
+      ["research", "workspace", "doctor", "--help"],
+      ["research", "capability", "catalog", "--help"],
+      ["research", "capability", "configure", "--help"],
+      ["research", "capability", "doctor", "--help"],
+      ["research", "capability", "credential", "set", "--help"],
+      ["research", "project", "preflight", "--help"],
+      ["research", "project", "init", "--help"],
+      ["research", "project", "input", "add", "--help"],
+      ["research", "project", "retry", "--help"],
+      ["research", "project", "fork", "--help"],
+      ["research", "schema", "show", "--help"],
+      ["research", "status", "--help"],
+      ["research", "run", "--help"],
+    ]) {
+      const result = await invoke(argv);
+      assert.equal(result.exitCode, 0, `${argv.join(" ")}: ${result.stderr}`);
+      assert.match(result.stdout, /Research workspace commands:/);
+      assert.equal(result.stderr, "");
+    }
+  });
+
   it("derives bounded text contexts from non-overlapping declared line ranges", async () => {
     const root = await temporaryDirectory();
     try {
@@ -1604,8 +1713,10 @@ describe("research workspace CLI", () => {
         inputPlan: { sha256: string; inputs: Array<{ id: string }> };
         doctorAttestation: { status: string; attestationSha256: string };
         budget: {
+          packageMaxTokens: Record<"discover" | "analyze" | "synthesize" | "review", number>;
           recommendedDiscoverOutputTokens: number;
           embeddedStageContextReservation: number;
+          stageContextTokenReservations: Record<"analyze" | "synthesize" | "review", number>;
           maxInputContextTokens: number;
           outputTokenLimitEnforcement: { producer: string; reviewer: string };
           preCallTokenReservations: Record<
@@ -1631,6 +1742,11 @@ describe("research workspace CLI", () => {
         preflightValue.budget.embeddedStageContextReservation <=
           preflightValue.budget.maxInputContextTokens,
       );
+      assert.deepEqual(preflightValue.budget.stageContextTokenReservations, {
+        analyze: 6_000,
+        synthesize: 12_000,
+        review: 30_000,
+      });
       assert.deepEqual(preflightValue.budget.outputTokenLimitEnforcement, {
         producer: "post-execution",
         reviewer: "post-execution",
@@ -1639,7 +1755,7 @@ describe("research workspace CLI", () => {
         discover: 6,
         analyze: 2,
         synthesize: 2,
-        review: 2,
+        review: 3,
         repair: 1,
       });
       assert.equal(
@@ -1650,6 +1766,17 @@ describe("research workspace CLI", () => {
       assert.ok(
         preflightValue.budget.preCallTokenReservations.review >
           preflightValue.budget.preCallTokenReservations.synthesize,
+      );
+      for (const stage of ["discover", "analyze", "synthesize", "review"] as const) {
+        assert.ok(
+          preflightValue.budget.preCallTokenReservations[stage] <=
+            preflightValue.budget.packageMaxTokens[stage],
+          `${stage} preflight reservation must fit the package budget`,
+        );
+      }
+      assert.ok(
+        preflightValue.budget.preCallTokenReservations.discover >= 220_000,
+        "discover preflight must reserve the bounded capability documentation on every broker turn",
       );
       assert.equal(preflight.stdout.includes(corporateSource), false);
       assert.equal(preflight.stdout.includes(peerReviewedSource), false);
@@ -1924,6 +2051,7 @@ async function declareExternalPublicCapability(root: string, skillParent: string
             permissions: ["project-read", "candidate-write", "brokered-network"],
             allowedHosts: ["search.example.test"],
             http: {
+              endpoint: "https://search.example.test/",
               accept: "application/json",
               allowedContentTypes: ["application/json"],
               maxResponseBytes: 64 * 1024,

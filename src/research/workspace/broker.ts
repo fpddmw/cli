@@ -28,10 +28,19 @@ import { loadWorkspaceConfig } from "./workspace.js";
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES = 16 * 1024;
 const BROKER_CONTEXT_BYTES_PER_TOKEN = 3;
+const MAX_RATE_LIMIT_RETRIES = 1;
+const MAX_INLINE_RETRY_DELAY_SECONDS = 5;
+const DEFAULT_RATE_LIMIT_RETRY_SECONDS = 1;
 
 export interface CapabilityBroker {
   url: string;
+  usage(): { maxCalls: number; startedCalls: number; remainingCalls: number };
   stop(): Promise<void>;
+}
+
+interface BrokerCallBudget {
+  maxCalls: number;
+  startedCalls: number;
 }
 
 export async function startCapabilityBroker(
@@ -54,6 +63,10 @@ export async function startCapabilityBroker(
   }
   const credentialMap = await loadCapabilityCredentialMap(root, declarations.capabilities);
   const config = await loadWorkspaceConfig(root);
+  const callBudget: BrokerCallBudget = {
+    maxCalls: config.budget.maxBrokerCalls,
+    startedCalls: 0,
+  };
   const routeToken = randomUUID().replaceAll("-", "");
   const route = `/mcp/${routeToken}`;
   const server = createServer((request, response) => {
@@ -69,6 +82,7 @@ export async function startCapabilityBroker(
       workspaceResponseBytes: config.budget.maxBrokerResponseBytes,
       workspaceContextTokens: config.budget.maxBrokerContextTokens,
       workspaceMaxItems: config.budget.maxBrokerItems,
+      callBudget,
     });
   });
   await new Promise<void>((resolvePromise, reject) => {
@@ -82,6 +96,11 @@ export async function startCapabilityBroker(
   }
   return {
     url: `http://127.0.0.1:${address.port}${route}`,
+    usage: () => ({
+      maxCalls: callBudget.maxCalls,
+      startedCalls: callBudget.startedCalls,
+      remainingCalls: Math.max(0, callBudget.maxCalls - callBudget.startedCalls),
+    }),
     stop: () =>
       new Promise<void>((resolvePromise, reject) => {
         server.close((error) => (error ? reject(error) : resolvePromise()));
@@ -101,6 +120,7 @@ async function handleMcpRequest(input: {
   workspaceResponseBytes: number;
   workspaceContextTokens: number;
   workspaceMaxItems: number;
+  callBudget: BrokerCallBudget;
 }): Promise<void> {
   try {
     if (input.request.method !== "POST" || input.request.url !== input.route) {
@@ -129,8 +149,7 @@ async function handleMcpRequest(input: {
         tools: [
           {
             name: "fetch_candidate_source",
-            description:
-              "Fetch one bounded HTTPS candidate source through a locked capability, persist the raw response, and return content-addressed provenance plus a bounded context view.",
+            description: `Fetch one bounded HTTPS candidate source through a locked capability, persist the raw response, and return content-addressed provenance plus a bounded context view. This run permits at most ${input.callBudget.maxCalls} total calls.`,
             inputSchema: {
               type: "object",
               additionalProperties: false,
@@ -173,6 +192,31 @@ async function handleMcpRequest(input: {
         sendToolError(input.response, body, "Unsupported tool call.");
         return;
       }
+      if (input.callBudget.startedCalls >= input.callBudget.maxCalls) {
+        await appendJournalEvent(
+          workspacePaths(input.root).journal,
+          "capability.fetch.rejected",
+          input.projectId,
+          {
+            projectId: input.projectId,
+            code: "RESEARCH_BROKER_CALL_LIMIT_EXCEEDED",
+            maxCalls: input.callBudget.maxCalls,
+            startedCalls: input.callBudget.startedCalls,
+          },
+        );
+        sendToolError(
+          input.response,
+          body,
+          JSON.stringify({
+            code: "RESEARCH_BROKER_CALL_LIMIT_EXCEEDED",
+            message:
+              "The bounded broker call budget is exhausted; produce the best supported result from admitted receipts.",
+            maxCalls: input.callBudget.maxCalls,
+          }),
+        );
+        return;
+      }
+      input.callBudget.startedCalls += 1;
       try {
         const receipt = await fetchCandidateSource({
           root: input.root,
@@ -186,7 +230,22 @@ async function handleMcpRequest(input: {
           arguments: params.arguments,
         });
         sendRpcResult(input.response, body, {
-          content: [{ type: "text", text: JSON.stringify(receipt) }],
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                ...receipt,
+                brokerBudget: {
+                  maxCalls: input.callBudget.maxCalls,
+                  startedCalls: input.callBudget.startedCalls,
+                  remainingCalls: Math.max(
+                    0,
+                    input.callBudget.maxCalls - input.callBudget.startedCalls,
+                  ),
+                },
+              }),
+            },
+          ],
         });
       } catch (error) {
         const detail =
@@ -271,6 +330,7 @@ async function fetchCandidateSource(input: {
     throw new Error(`capability is not admitted for brokered network: ${capabilityId}`);
   const target = validateHttpsUrl(rawUrl);
   if (!capability.http) throw new Error(`capability has no broker HTTP policy: ${capabilityId}`);
+  assertEndpointScope(target, capability.http.endpoint);
   const encodedRequestBody = validateBrokerRequestBody(
     capability.http.method,
     requestBody,
@@ -374,15 +434,56 @@ async function fetchCandidateSource(input: {
       if (!value) throw new Error(`credential value is not configured: ${credential.id}`);
       headers.set(credential.headerName, `${credential.prefix}${value}`);
     }
-    const { response, finalUrl } = await fetchWithRedirectPolicy(
-      target,
-      headers,
-      capability.allowedHosts,
-      credential?.allowedHosts,
-      capability.http.method,
-      encodedRequestBody,
-    );
     const responseLimit = Math.min(capability.http.maxResponseBytes, input.workspaceResponseBytes);
+    let response!: Response;
+    let finalUrl!: URL;
+    let rateLimitRetries = 0;
+    while (true) {
+      ({ response, finalUrl } = await fetchWithRedirectPolicy(
+        target,
+        headers,
+        capability.allowedHosts,
+        credential?.allowedHosts,
+        capability.http.method,
+        encodedRequestBody,
+        capability.http.endpoint,
+      ));
+      if (response.status !== 429 || rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) break;
+      const retryAfterSeconds = parseRetryAfter(response.headers.get("retry-after"));
+      const retryDelaySeconds = retryAfterSeconds ?? DEFAULT_RATE_LIMIT_RETRY_SECONDS;
+      if (retryDelaySeconds > MAX_INLINE_RETRY_DELAY_SECONDS) break;
+      const retryBytes = await readBoundedResponseBody(
+        response,
+        Math.min(responseLimit, MAX_ERROR_RESPONSE_BYTES),
+        true,
+      );
+      assertConfiguredCredentialsAbsent(retryBytes, input.credentialMap.values());
+      const retryContentType =
+        response.headers.get("content-type")?.split(";", 1)[0]?.trim() ??
+        "application/octet-stream";
+      rateLimitRetries += 1;
+      await appendJournalEvent(
+        workspacePaths(input.root).journal,
+        "capability.fetch.retry.scheduled",
+        input.projectId,
+        {
+          attemptId,
+          capabilityId,
+          credentialId: effectiveCredentialId,
+          status: response.status,
+          failureKind: "rate-limit",
+          providerAttempt: rateLimitRetries,
+          maxProviderAttempts: MAX_RATE_LIMIT_RETRIES + 1,
+          retryAfterSeconds,
+          retryDelaySeconds,
+          responseExcerpt: safeResponseExcerpt(retryBytes, retryContentType, [
+            ...input.credentialMap.values(),
+          ]),
+          requestId: safeResponseId(response.headers),
+        },
+      );
+      if (retryDelaySeconds > 0) await delay(retryDelaySeconds * 1000);
+    }
     const announcedLength = Number(response.headers.get("content-length") ?? "0");
     if (response.ok && announcedLength > responseLimit)
       throw new Error("response exceeds the broker size limit");
@@ -391,11 +492,7 @@ async function fetchCandidateSource(input: {
       response.ok ? responseLimit : Math.min(responseLimit, MAX_ERROR_RESPONSE_BYTES),
       !response.ok,
     );
-    for (const secret of input.credentialMap.values()) {
-      if (bytes.includes(Buffer.from(secret, "utf8"))) {
-        throw new Error("response failed credential disclosure screening");
-      }
-    }
+    assertConfiguredCredentialsAbsent(bytes, input.credentialMap.values());
     const contentType =
       response.headers.get("content-type")?.split(";", 1)[0]?.trim() ?? "application/octet-stream";
     if (!response.ok) {
@@ -517,6 +614,18 @@ function assertNoSensitiveResponseMaterial(bytes: Buffer, contentType: string): 
   }
 }
 
+function assertConfiguredCredentialsAbsent(bytes: Buffer, secrets: Iterable<string>): void {
+  for (const secret of secrets) {
+    if (bytes.includes(Buffer.from(secret, "utf8"))) {
+      throw new Error("response failed credential disclosure screening");
+    }
+  }
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+}
+
 function containsSensitiveJsonField(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(containsSensitiveJsonField);
   if (!isObject(value)) return false;
@@ -585,11 +694,13 @@ async function fetchWithRedirectPolicy(
   credentialHosts: string[] | undefined,
   method: "GET" | "POST",
   body: string | null,
+  endpoint: string,
 ): Promise<{ response: Response; finalUrl: URL }> {
   let current = initialUrl;
   for (let redirects = 0; redirects <= 5; redirects += 1) {
     assertAllowedHost(current, capabilityHosts, "capability");
     if (credentialHosts) assertAllowedHost(current, credentialHosts, "credential");
+    assertEndpointScope(current, endpoint);
     const response = await fetch(current, {
       method,
       headers,
@@ -636,6 +747,17 @@ function validateBrokerRequestBody(
 function assertAllowedHost(url: URL, allowedHosts: string[], scope: string): void {
   if (!allowedHosts.includes(url.host)) {
     throw new Error(`target host is outside ${scope} scope: ${url.host}`);
+  }
+}
+
+function assertEndpointScope(target: URL, endpointValue: string): void {
+  const endpoint = new URL(endpointValue);
+  if (
+    target.protocol !== endpoint.protocol ||
+    target.host.toLowerCase() !== endpoint.host.toLowerCase() ||
+    (endpoint.pathname !== "/" && target.pathname !== endpoint.pathname)
+  ) {
+    throw new Error("target URL is outside the capability endpoint scope");
   }
 }
 

@@ -289,7 +289,7 @@ function parseCapability(value: unknown, index: number): CapabilityDeclaration {
   if (!brokeredNetwork && parsedAllowedHosts.length > 0) {
     invalid(index, "cannot declare allowedHosts without brokered-network");
   }
-  const parsedHttp = brokeredNetwork ? parseHttpPolicy(http, index) : null;
+  const parsedHttp = brokeredNetwork ? parseHttpPolicy(http, index, parsedAllowedHosts) : null;
   if (!brokeredNetwork && http !== undefined && http !== null) {
     invalid(index, "cannot declare http policy without brokered-network");
   }
@@ -505,6 +505,9 @@ function parseHealthCheck(
   ) {
     invalid(index, "healthCheck URL must use an allowed credential-free HTTPS host");
   }
+  if (!endpointAllowsUrl(target, new URL(http.endpoint))) {
+    invalid(index, "healthCheck URL must stay within the declared http endpoint scope");
+  }
   const sensitiveParameter = [...target.searchParams.keys()].find((key) =>
     /(^|[-_])(api[-_]?key|authorization|cookie|credential|password|secret|session|token)($|[-_])/i.test(
       key,
@@ -573,20 +576,17 @@ function contentTypeAllowedByPolicy(value: string, allowed: string[]): boolean {
   });
 }
 
-function parseHttpPolicy(value: unknown, index: number): CapabilityDeclaration["http"] {
+function parseHttpPolicy(
+  value: unknown,
+  index: number,
+  allowedHosts: string[],
+): CapabilityDeclaration["http"] {
   if (value === undefined || value === null) {
-    return {
-      method: "GET",
-      accept: "application/json",
-      allowedContentTypes: ["application/json"],
-      staticHeaders: {},
-      maxRequestBytes: 64 * 1024,
-      maxResponseBytes: 512 * 1024,
-      maxItems: 100,
-    };
+    invalid(index, "brokered-network requires an explicit http endpoint policy");
   }
   if (
     !isObject(value) ||
+    typeof value.endpoint !== "string" ||
     (value.method !== undefined && value.method !== "GET" && value.method !== "POST") ||
     typeof value.accept !== "string" ||
     !value.accept.trim() ||
@@ -612,8 +612,10 @@ function parseHttpPolicy(value: unknown, index: number): CapabilityDeclaration["
   ) {
     invalid(index, "http policy is malformed");
   }
+  const endpoint = parseCapabilityEndpoint(value.endpoint, allowedHosts, index);
   const staticHeaders = parseStaticHeaders(value.staticHeaders, index);
   return {
+    endpoint,
     method: parseHttpMethod(value.method ?? "GET", index, "http"),
     accept: value.accept.trim(),
     allowedContentTypes: [...new Set(value.allowedContentTypes.map((item) => item.toLowerCase()))],
@@ -622,6 +624,29 @@ function parseHttpPolicy(value: unknown, index: number): CapabilityDeclaration["
     maxResponseBytes: value.maxResponseBytes,
     maxItems: value.maxItems,
   };
+}
+
+function parseCapabilityEndpoint(value: string, allowedHosts: string[], index: number): string {
+  let endpoint: URL;
+  try {
+    endpoint = new URL(value);
+  } catch {
+    invalid(index, "http endpoint must be an exact HTTPS URL");
+  }
+  if (
+    endpoint.protocol !== "https:" ||
+    endpoint.username ||
+    endpoint.password ||
+    endpoint.search ||
+    endpoint.hash ||
+    !allowedHosts.includes(endpoint.host.toLowerCase())
+  ) {
+    invalid(
+      index,
+      "http endpoint must be credential-free HTTPS on an allowed host without query or fragment",
+    );
+  }
+  return endpoint.toString();
 }
 
 function parseHttpMethod(value: unknown, index: number, label: string): "GET" | "POST" {
@@ -710,6 +735,14 @@ function normalizeAllowedHost(value: string, index: number, credentialIndex?: nu
     invalid(index, `${label} must contain exact HTTPS host names without paths or wildcards`);
   }
   return parsed.host;
+}
+
+function endpointAllowsUrl(target: URL, endpoint: URL): boolean {
+  return (
+    target.protocol === endpoint.protocol &&
+    target.host.toLowerCase() === endpoint.host.toLowerCase() &&
+    (endpoint.pathname === "/" || target.pathname === endpoint.pathname)
+  );
 }
 
 function skillFrontmatterName(content: string): string {

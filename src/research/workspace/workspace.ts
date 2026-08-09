@@ -9,7 +9,7 @@ import { inspectResearchContext, isWorkspaceMarker } from "./context.js";
 import { inspectCapabilityCredentialEnvironment } from "./credentials.js";
 import { appendJournalEvent, verifyJournal } from "./journal.js";
 import { loadProjectEvidenceReceipts } from "./evidence.js";
-import { executeAgent, type AgentExecutionRequest } from "./executor.js";
+import { executeAgent, fingerprintAgentRoute, type AgentExecutionRequest } from "./executor.js";
 import { doctorExternalCapabilities, hasPublicInternetCapability } from "./external-skills.js";
 import { parseStructuredStageOutput, schemaForStage } from "./schemas.js";
 import { sanitizeResearchText } from "./sanitization.js";
@@ -43,7 +43,7 @@ import type {
 const DOCTOR_ATTESTATION_TTL_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_BUDGET = {
-  maxTokens: 500_000,
+  maxTokens: 550_000,
   maxCostUsd: 60,
   maxWallSeconds: 72 * 60 * 60,
   maxFilesPerPackage: 20,
@@ -51,10 +51,10 @@ const DEFAULT_BUDGET = {
   maxAttemptsPerPackage: 3,
   confirmationCostUsd: 10,
   packageMaxTokens: {
-    discover: 200_000,
-    analyze: 55_000,
-    synthesize: 60_000,
-    review: 120_000,
+    discover: 230_000,
+    analyze: 60_000,
+    synthesize: 70_000,
+    review: 175_000,
   },
   packageMaxWallSeconds: {
     discover: 2 * 60 * 60,
@@ -62,10 +62,11 @@ const DEFAULT_BUDGET = {
     synthesize: 60 * 60,
     review: 60 * 60,
   },
-  maxOutputTokens: 4_000,
+  maxOutputTokens: 6_000,
   maxRepairTokens: 4_000,
   maxBrokerResponseBytes: 512 * 1024,
   maxBrokerContextTokens: 12_000,
+  maxBrokerCalls: 6,
   maxBrokerItems: 100,
   maxInputContextTokens: 12_000,
 } as const;
@@ -270,6 +271,10 @@ export interface DoctorOptions {
   capabilityFetcher?: typeof fetch;
   environment?: NodeJS.ProcessEnv;
   executor?: (request: AgentExecutionRequest) => Promise<ExecutionResult>;
+  runtimeFingerprinter?: (
+    route: AgentRoute,
+    environment: NodeJS.ProcessEnv,
+  ) => Promise<AgentRuntimeFingerprint>;
 }
 
 export async function doctorResearchWorkspace(
@@ -349,19 +354,37 @@ export async function doctorResearchWorkspace(
       capability.permissions.includes("brokered-network"),
     ),
   );
+  const reusableAttestation =
+    config?.mode === "production-research" &&
+    marker &&
+    capabilityDeclarations &&
+    (!options.agentSmoke || !options.capabilitySmoke)
+      ? await inspectReusableDoctorAttestation(
+          workspace,
+          config,
+          options.environment ?? process.env,
+          options.runtimeFingerprinter ?? fingerprintAgentRoute,
+        )
+      : null;
+  const attested =
+    reusableAttestation?.status === "verified" ? reusableAttestation.attestation : null;
   if (hasNetworkCapabilities) {
+    const liveCapabilityReady =
+      (options.capabilitySmoke === true && externalCapabilityDoctor?.status === "ready") ||
+      attested !== null;
     checks.push({
       id: "capability-live-smoke",
-      status:
-        options.capabilitySmoke && externalCapabilityDoctor?.status === "ready"
-          ? "pass"
-          : config?.mode === "production-research"
-            ? "fail"
-            : "warn",
+      status: liveCapabilityReady
+        ? "pass"
+        : config?.mode === "production-research"
+          ? "fail"
+          : "warn",
       detail:
-        options.capabilitySmoke && externalCapabilityDoctor?.status === "ready"
+        options.capabilitySmoke === true && externalCapabilityDoctor?.status === "ready"
           ? "All configured brokered capability health checks passed."
-          : "Live provider checks were not completed; rerun doctor with --capability-smoke.",
+          : attested
+            ? `Reused verified capability smoke from the doctor attestation valid until ${attested.expiresAt}.`
+            : "Live provider checks were not completed; rerun doctor with --capability-smoke.",
     });
   }
   await checked(checks, "project-state", async () => {
@@ -464,7 +487,7 @@ export async function doctorResearchWorkspace(
                         targetSha256: capability.health.targetSha256,
                         httpStatus: capability.health.httpStatus,
                       }))
-                  : [],
+                  : (attested?.capabilitySmoke ?? []),
             }
           : undefined;
       checks.push({
@@ -490,10 +513,22 @@ export async function doctorResearchWorkspace(
     } else {
       checks.push({
         id: "agent-sandbox-smoke",
-        status: config.mode === "production-research" ? "fail" : "warn",
-        detail:
-          "Producer/reviewer execution smoke was not run; rerun doctor with --agent-smoke before production research.",
+        status: attested ? "pass" : config.mode === "production-research" ? "fail" : "warn",
+        detail: attested
+          ? `Reused verified producer/reviewer runtime fingerprints from the doctor attestation valid until ${attested.expiresAt}.`
+          : "Producer/reviewer execution smoke was not run; rerun doctor with --agent-smoke before production research.",
       });
+      if (config.mode === "production-research") {
+        checks.push({
+          id: "doctor-attestation",
+          status: attested ? "pass" : "fail",
+          detail: attested
+            ? `verified until ${attested.expiresAt}; sha256=${attested.attestationSha256.slice(0, 12)}`
+            : `${reusableAttestation?.status ?? "missing"}: ${
+                reusableAttestation?.errors.join("; ") || "run doctor with both smoke flags"
+              }`,
+        });
+      }
     }
   }
 
@@ -502,6 +537,44 @@ export async function doctorResearchWorkspace(
     status: checks.some((check) => check.status === "fail") ? "blocked" : "ready",
     checks,
   };
+}
+
+async function inspectReusableDoctorAttestation(
+  workspace: string,
+  config: WorkspaceConfig,
+  environment: NodeJS.ProcessEnv,
+  fingerprinter: (
+    route: AgentRoute,
+    environment: NodeJS.ProcessEnv,
+  ) => Promise<AgentRuntimeFingerprint>,
+): Promise<Awaited<ReturnType<typeof verifyDoctorAttestation>>> {
+  const verification = await verifyDoctorAttestation(workspace);
+  if (verification.status !== "verified" || !verification.attestation) return verification;
+  const errors: string[] = [];
+  for (const route of [config.producer, config.reviewer]) {
+    const expected = verification.attestation.runtimes.find(
+      (runtime) => runtime.agent === route.agent && runtime.model === route.model,
+    );
+    if (!expected) {
+      errors.push(`${route.agent} runtime fingerprint is absent from the attestation`);
+      continue;
+    }
+    try {
+      const actual = await fingerprinter(route, environment);
+      if (canonicalJson(actual) !== canonicalJson(expected)) {
+        errors.push(`${route.agent} runtime fingerprint drifted`);
+      }
+    } catch (error) {
+      errors.push(
+        `${route.agent} runtime fingerprint could not be verified: ${sanitizeResearchText(
+          error instanceof Error ? error.message : String(error),
+        )}`,
+      );
+    }
+  }
+  return errors.length
+    ? { status: "drifted", errors, attestation: verification.attestation }
+    : verification;
 }
 
 interface AgentSmokeResult {
@@ -860,6 +933,7 @@ function isWorkspaceConfig(value: unknown): value is WorkspaceConfig {
     positiveInteger(budget.maxBrokerResponseBytes) &&
     positiveInteger(budget.maxBrokerContextTokens) &&
     budget.maxBrokerContextTokens >= 16 &&
+    positiveInteger(budget.maxBrokerCalls) &&
     positiveInteger(budget.maxBrokerItems) &&
     positiveInteger(budget.maxInputContextTokens)
   );

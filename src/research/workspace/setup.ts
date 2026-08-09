@@ -10,6 +10,7 @@ import { loadCapabilityDeclarations } from "./capabilities.js";
 import { inspectResearchContext } from "./context.js";
 import {
   inspectCapabilityCredentialEnvironment,
+  reconcileCapabilityCredentialEnvironment,
   setCapabilityCredentialFromEnvironment,
 } from "./credentials.js";
 import {
@@ -19,6 +20,7 @@ import {
   EXTERNAL_SKILL_CONTEXT_PROFILE,
   EXTERNAL_SKILL_MEDIA_PROFILE,
   EXTERNAL_SKILL_PROFILE,
+  reconcileSetupManagedCapabilities,
 } from "./external-skills.js";
 import { appendJournalEvent } from "./journal.js";
 import {
@@ -64,6 +66,7 @@ import {
   doctorResearchWorkspace,
   initializeResearchWorkspace,
   loadWorkspaceConfig,
+  type DoctorOptions,
 } from "./workspace.js";
 
 export type ResearchSetupEvidenceProfile =
@@ -211,6 +214,7 @@ export interface ApplyResearchSetupOptions {
   runner?: SetupCommandRunner;
   fetcher?: typeof fetch;
   sleeper?: (milliseconds: number) => Promise<unknown>;
+  executor?: DoctorOptions["executor"];
   skipDoctor?: boolean;
 }
 
@@ -401,7 +405,7 @@ export async function createResearchSetupPlan(
       globalMutation: scope === "global",
       agentSmokeCost: input.agentSmoke === true,
     },
-    mutations: setupMutations(root, targets, selected, credentialSources),
+    mutations: setupMutations(root, targets, selected),
   };
   const plan: ResearchSetupPlan = {
     ...unsigned,
@@ -672,6 +676,7 @@ export async function applyResearchSetupPlan(
     state = await completeSetupStep(root, state, "settings");
 
     state = await startSetupStep(root, state, "credentials");
+    await reconcilePlanCredentialStores(plan);
     await configurePlanCredentials(plan, environment);
     state = await completeSetupStep(root, state, "credentials");
 
@@ -707,6 +712,7 @@ export async function applyResearchSetupPlan(
       runner,
       ...(options.fetcher === undefined ? {} : { fetcher: options.fetcher }),
       ...(options.sleeper === undefined ? {} : { sleeper: options.sleeper }),
+      ...(options.executor === undefined ? {} : { executor: options.executor }),
     });
     state = await updateSetupState(root, {
       ...state,
@@ -928,6 +934,7 @@ export async function doctorResearchSetup(
     runner?: SetupCommandRunner;
     fetcher?: typeof fetch;
     sleeper?: (milliseconds: number) => Promise<unknown>;
+    executor?: DoctorOptions["executor"];
   } = {},
 ) {
   const root = requireAbsoluteWorkspace(resolve(workspace));
@@ -1140,16 +1147,24 @@ export async function doctorResearchSetup(
       capabilitySmoke: options.live === true,
       environment,
       capabilityFetcher: fetcher,
+      ...(options.executor === undefined ? {} : { executor: options.executor }),
     });
+    const requiredRuntimeChecks = options.agentSmoke === true || options.live === true;
+    const runtimeBlocked = workspaceDoctor.status !== "ready" && requiredRuntimeChecks;
+    const failedWorkspaceChecks = workspaceDoctor.checks
+      .filter((check) => check.status === "fail")
+      .map((check) => check.id);
     checks.push({
       id: "production-runtime",
       category: "research-runtime",
-      status: workspaceDoctor.status === "ready" ? "pass" : "warn",
+      status: workspaceDoctor.status === "ready" ? "pass" : runtimeBlocked ? "fail" : "warn",
       detail: `Workspace doctor reported ${workspaceDoctor.status}.`,
       minimumAction:
         workspaceDoctor.status === "ready"
           ? null
-          : "Configure explicit production models/pricing and run the separately confirmed agent/capability smoke checks.",
+          : runtimeBlocked
+            ? `Resolve the failed workspace doctor checks (${failedWorkspaceChecks.join(", ") || "unknown"}); an explicitly requested smoke failure blocks readiness.`
+            : "Configure explicit production models/pricing and run the separately confirmed agent/capability smoke checks.",
     });
   } catch (error) {
     checks.push({
@@ -1381,6 +1396,7 @@ function parseResearchSetupPlan(value: unknown): ResearchSetupPlan {
         typeof skill.expectedTreeSha256 !== "string" ||
         !/^[0-9a-f]{64}$/.test(skill.expectedTreeSha256) ||
         ![
+          "orchestrator",
           "evidence-capability",
           "input-preprocessor",
           "acquisition-adapter",
@@ -1521,12 +1537,7 @@ function assertPlanMatchesCatalog(plan: ResearchSetupPlan): void {
   if (plan.checks.agentSmoke !== plan.confirmations.agentSmokeCost) {
     throw planCatalogDrift("agent smoke confirmation");
   }
-  const expectedMutations = setupMutations(
-    plan.workspace.path,
-    plan.install.targets,
-    selected,
-    plan.credentialSources,
-  );
+  const expectedMutations = setupMutations(plan.workspace.path, plan.install.targets, selected);
   if (canonicalJson(plan.mutations) !== canonicalJson(expectedMutations)) {
     throw planCatalogDrift("declared mutations");
   }
@@ -2217,26 +2228,22 @@ async function configureSelectedCapabilities(
   plan: ResearchSetupPlan,
   _environment: NodeJS.ProcessEnv,
 ): Promise<void> {
-  if (
-    plan.selection.evidenceProfile === "none" &&
-    !plan.selection.skillIds.includes("tiangong.kb-sci-search")
-  ) {
-    return;
-  }
-  const codexRoot = plannedTargetRoot(plan, "codex");
+  const hasBraveProfile = plan.selection.evidenceProfile !== "none";
+  const hasTiangongSci = plan.selection.skillIds.includes("tiangong.kb-sci-search");
+  const codexRoot = hasBraveProfile || hasTiangongSci ? plannedTargetRoot(plan, "codex") : null;
   if (plan.selection.evidenceProfile !== "none") {
     await configureExternalSkillProfile({
       workspace: plan.workspace.path,
       profile: plan.selection.evidenceProfile,
-      skillRoot: codexRoot,
+      skillRoot: codexRoot!,
     });
   }
-  if (plan.selection.skillIds.includes("tiangong.kb-sci-search")) {
+  if (hasTiangongSci) {
     const skill = setupSkill("tiangong.kb-sci-search");
     const source = setupSource(skill.sourceId);
     await configureTiangongSciCapability({
       workspace: plan.workspace.path,
-      skillPath: join(codexRoot, skill.skillName),
+      skillPath: join(codexRoot!, skill.skillName),
       source: {
         type: "git",
         locator: source.locator,
@@ -2251,6 +2258,52 @@ async function configureSelectedCapabilities(
         : { region: plan.settings["tiangong.sci.region"] }),
     });
   }
+  await reconcileSetupManagedCapabilities({
+    workspace: plan.workspace.path,
+    selectedCapabilityIds: [
+      ...BRAVE_PROFILE_SKILLS[plan.selection.evidenceProfile].map(setupManagedCapabilityId),
+      ...(hasTiangongSci ? ["database.tiangong.sci-search"] : []),
+    ],
+  });
+}
+
+function setupManagedCapabilityId(skillId: string): string {
+  const mapping: Record<string, string> = {
+    "brave.web-search": "method.brave.web-search",
+    "brave.news-search": "method.brave.news-search",
+    "brave.llm-context": "method.brave.llm-context",
+    "brave.images-search": "method.brave.images-search",
+    "brave.videos-search": "method.brave.videos-search",
+  };
+  const capabilityId = mapping[skillId] ?? null;
+  if (!capabilityId) {
+    throw setupError({
+      code: "RESEARCH_SETUP_CATALOG_DRIFT",
+      step: "capability-configuration",
+      reason: `Setup-managed evidence Skill has no capability mapping: ${skillId}.`,
+      minimumAction: "Use the exact CLI/catalog release and regenerate the setup plan.",
+      retryCommand: "tiangong-ai research setup catalog --json",
+      exitCode: 3,
+    });
+  }
+  return capabilityId;
+}
+
+async function reconcilePlanCredentialStores(plan: ResearchSetupPlan): Promise<void> {
+  const declarations = await loadCapabilityDeclarations(plan.workspace.path);
+  await reconcileCapabilityCredentialEnvironment(plan.workspace.path, declarations.capabilities);
+  const adapterPath = workspacePaths(plan.workspace.path).setupAdapterEnv;
+  if (!(await pathExists(adapterPath))) return;
+  const definitions = selectedCredentialDefinitions(plan).filter(
+    (credential) => credential.storage === "adapter",
+  );
+  const configured = await loadAdapterCredentials(plan.workspace.path, definitions, {
+    ignoreUndeclared: true,
+  });
+  const serialized = Object.fromEntries(
+    [...configured.entries()].sort(([left], [right]) => left.localeCompare(right)),
+  );
+  await writeTextAtomic(adapterPath, `${ADAPTER_ENV_KEY}=${JSON.stringify(serialized)}\n`, 0o600);
 }
 
 async function configurePlanCredentials(
@@ -2286,7 +2339,9 @@ async function assertRequiredCredentialPreflight(
   const definitions = selectedCredentialDefinitions(plan);
   let adapterCredentials = new Map<string, string>();
   try {
-    adapterCredentials = await loadAdapterCredentials(plan.workspace.path, definitions);
+    adapterCredentials = await loadAdapterCredentials(plan.workspace.path, definitions, {
+      ignoreUndeclared: true,
+    });
   } catch (error) {
     if (error instanceof CliError) throw error;
   }
@@ -2868,6 +2923,7 @@ function companionArtifactError(root: string, reason: string): CliError {
 async function loadAdapterCredentials(
   root: string,
   definitions: ResearchSetupCredential[],
+  options: { ignoreUndeclared?: boolean } = {},
 ): Promise<Map<string, string>> {
   const path = workspacePaths(root).setupAdapterEnv;
   if (!(await pathExists(path))) return new Map();
@@ -2938,6 +2994,7 @@ async function loadAdapterCredentials(
   const result = new Map<string, string>();
   for (const [id, credentialValue] of Object.entries(value)) {
     const definition = allowed.get(id);
+    if (!definition && options.ignoreUndeclared) continue;
     if (
       !definition ||
       typeof credentialValue !== "string" ||
@@ -3210,7 +3267,6 @@ function setupMutations(
   root: string,
   targets: ResearchSetupPlan["install"]["targets"],
   selected: ResearchSetupSkill[],
-  credentialSources: ResearchSetupPlan["credentialSources"],
 ): ResearchSetupPlan["mutations"] {
   const mutations: ResearchSetupPlan["mutations"] = [
     {
@@ -3228,27 +3284,22 @@ function setupMutations(
       });
     }
   }
-  if (selected.some((skill) => skill.role === "evidence-capability")) {
-    mutations.push({
-      step: "capability-configuration",
-      target: workspacePaths(root).capabilityDeclarations,
-      reason: "Declare and lock the explicitly selected evidence capabilities.",
-    });
-  }
-  if (credentialSources.some((credential) => credential.storage === "broker")) {
-    mutations.push({
-      step: "credentials",
-      target: workspacePaths(root).env,
-      reason: "Store selected broker credentials in the owner-only workspace environment file.",
-    });
-  }
-  if (credentialSources.some((credential) => credential.storage === "adapter")) {
-    mutations.push({
-      step: "credentials",
-      target: workspacePaths(root).setupAdapterEnv,
-      reason: "Store selected companion-adapter credentials in an owner-only file.",
-    });
-  }
+  mutations.push({
+    step: "capability-configuration",
+    target: workspacePaths(root).capabilityDeclarations,
+    reason:
+      "Reconcile and lock the explicitly selected setup-managed evidence capabilities while preserving custom declarations.",
+  });
+  mutations.push({
+    step: "credentials",
+    target: workspacePaths(root).env,
+    reason: "Reconcile selected broker credentials in the owner-only workspace environment file.",
+  });
+  mutations.push({
+    step: "credentials",
+    target: workspacePaths(root).setupAdapterEnv,
+    reason: "Reconcile selected companion-adapter credentials in an owner-only file.",
+  });
   return mutations.sort((left, right) =>
     `${left.step}\0${left.target}`.localeCompare(`${right.step}\0${right.target}`),
   );
