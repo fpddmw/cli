@@ -144,13 +144,19 @@ const EXTERNAL_SKILL_CATALOG: readonly ExternalSkillCatalogEntry[] = [
   },
 ] as const;
 
+const TIANGONG_SCI_CATALOG_ID = "first-party.tiangong.kb-sci-search";
+const SETUP_MANAGED_CATALOG_IDS = new Set([
+  ...EXTERNAL_SKILL_CATALOG.map((entry) => entry.id),
+  TIANGONG_SCI_CATALOG_ID,
+]);
+
 const EVALUATED_EXTERNAL_SKILLS: readonly EvaluatedExternalSkillEntry[] = [
   {
     skillName: "answers",
     expectedTreeSha256: "7c11afce362b8beb6a3c27ef0f77d82d10869db2ee583f74ecf0d76422d4410a",
     disposition: "unsupported-execution",
     reason:
-      "Its synthesized-answer endpoint requires POST and is not a raw-evidence source; the current evidence broker authorizes bounded GET only.",
+      "Its synthesized-answer endpoint is not a raw-evidence source; broker support for bounded JSON POST does not make synthesized answers admissible evidence.",
   },
   {
     skillName: "bx",
@@ -424,7 +430,7 @@ export async function inspectExternalSkillCatalog(input: {
         {
           kind: "brokered-evidence",
           execution:
-            "The isolated producer translates the staged external Skill's documented GET endpoint into the credential broker.",
+            "The isolated producer translates the staged external Skill's exact documented GET or JSON POST endpoint into the credential broker.",
           permissions: ["project-read", "candidate-write", "brokered-network"],
         },
         {
@@ -442,8 +448,8 @@ export async function inspectExternalSkillCatalog(input: {
         "license identifier",
       ],
       networkRequirements: [
-        "exact HTTPS allowedHosts",
-        "bounded GET response policy (the current broker does not authorize POST)",
+        "credential-free exact HTTPS endpoint on an allowed host",
+        "bounded GET or JSON POST response policy",
         "safe healthCheck",
         "logical credential declarations only",
       ],
@@ -466,6 +472,7 @@ export async function inspectExternalSkillCatalog(input: {
         permissions: ["project-read", "candidate-write", "brokered-network"],
         allowedHosts: ["database.example.org"],
         http: {
+          endpoint: "https://database.example.org/search",
           accept: "application/json",
           allowedContentTypes: ["application/json"],
           maxResponseBytes: 524288,
@@ -487,7 +494,7 @@ export async function inspectExternalSkillCatalog(input: {
           },
         ],
         healthCheck: {
-          url: "https://database.example.org/health?query=connectivity",
+          url: "https://database.example.org/search?query=connectivity",
           credentialId: "database.owner-source.api-key",
           expectedContentTypes: ["application/json"],
         },
@@ -563,13 +570,10 @@ export async function configureExternalSkillProfile(input: {
     ),
   );
   const existing = await loadCapabilityDeclarations(workspace);
-  const managedIds = new Set(configured.map((capability) => capability.id));
+  const configuredById = new Map(configured.map((capability) => [capability.id, capability]));
   for (const capability of existing.capabilities) {
-    if (
-      managedIds.has(capability.id) &&
-      capability.source?.catalogId !==
-        configured.find((candidate) => candidate.id === capability.id)?.source?.catalogId
-    ) {
+    const replacement = configuredById.get(capability.id);
+    if (replacement && capability.source?.catalogId !== replacement.source?.catalogId) {
       throw new CliError(
         `Capability ID conflicts with the external Skill profile: ${capability.id}`,
         {
@@ -582,7 +586,11 @@ export async function configureExternalSkillProfile(input: {
   const merged = parseCapabilityDeclarations({
     schemaVersion: 1,
     capabilities: [
-      ...existing.capabilities.filter((capability) => !managedIds.has(capability.id)),
+      ...existing.capabilities.filter(
+        (capability) =>
+          !EXTERNAL_SKILL_CATALOG.some((entry) => entry.id === capability.source?.catalogId) &&
+          !configuredById.has(capability.id),
+      ),
       ...configured,
     ],
   });
@@ -607,6 +615,40 @@ export async function configureExternalSkillProfile(input: {
   };
 }
 
+export async function reconcileSetupManagedCapabilities(input: {
+  workspace: string;
+  selectedCapabilityIds: readonly string[];
+}) {
+  const workspace = resolve(input.workspace);
+  await requireExistingCapabilitiesVerified(workspace);
+  const selectedCapabilityIds = new Set(input.selectedCapabilityIds);
+  const existing = await loadCapabilityDeclarations(workspace);
+  const removed = existing.capabilities.filter(
+    (capability) =>
+      capability.source?.catalogId !== null &&
+      capability.source?.catalogId !== undefined &&
+      SETUP_MANAGED_CATALOG_IDS.has(capability.source.catalogId) &&
+      !selectedCapabilityIds.has(capability.id),
+  );
+  const retained = parseCapabilityDeclarations({
+    schemaVersion: 1,
+    capabilities: existing.capabilities.filter(
+      (capability) => !removed.some((candidate) => candidate.id === capability.id),
+    ),
+  });
+  const lock = await buildCapabilityLock(retained);
+  await persistDeclarationsAndLock(workspace, retained, lock);
+  return {
+    schemaVersion: 1 as const,
+    workspace,
+    selectedCapabilityIds: [...selectedCapabilityIds].sort(),
+    removedCapabilityIds: removed.map((capability) => capability.id).sort(),
+    preservedCapabilityIds: retained.capabilities.map((capability) => capability.id).sort(),
+    installedSkillDirectoriesRemoved: false as const,
+    lockStatus: "written" as const,
+  };
+}
+
 export async function configureTiangongSciCapability(input: {
   workspace: string;
   skillPath: string;
@@ -619,7 +661,7 @@ export async function configureTiangongSciCapability(input: {
   if (
     input.source.type !== "git" ||
     input.source.locator.replace(/\/+$/, "") !== "https://github.com/tiangong-ai/skills.git" ||
-    input.source.catalogId !== "first-party.tiangong.kb-sci-search"
+    input.source.catalogId !== TIANGONG_SCI_CATALOG_ID
   ) {
     throw new CliError(
       "Tiangong SCI capability source identity is not the reviewed first-party catalog entry.",
@@ -680,6 +722,7 @@ export async function configureTiangongSciCapability(input: {
         permissions: ["project-read", "candidate-write", "brokered-network"],
         allowedHosts: [endpoint.host.toLowerCase()],
         http: {
+          endpoint: endpoint.toString(),
           method: "POST",
           accept: "application/json",
           allowedContentTypes: ["application/json"],
@@ -887,6 +930,10 @@ export async function doctorExternalCapabilities(
             targetSha256: capability.healthCheck ? sha256Text(capability.healthCheck.url) : null,
             httpStatus: null,
             retryAfterSeconds: null,
+            providerCode: null,
+            providerRequestId: null,
+            minimumAction:
+              "Resolve the reported static readiness error before retrying live checks.",
             detail: "Live probe was not started because static readiness failed.",
           }
         : capability.healthCheck
@@ -904,6 +951,9 @@ export async function doctorExternalCapabilities(
               targetSha256: null,
               httpStatus: null,
               retryAfterSeconds: null,
+              providerCode: null,
+              providerRequestId: null,
+              minimumAction: null,
               detail: "Capability has no brokered network health check.",
             }
       : {
@@ -913,6 +963,9 @@ export async function doctorExternalCapabilities(
           targetSha256: capability.healthCheck ? sha256Text(capability.healthCheck.url) : null,
           httpStatus: null,
           retryAfterSeconds: null,
+          providerCode: null,
+          providerRequestId: null,
+          minimumAction: "Rerun capability doctor with --live after reviewing quota impact.",
           detail: "Use --live for an explicit provider connectivity probe.",
         };
     capabilities.push({
@@ -1005,6 +1058,7 @@ function catalogDeclaration(
         permissions: ["project-read", "candidate-write", "brokered-network"],
         allowedHosts: ["api.search.brave.com"],
         http: {
+          endpoint: capabilityEndpoint(entry.healthUrl),
           accept: "application/json",
           allowedContentTypes: ["application/json"],
           maxResponseBytes: entry.maxResponseBytes,
@@ -1033,6 +1087,13 @@ function catalogDeclaration(
       },
     ],
   }).capabilities[0]!;
+}
+
+function capabilityEndpoint(healthUrl: string): string {
+  const endpoint = new URL(healthUrl);
+  endpoint.search = "";
+  endpoint.hash = "";
+  return endpoint.toString();
 }
 
 async function inspectCatalogInstallation(
@@ -1228,6 +1289,7 @@ async function probeCapability(
   sleeper: (milliseconds: number) => Promise<unknown> = sleep,
 ) {
   const initial = new URL(healthCheck.url);
+  const secrets = [...credentialMap.values()];
   const headers = new Headers(capability.http?.staticHeaders ?? {});
   headers.set("Accept", capability.http?.accept ?? "application/json");
   const body = healthCheck.body === null ? null : JSON.stringify(healthCheck.body);
@@ -1282,7 +1344,8 @@ async function probeCapability(
       const contentType =
         response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
       const retryAfterSeconds = parseRetryAfter(response.headers.get("retry-after"));
-      await response.body?.cancel();
+      const responseBody = await readBoundedResponseBody(response, 4 * 1024);
+      const diagnostics = providerDiagnostics(response, responseBody.text, contentType, secrets);
       if (response.status === 429 && rateLimitRetries === 0) {
         rateLimitRetries += 1;
         await sleeper(Math.min(5, retryAfterSeconds ?? 1) * 1000);
@@ -1303,7 +1366,12 @@ async function probeCapability(
           targetSha256: sha256Text(current.toString()),
           httpStatus: response.status,
           retryAfterSeconds,
-          detail: `Provider returned HTTP ${response.status}.`,
+          providerCode: diagnostics.providerCode,
+          providerRequestId: diagnostics.providerRequestId,
+          minimumAction: providerMinimumAction(response.status, diagnostics.providerCode),
+          detail: diagnostics.detail
+            ? `Provider returned HTTP ${response.status}: ${diagnostics.detail}`
+            : `Provider returned HTTP ${response.status}.`,
         };
       }
       if (!healthCheck.expectedContentTypes.includes(contentType)) {
@@ -1314,6 +1382,10 @@ async function probeCapability(
           targetSha256: sha256Text(current.toString()),
           httpStatus: response.status,
           retryAfterSeconds,
+          providerCode: diagnostics.providerCode,
+          providerRequestId: diagnostics.providerRequestId,
+          minimumAction:
+            "Verify the capability Accept/content-type contract against the selected provider endpoint.",
           detail: `Provider returned unsupported content type ${contentType || "unknown"}.`,
         };
       }
@@ -1324,6 +1396,9 @@ async function probeCapability(
         targetSha256: sha256Text(current.toString()),
         httpStatus: response.status,
         retryAfterSeconds,
+        providerCode: diagnostics.providerCode,
+        providerRequestId: diagnostics.providerRequestId,
+        minimumAction: null,
         detail: "Provider authentication and response contract passed.",
       };
     }
@@ -1337,9 +1412,124 @@ async function probeCapability(
       targetSha256: sha256Text(initial.toString()),
       httpStatus: null,
       retryAfterSeconds: null,
+      providerCode: null,
+      providerRequestId: null,
+      minimumAction:
+        "Verify network/VPN/proxy access and the exact capability endpoint, then rerun the live check.",
       detail: "Provider connectivity probe failed before a valid response was received.",
     };
   }
+}
+
+async function readBoundedResponseBody(
+  response: Response,
+  maxBytes: number,
+): Promise<{ text: string; truncated: boolean }> {
+  if (!response.body) return { text: "", truncated: false };
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  let truncated = false;
+  try {
+    while (bytes < maxBytes) {
+      const item = await reader.read();
+      if (item.done) break;
+      const remaining = maxBytes - bytes;
+      if (item.value.byteLength > remaining) {
+        chunks.push(item.value.subarray(0, remaining));
+        bytes += remaining;
+        truncated = true;
+        await reader.cancel();
+        break;
+      }
+      chunks.push(item.value);
+      bytes += item.value.byteLength;
+      if (bytes === maxBytes) {
+        truncated = true;
+        await reader.cancel();
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return {
+    text: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8"),
+    truncated,
+  };
+}
+
+function providerDiagnostics(
+  response: Response,
+  responseText: string,
+  contentType: string,
+  secrets: readonly string[],
+): { providerCode: string | null; providerRequestId: string | null; detail: string | null } {
+  let value: unknown = null;
+  if (contentType === "application/json" && responseText.trim()) {
+    try {
+      value = JSON.parse(responseText) as unknown;
+    } catch {
+      value = null;
+    }
+  }
+  const root = isObject(value) ? value : null;
+  const error = root && isObject(root.error) ? root.error : null;
+  const providerCode = safeProviderIdentifier(
+    firstString(error?.code, root?.code, error?.type, root?.type),
+    secrets,
+  );
+  const providerRequestId = safeProviderIdentifier(
+    firstString(
+      response.headers.get("x-request-id"),
+      response.headers.get("request-id"),
+      error?.requestId,
+      error?.request_id,
+      error?.id,
+      root?.requestId,
+      root?.request_id,
+    ),
+    secrets,
+  );
+  const detailSource =
+    firstString(error?.detail, error?.message, root?.detail, root?.message) ??
+    (value === null ? responseText : null);
+  const detail = detailSource
+    ? sanitizeResearchText(detailSource, secrets).replaceAll(/\s+/g, " ").trim().slice(0, 320) ||
+      null
+    : null;
+  return { providerCode, providerRequestId, detail };
+}
+
+function firstString(...values: unknown[]): string | null {
+  return (
+    values.find((value): value is string => typeof value === "string" && value.length > 0) ?? null
+  );
+}
+
+function safeProviderIdentifier(value: string | null, secrets: readonly string[]): string | null {
+  if (!value || value.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value)) return null;
+  if (
+    secrets.some((secret) => secret === value || secret.includes(value) || value.includes(secret))
+  ) {
+    return null;
+  }
+  return value;
+}
+
+function providerMinimumAction(status: number, providerCode: string | null): string {
+  if (providerCode === "OPTION_NOT_IN_PLAN") {
+    return `Create and apply a reviewed ${EXTERNAL_SKILL_PROFILE} baseline replacement plan, or enable the provider subscription option; setup never switches profiles silently.`;
+  }
+  if (status === 401 || status === 403) {
+    return "Verify the selected logical credential and provider entitlement, then rerun the live check.";
+  }
+  if (status === 429) {
+    return "Honor Retry-After or the provider quota reset; do not retry a deterministic configuration error.";
+  }
+  if (status >= 500) {
+    return "Retry after the provider service recovers; preserve the request ID when reporting the incident.";
+  }
+  return "Review the sanitized provider code/detail and the exact capability request contract before retrying.";
 }
 
 function capabilityVerificationErrors(

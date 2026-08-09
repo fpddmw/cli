@@ -37,6 +37,7 @@ const BYTES_PER_OUTPUT_TOKEN = 16;
 const BYTES_PER_TOOL_CONTEXT_TOKEN = 3;
 const EXECUTOR_WRAPPER_PATH = fileURLToPath(import.meta.url);
 const WRAPPER_TARGET_ENV = "TIANGONG_RESEARCH_AGENT_BINARY";
+const CODEX_CAPSULE_ROOT_MARKER = ".tiangong-research-capsule-root";
 const CODEX_DISABLED_FEATURES = [
   "apps",
   "auth_elicitation",
@@ -137,6 +138,15 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
   const capsuleHome = join(request.capsuleRoot, "home");
   const capsuleAuth = await prepareCapsuleHome(request.route, capsuleHome, request.environment);
   const secrets = [...configuredResearchSecrets(request.environment), ...capsuleAuth.secrets];
+  if (request.route.agent === "codex") {
+    // Codex discovers project configuration by walking parent directories. Bound that
+    // discovery to the isolated capsule project so a host workspace .codex/config.toml
+    // is neither required nor made readable by the platform sandbox.
+    await writeFile(join(request.projectRoot, CODEX_CAPSULE_ROOT_MARKER), "", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  }
   const invocation = await buildInvocation(
     request,
     executables.launcher,
@@ -275,6 +285,8 @@ async function buildInvocation(
       "include_environment_context=false",
       "-c",
       "include_permissions_instructions=false",
+      "-c",
+      `project_root_markers=[${JSON.stringify(CODEX_CAPSULE_ROOT_MARKER)}]`,
       "-c",
       `model_reasoning_effort=${JSON.stringify(request.route.effort ?? DEFAULT_AGENT_EFFORT)}`,
       "-c",
@@ -482,8 +494,7 @@ async function prepareCapsuleHome(
     }
     assertOwnerOnlyAuthenticationFile(info.mode, route.agent);
     await mkdir(dirname(candidate.destination), { recursive: true, mode: 0o700 });
-    await copyFile(candidate.source, candidate.destination, fsConstants.COPYFILE_EXCL);
-    await chmod(candidate.destination, 0o600);
+    await ensureCapsuleAuthenticationFile(candidate.source, candidate.destination, route.agent);
     secrets.push(...authSecretValues(await readFile(candidate.destination, "utf8")));
   }
   const settingsEnvironment =
@@ -498,6 +509,43 @@ async function prepareCapsuleHome(
     secrets: [...new Set(secrets)].sort((left, right) => right.length - left.length),
     environment: settingsEnvironment,
   };
+}
+
+async function ensureCapsuleAuthenticationFile(
+  source: string,
+  destination: string,
+  agent: AgentRoute["agent"],
+): Promise<void> {
+  let destinationInfo = await lstat(destination).catch(() => undefined);
+  if (!destinationInfo) {
+    try {
+      await copyFile(source, destination, fsConstants.COPYFILE_EXCL);
+      await chmod(destination, 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    destinationInfo = await lstat(destination).catch(() => undefined);
+  }
+  if (!destinationInfo?.isFile() || destinationInfo.isSymbolicLink()) {
+    throw new CliError(`Capsule ${agent} authentication material is not a regular file.`, {
+      code: "RESEARCH_EXECUTOR_AUTH_INVALID",
+      exitCode: 3,
+    });
+  }
+  assertOwnerOnlyAuthenticationFile(destinationInfo.mode, agent);
+  const [sourceSha256, destinationSha256] = await Promise.all([
+    sha256File(source),
+    sha256File(destination),
+  ]);
+  if (sourceSha256 !== destinationSha256) {
+    throw new CliError(
+      `Configured ${agent} authentication material changed while the capsule was active.`,
+      {
+        code: "RESEARCH_EXECUTOR_AUTH_DRIFT",
+        exitCode: 3,
+      },
+    );
+  }
 }
 
 async function readClaudeSettingsEnvironment(path: string): Promise<NodeJS.ProcessEnv> {

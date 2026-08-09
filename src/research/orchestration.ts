@@ -98,6 +98,7 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
   if (action !== "show") throw unknownAction("research schema", action);
   const args = parseStrictArgs(rest, COMMON_OPTIONS, "research schema show");
+  if (strictBoolean(args, "help")) return writeHelp(io);
   const stage = onePositional(args.positionals, "research schema show");
   if (
     stage !== "discover" &&
@@ -124,6 +125,7 @@ async function runContext(argv: string[], io: CliIO): Promise<number> {
     { ...COMMON_OPTIONS, path: "string" },
     "research context inspect",
   );
+  if (strictBoolean(args, "help")) return writeHelp(io);
   rejectPositionals(args.positionals, "research context inspect");
   const result = await inspectResearchContext(strictString(args, "path") ?? process.cwd());
   writeJson(io, result, args);
@@ -139,6 +141,7 @@ async function runWorkspace(argv: string[], io: CliIO): Promise<number> {
       { ...COMMON_OPTIONS, name: "string", mode: "string" },
       "research workspace init",
     );
+    if (strictBoolean(args, "help")) return writeHelp(io);
     const target = onePositional(args.positionals, "research workspace init");
     const result = await initializeResearchWorkspace(
       target,
@@ -158,6 +161,7 @@ async function runWorkspace(argv: string[], io: CliIO): Promise<number> {
       },
       "research workspace doctor",
     );
+    if (strictBoolean(args, "help")) return writeHelp(io);
     rejectPositionals(args.positionals, "research workspace doctor");
     const result = await doctorResearchWorkspace(strictString(args, "workspace") ?? process.cwd(), {
       agentSmoke: strictBoolean(args, "agent-smoke"),
@@ -175,6 +179,7 @@ async function runCapability(argv: string[], io: CliIO): Promise<number> {
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
   if (action === "credential") {
     const [credentialAction, ...credentialRest] = rest;
+    if (credentialAction === "--help" || credentialAction === "-h") return writeHelp(io);
     if (credentialAction !== "set") {
       throw unknownAction("research capability credential", credentialAction ?? "missing");
     }
@@ -183,6 +188,7 @@ async function runCapability(argv: string[], io: CliIO): Promise<number> {
       { ...WORKSPACE_OPTIONS, id: "string", "from-env": "string" },
       "research capability credential set",
     );
+    if (strictBoolean(args, "help")) return writeHelp(io);
     rejectPositionals(args.positionals, "research capability credential set");
     const credentialId = strictString(args, "id");
     const environmentName = strictString(args, "from-env");
@@ -223,6 +229,7 @@ async function runCapability(argv: string[], io: CliIO): Promise<number> {
       { ...WORKSPACE_OPTIONS, path: "string", "skill-root": "string" },
       "research capability catalog",
     );
+    if (strictBoolean(args, "help")) return writeHelp(io);
     rejectPositionals(args.positionals, "research capability catalog");
     const workspaceArgument = strictString(args, "workspace");
     const workspace = workspaceArgument ? await requireResearchWorkspace(workspaceArgument) : null;
@@ -241,6 +248,7 @@ async function runCapability(argv: string[], io: CliIO): Promise<number> {
       { ...WORKSPACE_OPTIONS, profile: "string", "skill-root": "string" },
       "research capability configure",
     );
+    if (strictBoolean(args, "help")) return writeHelp(io);
     rejectPositionals(args.positionals, "research capability configure");
     const root = await workspaceFromArgs(args);
     const result = await withWorkspaceLock(root, "capability.configure", async () => {
@@ -273,6 +281,7 @@ async function runCapability(argv: string[], io: CliIO): Promise<number> {
       { ...WORKSPACE_OPTIONS, definition: "string" },
       "research capability import",
     );
+    if (strictBoolean(args, "help")) return writeHelp(io);
     rejectPositionals(args.positionals, "research capability import");
     const definitionPath = strictString(args, "definition");
     if (!definitionPath) {
@@ -298,6 +307,7 @@ async function runCapability(argv: string[], io: CliIO): Promise<number> {
       { ...WORKSPACE_OPTIONS, live: "boolean" },
       "research capability doctor",
     );
+    if (strictBoolean(args, "help")) return writeHelp(io);
     rejectPositionals(args.positionals, "research capability doctor");
     const root = await workspaceFromArgs(args);
     const result = await doctorExternalCapabilities(root, { live: strictBoolean(args, "live") });
@@ -306,6 +316,7 @@ async function runCapability(argv: string[], io: CliIO): Promise<number> {
   }
   if (action !== "lock" && action !== "verify") throw unknownAction("research capability", action);
   const args = parseStrictArgs(rest, WORKSPACE_OPTIONS, `research capability ${action}`);
+  if (strictBoolean(args, "help")) return writeHelp(io);
   rejectPositionals(args.positionals, `research capability ${action}`);
   const root = await workspaceFromArgs(args);
   if (action === "lock") {
@@ -340,6 +351,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       },
       "research project init",
     );
+    if (strictBoolean(args, "help")) return writeHelp(io);
     const projectId = onePositional(args.positionals, "research project init");
     const question = strictString(args, "question");
     if (!question) {
@@ -373,6 +385,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       },
       "research project preflight",
     );
+    if (strictBoolean(args, "help")) return writeHelp(io);
     rejectPositionals(args.positionals, "research project preflight");
     const question = strictString(args, "question")?.trim();
     if (!question) {
@@ -392,12 +405,14 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   }
   if (action === "input") {
     const [inputAction, ...inputRest] = rest;
+    if (inputAction === "--help" || inputAction === "-h") return writeHelp(io);
     if (inputAction !== "add") throw unknownAction("research project input", inputAction ?? "");
     const args = parseStrictArgs(
       inputRest,
       { ...WORKSPACE_OPTIONS, path: "string", role: "string" },
       "research project input add",
     );
+    if (strictBoolean(args, "help")) return writeHelp(io);
     const projectId = onePositional(args.positionals, "research project input add");
     const inputPath = strictString(args, "path");
     if (!inputPath) {
@@ -418,6 +433,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       { ...WORKSPACE_OPTIONS, package: "string" },
       "research project retry",
     );
+    if (strictBoolean(args, "help")) return writeHelp(io);
     const projectId = onePositional(args.positionals, "research project retry");
     const root = await workspaceFromArgs(args);
     const project = await retryProjectPackage(root, projectId, strictString(args, "package"));
@@ -430,6 +446,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       { ...WORKSPACE_OPTIONS, to: "string", "resume-through": "string" },
       "research project fork",
     );
+    if (strictBoolean(args, "help")) return writeHelp(io);
     const sourceProjectId = onePositional(args.positionals, "research project fork");
     const targetProjectId = strictString(args, "to");
     if (!targetProjectId) {
@@ -457,6 +474,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
     { ...WORKSPACE_OPTIONS, project: "string" },
     "research status",
   );
+  if (strictBoolean(args, "help")) return writeHelp(io);
   rejectPositionals(args.positionals, "research status");
   const root = await workspaceFromArgs(args);
   const selectedProject = strictString(args, "project");
@@ -492,6 +510,7 @@ async function runWorkspaceExecution(argv: string[], io: CliIO): Promise<number>
     },
     "research run",
   );
+  if (strictBoolean(args, "help")) return writeHelp(io);
   rejectPositionals(args.positionals, "research run");
   const root = await workspaceFromArgs(args);
   const progressJsonl = strictBoolean(args, "progress-jsonl");

@@ -10,6 +10,7 @@ const MAX_CREDENTIAL_ENV_BYTES = 64 * 1024;
 export async function loadCapabilityCredentialMap(
   root: string,
   capabilities: CapabilityDeclaration[],
+  options: { ignoreUndeclared?: boolean } = {},
 ): Promise<Map<string, string>> {
   const path = workspacePaths(root).env;
   if (!(await pathExists(path))) return new Map();
@@ -55,15 +56,33 @@ export async function loadCapabilityCredentialMap(
       throw credentialEnvironmentError("capability credentials must be a JSON object");
     }
     for (const [credentialId, credentialValue] of Object.entries(value)) {
-      if (!declared.has(credentialId))
+      if (!declared.has(credentialId) && !options.ignoreUndeclared) {
         throw credentialEnvironmentError(`credential is not declared: ${credentialId}`);
+      }
       if (typeof credentialValue !== "string" || Buffer.byteLength(credentialValue, "utf8") < 8) {
         throw credentialEnvironmentError(`credential value is invalid: ${credentialId}`);
       }
+      if (!declared.has(credentialId)) continue;
       configured.set(credentialId, credentialValue);
     }
   }
   return configured;
+}
+
+export async function reconcileCapabilityCredentialEnvironment(
+  root: string,
+  capabilities: CapabilityDeclaration[],
+): Promise<{ configuredCredentialIds: string[] }> {
+  const path = workspacePaths(root).env;
+  if (!(await pathExists(path))) return { configuredCredentialIds: [] };
+  const configured = await loadCapabilityCredentialMap(root, capabilities, {
+    ignoreUndeclared: true,
+  });
+  const serialized = Object.fromEntries(
+    [...configured.entries()].sort(([left], [right]) => left.localeCompare(right)),
+  );
+  await writeTextAtomic(path, `${CREDENTIAL_ENV_KEY}=${JSON.stringify(serialized)}\n`, 0o600);
+  return { configuredCredentialIds: [...configured.keys()].sort() };
 }
 
 export async function inspectCapabilityCredentialEnvironment(

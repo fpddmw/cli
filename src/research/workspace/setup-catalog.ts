@@ -9,8 +9,14 @@ import { hashRegularTree, pathExists } from "./storage.js";
 
 export type ResearchSetupScope = "project" | "global";
 export type ResearchSetupAgent = "codex" | "claude-code";
-export type ResearchSetupTier = "baseline" | "enhanced" | "conditional" | "authoring";
+export type ResearchSetupTier =
+  | "orchestrator"
+  | "baseline"
+  | "enhanced"
+  | "conditional"
+  | "authoring";
 export type ResearchSetupRole =
+  | "orchestrator"
   | "evidence-capability"
   | "input-preprocessor"
   | "acquisition-adapter"
@@ -97,7 +103,7 @@ export const RESEARCH_SETUP_SELECTION_GUIDANCE = {
 } as const;
 
 const BRAVE_COMMIT = "3e088af66eb61f1c207c22b2be0278ca8744d1d1";
-const TIANGONG_SKILLS_COMMIT = "c371dbc464dc51ac1d8b0d0d59b318942418cc7b";
+const TIANGONG_SKILLS_COMMIT = "a300a49803c193b686e7cde55b5f2d170f993af5";
 const ANTHROPIC_SKILLS_COMMIT = "f17010c9bb483898c1d9c9f42dde2b3a98889434";
 const PPT_MASTER_COMMIT = "4343bd8bfc91e79dfb9680681a378476cc38a280";
 
@@ -218,6 +224,27 @@ const PPT_MASTER_LOCK_REQUIRED: ResearchSetupDependency = {
 };
 
 export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
+  {
+    id: "tiangong.auto-research",
+    skillName: "tiangong-auto-research",
+    sourceId: "tiangong-ai-skills",
+    sourceRelativePath: "tiangong-auto-research",
+    expectedTreeSha256: "ed568b195393894fb16a2da89563f2a6ffb857dea150056105e440660aafae5b",
+    tier: "orchestrator",
+    role: "orchestrator",
+    purpose:
+      "Route ordinary research tasks into the reviewed Tiangong setup, preflight, execution, review, and closure workflow.",
+    recommendedFor: ["smoke-test", "production-research", "workspace-orchestration"],
+    defaultSelected: true,
+    credentialIds: [],
+    settingIds: [],
+    dependencies: [],
+    license: MIT_TIANGONG,
+    conflictGroup: null,
+    capabilityKind: null,
+    bundled: false,
+    userInitiatedOnly: true,
+  },
   {
     id: "brave.web-search",
     skillName: "web-search",
@@ -654,6 +681,9 @@ export async function inspectResearchSetupCatalog(input: {
     conflictGroups: [],
     selectionGuidance: RESEARCH_SETUP_SELECTION_GUIDANCE,
     roles: {
+      orchestrators: RESEARCH_SETUP_SKILLS.filter((skill) => skill.role === "orchestrator").map(
+        (skill) => skill.id,
+      ),
       evidenceCapabilities: RESEARCH_SETUP_SKILLS.filter(
         (skill) => skill.role === "evidence-capability",
       ).map((skill) => skill.id),

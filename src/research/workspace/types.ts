@@ -46,6 +46,7 @@ export interface ResearchBudget {
   maxRepairTokens: number;
   maxBrokerResponseBytes: number;
   maxBrokerContextTokens: number;
+  maxBrokerCalls: number;
   maxBrokerItems: number;
   maxInputContextTokens: number;
 }
@@ -106,6 +107,7 @@ export interface CapabilityDeclaration {
   permissions: string[];
   allowedHosts: string[];
   http: {
+    endpoint: string;
     method: "GET" | "POST";
     accept: string;
     allowedContentTypes: string[];

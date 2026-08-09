@@ -465,7 +465,7 @@ function setupEvidenceProfile(
   if (value === "brave-baseline") return EXTERNAL_SKILL_PROFILE;
   if (value === "brave-context") return EXTERNAL_SKILL_CONTEXT_PROFILE;
   if (value === "brave-media") return EXTERNAL_SKILL_MEDIA_PROFILE;
-  if (!value && !required) return EXTERNAL_SKILL_CONTEXT_PROFILE;
+  if (!value && !required) return EXTERNAL_SKILL_PROFILE;
   throw invalidSetupArgument(
     "--evidence-profile must be none, brave-baseline, brave-context, or brave-media.",
   );

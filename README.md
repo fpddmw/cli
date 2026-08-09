@@ -221,7 +221,10 @@ tiangong-ai research project init gpu-resource-impact \
 ```
 
 The guided setup creates an immutable, hash-bound plan before mutation. No Skill
-is bundled or installed implicitly. It pins the installer integrity, source
+is bundled or installed without an explicit Wizard confirmation or plan
+selection. The Wizard recommends a project-local `tiangong-auto-research`
+orchestrator so ordinary research requests can enter the workflow from any
+user-selected workspace directory. It pins the installer integrity, source
 commits, Skill tree hashes, exact destinations, license acceptance, credential
 environment names, settings, and checks. Required credential preflight runs
 before downloads. Project-local copy is the default; global writes, network
@@ -232,7 +235,8 @@ Production admission requires at least one locked external capability with
 `brokered-network` and `discoveryScopes: ["public-internet"]`; an input plan or
 local files alone cannot represent internet coverage. The machine-readable
 setup catalog contains only separately sourced external Skills and reports each
-evidence, preprocessing, acquisition, and post-closure recommendation; exact
+orchestrator, evidence, preprocessing, acquisition, and post-closure
+recommendation; exact
 source commit and tree hash; license and credential requirements; dependencies;
 and installed-byte status. Installation is never performed by a research
 package.
@@ -247,11 +251,12 @@ explicit owner environment name and stores it under the declared logical ID;
 the value is never returned or journaled.
 
 The pinned Brave checkout is verified at `skills/<skill-name>` before install.
-CLI `0.0.25` generated incorrect root-relative Brave paths; an immutable plan
-created by that release must not be edited or retried in place. Upgrade the CLI,
-run the Wizard again, and choose the explicitly reviewed replacement-plan
-option. Automation may recreate the same reviewed selection with
-`research setup plan --replace-plan`.
+An explicitly reviewed replacement plan reconciles the complete setup-managed
+capability set and both owner-only credential stores: deselected Brave/Sci
+declarations and lock records are removed, custom capability declarations are
+preserved, and installed Skill directories are never deleted implicitly.
+Provider-dependent context/media choices never fall back silently; select the
+baseline in a replacement plan when that is the intended operator decision.
 
 The interactive Wizard uses restrained semantic colors and section markers
 only when its terminal output is a TTY. Set `NO_COLOR` or `TERM=dumb` for plain
@@ -268,6 +273,10 @@ explicit browser handoff and never launches or chooses a browser silently.
 For PPT creation, setup recommends `hugohe3.ppt-master` first;
 `anthropic.pptx` remains a compatible situational option, and both may be
 selected in the same explicit plan.
+
+Every leaf command accepts `--help` before workspace resolution, so operators
+can inspect `capability doctor`, `project preflight`, `project init`, and `run`
+syntax safely from an empty or unrelated directory.
 
 The requirements object declares `dimensions`, `sourceTypes`, `minSources`,
 `minFullTextSources`, `minDatedSources`, and optional inclusive
@@ -318,16 +327,26 @@ workspace-wide run.
 
 Inputs are admitted by SHA-256. Agent work runs with a dedicated capsule HOME
 in an ephemeral platform sandbox. Only the minimal supported agent auth file is
-copied into that HOME. For Claude, an owner-only user `settings.json` is never
+copied into that HOME. A formatting repair reuses that capsule copy only after
+its SHA-256 still matches the owner source; changed, symlinked, or non-owner-only
+authentication stops execution instead of being overwritten. For Claude, an
+owner-only user `settings.json` is never
 copied; only the whitelisted API key/token and HTTPS base URL fields from its
 `env` object are injected in memory. Permissions, hooks, additional directories,
-and unrelated settings are not admitted. The workspace credential file and the
-rest of the host home are not admitted. Production doctor is blocked until
+and unrelated settings are not admitted. Codex project-root discovery is
+terminated by a capsule-local marker/config override, so a parent workspace
+`.codex/config.toml` is neither required nor made readable. The workspace
+credential file and the rest of the host home are not admitted. Production
+doctor is blocked until
 `--agent-smoke` actually starts both routes inside this boundary. A successful
 smoke creates a 24-hour attestation bound to workspace config, capability lock,
 output schema, and the resolved agent binary/wrapper fingerprints. Production
 execution stops before invocation if the attestation expires or any bound value
-drifts.
+drifts. While that attestation remains current, a plain `workspace doctor`
+revalidates its hashes and the currently resolved producer/reviewer runtime
+fingerprints, then reuses the attested agent and capability smoke results.
+Passing the smoke flags explicitly performs fresh checks instead; missing,
+expired, or drifted attestations remain blocking and include the refresh action.
 Use the exact `codex` / `claude` route by default. A custom wrapper must use an
 absolute `binary` plus an absolute `wrapperTargetBinary`; the runtime injects
 the resolved target path and independently hashes the target executable, route
@@ -346,28 +365,38 @@ facts.
 Total, per-package, output, repair, broker-response bytes, estimated broker
 context tokens, context items, wall-time, output-count, output-size, and attempt
 limits live in `.tiangong-research/config.json`.
-New workspaces reserve 500,000 total tokens by default, including 200,000 for
-discovery; the remaining package defaults are 55,000 for analysis, 60,000 for
-synthesis, and 120,000 for review. These are admission ceilings rather than a
-target spend and can be lowered only when the resulting pre-call reservations
-still fit.
+New workspaces reserve 550,000 total tokens by default, including 230,000 for
+discovery; the remaining package defaults are 60,000 for analysis, 70,000 for
+synthesis, and 175,000 for review. Primary output is bounded at 6,000 tokens
+and a separately invoked repair at 4,000. These are admission ceilings rather
+than a target spend and can be lowered only when the resulting pre-call
+reservations still fit.
 Before an agent starts, the runtime reserves the package token and conservative
 price budget. The call-level check accounts for prompt and schema bytes at
 three bytes per token, repeats input allowance for every permitted API turn,
 adds the maximum bounded broker context for every permitted discovery turn,
 and adds primary output plus a potential isolated repair's input and output;
 insufficient package or remaining project budget prevents invocation. The
+preflight uses the same reservation calculator and additionally reserves the
+entire admitted capability-documentation budget on every broker turn, so a
+project cannot pass admission and then fail solely because runtime applies a
+stricter token formula. Review admission reserves three maximum-size generated
+artifacts plus one globally bounded evidence-excerpt bundle; runtime applies
+that same stage-specific context ceiling. The
 provider cost cap is the current package reservation, not the remaining
-workspace allowance. Tool-free primary stages allow two protocol turns because
-Claude structured output uses a `StructuredOutput` call plus its follow-up
-result; external tools remain disabled. Formatting repair omits the provider
+workspace allowance. Tool-free Codex primary stages reserve two protocol turns;
+Claude JSON Schema primary stages reserve and receive a three-turn provider cap,
+matching the current Claude Code structured-output exchange. External tools
+remain disabled. Formatting repair omits the provider
 schema tool, uses one plain-JSON turn, and remains subject to the CLI schema and
 semantic validators. Current Codex and Claude CLI adapters report
 output usage only after execution, so preflight identifies
 `outputTokenLimitEnforcement` as `post-execution`; captured bytes provide a
 separate process bound. Discovery capture allowance includes the bounded MCP
 tool contexts as well as the requested model output, and over-limit output fails
-without promotion.
+without promotion. New workspaces also enforce a six-call broker budget
+mechanically; every successful result reports the remaining calls and excess
+calls are rejected before another provider fetch or evidence promotion.
 Preflight also reports per-stage `maxTurns` and `turnLimitEnforcement`: Claude
 receives a provider-side turn cap, while the current Codex CLI exposes no such
 flag, so its turn allowance is reservation guidance plus post-execution
@@ -393,16 +422,21 @@ review chain.
 Discovery receives only the capability broker as an execution tool. The CLI
 embeds the exact staged capability manifest and each external Skill's top-level
 `SKILL.md` in the prompt, so the producer does not need filesystem or shell
-access and cannot execute provider examples directly. Broker responses include
+access and cannot execute provider examples directly. The manifest includes
+the locked, non-secret HTTPS endpoint rather than only its host, so the model
+never has to guess a provider path. Broker responses include
 the exact bounded context inline with the hash-bound receipt; raw objects remain
 in the permanent evidence store for audit.
 Analyze and synthesize receive bounded, hash-verified prior-stage artifacts in
-their prompt with tools disabled. Review is also tool-free and limited to the
-two turns required by the structured-output protocol:
-its prompt embeds the complete generated artifacts, persistent packet, local
-bounded contexts, and each cited broker receipt's exact bounded view. Full
-local files and raw broker objects are hash-bound for durable human/mechanical
-audit, but the model must not claim to have read beyond those embedded views.
+their prompt with tools disabled. Review is also tool-free and uses the
+reviewer's route-specific structured-output turn cap:
+its prompt embeds the complete generated artifacts and a deterministic,
+globally bounded set of excerpts distributed across registered local contexts
+and broker receipts. The packet hash is schema-bound, but complete packet
+metadata is not redundantly copied into model context. Full local files,
+original per-receipt bounded contexts, raw broker objects, and the complete
+packet remain hash-bound for durable human/mechanical audit; the model must not
+claim to have read beyond the embedded excerpts.
 The CLI mechanically derives local full-text availability, source types,
 counts, date coverage, source IDs, and the coverage decision. A `partial`
 dimension is usable but incomplete; a missing dimension or unmet declared
@@ -440,9 +474,9 @@ tiangong-ai research capability lock --workspace /absolute/path/to/workspace
 tiangong-ai research capability verify --workspace /absolute/path/to/workspace
 ```
 
-A capability using `brokered-network` must declare exact `allowedHosts` and may
-declare an `http` policy with `method` (`GET` or bounded JSON `POST`), one exact
-`accept` value, safe `staticHeaders`, `maxRequestBytes`,
+A capability using `brokered-network` must declare exact `allowedHosts` and an
+`http` policy with a credential-free exact `endpoint`, `method` (`GET` or
+bounded JSON `POST`), one exact `accept` value, safe `staticHeaders`, `maxRequestBytes`,
 `allowedContentTypes`, `maxResponseBytes`, and `maxItems`. Its optional
 `coverage` block declares dimensions, source types, full-text availability,
 publication-date availability, and named discovery scopes for the preflight gap
@@ -451,7 +485,9 @@ owner-whitelisted database the question must exercise. Downstream work is
 blocked unless each such capability produces its own verified broker receipt;
 another local file cannot substitute for it. POST request bodies may contain
 only documented non-secret fields; credential-like keys are rejected, only the
-body hash is persisted, and redirects are refused. A non-network external
+body hash is persisted, and redirects are refused. GET targets and every
+redirect must remain on the endpoint path (an explicitly declared `/` endpoint
+grants origin-wide paths). A non-network external
 method-guidance Skill stages reviewed instructions but does not grant an
 undeclared tool or service call.
 Optional credentials declare logical IDs, exact host scopes, header names, and
@@ -475,8 +511,15 @@ and run `research capability doctor --live` plus production
 `research workspace doctor --agent-smoke --capability-smoke` before a run.
 Capability doctor retries only one 429 response with bounded `Retry-After`
 backoff; deterministic 4xx, missing subscription, authentication, drift, and
-content-type failures stop explicitly. The broker preserves a
-sanitized non-2xx excerpt, safe request ID, and `Retry-After`; it supports JSON
+content-type failures stop explicitly. It retains only a bounded sanitized
+provider code/detail and safe request ID, with an actionable baseline-or-
+subscription decision for `OPTION_NOT_IN_PLAN`. An explicitly requested agent
+or capability smoke failure makes setup readiness `BLOCKED`, never a warning.
+The broker preserves a sanitized non-2xx excerpt, safe request ID, and
+`Retry-After`. It performs at most one inline 429 retry when the declared or
+default delay is at most five seconds; longer throttles return an actionable
+rate-limit failure instead of holding the agent call open. The journal records
+the bounded retry decision without raw URLs or credentials. It supports JSON
 Pointer extraction, bounded item and estimated-token views, and an explicit
 public-response cache. For a JSON collection, use the returned
 `contextNextOffset` as the next `item_offset`; this creates a distinct bounded
@@ -488,8 +531,13 @@ credential values are never journaled.
 
 Retry policy is classified: deterministic configuration/4xx/output failures
 stop, schema failures use the formatting repair path, and rate limits or
-transient server failures alone may schedule another attempt. Explicit recovery
-uses append-only management events:
+transient server failures alone may schedule another attempt. Synthesis
+semantic validation also rejects literal `/n` or double-escaped
+`\\n` markers immediately before Markdown block structures. This unambiguous
+case is mechanically converted to the same number of line-feed characters and
+recorded as a content-free `package.output.normalized` journal event before
+independent review; URLs and other unmatched text are unchanged.
+Explicit recovery uses append-only management events:
 
 ```bash
 tiangong-ai research project retry gpu-resource-impact --package analyze \

@@ -198,7 +198,12 @@ const synthesisSchema: JsonSchema = {
   required: ["schemaVersion", "reportMarkdown"],
   properties: {
     schemaVersion: { type: "integer", const: 1 },
-    reportMarkdown: { type: "string", minLength: 20 },
+    reportMarkdown: {
+      type: "string",
+      minLength: 20,
+      description:
+        "Complete Markdown with actual line-feed characters after JSON parsing. Encode JSON newlines once; never emit literal /n or double-escaped \\n markers.",
+    },
   },
 };
 
@@ -283,7 +288,11 @@ export function parseStructuredStageOutput(
   stage: StructuredStage,
   raw: string,
   reviewPacketSha256: string | null = null,
-): { value: Record<string, unknown>; fileContent: string } {
+): {
+  value: Record<string, unknown>;
+  fileContent: string;
+  normalizations: Array<{ rule: string; replacements: number }>;
+} {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -306,9 +315,39 @@ export function parseStructuredStageOutput(
   }
   assertUniqueStringCollections(stage, value);
   if (stage === "synthesize") {
-    return { value, fileContent: `${String(value.reportMarkdown).trimEnd()}\n` };
+    const normalized = normalizeSynthesisMarkdown(String(value.reportMarkdown));
+    value.reportMarkdown = normalized.content;
+    return {
+      value,
+      fileContent: `${normalized.content.trimEnd()}\n`,
+      normalizations:
+        normalized.replacements > 0
+          ? [
+              {
+                rule: "synthesis-markdown-newline-artifacts",
+                replacements: normalized.replacements,
+              },
+            ]
+          : [],
+    };
   }
-  return { value, fileContent: `${JSON.stringify(value, null, 2)}\n` };
+  return { value, fileContent: `${JSON.stringify(value, null, 2)}\n`, normalizations: [] };
+}
+
+function normalizeSynthesisMarkdown(markdown: string): {
+  content: string;
+  replacements: number;
+} {
+  let replacements = 0;
+  const content = markdown.replace(
+    /(?:\/n|\\n){1,3}(?=(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|\|))/gm,
+    (artifact) => {
+      const markers = artifact.match(/(?:\/n|\\n)/g)?.length ?? 0;
+      replacements += markers;
+      return "\n".repeat(markers);
+    },
+  );
+  return { content, replacements };
 }
 
 function assertUniqueStringCollections(stage: StructuredStage, value: Record<string, unknown>) {

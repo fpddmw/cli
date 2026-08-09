@@ -17,6 +17,7 @@ import { describe, it } from "node:test";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import { startCapabilityBroker } from "../src/research/workspace/broker.js";
 import { readAndVerifyProjectInputPlan } from "../src/research/workspace/input-plan.js";
+import { appendJournalEvent } from "../src/research/workspace/journal.js";
 import {
   loadProjectEvidenceReceipts,
   stageProjectEvidence,
@@ -51,6 +52,7 @@ describe("production research evidence and broker", () => {
       await initializeResearchWorkspace(root, undefined);
       await initializeProject(root, "broker-evidence", "Evaluate one broker evidence chain.");
       await installNetworkCapability(root, skillParent, {
+        endpoint: "https://source.test/items",
         accept: "application/vnd.source+json",
         allowedContentTypes: ["application/json"],
         maxResponseBytes: 64 * 1024,
@@ -135,6 +137,8 @@ describe("production research evidence and broker", () => {
             ).text,
           ),
         ) as Record<string, unknown>;
+        const outsideEndpoint = await callBroker(broker.url, "https://source.test/outside");
+        assert.match(JSON.stringify(outsideEndpoint), /outside the capability endpoint scope/);
       } finally {
         await broker.stop();
       }
@@ -234,6 +238,181 @@ describe("production research evidence and broker", () => {
     }
   });
 
+  it("globally bounds reviewer excerpts while retaining every permanent broker object", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    const originalFetch = globalThis.fetch;
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, "bounded-review-context", "Review several large responses.");
+      await installNetworkCapability(root, skillParent, {
+        endpoint: "https://source.test/",
+        accept: "application/json",
+        allowedContentTypes: ["application/json"],
+        maxResponseBytes: 256 * 1024,
+        maxItems: 2,
+      });
+      globalThis.fetch = async (input, init) => {
+        if (String(input).startsWith("https://source.test/")) {
+          return new Response(
+            JSON.stringify({
+              request: String(input),
+              records: [
+                { id: 1, body: "x".repeat(18_000) },
+                { id: 2, body: "y".repeat(18_000) },
+                { id: 3, body: "z".repeat(18_000) },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return originalFetch(input, init);
+      };
+      const capsule = join(workspacePaths(root).runtime, "bounded-review-prefetch", "project");
+      await mkdir(capsule, { recursive: true });
+      const broker = await startCapabilityBroker(root, "bounded-review-context", capsule);
+      assert.ok(broker);
+      try {
+        for (let page = 1; page <= 4; page += 1) {
+          const response = await rpc(broker.url, "tools/call", {
+            name: "fetch_candidate_source",
+            arguments: {
+              capability_id: "method.public-source",
+              url: `https://source.test/search?page=${page}`,
+              json_pointer: "/records",
+              max_items: 2,
+            },
+          });
+          assert.notEqual(
+            (response.result as Record<string, unknown>).isError,
+            true,
+            JSON.stringify(response),
+          );
+        }
+      } finally {
+        await broker.stop();
+      }
+      await rm(join(workspacePaths(root).runtime, "bounded-review-prefetch"), {
+        recursive: true,
+        force: true,
+      });
+
+      let reviewed = false;
+      const result = await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
+        brokerBackedExecutor(async (request) => {
+          assert.equal(request.maxTurns, 3);
+          assert.doesNotMatch(request.prompt, /### inputs\/review-packet\.json/);
+          assert.match(request.prompt, /TRUNCATED: the full object/);
+          const contextPath = join(request.projectRoot, "inputs", "review-evidence-context.txt");
+          const contextInfo = await lstat(contextPath);
+          const config = JSON.parse(await readFile(workspacePaths(root).config, "utf8")) as {
+            budget: { maxInputContextTokens: number };
+          };
+          assert.ok(contextInfo.size <= config.budget.maxInputContextTokens * 3);
+          const packet = JSON.parse(
+            await readFile(join(request.projectRoot, "inputs", "review-packet.json"), "utf8"),
+          ) as {
+            evidenceReceipts: Array<{ locator: string }>;
+            evidenceFiles: Array<{ path: string; bytes: number }>;
+          };
+          assert.equal(packet.evidenceReceipts.length, 4);
+          assert.ok(packet.evidenceFiles.some((file) => file.bytes > contextInfo.size));
+          for (const receipt of packet.evidenceReceipts) {
+            assert.ok(await readFile(join(request.projectRoot, receipt.locator)));
+          }
+          reviewed = true;
+        }, false),
+      );
+      assert.equal(result.status, "complete", JSON.stringify(result));
+      assert.equal(reviewed, true);
+      assert.equal((await loadProjectEvidenceReceipts(root, "bounded-review-context")).length, 4);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("enforces the configured broker call budget before an extra provider fetch", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    const originalFetch = globalThis.fetch;
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, "broker-call-budget", "Use a bounded broker call budget.");
+      const paths = workspacePaths(root);
+      const config = JSON.parse(await readFile(paths.config, "utf8")) as {
+        budget: { maxBrokerCalls: number };
+      };
+      config.budget.maxBrokerCalls = 1;
+      await writeFile(paths.config, `${JSON.stringify(config, null, 2)}\n`);
+      await installNetworkCapability(root, skillParent);
+      let providerFetches = 0;
+      globalThis.fetch = async (input, init) => {
+        if (String(input).startsWith("https://source.test/")) {
+          providerFetches += 1;
+          return new Response('{"records":[{"id":1}]}', {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return originalFetch(input, init);
+      };
+      const capsule = join(paths.runtime, "broker-call-budget", "project");
+      await mkdir(capsule, { recursive: true });
+      const broker = await startCapabilityBroker(root, "broker-call-budget", capsule);
+      assert.ok(broker);
+      try {
+        const first = await rpc(broker.url, "tools/call", {
+          name: "fetch_candidate_source",
+          arguments: {
+            capability_id: "method.public-source",
+            url: "https://source.test/first",
+          },
+        });
+        const firstResult = first.result as Record<string, unknown>;
+        assert.notEqual(firstResult.isError, true, JSON.stringify(first));
+        const firstReceipt = JSON.parse(
+          String(((firstResult.content as Array<Record<string, unknown>>)[0] ?? {}).text),
+        ) as { brokerBudget: { maxCalls: number; startedCalls: number; remainingCalls: number } };
+        assert.deepEqual(firstReceipt.brokerBudget, {
+          maxCalls: 1,
+          startedCalls: 1,
+          remainingCalls: 0,
+        });
+
+        const rejected = await rpc(broker.url, "tools/call", {
+          name: "fetch_candidate_source",
+          arguments: {
+            capability_id: "method.public-source",
+            url: "https://source.test/second",
+          },
+        });
+        assert.match(JSON.stringify(rejected), /RESEARCH_BROKER_CALL_LIMIT_EXCEEDED/);
+        assert.deepEqual(broker.usage(), {
+          maxCalls: 1,
+          startedCalls: 1,
+          remainingCalls: 0,
+        });
+      } finally {
+        await broker.stop();
+      }
+      assert.equal(providerFetches, 1);
+      assert.equal((await loadProjectEvidenceReceipts(root, "broker-call-budget")).length, 1);
+      assert.match(await readFile(paths.journal, "utf8"), /RESEARCH_BROKER_CALL_LIMIT_EXCEEDED/);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("reports sanitized HTTP failures, Retry-After, and request IDs", async () => {
     const root = await temporaryDirectory();
     const skillParent = await temporaryDirectory();
@@ -281,6 +460,65 @@ describe("production research evidence and broker", () => {
       assert.match(workspaceText, /request-safe-123/);
       assert.doesNotMatch(workspaceText, /should-not-leak|request-secret/);
       assert.equal((await loadProjectEvidenceReceipts(root, "http-errors")).length, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("retries one short 429 in place and persists only the successful response", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    const originalFetch = globalThis.fetch;
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await installNetworkCapability(root, skillParent);
+      let providerFetches = 0;
+      globalThis.fetch = async (input, init) => {
+        if (String(input).startsWith("https://source.test/")) {
+          providerFetches += 1;
+          if (providerFetches === 1) {
+            return new Response('{"error":"briefly-limited"}', {
+              status: 429,
+              headers: {
+                "content-type": "application/json",
+                "retry-after": "0",
+                "x-request-id": "retry-safe-123",
+              },
+            });
+          }
+          return new Response('{"records":[{"id":"admitted"}]}', {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return originalFetch(input, init);
+      };
+      const capsule = join(workspacePaths(root).runtime, "short-429", "project");
+      await mkdir(capsule, { recursive: true });
+      const broker = await startCapabilityBroker(root, "short-429", capsule);
+      assert.ok(broker);
+      try {
+        const response = await rpc(broker.url, "tools/call", {
+          name: "fetch_candidate_source",
+          arguments: {
+            capability_id: "method.public-source",
+            url: "https://source.test/items?query=public",
+          },
+        });
+        assert.notEqual((response.result as Record<string, unknown>).isError, true);
+      } finally {
+        await broker.stop();
+      }
+      assert.equal(providerFetches, 2);
+      assert.equal((await loadProjectEvidenceReceipts(root, "short-429")).length, 1);
+      const journal = await readFile(workspacePaths(root).journal, "utf8");
+      assert.match(journal, /capability\.fetch\.retry\.scheduled/);
+      assert.match(journal, /retry-safe-123/);
+      assert.doesNotMatch(journal, /items\?query=public/);
     } finally {
       globalThis.fetch = originalFetch;
       await Promise.all([
@@ -602,9 +840,9 @@ describe("production research control plane", () => {
           } else {
             assert.equal(input.fullTextStaged, true);
             assert.equal(request.toolPolicy, "none");
-            assert.equal(request.maxTurns, 2);
+            assert.equal(request.maxTurns, 3);
             assert.equal(request.brokerUrl, null);
-            assert.match(request.prompt, /### inputs\/review-packet\.json/);
+            assert.doesNotMatch(request.prompt, /### inputs\/review-packet\.json/);
             assert.match(request.prompt, /### inputs\/review-evidence-context\.txt/);
             assert.match(request.prompt, /Bounded evidence excerpt with provenance/);
             assert.doesNotMatch(request.prompt, /Full evidence line/);
@@ -677,6 +915,59 @@ describe("production research control plane", () => {
       const project = await loadProject(root, "repair-json");
       assert.equal(project.packages[0]?.attempts, 1);
       assert.equal(project.usage.tokens, 37);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("mechanically normalizes literal Markdown newline artifacts before review", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, "repair-markdown", "Evaluate Markdown repair behavior.");
+      const input = join(root, "evidence.txt");
+      await writeFile(input, "measured evidence\n");
+      await addProjectInput(root, "repair-markdown", input, "primary");
+      const calls: Array<{ stage: string; purpose: string }> = [];
+      const normal = deterministicExecutor();
+      const executor: PackageExecutor = async (request) => {
+        const stage = stageFrom(request);
+        calls.push({ stage, purpose: request.purpose });
+        if (stage === "synthesize" && request.purpose === "primary") {
+          return execution(
+            JSON.stringify({
+              schemaVersion: 1,
+              reportMarkdown:
+                "# Findings/n- Supported [finding](https://example.test/n-path)./n/n## Limitations/n- Bounded evidence.",
+            }),
+            5,
+          );
+        }
+        return normal(request);
+      };
+      const result = await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
+        executor,
+      );
+      assert.equal(result.status, "complete", JSON.stringify(result));
+      assert.deepEqual(
+        calls.filter((call) => call.stage === "synthesize"),
+        [{ stage: "synthesize", purpose: "primary" }],
+      );
+      const report = await readFile(
+        join(workspacePaths(root).projects, "repair-markdown", "outputs", "report.md"),
+        "utf8",
+      );
+      assert.match(report, /# Findings\n- Supported \[finding\]/);
+      assert.match(report, /https:\/\/example\.test\/n-path/);
+      assert.doesNotMatch(report, /Findings\/n-|\.\)\/n\/n##|Limitations\/n-/);
+      assert.match(
+        await readFile(workspacePaths(root).journal, "utf8"),
+        /package\.output\.normalized.*synthesis-markdown-newline-artifacts/,
+      );
+      const project = await loadProject(root, "repair-markdown");
+      assert.equal(project.packages[2]?.attempts, 1);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -928,6 +1219,71 @@ describe("production research control plane", () => {
     }
   });
 
+  it("distinguishes a failed required discovery attempt from a capability never exercised", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await installNetworkCapability(root, skillParent);
+      const declarations = JSON.parse(
+        await readFile(workspacePaths(root).capabilityDeclarations, "utf8"),
+      ) as {
+        capabilities: Array<{ requiredForDiscovery?: boolean }>;
+      };
+      declarations.capabilities[0]!.requiredForDiscovery = true;
+      await writeFile(
+        workspacePaths(root).capabilityDeclarations,
+        `${JSON.stringify(declarations, null, 2)}\n`,
+      );
+      await lockCapabilities(root);
+      await initializeProject(
+        root,
+        "failed-required-skill",
+        "What does the available evidence establish?",
+      );
+      const input = join(root, "input.txt");
+      await writeFile(input, "A valid local source does not replace a required public index.\n");
+      await addProjectInput(root, "failed-required-skill", input, "primary");
+      const attemptId = "failed-required-capability-attempt";
+      await appendJournalEvent(
+        workspacePaths(root).journal,
+        "capability.fetch.attempted",
+        "failed-required-skill",
+        {
+          attemptId,
+          projectId: "failed-required-skill",
+          capabilityId: "method.public-source",
+        },
+      );
+      await appendJournalEvent(
+        workspacePaths(root).journal,
+        "capability.fetch.failed",
+        "failed-required-skill",
+        {
+          attemptId,
+          capabilityId: "method.public-source",
+          failureKind: "rate-limit",
+        },
+      );
+      const result = await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 5, dryRun: false, environment: {} },
+        deterministicExecutor(),
+      );
+      assert.equal(result.status, "blocked");
+      const project = await loadProject(root, "failed-required-skill");
+      assert.match(project.packages[0]?.lastError ?? "", /produced no admissible receipt/);
+      assert.match(project.packages[0]?.lastError ?? "", /failure kinds: rate-limit/);
+      assert.doesNotMatch(project.packages[0]?.lastError ?? "", /was not exercised/);
+      assert.equal(project.packages[1]?.status, "pending");
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("normalizes derived coverage fields while preserving usable partial coverage", async () => {
     const root = await temporaryDirectory();
     try {
@@ -1165,6 +1521,16 @@ describe("production research control plane", () => {
         "fail",
       );
       const smokeRequests: AgentExecutionRequest[] = [];
+      const mockRuntime = (route: AgentExecutionRequest["route"]) => ({
+        agent: route.agent,
+        model: route.model,
+        binarySha256: "a".repeat(64),
+        wrapperSha256: "b".repeat(64),
+        adapterSha256: "d".repeat(64),
+        binaryVersion: "mock 1.0.0",
+        platform: process.platform,
+        architecture: process.arch,
+      });
       const withSmoke = await doctorResearchWorkspace(root, {
         agentSmoke: true,
         capabilitySmoke: true,
@@ -1176,16 +1542,14 @@ describe("production research control plane", () => {
         environment: {},
         executor: async (request) => {
           smokeRequests.push(request);
-          return execution('{"ok":true}', 1, 0, "", request.route.model, {
-            agent: request.route.agent,
-            model: request.route.model,
-            binarySha256: "a".repeat(64),
-            wrapperSha256: "b".repeat(64),
-            adapterSha256: "d".repeat(64),
-            binaryVersion: "mock 1.0.0",
-            platform: process.platform,
-            architecture: process.arch,
-          });
+          return execution(
+            '{"ok":true}',
+            1,
+            0,
+            "",
+            request.route.model,
+            mockRuntime(request.route),
+          );
         },
       });
       assert.equal(withSmoke.status, "ready", JSON.stringify(withSmoke));
@@ -1195,6 +1559,35 @@ describe("production research control plane", () => {
       );
       assert.ok(smokeRequests.every((request) => request.purpose === "doctor"));
       assert.equal((await verifyDoctorAttestation(root)).status, "verified");
+      const reused = await doctorResearchWorkspace(root, {
+        environment: {},
+        runtimeFingerprinter: async (route) => mockRuntime(route),
+      });
+      assert.equal(reused.status, "ready", JSON.stringify(reused));
+      assert.equal(
+        reused.checks.find((check) => check.id === "capability-live-smoke")?.status,
+        "pass",
+      );
+      assert.equal(
+        reused.checks.find((check) => check.id === "agent-sandbox-smoke")?.status,
+        "pass",
+      );
+      assert.equal(
+        reused.checks.find((check) => check.id === "doctor-attestation")?.status,
+        "pass",
+      );
+      const runtimeDrift = await doctorResearchWorkspace(root, {
+        environment: {},
+        runtimeFingerprinter: async (route) => ({
+          ...mockRuntime(route),
+          binarySha256: route.agent === "codex" ? "c".repeat(64) : "a".repeat(64),
+        }),
+      });
+      assert.equal(runtimeDrift.status, "blocked");
+      assert.match(
+        runtimeDrift.checks.find((check) => check.id === "doctor-attestation")?.detail ?? "",
+        /codex runtime fingerprint drifted/,
+      );
       const driftedConfig = JSON.parse(await readFile(paths.config, "utf8")) as {
         budget: { maxInputContextTokens: number };
       };
@@ -1348,6 +1741,7 @@ async function installNetworkCapability(
   root: string,
   skillParent: string,
   http: {
+    endpoint?: string;
     accept: string;
     allowedContentTypes: string[];
     maxResponseBytes: number;
@@ -1359,6 +1753,9 @@ async function installNetworkCapability(
     maxItems: 10,
   },
 ): Promise<void> {
+  const { endpoint = "https://source.test/", ...httpPolicy } = http;
+  const healthUrl = new URL(endpoint);
+  healthUrl.searchParams.set("query", "connectivity");
   const skillPath = join(skillParent, "public-source-fetch");
   await mkdir(skillPath, { recursive: true });
   await writeFile(
@@ -1385,7 +1782,7 @@ async function installNetworkCapability(
             },
             permissions: ["project-read", "candidate-write", "brokered-network"],
             allowedHosts: ["source.test"],
-            http,
+            http: { endpoint, ...httpPolicy },
             coverage: {
               dimensions: ["*"],
               sourceTypes: ["*"],
@@ -1395,7 +1792,7 @@ async function installNetworkCapability(
             },
             credentials: [],
             healthCheck: {
-              url: "https://source.test/health?query=connectivity",
+              url: healthUrl.toString(),
               credentialId: null,
               expectedContentTypes: ["application/json"],
             },
@@ -1409,7 +1806,10 @@ async function installNetworkCapability(
   await lockCapabilities(root);
 }
 
-function brokerBackedExecutor(onReview: () => void): PackageExecutor {
+function brokerBackedExecutor(
+  onReview: (request: AgentExecutionRequest) => void | Promise<void>,
+  assertSmallPaginatedContext = true,
+): PackageExecutor {
   return async (request) => {
     const stage = stageFrom(request);
     if (stage === "discover") {
@@ -1469,13 +1869,15 @@ function brokerBackedExecutor(onReview: () => void): PackageExecutor {
       assert.ok(packet.evidenceFiles.length >= 1);
       assert.ok(packet.evidenceReceipts.length >= 1);
       assert.match(request.prompt, /### inputs\/review-evidence-context\.txt/);
-      assert.match(request.prompt, /\{"id":1\}/);
-      assert.match(request.prompt, /\{"id":2\}/);
-      assert.doesNotMatch(request.prompt, /\{"id":3\}/);
+      if (assertSmallPaginatedContext) {
+        assert.match(request.prompt, /\{"id":1(?:,|\})/);
+        assert.match(request.prompt, /\{"id":2(?:,|\})/);
+        assert.doesNotMatch(request.prompt, /\{"id":3(?:,|\})/);
+      }
       for (const file of packet.evidenceFiles) {
         assert.ok(await readFile(join(request.projectRoot, file.path)));
       }
-      onReview();
+      await onReview(request);
       return execution(JSON.stringify(reviewValue(packet.packetSha256)));
     }
     return deterministicExecutor()(request);

@@ -265,14 +265,14 @@ export async function executeResearchSetupWizard(input: {
     "production-research",
   );
   const evidenceChoices: Array<{ value: ResearchSetupEvidenceProfile; label: string }> = [
+    { value: EXTERNAL_SKILL_PROFILE, label: "Brave web + news (recommended baseline)" },
     {
       value: EXTERNAL_SKILL_CONTEXT_PROFILE,
-      label: "Brave web + news + bounded full-text context (recommended)",
+      label: "Brave web + news + bounded context (requires provider plan support)",
     },
-    { value: EXTERNAL_SKILL_PROFILE, label: "Brave web + news" },
     {
       value: EXTERNAL_SKILL_MEDIA_PROFILE,
-      label: "Brave context + image/video discovery",
+      label: "Brave context + image/video discovery (subscription-dependent)",
     },
   ];
   if (mode === "smoke-test") {
@@ -281,11 +281,19 @@ export async function executeResearchSetupWizard(input: {
   const evidenceProfile = await prompt.select(
     "Independent public-internet evidence profile",
     evidenceChoices,
-    EXTERNAL_SKILL_CONTEXT_PROFILE,
+    EXTERNAL_SKILL_PROFILE,
+  );
+
+  const includeOrchestrator = await prompt.confirm(
+    "Install the tiangong-auto-research orchestrator so ordinary research requests route into this workspace workflow?",
+    true,
   );
 
   const companionChoices = RESEARCH_SETUP_SKILLS.filter(
-    (skill) => skill.sourceId === "tiangong-ai-skills" && skill.role !== "post-closure-authoring",
+    (skill) =>
+      skill.sourceId === "tiangong-ai-skills" &&
+      skill.role !== "orchestrator" &&
+      skill.role !== "post-closure-authoring",
   ).map((skill) => ({ value: skill.id, label: `${skill.skillName} — ${skill.purpose}` }));
   const companionIds = await prompt.multiSelect(
     "Optional Tiangong companion Skills (explicit selection)",
@@ -312,7 +320,13 @@ export async function executeResearchSetupWizard(input: {
       .map((skill) => ({ value: skill.id, label: `${skill.skillName} — ${skill.purpose}` }));
     authoringIds = await prompt.multiSelect("Post-closure authoring Skills", choices, []);
   }
-  const explicitSkillIds = [...new Set([...companionIds, ...authoringIds])];
+  const explicitSkillIds = [
+    ...new Set([
+      ...(includeOrchestrator ? ["tiangong.auto-research"] : []),
+      ...companionIds,
+      ...authoringIds,
+    ]),
+  ];
   const profileSkillIds = evidenceProfileSkillIds(evidenceProfile);
   const selected = resolveSetupSkills([...profileSkillIds, ...explicitSkillIds]);
 
