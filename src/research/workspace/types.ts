@@ -203,6 +203,8 @@ export interface VerifiedProjectInputPlan {
 export interface ProjectEvidenceRequirements {
   dimensions: string[];
   sourceTypes: string[];
+  requiredCapabilityIds?: string[];
+  requiredDiscoveryScopes?: string[];
   minSources: number;
   minFullTextSources: number;
   minDatedSources: number;

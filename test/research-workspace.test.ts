@@ -298,7 +298,7 @@ describe("research capability locks", () => {
         assert.equal(result.isError, true);
         assert.match(
           String(((result.content as Array<Record<string, unknown>>)[0] ?? {}).text),
-          /HTTPS/,
+          /BROKER_CREDENTIAL_INJECTION_REJECTED/,
         );
         const outsideScope = await rpc(broker.url, "tools/call", {
           name: "fetch_candidate_source",
@@ -317,7 +317,7 @@ describe("research capability locks", () => {
               )[0] ?? {}
             ).text,
           ),
-          /outside.*capability.*scope/,
+          /BROKER_CREDENTIAL_INJECTION_REJECTED/,
         );
       } finally {
         await broker.stop();
@@ -1357,7 +1357,9 @@ describe("research workspace CLI", () => {
         requirementsPath,
         `${JSON.stringify({
           dimensions: ["energy"],
-          sourceTypes: ["primary"],
+          sourceTypes: ["primary", "industry-report"],
+          requiredCapabilityIds: ["database.tiangong.report-search"],
+          requiredDiscoveryScopes: ["database:tiangong-report"],
           minSources: 2,
           minFullTextSources: 1,
           minDatedSources: 1,
@@ -1380,11 +1382,35 @@ describe("research workspace CLI", () => {
       assert.equal(preflight.exitCode, 3, preflight.stderr);
       const value = JSON.parse(preflight.stdout) as {
         gaps: string[];
+        coverageGaps: Array<{
+          kind: string;
+          requirement: string;
+          affectedDimensions: string[];
+          affectedSourceTypes: string[];
+          alternativeCanSatisfyMinimumCoverage: boolean;
+          minimumAction: string;
+        }>;
         budget: { maxBrokerContextTokens: number };
       };
       assert.ok(value.gaps.includes("no-evidence-acquisition-plan"));
       assert.ok(value.gaps.includes("evidence-plan-dimension-uncovered:energy"));
       assert.ok(value.gaps.includes("evidence-plan-source-type-uncovered:primary"));
+      assert.ok(value.gaps.includes("evidence-plan-source-type-uncovered:industry-report"));
+      assert.ok(
+        value.gaps.includes("evidence-plan-capability-unavailable:database.tiangong.report-search"),
+      );
+      assert.ok(
+        value.gaps.includes("evidence-plan-discovery-scope-uncovered:database:tiangong-report"),
+      );
+      assert.deepEqual(value.coverageGaps[0], {
+        kind: "capability-unavailable",
+        requirement: "database.tiangong.report-search",
+        affectedDimensions: ["energy"],
+        affectedSourceTypes: ["industry-report", "primary"],
+        alternativeCanSatisfyMinimumCoverage: false,
+        minimumAction:
+          "Rerun the setup Wizard, select tiangong.kb-report-search, review its license and exact endpoint, securely configure tiangong.report.api-key, apply the replacement immutable plan, and pass capability live doctor.",
+      });
       assert.ok(value.gaps.includes("evidence-plan-min-sources-insufficient:0/2"));
       assert.ok(value.gaps.includes("evidence-plan-full-text-insufficient:0/1"));
       assert.ok(value.gaps.includes("evidence-plan-dated-sources-insufficient:0/1"));

@@ -67,6 +67,7 @@ jobs:
           npm run lint
           npm test
           npm run test:coverage
+          npm run audit:research-setup-pins
           npm pack --dry-run >/dev/null
 
       - name: Publish to npm

@@ -138,7 +138,7 @@ describe("production research evidence and broker", () => {
           ),
         ) as Record<string, unknown>;
         const outsideEndpoint = await callBroker(broker.url, "https://source.test/outside");
-        assert.match(JSON.stringify(outsideEndpoint), /outside the capability endpoint scope/);
+        assert.match(JSON.stringify(outsideEndpoint), /BROKER_CREDENTIAL_INJECTION_REJECTED/);
       } finally {
         await broker.stop();
       }

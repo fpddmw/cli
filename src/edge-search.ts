@@ -126,16 +126,48 @@ export async function runEdgeSearch<SourceId extends string>(input: {
 
   const responses: Array<EdgeSearchResponse<SourceId>> = [];
   for (const plan of plans) {
-    responses.push({
-      source: plan.source,
-      response: await postJson({
-        url: plan.request.url,
-        headers: plan.request.headers,
-        body: plan.request.body,
-        timeoutMs: input.timeoutMs,
-        fetchImpl: input.fetchImpl ?? fetch,
-      }),
-    });
+    try {
+      responses.push({
+        source: plan.source,
+        response: await postJson({
+          url: plan.request.url,
+          headers: plan.request.headers,
+          body: plan.request.body,
+          timeoutMs: input.timeoutMs,
+          fetchImpl: input.fetchImpl ?? fetch,
+        }),
+      });
+    } catch (error) {
+      if (error instanceof CliError && error.code === "REMOTE_REQUEST_FAILED") {
+        const status =
+          error.details && typeof error.details === "object" && "status" in error.details
+            ? Number(error.details.status)
+            : null;
+        const authenticationFailed = status === 401 || status === 403;
+        throw new CliError(
+          authenticationFailed
+            ? `The ${plan.source} provider rejected the standalone credential.`
+            : `The ${plan.source} standalone provider request failed.`,
+          {
+            code: authenticationFailed
+              ? "PROVIDER_AUTHENTICATION_FAILED"
+              : "STANDALONE_PROVIDER_REQUEST_FAILED",
+            exitCode: 1,
+            details: {
+              source: plan.source,
+              executionMode: "standalone",
+              credentialScope: "ambient-or-explicit-owner-env",
+              networkAttempted: true,
+              ...(status === null ? {} : { status }),
+              minimumAction: authenticationFailed
+                ? "Verify the owner-provided standalone credential and provider entitlement, then retry the isolated query."
+                : "Verify the exact endpoint, provider availability, and quota before retrying the isolated query.",
+            },
+          },
+        );
+      }
+      throw error;
+    }
   }
 
   return { dryRun: false, responses };
@@ -169,17 +201,29 @@ function edgeSearchHeaders<SourceId extends string>(
   missingCredentialHelp: string,
 ): Record<string, string> {
   if (source.authStrategy === "apiKey" && !source.apiKey) {
-    throw new CliError(`Missing ${source.source} search credentials. ${missingCredentialHelp}`, {
-      code: "EDGE_SEARCH_CREDENTIALS_REQUIRED",
+    throw new CliError(`Standalone ambient credential not found for ${source.source} search.`, {
+      code: "STANDALONE_AMBIENT_CREDENTIAL_MISSING",
       exitCode: 2,
-      details: { source: source.source },
+      details: {
+        source: source.source,
+        executionMode: "standalone",
+        credentialScope: "ambient-or-explicit-owner-env",
+        networkAttempted: false,
+        minimumAction: missingCredentialHelp,
+      },
     });
   }
   if (source.authStrategy === "bearerOrApiKey" && !source.apiKey && !source.bearerToken) {
-    throw new CliError(`Missing ${source.source} search credentials. ${missingCredentialHelp}`, {
-      code: "EDGE_SEARCH_CREDENTIALS_REQUIRED",
+    throw new CliError(`Standalone ambient credential not found for ${source.source} search.`, {
+      code: "STANDALONE_AMBIENT_CREDENTIAL_MISSING",
       exitCode: 2,
-      details: { source: source.source },
+      details: {
+        source: source.source,
+        executionMode: "standalone",
+        credentialScope: "ambient-or-explicit-owner-env",
+        networkAttempted: false,
+        minimumAction: missingCredentialHelp,
+      },
     });
   }
 

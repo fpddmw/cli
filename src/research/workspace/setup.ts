@@ -16,7 +16,7 @@ import {
 } from "./credentials.js";
 import {
   configureExternalSkillProfile,
-  configureTiangongSciCapability,
+  configureTiangongDatabaseCapability,
   doctorExternalCapabilities,
   EXTERNAL_SKILL_CONTEXT_PROFILE,
   EXTERNAL_SKILL_MEDIA_PROFILE,
@@ -41,6 +41,7 @@ import {
   setupSkill,
   setupSource,
   setupTargetRoot,
+  verifyResearchSetupRuntimeContract,
   type ResearchSetupAgent,
   type ResearchSetupCredential,
   type ResearchSetupScope,
@@ -1021,13 +1022,7 @@ export async function doctorResearchSetup(
     options.runner ?? runSetupCommand,
     setupSecretValues(plan, environment),
   );
-  const checks: Array<{
-    id: string;
-    category: string;
-    status: "pass" | "warn" | "fail";
-    detail: string;
-    minimumAction: string | null;
-  }> = [];
+  const checks: SetupDoctorCheck[] = [];
 
   await setupDoctorCheck(checks, "workspace", "workspace", async () => {
     const context = await inspectResearchContext(root);
@@ -1367,23 +1362,25 @@ export async function checkResearchSetupUpdates(
       });
     }
   }
+  const cliVersionDrift =
+    plan.cli.version === packageVersion()
+      ? null
+      : { planned: plan.cli.version, active: packageVersion() };
+  const updateAvailable = drift.length > 0 || cliVersionDrift !== null;
   return {
     schemaVersion: 1 as const,
     workspace: root,
     checkedAt: new Date().toISOString(),
-    updateAvailable: drift.length > 0 || plan.cli.version !== packageVersion(),
-    cliVersionDrift:
-      plan.cli.version === packageVersion()
-        ? null
-        : { planned: plan.cli.version, active: packageVersion() },
+    updateAvailable,
+    cliVersionDrift,
     drift,
     currentInstaller: RESEARCH_SETUP_INSTALLER,
     catalog,
     policy: {
       automaticUpdate: false,
       floatingUpdate: false,
-      minimumAction: drift.length
-        ? "Use the newer CLI to create and review a replacement immutable plan; upgrade never runs a floating skills update."
+      minimumAction: updateAvailable
+        ? "Use the active exact CLI release to create, review, and apply a replacement immutable plan; upgrade never runs a floating CLI or Skills update."
         : "No catalog migration is required. Installed tree drift is reported separately by setup status/doctor.",
     },
   };
@@ -2288,6 +2285,7 @@ async function ensureSetupSourceCheckout(
         },
       });
     }
+    await verifyResearchSetupRuntimeContract(sourcePath, setupSkill(skill.id));
   }
   return checkout;
 }
@@ -2358,8 +2356,31 @@ async function configureSelectedCapabilities(
   _environment: NodeJS.ProcessEnv,
 ): Promise<void> {
   const hasBraveProfile = plan.selection.evidenceProfile !== "none";
-  const hasTiangongSci = plan.selection.skillIds.includes("tiangong.kb-sci-search");
-  const codexRoot = hasBraveProfile || hasTiangongSci ? plannedTargetRoot(plan, "codex") : null;
+  const tiangongDatabases = [
+    {
+      kind: "sci" as const,
+      skillId: "tiangong.kb-sci-search",
+      settingPrefix: "tiangong.sci",
+      catalogId: "first-party.tiangong.kb-sci-search",
+      capabilityId: "database.tiangong.sci-search",
+    },
+    {
+      kind: "report" as const,
+      skillId: "tiangong.kb-report-search",
+      settingPrefix: "tiangong.report",
+      catalogId: "first-party.tiangong.kb-report-search",
+      capabilityId: "database.tiangong.report-search",
+    },
+    {
+      kind: "patent" as const,
+      skillId: "tiangong.kb-patent-search",
+      settingPrefix: "tiangong.patent",
+      catalogId: "first-party.tiangong.kb-patent-search",
+      capabilityId: "database.tiangong.patent-search",
+    },
+  ].filter((entry) => plan.selection.skillIds.includes(entry.skillId));
+  const codexRoot =
+    hasBraveProfile || tiangongDatabases.length ? plannedTargetRoot(plan, "codex") : null;
   if (plan.selection.evidenceProfile !== "none") {
     await configureExternalSkillProfile({
       workspace: plan.workspace.path,
@@ -2367,10 +2388,11 @@ async function configureSelectedCapabilities(
       skillRoot: codexRoot!,
     });
   }
-  if (hasTiangongSci) {
-    const skill = setupSkill("tiangong.kb-sci-search");
+  for (const database of tiangongDatabases) {
+    const skill = setupSkill(database.skillId);
     const source = setupSource(skill.sourceId);
-    await configureTiangongSciCapability({
+    await configureTiangongDatabaseCapability({
+      kind: database.kind,
       workspace: plan.workspace.path,
       skillPath: join(codexRoot!, skill.skillName),
       source: {
@@ -2379,19 +2401,19 @@ async function configureSelectedCapabilities(
         immutableRef: source.immutableRef,
         expectedTreeSha256: skill.expectedTreeSha256,
         license: "MIT",
-        catalogId: "first-party.tiangong.kb-sci-search",
+        catalogId: database.catalogId,
       },
-      endpoint: plan.settings["tiangong.sci.endpoint"]!,
-      ...(plan.settings["tiangong.sci.region"] === undefined
+      endpoint: plan.settings[`${database.settingPrefix}.endpoint`]!,
+      ...(plan.settings[`${database.settingPrefix}.region`] === undefined
         ? {}
-        : { region: plan.settings["tiangong.sci.region"] }),
+        : { region: plan.settings[`${database.settingPrefix}.region`] }),
     });
   }
   await reconcileSetupManagedCapabilities({
     workspace: plan.workspace.path,
     selectedCapabilityIds: [
       ...BRAVE_PROFILE_SKILLS[plan.selection.evidenceProfile].map(setupManagedCapabilityId),
-      ...(hasTiangongSci ? ["database.tiangong.sci-search"] : []),
+      ...tiangongDatabases.map((database) => database.capabilityId),
     ],
   });
 }
@@ -2511,6 +2533,18 @@ async function assertRequiredCredentialPreflight(
         .join(", ")}), then retry this exact step.`,
       retryCommand: `tiangong-ai research setup retry --step credential-preflight --workspace ${plan.workspace.path} --json`,
       exitCode: 3,
+      diagnostics: {
+        executionMode: "setup-preflight",
+        credentialScope: [
+          ...new Set(
+            failures.map(
+              (failure) => definitions.find((definition) => definition.id === failure.id)!.storage,
+            ),
+          ),
+        ].join("+"),
+        networkAttempted: false,
+        missingCredentialIds: failures.map((failure) => failure.id),
+      },
     });
   }
 }
@@ -3289,6 +3323,14 @@ type SetupDoctorCheck = {
   status: "pass" | "warn" | "fail";
   detail: string;
   minimumAction: string | null;
+  diagnostics?: {
+    code: string;
+    executionMode: "setup-doctor" | "broker" | "standalone";
+    credentialScope: "adapter" | "broker" | "ambient-or-explicit-owner-env";
+    networkAttempted: boolean;
+    httpStatus?: number;
+    retryAfterSeconds?: number | null;
+  };
 };
 
 function requireAbsoluteWorkspace(value: string): string {
@@ -3701,6 +3743,7 @@ async function setupDoctorCheck(
   id: string,
   category: string,
   callback: () => Promise<string>,
+  failureMinimumAction = `Resolve ${id}, then rerun research setup doctor.`,
 ): Promise<void> {
   try {
     checks.push({
@@ -3716,7 +3759,7 @@ async function setupDoctorCheck(
       category,
       status: "fail",
       detail: sanitizeResearchText(error instanceof Error ? error.message : String(error)),
-      minimumAction: `Resolve ${id}, then rerun research setup doctor.`,
+      minimumAction: failureMinimumAction,
     });
   }
 }
@@ -3746,45 +3789,51 @@ async function appendDependencyChecks(
       });
       continue;
     }
-    await setupDoctorCheck(checks, `dependency.${dependency.id}`, "dependency", async () => {
-      if (dependency.id === "python-3.10") {
-        const result = await runner({
-          command: "python3",
-          args: ["--version"],
-          cwd: root,
-          environment: installerEnvironment(environment),
-          timeoutMs: 15_000,
-        });
-        if (result.exitCode !== 0) throw new Error(dependency.minimumAction);
-        const versionText = `${result.stdout} ${result.stderr}`;
-        const match = versionText.match(/Python\s+(\d+)\.(\d+)(?:\.(\d+))?/i);
-        if (!match || Number(match[1]) < 3 || (Number(match[1]) === 3 && Number(match[2]) < 10)) {
-          throw new Error(
-            `Detected ${versionText.trim() || "unknown Python version"}; ${dependency.requirement} is required.`,
-          );
+    await setupDoctorCheck(
+      checks,
+      `dependency.${dependency.id}`,
+      "dependency",
+      async () => {
+        if (dependency.id === "python-3.10") {
+          const result = await runner({
+            command: "python3",
+            args: ["--version"],
+            cwd: root,
+            environment: installerEnvironment(environment),
+            timeoutMs: 15_000,
+          });
+          if (result.exitCode !== 0) throw new Error(dependency.minimumAction);
+          const versionText = `${result.stdout} ${result.stderr}`;
+          const match = versionText.match(/Python\s+(\d+)\.(\d+)(?:\.(\d+))?/i);
+          if (!match || Number(match[1]) < 3 || (Number(match[1]) === 3 && Number(match[2]) < 10)) {
+            throw new Error(
+              `Detected ${versionText.trim() || "unknown Python version"}; ${dependency.requirement} is required.`,
+            );
+          }
+          return `${versionText.trim()} satisfies ${dependency.requirement}.`;
         }
-        return `${versionText.trim()} satisfies ${dependency.requirement}.`;
-      }
-      if (dependency.id === "academic-paper-download:pypdf") {
-        const result = await runner({
-          command: "python3",
-          args: ["-c", "import importlib.metadata as m; print(m.version('pypdf'))"],
-          cwd: root,
-          environment: installerEnvironment(environment),
-          timeoutMs: 15_000,
-        });
-        const observed = result.stdout.trim();
-        if (result.exitCode !== 0 || observed !== "6.14.2") {
-          throw new Error(
-            `${dependency.requirement} is not active in the selected python3 environment.`,
-          );
+        if (dependency.id === "academic-paper-download:pypdf") {
+          const result = await runner({
+            command: "python3",
+            args: ["-c", "import importlib.metadata as m; print(m.version('pypdf'))"],
+            cwd: root,
+            environment: installerEnvironment(environment),
+            timeoutMs: 15_000,
+          });
+          const observed = result.stdout.trim();
+          if (result.exitCode !== 0 || observed !== "6.14.2") {
+            throw new Error(
+              `${dependency.requirement} is not active in the selected python3 environment.`,
+            );
+          }
+          return `${dependency.requirement} is active.`;
         }
-        return `${dependency.requirement} is active.`;
-      }
-      throw new Error(
-        `No automatic dependency check is declared for ${dependency.id}. ${dependency.minimumAction}`,
-      );
-    });
+        throw new Error(
+          `No automatic dependency check is declared for ${dependency.id}. ${dependency.minimumAction}`,
+        );
+      },
+      dependency.minimumAction,
+    );
   }
 }
 
@@ -3799,37 +3848,8 @@ async function appendCompanionLiveChecks(
     allowSyntheticUnstructureUpload: boolean;
   },
 ): Promise<void> {
-  void input.sleeper;
   if (input.selected.some((skill) => skill.id === "tiangong.academic-paper-download")) {
-    await setupDoctorCheck(checks, "live.semantic-scholar", "live-check", async () => {
-      const apiKey = input.adapterCredentials.get("semantic-scholar.api-key");
-      const headers = new Headers({ Accept: "application/json" });
-      if (apiKey) headers.set("x-api-key", apiKey);
-      const response = await input.fetcher(
-        "https://api.semanticscholar.org/graph/v1/paper/search?query=reproducible%20research&limit=1&fields=paperId",
-        {
-          method: "GET",
-          headers,
-          redirect: "manual",
-          signal: AbortSignal.timeout(30_000),
-        },
-      );
-      if (response.status >= 300 && response.status < 400) {
-        throw new Error(
-          "Semantic Scholar returned a redirect; credential-bearing redirects are not followed.",
-        );
-      }
-      if (!response.ok) {
-        const detail = await boundedResponseText(response, 2_000, apiKey ? [apiKey] : []);
-        throw new Error(
-          `Semantic Scholar live check returned HTTP ${response.status}${detail ? `: ${detail}` : ""}.`,
-        );
-      }
-      await response.body?.cancel().catch(() => undefined);
-      return apiKey
-        ? "Semantic Scholar accepted the configured optional API key."
-        : "Semantic Scholar public API is reachable without an optional API key.";
-    });
+    await appendSemanticScholarLiveCheck(checks, input);
   }
 
   if (input.selected.some((skill) => skill.id === "tiangong.document-granular-decompose")) {
@@ -3882,6 +3902,129 @@ async function appendCompanionLiveChecks(
       });
     }
   }
+}
+
+async function appendSemanticScholarLiveCheck(
+  checks: SetupDoctorCheck[],
+  input: {
+    adapterCredentials: Map<string, string>;
+    fetcher: typeof fetch;
+    sleeper: (milliseconds: number) => Promise<unknown>;
+  },
+): Promise<void> {
+  const apiKey = input.adapterCredentials.get("semantic-scholar.api-key");
+  const headers = new Headers({ Accept: "application/json" });
+  if (apiKey) headers.set("x-api-key", apiKey);
+  const url =
+    "https://api.semanticscholar.org/graph/v1/paper/search?query=reproducible%20research&limit=1&fields=paperId";
+  try {
+    let response!: Response;
+    let retryAfterSeconds: number | null = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      response = await input.fetcher(url, {
+        method: "GET",
+        headers,
+        redirect: "manual",
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (response.status !== 429 || attempt === 1) break;
+      retryAfterSeconds = setupRetryAfterSeconds(response.headers.get("retry-after"));
+      await response.body?.cancel().catch(() => undefined);
+      await input.sleeper(Math.min(5, retryAfterSeconds ?? 1) * 1_000);
+    }
+    retryAfterSeconds ??= setupRetryAfterSeconds(response.headers.get("retry-after"));
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel().catch(() => undefined);
+      checks.push({
+        id: "live.semantic-scholar",
+        category: "live-check",
+        status: "fail",
+        detail:
+          "Semantic Scholar returned a redirect; credential-bearing redirects are not followed.",
+        minimumAction:
+          "Verify the fixed Semantic Scholar endpoint and network policy, then rerun setup doctor; do not fall back to a standalone source wrapper.",
+        diagnostics: {
+          code: "PROVIDER_REDIRECT_REJECTED",
+          executionMode: "setup-doctor",
+          credentialScope: "adapter",
+          networkAttempted: true,
+          httpStatus: response.status,
+        },
+      });
+      return;
+    }
+    if (!response.ok) {
+      const authenticationFailure = response.status === 401 || response.status === 403;
+      const rateLimited = response.status === 429;
+      const detail = authenticationFailure
+        ? ""
+        : await boundedResponseText(response, 2_000, apiKey ? [apiKey] : []);
+      checks.push({
+        id: "live.semantic-scholar",
+        category: "live-check",
+        status: "fail",
+        detail: sanitizeResearchText(
+          `Semantic Scholar live check returned HTTP ${response.status}${detail ? `: ${detail}` : ""}.`,
+          apiKey ? [apiKey] : [],
+        ),
+        minimumAction: rateLimited
+          ? `Wait for the provider quota window${retryAfterSeconds === null ? "" : ` (Retry-After ${retryAfterSeconds}s)`}, then rerun setup doctor. The production workflow remains blocked and must not downgrade to standalone search.`
+          : authenticationFailure
+            ? "Replace or remove the optional Semantic Scholar API key, verify provider entitlement, and rerun setup doctor; do not expose the key in output."
+            : "Verify Semantic Scholar availability and the fixed API contract, then rerun setup doctor; do not downgrade the research workflow.",
+        diagnostics: {
+          code: authenticationFailure
+            ? "PROVIDER_AUTHENTICATION_FAILED"
+            : rateLimited
+              ? "PROVIDER_RATE_LIMITED"
+              : "PROVIDER_REQUEST_FAILED",
+          executionMode: "setup-doctor",
+          credentialScope: "adapter",
+          networkAttempted: true,
+          httpStatus: response.status,
+          retryAfterSeconds,
+        },
+      });
+      return;
+    }
+    await response.body?.cancel().catch(() => undefined);
+    checks.push({
+      id: "live.semantic-scholar",
+      category: "live-check",
+      status: "pass",
+      detail: apiKey
+        ? "Semantic Scholar accepted the configured optional API key."
+        : "Semantic Scholar public API is reachable without an optional API key.",
+      minimumAction: null,
+    });
+  } catch (error) {
+    checks.push({
+      id: "live.semantic-scholar",
+      category: "live-check",
+      status: "fail",
+      detail: sanitizeResearchText(
+        error instanceof Error ? error.message : String(error),
+        apiKey ? [apiKey] : [],
+      ),
+      minimumAction:
+        "Restore provider connectivity, then rerun setup doctor; the production workflow must remain blocked instead of using a standalone fallback.",
+      diagnostics: {
+        code: "PROVIDER_TRANSPORT_FAILED",
+        executionMode: "setup-doctor",
+        credentialScope: "adapter",
+        networkAttempted: true,
+      },
+    });
+  }
+}
+
+function setupRetryAfterSeconds(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds);
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return null;
+  return Math.max(0, Math.ceil((timestamp - Date.now()) / 1_000));
 }
 
 async function boundedResponseText(

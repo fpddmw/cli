@@ -532,6 +532,8 @@ function defaultEvidenceRequirements(config: WorkspaceConfig): ProjectEvidenceRe
     ? {
         dimensions: ["research-question"],
         sourceTypes: ["primary"],
+        requiredCapabilityIds: [],
+        requiredDiscoveryScopes: [],
         minSources: 3,
         minFullTextSources: 1,
         minDatedSources: 1,
@@ -541,6 +543,8 @@ function defaultEvidenceRequirements(config: WorkspaceConfig): ProjectEvidenceRe
     : {
         dimensions: ["research-question"],
         sourceTypes: [],
+        requiredCapabilityIds: [],
+        requiredDiscoveryScopes: [],
         minSources: 1,
         minFullTextSources: 0,
         minDatedSources: 0,
@@ -555,6 +559,12 @@ export function normalizeEvidenceRequirements(
   const normalized = {
     dimensions: [...new Set(value.dimensions.map(normalizeRequirementId))].sort(),
     sourceTypes: [...new Set(value.sourceTypes.map(normalizeRequirementId))].sort(),
+    requiredCapabilityIds: [
+      ...new Set((value.requiredCapabilityIds ?? []).map(normalizeRequirementId)),
+    ].sort(),
+    requiredDiscoveryScopes: [
+      ...new Set((value.requiredDiscoveryScopes ?? []).map(normalizeRequirementId)),
+    ].sort(),
     minSources: value.minSources,
     minFullTextSources: value.minFullTextSources,
     minDatedSources: value.minDatedSources,
@@ -580,6 +590,14 @@ function isEvidenceRequirements(value: unknown): value is ProjectEvidenceRequire
     (value as ProjectEvidenceRequirements).dimensions.every(validRequirementId) &&
     Array.isArray((value as ProjectEvidenceRequirements).sourceTypes) &&
     (value as ProjectEvidenceRequirements).sourceTypes.every(validRequirementId) &&
+    ((value as ProjectEvidenceRequirements).requiredCapabilityIds === undefined ||
+      (Array.isArray((value as ProjectEvidenceRequirements).requiredCapabilityIds) &&
+        (value as ProjectEvidenceRequirements).requiredCapabilityIds!.every(validRequirementId))) &&
+    ((value as ProjectEvidenceRequirements).requiredDiscoveryScopes === undefined ||
+      (Array.isArray((value as ProjectEvidenceRequirements).requiredDiscoveryScopes) &&
+        (value as ProjectEvidenceRequirements).requiredDiscoveryScopes!.every(
+          validRequirementId,
+        ))) &&
     Number.isInteger((value as ProjectEvidenceRequirements).minSources) &&
     (value as ProjectEvidenceRequirements).minSources > 0 &&
     Number.isInteger((value as ProjectEvidenceRequirements).minFullTextSources) &&

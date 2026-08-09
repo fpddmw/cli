@@ -84,7 +84,11 @@ async function parseResponse(response: ResponseLike, url: string): Promise<unkno
     throw new CliError(`HTTP ${response.status} returned from ${url}`, {
       code: "REMOTE_REQUEST_FAILED",
       exitCode: 1,
-      details: rawText,
+      details: {
+        status: response.status,
+        retryAfterSeconds: responseRetryAfterSeconds(response.headers),
+        networkAttempted: true,
+      },
     });
   }
 
@@ -101,6 +105,16 @@ async function parseResponse(response: ResponseLike, url: string): Promise<unkno
   }
 
   return rawText;
+}
+
+function responseRetryAfterSeconds(headers: ResponseLike["headers"]): number | null {
+  const value = headers.get("retry-after");
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds);
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return null;
+  return Math.max(0, Math.ceil((timestamp - Date.now()) / 1_000));
 }
 
 export async function postJson(options: {

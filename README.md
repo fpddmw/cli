@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-08
-lastReviewedCommit: 2aee8339c04d94dc42a8b34d20d59af27dbe756d
+lastReviewedAt: 2026-08-09
+lastReviewedCommit: 14c804e61b3768489253533ee754b6f7e75460ea
 ---
 
 # Tiangong AI CLI
@@ -252,7 +252,12 @@ hash mismatch remains fail-closed before `npx skills add`; its structured error
 reports only the Skill/source IDs, hash algorithm, and expected/observed hashes.
 It never treats file existence as installation success or silently rewrites an
 immutable plan. Plans created by an earlier CLI release are rejected at the
-execution boundary; create and review a new plan with the active release.
+execution boundary; create and review a new plan with the active release. The
+orchestrator additionally declares a `workspace-lock` runtime contract: every
+workspace command goes through its bundled resolver, which accepts only the
+regular non-symlink `runtime-lock.json` exact stable CLI version. Setup and
+release CI reject a missing resolver or any stale exact CLI version in the
+orchestrator's `SKILL.md` or `references/*.md`.
 
 The default `internet-research` profile selects Brave Web Search and News
 Search. `internet-research-with-context` additionally selects the
@@ -276,9 +281,10 @@ op read 'op://Research/Brave/api-key' | \
 
 The pinned Brave checkout is verified at `skills/<skill-name>` before install.
 An explicitly reviewed replacement plan reconciles the complete setup-managed
-capability set and both owner-only credential stores: deselected Brave/Sci
-declarations and lock records are removed, custom capability declarations are
-preserved, and installed Skill directories are never deleted implicitly.
+capability set and both owner-only credential stores: deselected Brave, SCI,
+report, or patent declarations and lock records are removed, custom capability
+declarations are preserved, and installed Skill directories are never deleted
+implicitly.
 Provider-dependent context/media choices never fall back silently; select the
 baseline in a replacement plan when that is the intended operator decision.
 
@@ -290,9 +296,11 @@ managers may preload one line per logical ID with
 `--credential-stdin <id[,id...]>`; the remaining Wizard questions use the
 controlling terminal.
 
-Optional setup entries have explicit roles. Tiangong SCI is an
-owner-whitelisted POST evidence capability; document decomposition is an input
-preprocessor; academic paper download is an acquisition adapter; document and
+Optional setup entries have explicit roles. Tiangong SCI, report, and patent
+search are distinct owner-whitelisted POST evidence capabilities with separate
+logical credentials and discovery scopes; one cannot substitute for another.
+Document decomposition is an input preprocessor; academic paper download is an
+acquisition adapter; document and
 presentation Skills are post-closure authoring only. Run selected preprocessors
 and acquisition adapters with `research setup companion run`, then admit their
 exact hash-bound output separately. Automatic paper OA exhaustion returns an
@@ -305,10 +313,15 @@ Every leaf command accepts `--help` before workspace resolution, so operators
 can inspect `capability doctor`, `project preflight`, `project init`, and `run`
 syntax safely from an empty or unrelated directory.
 
-The requirements object declares `dimensions`, `sourceTypes`, `minSources`,
+The requirements object declares `dimensions`, `sourceTypes`, optional
+`requiredCapabilityIds` and `requiredDiscoveryScopes`, `minSources`,
 `minFullTextSources`, `minDatedSources`, and optional inclusive
 `publicationDateFrom` / `publicationDateTo` boundaries (`YYYY-MM-DD` or
-`null`). After discovery, a mechanical coverage gate verifies the declared
+`null`). Explicit capability/scope requirements are exact: wildcard web or SCI
+coverage cannot satisfy a required report database. Preflight returns both
+stable string gaps and structured `coverageGaps` with the affected dimensions,
+source types, alternative-coverage decision, and minimum owner action. After
+discovery, a mechanical coverage gate verifies the declared
 source, full-text, publication-date, and dimension summary before analysis.
 For large local sources, pass an immutable `--input-plan` to both preflight and
 project initialization. Each plan entry may expose either a separate
@@ -488,8 +501,8 @@ must be exact versions; local references must equal
 `sha256:<expectedTreeSha256>`. Every source type must match the installed whole
 tree before a lock can be written. Skill trees reject symlinks and excessive
 file counts/sizes. Project-owned Tiangong Skills are rejected through this
-generic import path; the setup catalog has a separate reviewed first-party
-adapter for Tiangong SCI. Configure/import refuses to rewrite the lock if any
+generic import path; the setup catalog has separate reviewed first-party
+adapters for Tiangong SCI, report, and patent search. Configure/import refuses to rewrite the lock if any
 existing capability has drifted; restore it or explicitly update its source
 identity and expected hash first.
 
@@ -542,6 +555,13 @@ content-type failures stop explicitly. It retains only a bounded sanitized
 provider code/detail and safe request ID, with an actionable baseline-or-
 subscription decision for `OPTION_NOT_IN_PLAN`. An explicitly requested agent
 or capability smoke failure makes setup readiness `BLOCKED`, never a warning.
+Credential diagnostics distinguish standalone ambient absence,
+broker-store absence, policy-rejected injection, and provider 401/403. Every
+such diagnostic identifies the execution mode, credential scope, whether a
+network request occurred, and a minimum action without returning credentials
+or raw authentication responses. The optional Semantic Scholar live check also
+performs only one bounded 429 retry; a second 429 remains an explicit setup
+blocker and never triggers a standalone fallback.
 The broker preserves a sanitized non-2xx excerpt, safe request ID, and
 `Retry-After`. It performs at most one inline 429 retry when the declared or
 default delay is at most five seconds; longer throttles return an actionable
@@ -654,6 +674,7 @@ transitions.
 npm run lint
 npm test
 npm run test:coverage
+npm run audit:research-setup-pins
 docpact validate-config --root . --strict
 ```
 
@@ -662,4 +683,5 @@ docpact validate-config --root . --strict
 Publishing is handled by GitHub Actions in `.github/workflows/publish.yml`.
 Push a `v*` tag that matches `package.json` version. The workflow publishes
 `@tiangong-ai/cli` to npm through npm Trusted Publishing after lint, tests,
-coverage, version availability, and a package dry run pass.
+coverage, immutable remote Skill pin/runtime-contract audit, version
+availability, and a package dry run pass.

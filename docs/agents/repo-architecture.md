@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-08-09
-lastReviewedCommit: 6014c3cf3e9bd13a89285e80483f02148a3f0fb0
+lastReviewedCommit: 14c804e61b3768489253533ee754b6f7e75460ea
 ---
 
 # Repo Architecture
@@ -144,16 +144,23 @@ not an evidence capability. Wizard selection is explicit and project-local by
 default. Evidence defaults to Brave web/news; context and media profiles remain
 subscription-dependent choices. A replacement removes only deselected
 setup-managed declarations/credentials, preserves custom capabilities, and
-never removes installed Skill directories.
+never removes installed Skill directories. The Catalog marks the orchestrator
+with a `workspace-lock` runtime contract and marks direct SCI/report/patent
+wrappers only with their separate `standaloneTestedCliVersion`. Setup verifies
+the bundled resolver and forbids stale exact CLI literals in orchestrator
+instructions before installation.
 
 Brokered evidence Skills document allowlisted GET or bounded JSON POST APIs;
 credentials remain in an owner-only logical map and are injected only by the
 broker. POST request bodies reject credential-like fields, persist only their
 hash outside the evidence object, and cannot redirect. A selected production
 profile must include an independent public-internet capability. The reviewed
-Tiangong SCI adapter is an optional owner-whitelisted database and cannot
-satisfy that public-internet gate; arbitrary owner databases still require an
-explicit external definition.
+Tiangong SCI, report, and patent adapters are optional, distinct
+owner-whitelisted databases and cannot satisfy that public-internet gate or
+substitute for one another; arbitrary owner databases still require an explicit
+external definition. Project evidence requirements may bind exact capability
+IDs and discovery scopes, which preflight reports as structured, actionable
+coverage gaps when absent.
 
 Document decomposition is an input-preprocessor and paper download is an
 acquisition adapter. Their explicit companion command verifies the installed
@@ -178,6 +185,12 @@ stages are tool-free and receive only bounded, hash-verified context.
 Every brokered manifest entry carries a locked non-secret HTTPS endpoint;
 initial targets and GET redirects are checked against that endpoint scope
 before a provider request.
+Broker diagnostics keep standalone ambient credentials, broker logical
+credentials, injection policy, and provider authentication as separate failure
+classes. They expose only execution mode, credential scope, network-attempt
+state, safe request metadata, and minimum action. Setup doctor performs one
+bounded Semantic Scholar 429 retry and retains the blocker if quota remains
+unavailable; no managed research path silently downgrades to a direct wrapper.
 Codex receives a capsule-local project-root marker override so parent host
 `.codex/config.toml` discovery stops at the capsule boundary without widening
 the sandbox's readable roots.
