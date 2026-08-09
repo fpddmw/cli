@@ -870,9 +870,10 @@ export async function verifyResearchSetupRuntimeContract(
     }
     const contents = await readFile(file, "utf8");
     for (const match of contents.matchAll(exactVersionPattern)) {
-      const versions = offending.get(relative(root, file)) ?? new Set<string>();
+      const instructionPath = portableRelativePath(root, file);
+      const versions = offending.get(instructionPath) ?? new Set<string>();
       versions.add(match[1]!);
-      offending.set(relative(root, file), versions);
+      offending.set(instructionPath, versions);
     }
   }
   if (skill.runtimeContract.exactCliVersionLiterals === "forbidden" && offending.size) {
@@ -891,8 +892,14 @@ export async function verifyResearchSetupRuntimeContract(
     status: "verified",
     mode: skill.runtimeContract.mode,
     resolverRelativePath: skill.runtimeContract.resolverRelativePath,
-    scannedInstructionFiles: instructionFiles.map((file) => relative(root, file)).sort(),
+    scannedInstructionFiles: instructionFiles
+      .map((file) => portableRelativePath(root, file))
+      .sort(),
   };
+}
+
+function portableRelativePath(root: string, path: string): string {
+  return relative(root, path).split(sep).join("/");
 }
 
 async function markdownFiles(root: string, skillId: string): Promise<string[]> {
