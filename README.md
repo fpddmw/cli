@@ -245,6 +245,15 @@ source commit and tree hash; license and credential requirements; dependencies;
 and installed-byte status. Installation is never performed by a research
 package.
 
+Whole-tree hashes are platform-stable: logical paths are NFC-normalized and
+ordered by UTF-8 bytes rather than the host locale, and newly created detached
+source checkouts disable Git line-ending conversion before checkout. A source
+hash mismatch remains fail-closed before `npx skills add`; its structured error
+reports only the Skill/source IDs, hash algorithm, and expected/observed hashes.
+It never treats file existence as installation success or silently rewrites an
+immutable plan. Plans created by an earlier CLI release are rejected at the
+execution boundary; create and review a new plan with the active release.
+
 The default `internet-research` profile selects Brave Web Search and News
 Search. `internet-research-with-context` additionally selects the
 subscription-dependent LLM Context endpoint, while

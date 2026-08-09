@@ -54,6 +54,7 @@ import {
   hashRegularTree,
   isObject,
   pathExists,
+  REGULAR_TREE_HASH_ALGORITHM,
   readJsonFile,
   sha256File,
   sha256Text,
@@ -2123,6 +2124,7 @@ async function ensureSetupSourceCheckout(
     `${source.id}-${source.immutableRef.slice(0, 12)}`,
   );
   await assertNoSymlinkedExistingPath(dirname(checkout), plan.workspace.path);
+  let createdCheckout = false;
   if (!(await pathExists(checkout))) {
     await ensureDirectory(workspacePaths(plan.workspace.path).setupSources);
     await runChecked(
@@ -2133,6 +2135,8 @@ async function ensureSetupSourceCheckout(
       environment,
       "source-checkout",
     );
+    createdCheckout = true;
+    await configureDeterministicSourceCheckout(checkout, runner, plan.workspace.path, environment);
     await runChecked(
       runner,
       "git",
@@ -2217,6 +2221,14 @@ async function ensureSetupSourceCheckout(
     // A process may have been interrupted after git init/remote-add. Resume only
     // that exact incomplete checkout; never rewrite a checkout with a valid,
     // different HEAD.
+    if (!createdCheckout) {
+      await configureDeterministicSourceCheckout(
+        checkout,
+        runner,
+        plan.workspace.path,
+        environment,
+      );
+    }
     await runChecked(
       runner,
       "git",
@@ -2263,13 +2275,42 @@ async function ensureSetupSourceCheckout(
         code: "RESEARCH_SETUP_SOURCE_HASH_MISMATCH",
         step: "source-verification",
         reason: `Pinned source bytes failed the reviewed tree hash for ${skill.id}.`,
-        minimumAction: "Stop and inspect the immutable source; do not install mismatched bytes.",
+        minimumAction:
+          "Regenerate the reviewed setup plan with the active CLI/catalog. If that exact plan still fails, inspect only its CLI-owned source cache; never bypass verification.",
         retryCommand: `tiangong-ai research setup update --check --workspace ${plan.workspace.path} --json`,
         exitCode: 3,
+        diagnostics: {
+          skillId: skill.id,
+          sourceId: source.id,
+          hashAlgorithm: REGULAR_TREE_HASH_ALGORITHM,
+          expectedTreeSha256: skill.expectedTreeSha256,
+          observedTreeSha256,
+        },
       });
     }
   }
   return checkout;
+}
+
+async function configureDeterministicSourceCheckout(
+  checkout: string,
+  runner: SetupCommandRunner,
+  cwd: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<void> {
+  for (const [key, value] of [
+    ["core.autocrlf", "false"],
+    ["core.eol", "lf"],
+  ] as const) {
+    await runChecked(
+      runner,
+      "git",
+      ["-C", checkout, "config", "--local", key, value],
+      cwd,
+      environment,
+      "source-checkout",
+    );
+  }
 }
 
 async function installSetupSkills(input: {
@@ -3932,12 +3973,14 @@ function setupError(input: {
   minimumAction: string;
   retryCommand: string;
   exitCode: number;
+  diagnostics?: Record<string, unknown>;
 }): CliError {
   const details = sanitizeResearchRecord({
     step: input.step,
     reason: input.reason,
     minimumAction: input.minimumAction,
     retryCommand: input.retryCommand,
+    ...(input.diagnostics === undefined ? {} : { diagnostics: input.diagnostics }),
   });
   return new CliError(sanitizeResearchText(input.reason), {
     code: input.code,

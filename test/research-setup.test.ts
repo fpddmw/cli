@@ -99,6 +99,10 @@ describe("research setup catalog and immutable plans", () => {
         catalog.entries.find((entry) => entry.id === "anthropic.docx")?.license.notice ?? "",
         /not open source/i,
       );
+      assert.equal(
+        catalog.entries.find((entry) => entry.id === "hugohe3.ppt-master")?.expectedTreeSha256,
+        "229514a9ae52ff958ba80307a071c3235c72aa137fb8f9dedda61d103b8e3902",
+      );
       assert.deepEqual(catalog.conflictGroups, []);
       assert.deepEqual(catalog.selectionGuidance.pptCreation, {
         preferredSkillId: "hugohe3.ppt-master",
@@ -300,6 +304,26 @@ describe("research setup catalog and immutable plans", () => {
       await assert.rejects(
         loadAndVerifyResearchSetupPlan(planPath),
         errorCode("RESEARCH_SETUP_PLAN_CATALOG_DRIFT"),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an immutable setup plan from an earlier CLI release", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await createEmptyPlan(root);
+      const planPath = workspacePaths(root).setupPlan;
+      await chmod(planPath, 0o600);
+      const plan = JSON.parse(await readFile(planPath, "utf8")) as Record<string, unknown>;
+      (plan.cli as Record<string, unknown>).version = "0.0.29";
+      const { planSha256: _oldHash, ...unsigned } = plan;
+      plan.planSha256 = sha256Text(canonicalJson(unsigned));
+      await writeFile(planPath, `${JSON.stringify(plan, null, 2)}\n`);
+      await assert.rejects(
+        loadAndVerifyResearchSetupPlan(planPath),
+        errorCode("RESEARCH_SETUP_CLI_DRIFT"),
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -530,6 +554,182 @@ describe("research setup catalog and immutable plans", () => {
 });
 
 describe("research setup execution and operator safety", () => {
+  it("configures a reproducible source checkout before verifying and installing bytes", async () => {
+    const root = await temporaryDirectory();
+    const skill = RESEARCH_SETUP_SKILLS.find((candidate) => candidate.id === "hugohe3.ppt-master")!;
+    const originalTreeSha256 = skill.expectedTreeSha256;
+    const calls: string[][] = [];
+    try {
+      const fixture = join(root, "fixture-ppt-master");
+      await mkdir(fixture, { recursive: true });
+      await writeFile(join(fixture, "SKILL.md"), "# deterministic checkout fixture\n");
+      skill.expectedTreeSha256 = await hashRegularTree(fixture);
+      const plan = await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [skill.id],
+        acceptedLicenseIds: ["ppt-master:MIT"],
+        confirmNetworkDownloads: true,
+      });
+      const source = plan.sources.find((candidate) => candidate.id === skill.sourceId)!;
+      let hasHead = false;
+      const result = await applyResearchSetupPlan(workspacePaths(root).setupPlan, {
+        skipDoctor: true,
+        runner: async ({ command, args }) => {
+          calls.push([command, ...args]);
+          if (command === "npm") {
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify({
+                version: RESEARCH_SETUP_INSTALLER.version,
+                "dist.integrity": RESEARCH_SETUP_INSTALLER.npmIntegrity,
+                gitHead: RESEARCH_SETUP_INSTALLER.gitHead,
+              }),
+              stderr: "",
+            };
+          }
+          if (command === "git" && args[0] === "init") {
+            await mkdir(args.at(-1)!, { recursive: true });
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "git" && args[2] === "remote" && args[3] === "get-url") {
+            return { exitCode: 0, stdout: `${source.locator}\n`, stderr: "" };
+          }
+          if (command === "git" && args[2] === "rev-parse") {
+            return hasHead
+              ? { exitCode: 0, stdout: `${source.immutableRef}\n`, stderr: "" }
+              : { exitCode: 1, stdout: "", stderr: "missing HEAD" };
+          }
+          if (command === "git" && args[2] === "checkout") {
+            const sourcePath = join(args[1]!, skill.sourceRelativePath);
+            await mkdir(sourcePath, { recursive: true });
+            await writeFile(join(sourcePath, "SKILL.md"), "# deterministic checkout fixture\n");
+            hasHead = true;
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "git") return { exitCode: 0, stdout: "", stderr: "" };
+          if (command === "npx") {
+            const destination = join(plan.install.targets[0]!.root, skill.skillName);
+            await mkdir(destination, { recursive: true });
+            await writeFile(join(destination, "SKILL.md"), "# deterministic checkout fixture\n");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          throw new Error(`Unexpected setup command: ${command} ${args.join(" ")}`);
+        },
+      });
+      assert.equal(result.state.status, "partially-ready");
+      assert.ok(
+        calls.some((call) => call.join(" ").endsWith("config --local core.autocrlf false")),
+      );
+      assert.ok(calls.some((call) => call.join(" ").endsWith("config --local core.eol lf")));
+      const checkoutIndex = calls.findIndex((call) => call.includes("checkout"));
+      const autocrlfIndex = calls.findIndex((call) => call.includes("core.autocrlf"));
+      assert.ok(autocrlfIndex >= 0 && autocrlfIndex < checkoutIndex);
+    } finally {
+      skill.expectedTreeSha256 = originalTreeSha256;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed with safe diagnostics when pinned source bytes do not match", async () => {
+    const root = await temporaryDirectory();
+    const skill = RESEARCH_SETUP_SKILLS.find((candidate) => candidate.id === "hugohe3.ppt-master")!;
+    const originalTreeSha256 = skill.expectedTreeSha256;
+    const calls: string[][] = [];
+    try {
+      skill.expectedTreeSha256 = "0".repeat(64);
+      const plan = await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [skill.id],
+        acceptedLicenseIds: ["ppt-master:MIT"],
+        confirmNetworkDownloads: true,
+      });
+      const source = plan.sources.find((candidate) => candidate.id === skill.sourceId)!;
+      const checkout = join(
+        workspacePaths(root).setupSources,
+        `${source.id}-${source.immutableRef.slice(0, 12)}`,
+      );
+      const sourcePath = join(checkout, skill.sourceRelativePath);
+      let hasHead = false;
+      let thrown: unknown;
+      try {
+        await applyResearchSetupPlan(workspacePaths(root).setupPlan, {
+          skipDoctor: true,
+          runner: async ({ command, args }) => {
+            calls.push([command, ...args]);
+            if (command === "npm") {
+              return {
+                exitCode: 0,
+                stdout: JSON.stringify({
+                  version: RESEARCH_SETUP_INSTALLER.version,
+                  "dist.integrity": RESEARCH_SETUP_INSTALLER.npmIntegrity,
+                  gitHead: RESEARCH_SETUP_INSTALLER.gitHead,
+                }),
+                stderr: "",
+              };
+            }
+            if (command === "git" && args[0] === "init") {
+              await mkdir(args.at(-1)!, { recursive: true });
+              return { exitCode: 0, stdout: "", stderr: "" };
+            }
+            if (command === "git" && args[2] === "remote" && args[3] === "get-url") {
+              return { exitCode: 0, stdout: `${source.locator}\n`, stderr: "" };
+            }
+            if (command === "git" && args[2] === "rev-parse") {
+              return hasHead
+                ? { exitCode: 0, stdout: `${source.immutableRef}\n`, stderr: "" }
+                : { exitCode: 1, stdout: "", stderr: "missing HEAD" };
+            }
+            if (command === "git" && args[2] === "checkout") {
+              await mkdir(sourcePath, { recursive: true });
+              await writeFile(join(sourcePath, "SKILL.md"), "# mismatched immutable bytes\n");
+              hasHead = true;
+              return { exitCode: 0, stdout: "", stderr: "" };
+            }
+            if (command === "npx") throw new Error("installer must not run after hash mismatch");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          },
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown instanceof Error);
+      const observedTreeSha256 = await hashRegularTree(sourcePath);
+      assert.equal(
+        (thrown as Error & { code: string }).code,
+        "RESEARCH_SETUP_SOURCE_HASH_MISMATCH",
+      );
+      const details = (thrown as Error & { details: Record<string, unknown> }).details;
+      assert.deepEqual(details.diagnostics, {
+        skillId: skill.id,
+        sourceId: source.id,
+        hashAlgorithm: "sha256-nfc-path-size-content-v2",
+        expectedTreeSha256: "0".repeat(64),
+        observedTreeSha256,
+      });
+      assert.equal(
+        calls.some((call) => call[0] === "npx"),
+        false,
+      );
+      const state = JSON.parse(await readFile(workspacePaths(root).setupState, "utf8")) as {
+        status: string;
+        completedSteps: string[];
+      };
+      assert.equal(state.status, "blocked");
+      assert.equal(state.completedSteps.includes("source-checkout"), false);
+      assert.equal(
+        await pathExistsSafe(join(plan.install.targets[0]!.root, skill.skillName)),
+        false,
+      );
+    } finally {
+      skill.expectedTreeSha256 = originalTreeSha256;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("applies an empty smoke setup without invoking any installer or network command", async () => {
     const root = await temporaryDirectory();
     const calls: string[] = [];
