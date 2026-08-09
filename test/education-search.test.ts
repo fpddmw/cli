@@ -497,7 +497,7 @@ describe("education search command", () => {
         },
       );
       assert.equal(missingCredentialExit, 2);
-      assert.match(stderr, /Missing edu search credentials/);
+      assert.match(stderr, /Standalone ambient credential not found for edu search/);
     } finally {
       globalThis.fetch = previousFetch;
     }

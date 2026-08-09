@@ -17,7 +17,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-08-09
-lastReviewedCommit: 6014c3cf3e9bd13a89285e80483f02148a3f0fb0
+lastReviewedCommit: 14c804e61b3768489253533ee754b6f7e75460ea
 ---
 
 # Repo Validation
@@ -58,6 +58,7 @@ Run before delivery:
 npm run lint
 npm test
 npm run test:coverage
+npm run audit:research-setup-pins
 docpact validate-config --root . --strict
 docpact lint --root . --worktree --mode enforce
 ```
@@ -67,15 +68,19 @@ docpact lint --root . --worktree --mode enforce
 
 When a pinned research setup commit or the whole-tree hash algorithm changes,
 recompute every affected catalog entry from a clean detached checkout of its
-exact immutable commit. Unit tests remain network-free; the maintainer-side pin
-audit is separate and must confirm every selected source path, not only the tree
-that first exposed a mismatch.
+exact immutable commit. Unit tests remain network-free. The explicit
+`audit:research-setup-pins` gate is networked: it creates fresh deterministic
+checkouts for every Catalog source, verifies every selected source path and
+whole-tree hash, validates exact stable versions, and enforces the
+orchestrator's workspace-lock resolver/no-stale-version contract. It is required
+locally for a pin change and in release CI.
 
 ## Release Flow
 
 `.github/workflows/publish.yml` publishes `@tiangong-ai/cli` to npm from
 GitHub Actions. It runs the same npm lint, test, and coverage gates before any
-publish attempt.
+publish attempt, then runs the networked immutable Skill pin/runtime-contract
+audit before packaging.
 
 Publishing starts when a `v*` tag is pushed. The tag must match
 `package.json` version exactly, for example `v0.1.0` for version `0.1.0`.
@@ -114,7 +119,8 @@ state, hidden-TTY/env/bounded-stdin/explicit-skip Wizard paths without secret
 disclosure, TTY Wizard automation and color suppression, pinned Brave
 source-layout paths across every evidence profile, deterministic Git checkout
 configuration, safe hash-mismatch diagnostics and pre-installer fail-closed
-behavior, optional setting/credential omission without false readiness
+behavior, workspace-lock resolver/stale-version rejection, Catalog CLI-drift
+warnings, optional setting/credential omission without false readiness
 warnings, reusable runtime-bound live
 attestations, explicit orchestrator/default-baseline selection,
 replacement-time managed capability and credential pruning with custom/Skill
@@ -143,7 +149,8 @@ errors, owner-environment credential configuration without disclosure, custom
 database Skill admission, whole-tree locks and staged manifests, static/live
 provider checks, bounded 429 retry, authentication/rate-limit redaction,
 exact endpoint staging and pre-fetch/redirect scope rejection,
-bounded sanitized provider code/detail/request-ID retention,
+distinct report/patent capability admission, broker-store versus provider-auth
+diagnostics, bounded sanitized provider code/detail/request-ID retention,
 source-to-installed-tree binding, refusal to bless drift through lock/configure/import,
 internal-source rejection, invalid-definition errors, sensitive health-URL
 rejection, and blocked catalog/doctor status for symlinked credential files.

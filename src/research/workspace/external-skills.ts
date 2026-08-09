@@ -144,10 +144,51 @@ const EXTERNAL_SKILL_CATALOG: readonly ExternalSkillCatalogEntry[] = [
   },
 ] as const;
 
-const TIANGONG_SCI_CATALOG_ID = "first-party.tiangong.kb-sci-search";
+const TIANGONG_DATABASE_SPECS = {
+  sci: {
+    label: "SCI",
+    catalogId: "first-party.tiangong.kb-sci-search",
+    capabilityId: "database.tiangong.sci-search",
+    credentialId: "tiangong.sci.api-key",
+    sourceTypes: ["academic-paper", "journal-article"],
+    discoveryScope: "database:tiangong-sci",
+    healthBody: {
+      query: "tiangong research connectivity check",
+      topK: 1,
+      extK: 0,
+      getMeta: true,
+    },
+  },
+  report: {
+    label: "report",
+    catalogId: "first-party.tiangong.kb-report-search",
+    capabilityId: "database.tiangong.report-search",
+    credentialId: "tiangong.report.api-key",
+    sourceTypes: ["industry-report", "policy-report", "whitepaper"],
+    discoveryScope: "database:tiangong-report",
+    healthBody: {
+      query: "tiangong research connectivity check",
+      topK: 1,
+      extK: 0,
+    },
+  },
+  patent: {
+    label: "patent",
+    catalogId: "first-party.tiangong.kb-patent-search",
+    capabilityId: "database.tiangong.patent-search",
+    credentialId: "tiangong.patent.api-key",
+    sourceTypes: ["patent"],
+    discoveryScope: "database:tiangong-patent",
+    healthBody: {
+      query: "tiangong research connectivity check",
+      topK: 1,
+    },
+  },
+} as const;
+export type TiangongDatabaseKind = keyof typeof TIANGONG_DATABASE_SPECS;
 const SETUP_MANAGED_CATALOG_IDS = new Set([
   ...EXTERNAL_SKILL_CATALOG.map((entry) => entry.id),
-  TIANGONG_SCI_CATALOG_ID,
+  ...Object.values(TIANGONG_DATABASE_SPECS).map((entry) => entry.catalogId),
 ]);
 
 const EVALUATED_EXTERNAL_SKILLS: readonly EvaluatedExternalSkillEntry[] = [
@@ -656,15 +697,27 @@ export async function configureTiangongSciCapability(input: {
   endpoint: string;
   region?: string | null;
 }) {
+  return configureTiangongDatabaseCapability({ ...input, kind: "sci" });
+}
+
+export async function configureTiangongDatabaseCapability(input: {
+  kind: TiangongDatabaseKind;
+  workspace: string;
+  skillPath: string;
+  source: CapabilitySourceDeclaration;
+  endpoint: string;
+  region?: string | null;
+}) {
+  const spec = TIANGONG_DATABASE_SPECS[input.kind];
   const workspace = resolve(input.workspace);
   await requireExistingCapabilitiesVerified(workspace);
   if (
     input.source.type !== "git" ||
     input.source.locator.replace(/\/+$/, "") !== "https://github.com/tiangong-ai/skills.git" ||
-    input.source.catalogId !== TIANGONG_SCI_CATALOG_ID
+    input.source.catalogId !== spec.catalogId
   ) {
     throw new CliError(
-      "Tiangong SCI capability source identity is not the reviewed first-party catalog entry.",
+      `Tiangong ${spec.label} capability source identity is not the reviewed first-party catalog entry.`,
       {
         code: "RESEARCH_SETUP_SOURCE_INVALID",
         exitCode: 3,
@@ -673,14 +726,14 @@ export async function configureTiangongSciCapability(input: {
   }
   const skillInfo = await lstat(input.skillPath).catch(() => undefined);
   if (!skillInfo?.isDirectory() || skillInfo.isSymbolicLink()) {
-    throw new CliError("Tiangong SCI Skill must be a regular non-symlink directory.", {
+    throw new CliError(`Tiangong ${spec.label} Skill must be a regular non-symlink directory.`, {
       code: "RESEARCH_EXTERNAL_SKILL_NOT_READY",
       exitCode: 3,
     });
   }
   const observedTreeSha256 = await hashRegularTree(input.skillPath);
   if (observedTreeSha256 !== input.source.expectedTreeSha256) {
-    throw new CliError("Tiangong SCI Skill bytes differ from the reviewed tree hash.", {
+    throw new CliError(`Tiangong ${spec.label} Skill bytes differ from the reviewed tree hash.`, {
       code: "RESEARCH_EXTERNAL_SKILL_NOT_READY",
       exitCode: 3,
       details: {
@@ -693,20 +746,20 @@ export async function configureTiangongSciCapability(input: {
   try {
     endpoint = new URL(input.endpoint);
   } catch {
-    throw new CliError("Tiangong SCI endpoint is invalid.", {
+    throw new CliError(`Tiangong ${spec.label} endpoint is invalid.`, {
       code: "RESEARCH_SETUP_SETTING_INVALID",
       exitCode: 2,
     });
   }
   if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || !endpoint.host) {
-    throw new CliError("Tiangong SCI endpoint must be credential-free HTTPS.", {
+    throw new CliError(`Tiangong ${spec.label} endpoint must be credential-free HTTPS.`, {
       code: "RESEARCH_SETUP_SETTING_INVALID",
       exitCode: 2,
     });
   }
   const region = input.region?.trim() || "us-east-1";
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(region)) {
-    throw new CliError("Tiangong SCI region is invalid.", {
+    throw new CliError(`Tiangong ${spec.label} region is invalid.`, {
       code: "RESEARCH_SETUP_SETTING_INVALID",
       exitCode: 2,
     });
@@ -715,7 +768,7 @@ export async function configureTiangongSciCapability(input: {
     schemaVersion: 1,
     capabilities: [
       {
-        id: "database.tiangong.sci-search",
+        id: spec.capabilityId,
         skillPath: resolve(input.skillPath),
         source: input.source,
         requiredForDiscovery: true,
@@ -733,14 +786,14 @@ export async function configureTiangongSciCapability(input: {
         },
         coverage: {
           dimensions: ["*"],
-          sourceTypes: ["academic-paper", "journal-article"],
-          discoveryScopes: ["database:tiangong-sci"],
+          sourceTypes: [...spec.sourceTypes],
+          discoveryScopes: [spec.discoveryScope],
           fullText: true,
           publicationDates: true,
         },
         credentials: [
           {
-            id: "tiangong.sci.api-key",
+            id: spec.credentialId,
             allowedHosts: [endpoint.host.toLowerCase()],
             headerName: "x-api-key",
             prefix: "",
@@ -748,15 +801,10 @@ export async function configureTiangongSciCapability(input: {
         ],
         healthCheck: {
           url: endpoint.toString(),
-          credentialId: "tiangong.sci.api-key",
+          credentialId: spec.credentialId,
           expectedContentTypes: ["application/json"],
           method: "POST",
-          body: {
-            query: "tiangong research connectivity check",
-            topK: 1,
-            extK: 0,
-            getMeta: true,
-          },
+          body: spec.healthBody,
         },
       },
     ],
@@ -767,7 +815,7 @@ export async function configureTiangongSciCapability(input: {
       capability.id === configured.id && capability.source?.catalogId !== input.source.catalogId,
   );
   if (conflict) {
-    throw new CliError(`Capability ID conflicts with Tiangong SCI: ${configured.id}`, {
+    throw new CliError(`Capability ID conflicts with Tiangong ${spec.label}: ${configured.id}`, {
       code: "RESEARCH_CAPABILITY_CONFLICT",
       exitCode: 3,
     });
@@ -925,16 +973,24 @@ export async function doctorExternalCapabilities(
       ? staticErrors.length
         ? {
             status: "blocked" as const,
-            code: staticErrors[0]!,
+            code: missingCredentialIds.length
+              ? "BROKER_CREDENTIAL_NOT_CONFIGURED"
+              : staticErrors.includes("health-check-missing")
+                ? "CAPABILITY_NOT_DECLARED"
+                : staticErrors[0]!,
             host: capability.healthCheck ? new URL(capability.healthCheck.url).host : null,
             targetSha256: capability.healthCheck ? sha256Text(capability.healthCheck.url) : null,
             httpStatus: null,
             retryAfterSeconds: null,
             providerCode: null,
             providerRequestId: null,
-            minimumAction:
-              "Resolve the reported static readiness error before retrying live checks.",
+            minimumAction: missingCredentialIds.length
+              ? "Configure each missing logical credential through research setup credential set, then rerun capability doctor."
+              : "Resolve the reported static readiness error before retrying live checks.",
             detail: "Live probe was not started because static readiness failed.",
+            executionMode: "broker" as const,
+            credentialScope: "broker" as const,
+            networkAttempted: false,
           }
         : capability.healthCheck
           ? await probeCapability(
@@ -1356,9 +1412,9 @@ async function probeCapability(
           status: "fail" as const,
           code:
             response.status === 401 || response.status === 403
-              ? "authentication-failed"
+              ? "PROVIDER_AUTHENTICATION_FAILED"
               : response.status === 429
-                ? "rate-limited"
+                ? "PROVIDER_RATE_LIMITED"
                 : response.status >= 500
                   ? "provider-unavailable"
                   : "request-rejected",
@@ -1372,6 +1428,9 @@ async function probeCapability(
           detail: diagnostics.detail
             ? `Provider returned HTTP ${response.status}: ${diagnostics.detail}`
             : `Provider returned HTTP ${response.status}.`,
+          executionMode: "broker" as const,
+          credentialScope: "broker" as const,
+          networkAttempted: true,
         };
       }
       if (!healthCheck.expectedContentTypes.includes(contentType)) {
@@ -1417,6 +1476,9 @@ async function probeCapability(
       minimumAction:
         "Verify network/VPN/proxy access and the exact capability endpoint, then rerun the live check.",
       detail: "Provider connectivity probe failed before a valid response was received.",
+      executionMode: "broker" as const,
+      credentialScope: "broker" as const,
+      networkAttempted: true,
     };
   }
 }

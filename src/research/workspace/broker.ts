@@ -326,34 +326,89 @@ async function fetchCandidateSource(input: {
     throw new Error('cache_mode must be "prefer" or "bypass"');
   }
   const capability = input.capabilities.find((candidate) => candidate.id === capabilityId);
-  if (!capability)
-    throw new Error(`capability is not admitted for brokered network: ${capabilityId}`);
-  const target = validateHttpsUrl(rawUrl);
-  if (!capability.http) throw new Error(`capability has no broker HTTP policy: ${capabilityId}`);
-  assertEndpointScope(target, capability.http.endpoint);
-  const encodedRequestBody = validateBrokerRequestBody(
-    capability.http.method,
-    requestBody,
-    capability.http.maxRequestBytes,
-  );
+  if (!capability) {
+    throw brokerDiagnosticError(
+      "CAPABILITY_NOT_DECLARED",
+      "The requested evidence capability is not present in the locked manifest.",
+      false,
+      "Have the workspace owner select or import the exact reviewed capability, configure it, rebuild the capability lock, and pass doctor before retrying.",
+      { capabilityId },
+    );
+  }
+  if (!capability.http) {
+    throw brokerDiagnosticError(
+      "CAPABILITY_NOT_DECLARED",
+      "The requested capability has no locked broker HTTP policy.",
+      false,
+      "Replace the capability declaration with a reviewed brokered-network capability and rebuild the lock.",
+      { capabilityId },
+    );
+  }
+  let target: URL;
+  let encodedRequestBody: string | null;
+  try {
+    target = validateHttpsUrl(rawUrl);
+    assertEndpointScope(target, capability.http.endpoint);
+    encodedRequestBody = validateBrokerRequestBody(
+      capability.http.method,
+      requestBody,
+      capability.http.maxRequestBytes,
+    );
+  } catch {
+    throw brokerDiagnosticError(
+      "BROKER_CREDENTIAL_INJECTION_REJECTED",
+      "The broker rejected the request before credential injection because it does not match the locked endpoint or method policy.",
+      false,
+      "Use only the exact locked capability ID, endpoint, HTTP method, and non-secret request shape.",
+      { capabilityId },
+    );
+  }
   const credential = credentialId
     ? capability.credentials.find((candidate) => candidate.id === credentialId)
     : capability.credentials.length === 1
       ? capability.credentials[0]
       : undefined;
   if (credentialId && !credential) {
-    throw new Error(`credential is not declared by capability ${capabilityId}: ${credentialId}`);
+    throw brokerDiagnosticError(
+      "BROKER_CREDENTIAL_INJECTION_REJECTED",
+      "The requested logical credential is not declared by the locked capability.",
+      false,
+      "Use the logical credential ID declared by the capability manifest; never pass credential values through tool arguments.",
+      { capabilityId, credentialId },
+    );
   }
   if (!credentialId && capability.credentials.length > 1) {
-    throw new Error(`credential_id is required by capability ${capabilityId}`);
+    throw brokerDiagnosticError(
+      "BROKER_CREDENTIAL_INJECTION_REJECTED",
+      "The capability declares multiple logical credentials and requires an explicit credential ID.",
+      false,
+      "Select one logical credential ID from the locked capability declaration without including its value.",
+      { capabilityId },
+    );
   }
   const effectiveCredentialId = credential?.id ?? null;
   const cacheMode = requestedCacheMode ?? (credential ? "bypass" : "prefer");
   if (credential && cacheMode === "prefer") {
-    throw new Error("credentialed broker requests require cache_mode=bypass");
+    throw brokerDiagnosticError(
+      "BROKER_CREDENTIAL_INJECTION_REJECTED",
+      "Credentialed broker requests cannot use the shared response cache.",
+      false,
+      "Retry the locked capability request with cache_mode=bypass.",
+      { capabilityId, credentialId: credential.id },
+    );
   }
-  assertAllowedHost(target, capability.allowedHosts, "capability");
-  if (credential) assertAllowedHost(target, credential.allowedHosts, "credential");
+  try {
+    assertAllowedHost(target, capability.allowedHosts, "capability");
+    if (credential) assertAllowedHost(target, credential.allowedHosts, "credential");
+  } catch {
+    throw brokerDiagnosticError(
+      "BROKER_CREDENTIAL_INJECTION_REJECTED",
+      "The broker refused credential injection because the target host is outside the locked policy.",
+      false,
+      "Use the exact credential-free HTTPS endpoint and host declared by the locked capability.",
+      { capabilityId, credentialId: credential?.id ?? null },
+    );
+  }
   const attemptId = randomUUID();
   const maxItems = Math.min(
     (requestedMaxItems as number | undefined) ?? capability.http.maxItems,
@@ -431,7 +486,15 @@ async function fetchCandidateSource(input: {
     if (encodedRequestBody) headers.set("Content-Type", "application/json");
     if (credential) {
       const value = input.credentialMap.get(credential.id);
-      if (!value) throw new Error(`credential value is not configured: ${credential.id}`);
+      if (!value) {
+        throw brokerDiagnosticError(
+          "BROKER_CREDENTIAL_NOT_CONFIGURED",
+          "The locked capability's logical credential is not configured in the broker store.",
+          false,
+          "Use research setup credential set with hidden input, stdin, or an owner environment variable, then rerun capability doctor.",
+          { capabilityId, credentialId: credential.id },
+        );
+      }
       headers.set(credential.headerName, `${credential.prefix}${value}`);
     }
     const responseLimit = Math.min(capability.http.maxResponseBytes, input.workspaceResponseBytes);
@@ -498,10 +561,31 @@ async function fetchCandidateSource(input: {
     if (!response.ok) {
       const retryAfterSeconds = parseRetryAfter(response.headers.get("retry-after"));
       const excerpt = safeResponseExcerpt(bytes, contentType, [...input.credentialMap.values()]);
+      if (response.status === 401 || response.status === 403) {
+        throw brokerDiagnosticError(
+          "PROVIDER_AUTHENTICATION_FAILED",
+          "The provider rejected the broker-injected logical credential or entitlement.",
+          true,
+          "Verify the configured logical credential and provider entitlement, then rerun capability doctor before retrying research.",
+          {
+            capabilityId,
+            credentialId: effectiveCredentialId,
+            status: response.status,
+            requestId: safeResponseId(response.headers),
+          },
+        );
+      }
       throw new CliError(`HTTPS source returned status ${response.status}.`, {
         code: "RESEARCH_BROKER_HTTP_ERROR",
         exitCode: 3,
         details: {
+          executionMode: "broker",
+          credentialScope: "broker",
+          networkAttempted: true,
+          minimumAction:
+            response.status === 429
+              ? "Honor Retry-After or the provider quota reset, then retry through the same locked broker capability."
+              : "Resolve the provider response or capability contract, then retry through the same locked broker capability.",
           status: response.status,
           retryAfterSeconds,
           responseExcerpt: excerpt,
@@ -982,7 +1066,34 @@ function parseRetryAfter(value: string | null): number | null {
   return Number.isFinite(date) ? Math.max(0, Math.ceil((date - Date.now()) / 1000)) : null;
 }
 
+function brokerDiagnosticError(
+  code:
+    | "CAPABILITY_NOT_DECLARED"
+    | "BROKER_CREDENTIAL_NOT_CONFIGURED"
+    | "BROKER_CREDENTIAL_INJECTION_REJECTED"
+    | "PROVIDER_AUTHENTICATION_FAILED",
+  message: string,
+  networkAttempted: boolean,
+  minimumAction: string,
+  extra: Record<string, unknown> = {},
+): CliError {
+  return new CliError(message, {
+    code,
+    exitCode: 3,
+    details: {
+      executionMode: "broker",
+      credentialScope: "broker",
+      networkAttempted,
+      minimumAction,
+      ...extra,
+    },
+  });
+}
+
 function brokerFailureKind(error: unknown): string {
+  if (error instanceof CliError && error.code === "PROVIDER_AUTHENTICATION_FAILED") {
+    return "deterministic";
+  }
   if (error instanceof CliError && error.code === "RESEARCH_BROKER_HTTP_ERROR") {
     const status = isObject(error.details) ? error.details.status : undefined;
     if (status === 429) return "rate-limit";

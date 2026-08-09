@@ -538,7 +538,7 @@ describe("research search command", () => {
         },
       );
       assert.equal(missingCredentialExit, 2);
-      assert.match(stderr, /Missing report search credentials/);
+      assert.match(stderr, /Standalone ambient credential not found for report search/);
     } finally {
       globalThis.fetch = previousFetch;
     }

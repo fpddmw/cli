@@ -23,9 +23,11 @@ import {
   RESEARCH_SETUP_INSTALLER,
   RESEARCH_SETUP_SKILLS,
   setupTargetRoot,
+  verifyResearchSetupRuntimeContract,
 } from "../src/research/workspace/setup-catalog.js";
 import {
   applyResearchSetupPlan,
+  checkResearchSetupUpdates,
   createResearchSetupPlan,
   doctorResearchSetup,
   inspectResearchSetupStatus,
@@ -63,16 +65,31 @@ describe("research setup catalog and immutable plans", () => {
       assert.equal(catalog.policy.defaultInstallMode, "copy");
       assert.equal(catalog.policy.floatingUpdates, false);
       assert.deepEqual(catalog.installer, RESEARCH_SETUP_INSTALLER);
-      assert.equal(catalog.entries.length, 15);
+      assert.equal(catalog.entries.length, 17);
       assert.ok(catalog.entries.every((entry) => entry.bundled === false));
       assert.ok(catalog.entries.every((entry) => entry.userInitiatedOnly === true));
       assert.ok(catalog.entries.every((entry) => /^[0-9a-f]{64}$/.test(entry.expectedTreeSha256)));
       assert.ok(catalog.sources.every((source) => /^[0-9a-f]{40}$/.test(source.immutableRef)));
       assert.equal(
         catalog.sources.find((source) => source.id === "tiangong-ai-skills")?.immutableRef,
-        "a300a49803c193b686e7cde55b5f2d170f993af5",
+        "20d4fbb8ffd35af110675f47a66b510d26577453",
       );
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-sci-search"));
+      assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-report-search"));
+      assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-patent-search"));
+      assert.deepEqual(
+        catalog.entries.find((entry) => entry.id === "tiangong.auto-research")?.runtimeContract,
+        {
+          mode: "workspace-lock",
+          resolverRelativePath: "scripts/research_cli.mjs",
+          exactCliVersionLiterals: "forbidden",
+        },
+      );
+      assert.equal(
+        catalog.entries.find((entry) => entry.id === "tiangong.kb-report-search")
+          ?.standaloneTestedCliVersion,
+        "0.0.30",
+      );
       assert.deepEqual(catalog.roles.orchestrators, ["tiangong.auto-research"]);
       assert.ok(catalog.roles.inputPreprocessors.includes("tiangong.document-granular-decompose"));
       assert.ok(catalog.roles.acquisitionAdapters.includes("tiangong.academic-paper-download"));
@@ -138,6 +155,47 @@ describe("research setup catalog and immutable plans", () => {
           environment: { CLAUDE_CONFIG_DIR: join(root, "operator-claude") },
         }),
         join(root, "operator-claude", "skills"),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("mechanically enforces the workspace-lock resolver and forbids stale exact CLI literals", async () => {
+    const root = await temporaryDirectory();
+    const skill = RESEARCH_SETUP_SKILLS.find(
+      (candidate) => candidate.id === "tiangong.auto-research",
+    )!;
+    try {
+      await mkdir(join(root, "scripts"), { recursive: true });
+      await mkdir(join(root, "references"), { recursive: true });
+      await writeFile(
+        join(root, "SKILL.md"),
+        "Use scripts/research_cli.mjs for workspace commands.\n",
+      );
+      await writeFile(join(root, "references", "setup.md"), "Use the locked resolver.\n");
+      await writeFile(join(root, "scripts", "research_cli.mjs"), "// fixture resolver\n");
+      const verified = await verifyResearchSetupRuntimeContract(root, skill);
+      assert.equal(verified.status, "verified");
+      assert.deepEqual(verified.scannedInstructionFiles, ["SKILL.md", "references/setup.md"]);
+
+      await writeFile(join(root, "SKILL.md"), "npx --yes @tiangong-ai/cli@0.0.26 research run\n");
+      await assert.rejects(
+        () => verifyResearchSetupRuntimeContract(root, skill),
+        (error) =>
+          error instanceof Error &&
+          (error as Error & { code: string }).code === "RESEARCH_SETUP_RUNTIME_CONTRACT_INVALID" &&
+          !JSON.stringify(error).includes(root),
+      );
+
+      await writeFile(join(root, "SKILL.md"), "Use scripts/research_cli.mjs.\n");
+      await rm(join(root, "scripts", "research_cli.mjs"));
+      await symlink(join(root, "SKILL.md"), join(root, "scripts", "research_cli.mjs"));
+      await assert.rejects(
+        () => verifyResearchSetupRuntimeContract(root, skill),
+        (error) =>
+          error instanceof Error &&
+          (error as Error & { code: string }).code === "RESEARCH_SETUP_RUNTIME_CONTRACT_INVALID",
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -321,6 +379,10 @@ describe("research setup catalog and immutable plans", () => {
       const { planSha256: _oldHash, ...unsigned } = plan;
       plan.planSha256 = sha256Text(canonicalJson(unsigned));
       await writeFile(planPath, `${JSON.stringify(plan, null, 2)}\n`);
+      const update = await checkResearchSetupUpdates(root);
+      assert.equal(update.updateAvailable, true);
+      assert.deepEqual(update.cliVersionDrift, { planned: "0.0.29", active: "0.0.31" });
+      assert.match(update.policy.minimumAction, /replacement immutable plan/i);
       await assert.rejects(
         loadAndVerifyResearchSetupPlan(planPath),
         errorCode("RESEARCH_SETUP_CLI_DRIFT"),
@@ -780,7 +842,16 @@ describe("research setup execution and operator safety", () => {
             return { exitCode: 0, stdout: "", stderr: "" };
           },
         }),
-        errorCode("RESEARCH_SETUP_CREDENTIAL_PREFLIGHT_FAILED"),
+        (error: unknown) => {
+          if (!errorCode("RESEARCH_SETUP_CREDENTIAL_PREFLIGHT_FAILED")(error)) return false;
+          const details = (error as { details?: { diagnostics?: Record<string, unknown> } })
+            .details;
+          assert.equal(details?.diagnostics?.executionMode, "setup-preflight");
+          assert.equal(details?.diagnostics?.credentialScope, "broker");
+          assert.equal(details?.diagnostics?.networkAttempted, false);
+          assert.deepEqual(details?.diagnostics?.missingCredentialIds, ["brave.search.api-key"]);
+          return true;
+        },
       );
       assert.equal(calls.length, 0);
 
@@ -930,10 +1001,73 @@ describe("research setup execution and operator safety", () => {
       );
       assert.equal(optionalCredential?.status, "pass");
       assert.equal(optionalCredential?.minimumAction, null);
+      const pypdfDependency = reportChecks.find(
+        (check) => check.id === "dependency.academic-paper-download:pypdf",
+      );
+      assert.equal(pypdfDependency?.status, "fail");
+      assert.match(pypdfDependency?.minimumAction ?? "", /isolated Python environment/i);
       assert.equal(
         (await readFile(workspacePaths(root).setupReport, "utf8")).includes(secret),
         false,
       );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retries Semantic Scholar 429 once, preserves the blocker, and reports a safe action", async () => {
+    const root = await temporaryDirectory();
+    const secret = "semantic-scholar-rate-limit-secret";
+    let providerCalls = 0;
+    const sleeps: number[] = [];
+    try {
+      await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: ["tiangong.academic-paper-download"],
+        acceptedLicenseIds: ["tiangong-ai-skills:MIT"],
+        credentialEnvironment: { "semantic-scholar.api-key": "OWNER_S2_VALUE" },
+        confirmNetworkDownloads: true,
+      });
+      const report = await doctorResearchSetup(root, {
+        live: true,
+        environment: { OWNER_S2_VALUE: secret },
+        runner: async ({ command, args }) => {
+          if (
+            command === "python3" &&
+            args.includes("import importlib.metadata as m; print(m.version('pypdf'))")
+          ) {
+            return { exitCode: 0, stdout: "6.14.2\n", stderr: "" };
+          }
+          return { exitCode: 0, stdout: `${command} fixture-version\n`, stderr: "" };
+        },
+        fetcher: async () => {
+          providerCalls += 1;
+          return new Response(`{"token":"${secret}"}`, {
+            status: 429,
+            headers: { "content-type": "application/json", "retry-after": "7" },
+          });
+        },
+        sleeper: async (milliseconds) => void sleeps.push(milliseconds),
+      });
+      assert.equal(providerCalls, 2);
+      assert.deepEqual(sleeps, [5_000]);
+      assert.equal(report.readiness, "BLOCKED");
+      const check = (
+        report.checks as Array<{
+          id: string;
+          status: string;
+          minimumAction: string | null;
+          diagnostics?: Record<string, unknown>;
+        }>
+      ).find((candidate) => candidate.id === "live.semantic-scholar");
+      assert.equal(check?.status, "fail");
+      assert.equal(check?.diagnostics?.code, "PROVIDER_RATE_LIMITED");
+      assert.equal(check?.diagnostics?.networkAttempted, true);
+      assert.equal(check?.diagnostics?.retryAfterSeconds, 7);
+      assert.match(check?.minimumAction ?? "", /must not downgrade to standalone/i);
+      assert.equal(JSON.stringify(report).includes(secret), false);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -1,6 +1,6 @@
-import { lstat } from "node:fs/promises";
+import { lstat, readFile, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { EXTERNAL_SKILLS_CLI_VERSION } from "./external-skills.js";
@@ -64,7 +64,18 @@ export interface ResearchSetupSkill {
   dependencies: ResearchSetupDependency[];
   license: ResearchSetupLicense;
   conflictGroup: string | null;
-  capabilityKind: "brave-public-internet" | "tiangong-sci" | null;
+  capabilityKind:
+    | "brave-public-internet"
+    | "tiangong-sci"
+    | "tiangong-report"
+    | "tiangong-patent"
+    | null;
+  runtimeContract?: {
+    mode: "workspace-lock";
+    resolverRelativePath: string;
+    exactCliVersionLiterals: "forbidden";
+  };
+  standaloneTestedCliVersion?: string;
   bundled: false;
   userInitiatedOnly: true;
 }
@@ -103,7 +114,7 @@ export const RESEARCH_SETUP_SELECTION_GUIDANCE = {
 } as const;
 
 const BRAVE_COMMIT = "3e088af66eb61f1c207c22b2be0278ca8744d1d1";
-const TIANGONG_SKILLS_COMMIT = "a300a49803c193b686e7cde55b5f2d170f993af5";
+const TIANGONG_SKILLS_COMMIT = "20d4fbb8ffd35af110675f47a66b510d26577453";
 const ANTHROPIC_SKILLS_COMMIT = "f17010c9bb483898c1d9c9f42dde2b3a98889434";
 const PPT_MASTER_COMMIT = "4343bd8bfc91e79dfb9680681a378476cc38a280";
 
@@ -229,7 +240,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "tiangong-auto-research",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "tiangong-auto-research",
-    expectedTreeSha256: "1d5cc8a0604372f1288e99cf7483dba80311d39ba8635858195bb9dcc7b4795e",
+    expectedTreeSha256: "137d69761c02c8a7b72107b80774a99d92ddd0d0ff82a0aeb3fe602f879cbdd4",
     tier: "orchestrator",
     role: "orchestrator",
     purpose:
@@ -242,6 +253,11 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     license: MIT_TIANGONG,
     conflictGroup: null,
     capabilityKind: null,
+    runtimeContract: {
+      mode: "workspace-lock",
+      resolverRelativePath: "scripts/research_cli.mjs",
+      exactCliVersionLiterals: "forbidden",
+    },
     bundled: false,
     userInitiatedOnly: true,
   },
@@ -350,7 +366,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "tiangong-kb-sci-search",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "tiangong-kb-sci-search",
-    expectedTreeSha256: "ef319b45923a65b9698afeb454723041037bc499021b8ea1b5660eb2f59a48b0",
+    expectedTreeSha256: "1e3fb6c92bf4e98c6d382e06c6e3bcec52bb8c051f630a2ca499bd63042292ce",
     tier: "enhanced",
     role: "evidence-capability",
     purpose: "Owner-authorized Tiangong SCI database discovery through a bounded JSON POST broker.",
@@ -362,6 +378,51 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     license: MIT_TIANGONG,
     conflictGroup: null,
     capabilityKind: "tiangong-sci",
+    standaloneTestedCliVersion: "0.0.30",
+    bundled: false,
+    userInitiatedOnly: true,
+  },
+  {
+    id: "tiangong.kb-report-search",
+    skillName: "tiangong-kb-report-search",
+    sourceId: "tiangong-ai-skills",
+    sourceRelativePath: "tiangong-kb-report-search",
+    expectedTreeSha256: "1cb09d26609511f39c4511cc117eb0f421c867dbe0d36cd0437d7aae38b7b836",
+    tier: "enhanced",
+    role: "evidence-capability",
+    purpose:
+      "Owner-authorized Tiangong report database discovery through a bounded JSON POST broker.",
+    recommendedFor: ["industry-reports", "policy-reports", "whitepapers"],
+    defaultSelected: false,
+    credentialIds: ["tiangong.report.api-key"],
+    settingIds: ["tiangong.report.endpoint", "tiangong.report.region"],
+    dependencies: [],
+    license: MIT_TIANGONG,
+    conflictGroup: null,
+    capabilityKind: "tiangong-report",
+    standaloneTestedCliVersion: "0.0.30",
+    bundled: false,
+    userInitiatedOnly: true,
+  },
+  {
+    id: "tiangong.kb-patent-search",
+    skillName: "tiangong-kb-patent-search",
+    sourceId: "tiangong-ai-skills",
+    sourceRelativePath: "tiangong-kb-patent-search",
+    expectedTreeSha256: "7ea45cebf2c74c5f5b665a17abd1a439235b89beff97657235996aa2db58f770",
+    tier: "enhanced",
+    role: "evidence-capability",
+    purpose:
+      "Owner-authorized Tiangong patent database discovery through a bounded JSON POST broker.",
+    recommendedFor: ["patent-landscapes", "prior-art", "owner-whitelisted-database"],
+    defaultSelected: false,
+    credentialIds: ["tiangong.patent.api-key"],
+    settingIds: ["tiangong.patent.endpoint", "tiangong.patent.region"],
+    dependencies: [],
+    license: MIT_TIANGONG,
+    conflictGroup: null,
+    capabilityKind: "tiangong-patent",
+    standaloneTestedCliVersion: "0.0.30",
     bundled: false,
     userInitiatedOnly: true,
   },
@@ -509,6 +570,28 @@ export const RESEARCH_SETUP_CREDENTIALS: readonly ResearchSetupCredential[] = [
     liveCheck: "capability",
   },
   {
+    id: "tiangong.report.api-key",
+    provider: "Tiangong Report Search",
+    requiredBy: ["tiangong.kb-report-search"],
+    required: true,
+    storage: "broker",
+    adapterEnvironmentName: null,
+    obtainAt: "Ask the owner of the selected Tiangong report deployment.",
+    minimumUtf8Bytes: 8,
+    liveCheck: "capability",
+  },
+  {
+    id: "tiangong.patent.api-key",
+    provider: "Tiangong Patent Search",
+    requiredBy: ["tiangong.kb-patent-search"],
+    required: true,
+    storage: "broker",
+    adapterEnvironmentName: null,
+    obtainAt: "Ask the owner of the selected Tiangong patent deployment.",
+    minimumUtf8Bytes: 8,
+    liveCheck: "capability",
+  },
+  {
     id: "tiangong.unstructure.auth-token",
     provider: "Tiangong Unstructure",
     requiredBy: ["tiangong.document-granular-decompose"],
@@ -546,6 +629,42 @@ export const RESEARCH_SETUP_SETTINGS: readonly ResearchSetupSetting[] = [
     id: "tiangong.sci.region",
     label: "Tiangong SCI region header",
     requiredBy: ["tiangong.kb-sci-search"],
+    required: false,
+    secret: false,
+    defaultValue: "us-east-1",
+    validation: "identifier",
+  },
+  {
+    id: "tiangong.report.endpoint",
+    label: "Tiangong report exact endpoint",
+    requiredBy: ["tiangong.kb-report-search"],
+    required: true,
+    secret: false,
+    defaultValue: "https://qyyqlnwqwgvzxnccnbgm.supabase.co/functions/v1/report_search",
+    validation: "https-url",
+  },
+  {
+    id: "tiangong.report.region",
+    label: "Tiangong report region header",
+    requiredBy: ["tiangong.kb-report-search"],
+    required: false,
+    secret: false,
+    defaultValue: "us-east-1",
+    validation: "identifier",
+  },
+  {
+    id: "tiangong.patent.endpoint",
+    label: "Tiangong patent exact endpoint",
+    requiredBy: ["tiangong.kb-patent-search"],
+    required: true,
+    secret: false,
+    defaultValue: "https://qyyqlnwqwgvzxnccnbgm.supabase.co/functions/v1/patent_search",
+    validation: "https-url",
+  },
+  {
+    id: "tiangong.patent.region",
+    label: "Tiangong patent region header",
+    requiredBy: ["tiangong.kb-patent-search"],
     required: false,
     secret: false,
     defaultValue: "us-east-1",
@@ -698,6 +817,118 @@ export async function inspectResearchSetupCatalog(input: {
       ).map((skill) => skill.id),
     },
   };
+}
+
+export async function verifyResearchSetupRuntimeContract(
+  skillPath: string,
+  skill: ResearchSetupSkill,
+): Promise<{
+  status: "not-applicable" | "verified";
+  mode: "workspace-lock" | null;
+  resolverRelativePath: string | null;
+  scannedInstructionFiles: string[];
+}> {
+  if (!skill.runtimeContract) {
+    return {
+      status: "not-applicable",
+      mode: null,
+      resolverRelativePath: null,
+      scannedInstructionFiles: [],
+    };
+  }
+  const root = resolve(skillPath);
+  const rootInfo = await lstat(root).catch(() => undefined);
+  if (!rootInfo?.isDirectory() || rootInfo.isSymbolicLink()) {
+    throw runtimeContractError(skill.id, "Skill root is not a regular non-symlink directory.");
+  }
+  const resolver = resolve(root, skill.runtimeContract.resolverRelativePath);
+  if (!resolver.startsWith(`${root}${sep}`)) {
+    throw runtimeContractError(skill.id, "Runtime resolver escapes the pinned Skill tree.");
+  }
+  const resolverInfo = await lstat(resolver).catch(() => undefined);
+  if (!resolverInfo?.isFile() || resolverInfo.isSymbolicLink()) {
+    throw runtimeContractError(
+      skill.id,
+      "Workspace runtime resolver is missing or is not a regular non-symlink file.",
+    );
+  }
+  const instructionFiles = [join(root, "SKILL.md")];
+  const references = join(root, "references");
+  const referenceInfo = await lstat(references).catch(() => undefined);
+  if (referenceInfo?.isDirectory() && !referenceInfo.isSymbolicLink()) {
+    instructionFiles.push(...(await markdownFiles(references, skill.id)));
+  }
+  const exactVersionPattern = /@tiangong-ai\/cli@(\d+\.\d+\.\d+)(?![-+0-9A-Za-z.])/g;
+  const offending = new Map<string, Set<string>>();
+  for (const file of instructionFiles.sort()) {
+    const info = await lstat(file).catch(() => undefined);
+    if (!info?.isFile() || info.isSymbolicLink() || info.size > 512 * 1024) {
+      throw runtimeContractError(
+        skill.id,
+        "Runtime instruction file is missing, linked, or exceeds the review size limit.",
+      );
+    }
+    const contents = await readFile(file, "utf8");
+    for (const match of contents.matchAll(exactVersionPattern)) {
+      const versions = offending.get(relative(root, file)) ?? new Set<string>();
+      versions.add(match[1]!);
+      offending.set(relative(root, file), versions);
+    }
+  }
+  if (skill.runtimeContract.exactCliVersionLiterals === "forbidden" && offending.size) {
+    throw runtimeContractError(
+      skill.id,
+      "Workspace instructions contain an exact CLI version instead of the locked resolver.",
+      {
+        offendingFiles: [...offending.keys()].sort(),
+        observedVersions: [
+          ...new Set([...offending.values()].flatMap((value) => [...value])),
+        ].sort(),
+      },
+    );
+  }
+  return {
+    status: "verified",
+    mode: skill.runtimeContract.mode,
+    resolverRelativePath: skill.runtimeContract.resolverRelativePath,
+    scannedInstructionFiles: instructionFiles.map((file) => relative(root, file)).sort(),
+  };
+}
+
+async function markdownFiles(root: string, skillId: string): Promise<string[]> {
+  const files: string[] = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw runtimeContractError(
+        skillId,
+        "Runtime instruction references may not contain symbolic links.",
+      );
+    }
+    if (entry.isDirectory()) files.push(...(await markdownFiles(path, skillId)));
+    else if (entry.isFile() && entry.name.endsWith(".md")) files.push(path);
+  }
+  return files;
+}
+
+function runtimeContractError(
+  skillId: string,
+  reason: string,
+  extra: Record<string, unknown> = {},
+): CliError {
+  return new CliError(reason, {
+    code: "RESEARCH_SETUP_RUNTIME_CONTRACT_INVALID",
+    exitCode: 3,
+    details: {
+      skillId,
+      executionMode: "workspace-locked",
+      credentialScope: "broker",
+      networkAttempted: false,
+      minimumAction:
+        "Use a CLI release whose immutable Catalog tree passes the workspace-lock runtime contract; do not edit or bypass the installed Skill.",
+      ...extra,
+    },
+  });
 }
 
 async function inspectInstalledSkill(

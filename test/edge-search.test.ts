@@ -181,9 +181,11 @@ describe("edge search forwarding", () => {
           }),
         (error) =>
           error instanceof CliError &&
-          error.code === "EDGE_SEARCH_CREDENTIALS_REQUIRED" &&
+          error.code === "STANDALONE_AMBIENT_CREDENTIAL_MISSING" &&
           error.exitCode === 2 &&
-          /Missing report search credentials/.test(error.message),
+          /Standalone ambient credential not found/.test(error.message) &&
+          JSON.stringify(error.details).includes('"networkAttempted":false') &&
+          !JSON.stringify(error.details).includes("Authorization"),
       );
     } finally {
       globalThis.fetch = previousFetch;

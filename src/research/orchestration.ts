@@ -552,6 +552,10 @@ async function readEvidenceRequirements(path: string): Promise<ProjectEvidenceRe
     Array.isArray(value) ||
     !Array.isArray((value as ProjectEvidenceRequirements).dimensions) ||
     !Array.isArray((value as ProjectEvidenceRequirements).sourceTypes) ||
+    ((value as ProjectEvidenceRequirements).requiredCapabilityIds !== undefined &&
+      !Array.isArray((value as ProjectEvidenceRequirements).requiredCapabilityIds)) ||
+    ((value as ProjectEvidenceRequirements).requiredDiscoveryScopes !== undefined &&
+      !Array.isArray((value as ProjectEvidenceRequirements).requiredDiscoveryScopes)) ||
     typeof (value as ProjectEvidenceRequirements).minSources !== "number" ||
     typeof (value as ProjectEvidenceRequirements).minFullTextSources !== "number" ||
     typeof (value as ProjectEvidenceRequirements).minDatedSources !== "number" ||
@@ -569,7 +573,11 @@ async function readEvidenceRequirements(path: string): Promise<ProjectEvidenceRe
       exitCode: 2,
     });
   }
-  return normalizeEvidenceRequirements(value as ProjectEvidenceRequirements);
+  return normalizeEvidenceRequirements({
+    ...(value as ProjectEvidenceRequirements),
+    requiredCapabilityIds: (value as ProjectEvidenceRequirements).requiredCapabilityIds ?? [],
+    requiredDiscoveryScopes: (value as ProjectEvidenceRequirements).requiredDiscoveryScopes ?? [],
+  });
 }
 
 function researchMode(value: string | undefined): ResearchMode {

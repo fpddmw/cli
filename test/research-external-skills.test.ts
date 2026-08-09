@@ -12,6 +12,7 @@ import {
 } from "../src/research/workspace/capabilities.js";
 import {
   configureExternalSkillProfile,
+  configureTiangongDatabaseCapability,
   configureTiangongSciCapability,
   doctorExternalCapabilities,
   importExternalCapability,
@@ -184,6 +185,81 @@ describe("external database capability admission and doctor", () => {
         capabilities: Array<{ id: string; http: { endpoint: string } }>;
       };
       assert.equal(manifest.capabilities[0]?.http.endpoint, endpoint);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("configures report and patent as distinct locked database capabilities", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      for (const fixture of [
+        {
+          kind: "report" as const,
+          skillName: "tiangong-kb-report-search",
+          endpoint: "https://database.example.test/functions/v1/report_search",
+          catalogId: "first-party.tiangong.kb-report-search",
+        },
+        {
+          kind: "patent" as const,
+          skillName: "tiangong-kb-patent-search",
+          endpoint: "https://database.example.test/functions/v1/patent_search",
+          catalogId: "first-party.tiangong.kb-patent-search",
+        },
+      ]) {
+        const skillPath = join(root, "installed-skills", fixture.skillName);
+        await mkdir(skillPath, { recursive: true });
+        await writeFile(
+          join(skillPath, "SKILL.md"),
+          `---\nname: ${fixture.skillName}\ndescription: Fixture.\n---\n`,
+        );
+        await configureTiangongDatabaseCapability({
+          kind: fixture.kind,
+          workspace: root,
+          skillPath,
+          endpoint: fixture.endpoint,
+          source: {
+            type: "git",
+            locator: "https://github.com/tiangong-ai/skills.git",
+            immutableRef: "b".repeat(40),
+            expectedTreeSha256: await hashRegularTree(skillPath),
+            license: "MIT",
+            catalogId: fixture.catalogId,
+          },
+        });
+      }
+      const declarations = JSON.parse(
+        await readFile(workspacePaths(root).capabilityDeclarations, "utf8"),
+      ) as {
+        capabilities: Array<{
+          id: string;
+          coverage: { sourceTypes: string[]; discoveryScopes: string[] };
+          credentials: Array<{ id: string }>;
+        }>;
+      };
+      assert.deepEqual(declarations.capabilities.map((capability) => capability.id).sort(), [
+        "database.tiangong.patent-search",
+        "database.tiangong.report-search",
+      ]);
+      const report = declarations.capabilities.find(
+        (capability) => capability.id === "database.tiangong.report-search",
+      );
+      assert.deepEqual(report?.coverage.sourceTypes, [
+        "industry-report",
+        "policy-report",
+        "whitepaper",
+      ]);
+      assert.deepEqual(report?.coverage.discoveryScopes, ["database:tiangong-report"]);
+      assert.deepEqual(
+        report?.credentials.map((credential) => credential.id),
+        ["tiangong.report.api-key"],
+      );
+      const patent = declarations.capabilities.find(
+        (capability) => capability.id === "database.tiangong.patent-search",
+      );
+      assert.deepEqual(patent?.coverage.sourceTypes, ["patent"]);
+      assert.deepEqual(patent?.coverage.discoveryScopes, ["database:tiangong-patent"]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -400,6 +476,108 @@ describe("external database capability admission and doctor", () => {
     }
   });
 
+  it("distinguishes missing broker credentials from provider authentication failure", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    const originalFetch = globalThis.fetch;
+    const fakeSecret = "fixture-broker-auth-secret";
+    let providerCalls = 0;
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const definitionPath = await writeDatabaseCapability(root, skillParent);
+      await importExternalCapability({ workspace: root, definitionPath });
+      globalThis.fetch = async (input, init) => {
+        if (!String(input).startsWith("https://database.example.test/")) {
+          return originalFetch(input, init);
+        }
+        providerCalls += 1;
+        return new Response('{"error":"credential rejected"}', {
+          status: 401,
+          headers: { "content-type": "application/json", "x-request-id": "safe-request-1" },
+        });
+      };
+      const capsuleProject = join(root, ".tiangong-research", "runtime", "diagnostic", "project");
+      await mkdir(capsuleProject, { recursive: true });
+
+      const missingBroker = await startCapabilityBroker(root, "missing-credential", capsuleProject);
+      assert.ok(missingBroker);
+      try {
+        const response = await rpc(missingBroker.url, "tools/call", {
+          name: "fetch_candidate_source",
+          arguments: {
+            capability_id: "database.acme.search",
+            url: "https://database.example.test/search?q=evidence",
+          },
+        });
+        const text = String(
+          (
+            (
+              (response.result as Record<string, unknown>).content as Array<Record<string, unknown>>
+            )[0] ?? {}
+          ).text ?? "",
+        );
+        const diagnostic = JSON.parse(text) as {
+          code: string;
+          details: Record<string, unknown>;
+        };
+        assert.equal(diagnostic.code, "BROKER_CREDENTIAL_NOT_CONFIGURED");
+        assert.equal(diagnostic.details.executionMode, "broker");
+        assert.equal(diagnostic.details.credentialScope, "broker");
+        assert.equal(diagnostic.details.networkAttempted, false);
+        assert.equal(providerCalls, 0);
+      } finally {
+        await missingBroker.stop();
+      }
+
+      await writeFile(
+        workspacePaths(root).env,
+        `TIANGONG_RESEARCH_CAPABILITY_CREDENTIALS_JSON={"database.acme.api-key":"${fakeSecret}"}\n`,
+        { mode: 0o600 },
+      );
+      await chmod(workspacePaths(root).env, 0o600);
+      const rejectedBroker = await startCapabilityBroker(
+        root,
+        "rejected-credential",
+        capsuleProject,
+      );
+      assert.ok(rejectedBroker);
+      try {
+        const response = await rpc(rejectedBroker.url, "tools/call", {
+          name: "fetch_candidate_source",
+          arguments: {
+            capability_id: "database.acme.search",
+            url: "https://database.example.test/search?q=evidence",
+          },
+        });
+        const text = String(
+          (
+            (
+              (response.result as Record<string, unknown>).content as Array<Record<string, unknown>>
+            )[0] ?? {}
+          ).text ?? "",
+        );
+        const diagnostic = JSON.parse(text) as {
+          code: string;
+          details: Record<string, unknown>;
+        };
+        assert.equal(diagnostic.code, "PROVIDER_AUTHENTICATION_FAILED");
+        assert.equal(diagnostic.details.networkAttempted, true);
+        assert.equal(diagnostic.details.status, 401);
+        assert.equal(providerCalls, 1);
+        assert.equal(text.includes(fakeSecret), false);
+        assert.equal(text.includes("credential rejected"), false);
+      } finally {
+        await rejectedBroker.stop();
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("reports authentication and rate-limit failures without leaking credentials or targets", async () => {
     const root = await temporaryDirectory();
     const skillParent = await temporaryDirectory();
@@ -416,8 +594,8 @@ describe("external database capability admission and doctor", () => {
       await chmod(workspacePaths(root).env, 0o600);
 
       for (const [status, code] of [
-        [401, "authentication-failed"],
-        [429, "rate-limited"],
+        [401, "PROVIDER_AUTHENTICATION_FAILED"],
+        [429, "PROVIDER_RATE_LIMITED"],
       ] as const) {
         const doctor = await doctorExternalCapabilities(root, {
           live: true,
@@ -435,6 +613,9 @@ describe("external database capability admission and doctor", () => {
         assert.equal(doctor.status, "blocked");
         assert.equal(doctor.capabilities[0]?.health.code, code);
         assert.equal(doctor.capabilities[0]?.health.retryAfterSeconds, 7);
+        assert.equal(doctor.capabilities[0]?.health.executionMode, "broker");
+        assert.equal(doctor.capabilities[0]?.health.credentialScope, "broker");
+        assert.equal(doctor.capabilities[0]?.health.networkAttempted, true);
         assert.equal(JSON.stringify(doctor).includes(fakeSecret), false);
         assert.equal(JSON.stringify(doctor).includes("query=connectivity"), false);
       }

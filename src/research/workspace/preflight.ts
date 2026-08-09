@@ -23,6 +23,15 @@ export const RESEARCH_BROKER_MAX_TURNS = 6;
 export const RESEARCH_REPAIR_MAX_TURNS = 1;
 const RESEARCH_PREFLIGHT_PROMPT_ALLOWANCE_TOKENS = 3_000;
 
+export interface EvidenceCoverageGap {
+  kind: "capability-unavailable" | "discovery-scope-uncovered";
+  requirement: string;
+  affectedDimensions: string[];
+  affectedSourceTypes: string[];
+  alternativeCanSatisfyMinimumCoverage: boolean;
+  minimumAction: string;
+}
+
 export async function evaluateProjectPreflight(
   root: string,
   question: string,
@@ -62,6 +71,7 @@ export async function evaluateProjectPreflight(
         )
       : null;
   const gaps: string[] = [];
+  const coverageGaps: EvidenceCoverageGap[] = [];
   if (config.mode === "production-research" && !requirements) {
     gaps.push("explicit-evidence-requirements-missing");
   }
@@ -221,7 +231,7 @@ export async function evaluateProjectPreflight(
     }
   }
   if (requirements) {
-    appendEvidencePlanGaps(gaps, requirements, inputPlan, networkCapabilities);
+    appendEvidencePlanGaps(gaps, coverageGaps, requirements, inputPlan, networkCapabilities);
   }
   const result = {
     schemaVersion: 1 as const,
@@ -260,6 +270,7 @@ export async function evaluateProjectPreflight(
             expiresAt: doctorAttestation.attestation?.expiresAt ?? null,
           },
     gaps,
+    coverageGaps,
     budget: {
       tokenReservation,
       wallReservation,
@@ -403,17 +414,49 @@ export function reservedAgentPackageCost(
 
 function appendEvidencePlanGaps(
   gaps: string[],
+  coverageGaps: EvidenceCoverageGap[],
   requirements: ProjectEvidenceRequirements,
   inputPlan: VerifiedProjectInputPlan | null,
   networkCapabilities: Array<{
+    id: string;
     coverage: {
       dimensions: string[];
       sourceTypes: string[];
+      discoveryScopes: string[];
       fullText: boolean;
       publicationDates: boolean;
     } | null;
   }>,
 ): void {
+  const capabilityIds = new Set(networkCapabilities.map((capability) => capability.id));
+  for (const requiredCapabilityId of requirements.requiredCapabilityIds ?? []) {
+    if (capabilityIds.has(requiredCapabilityId)) continue;
+    gaps.push(`evidence-plan-capability-unavailable:${requiredCapabilityId}`);
+    coverageGaps.push({
+      kind: "capability-unavailable",
+      requirement: requiredCapabilityId,
+      affectedDimensions: [...requirements.dimensions],
+      affectedSourceTypes: [...requirements.sourceTypes],
+      alternativeCanSatisfyMinimumCoverage: false,
+      minimumAction: capabilityMinimumAction(requiredCapabilityId),
+    });
+  }
+  const discoveryScopes = new Set(
+    networkCapabilities.flatMap((capability) => capability.coverage?.discoveryScopes ?? []),
+  );
+  for (const requiredDiscoveryScope of requirements.requiredDiscoveryScopes ?? []) {
+    if (discoveryScopes.has(requiredDiscoveryScope)) continue;
+    gaps.push(`evidence-plan-discovery-scope-uncovered:${requiredDiscoveryScope}`);
+    coverageGaps.push({
+      kind: "discovery-scope-uncovered",
+      requirement: requiredDiscoveryScope,
+      affectedDimensions: [...requirements.dimensions],
+      affectedSourceTypes: [...requirements.sourceTypes],
+      alternativeCanSatisfyMinimumCoverage: false,
+      minimumAction:
+        "Have the workspace owner select or import a reviewed capability that declares this exact discovery scope, configure its logical credential and license, rebuild the capability lock, and pass live doctor before initializing the project.",
+    });
+  }
   const declaredCoverage = networkCapabilities.flatMap((capability) =>
     capability.coverage ? [capability.coverage] : [],
   );
@@ -463,6 +506,19 @@ function appendEvidencePlanGaps(
       `evidence-plan-dated-sources-insufficient:${plannedDatedCount}/${requirements.minDatedSources}`,
     );
   }
+}
+
+function capabilityMinimumAction(capabilityId: string): string {
+  if (capabilityId === "database.tiangong.report-search") {
+    return "Rerun the setup Wizard, select tiangong.kb-report-search, review its license and exact endpoint, securely configure tiangong.report.api-key, apply the replacement immutable plan, and pass capability live doctor.";
+  }
+  if (capabilityId === "database.tiangong.patent-search") {
+    return "Rerun the setup Wizard, select tiangong.kb-patent-search, review its license and exact endpoint, securely configure tiangong.patent.api-key, apply the replacement immutable plan, and pass capability live doctor.";
+  }
+  if (capabilityId === "database.tiangong.sci-search") {
+    return "Rerun the setup Wizard, select tiangong.kb-sci-search, review its license and exact endpoint, securely configure tiangong.sci.api-key, apply the replacement immutable plan, and pass capability live doctor.";
+  }
+  return "Have the workspace owner select or import the exact reviewed capability, configure its logical credential and license, rebuild the capability lock, and pass live doctor before initializing the project.";
 }
 
 function roundMoney(value: number): number {
