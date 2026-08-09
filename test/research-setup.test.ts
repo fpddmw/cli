@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
@@ -31,11 +32,13 @@ import {
   loadAndVerifyResearchSetupPlan,
   retryResearchSetup,
   runResearchSetupCompanion,
+  setResearchSetupCredentialFromEnvironment,
 } from "../src/research/workspace/setup.js";
 import {
   createResearchSetupWizardTheme,
   executeResearchSetupWizard,
   formatResearchSetupWizardNote,
+  readResearchSetupCredentialStdin,
   shouldUseResearchSetupWizardColor,
   type ResearchSetupWizardNoteTone,
   type ResearchSetupWizardPrompt,
@@ -336,6 +339,96 @@ describe("research setup catalog and immutable plans", () => {
     }
   });
 
+  it("preserves owner custom capability credentials while staging a setup credential", async () => {
+    const root = await temporaryDirectory();
+    const customSecret = "owner-custom-capability-secret";
+    const braveSecret = "owner-brave-setup-secret";
+    try {
+      await createResearchSetupPlan({
+        workspace: root,
+        mode: "production-research",
+        evidenceProfile: EXTERNAL_SKILL_PROFILE,
+        skillIds: [],
+        acceptedLicenseIds: ["brave-search-skills:MIT"],
+        credentialEnvironment: { "brave.search.api-key": "BRAVE_API_KEY" },
+        confirmNetworkDownloads: true,
+      });
+      const skillPath = join(root, "owner-custom-skill");
+      await mkdir(skillPath);
+      await writeFile(join(skillPath, "SKILL.md"), "# owner custom capability\n");
+      const expectedTreeSha256 = await hashRegularTree(skillPath);
+      await writeFile(
+        workspacePaths(root).capabilityDeclarations,
+        `${JSON.stringify({
+          schemaVersion: 1,
+          capabilities: [
+            {
+              id: "database.owner.custom",
+              skillPath,
+              source: {
+                type: "local",
+                locator: "owner-custom-fixture",
+                immutableRef: `sha256:${expectedTreeSha256}`,
+                expectedTreeSha256,
+                license: "MIT",
+                catalogId: null,
+              },
+              requiredForDiscovery: false,
+              permissions: ["project-read", "candidate-write", "brokered-network"],
+              allowedHosts: ["owner.example.test"],
+              http: {
+                endpoint: "https://owner.example.test/",
+                accept: "application/json",
+                allowedContentTypes: ["application/json"],
+                maxResponseBytes: 4096,
+                maxItems: 10,
+              },
+              coverage: {
+                dimensions: ["*"],
+                sourceTypes: ["*"],
+                discoveryScopes: ["database:owner"],
+                fullText: false,
+                publicationDates: true,
+              },
+              credentials: [
+                {
+                  id: "database.owner.api-key",
+                  allowedHosts: ["owner.example.test"],
+                  headerName: "Authorization",
+                  prefix: "Bearer ",
+                },
+              ],
+              healthCheck: null,
+            },
+          ],
+        })}\n`,
+      );
+      await writeFile(
+        workspacePaths(root).env,
+        `TIANGONG_RESEARCH_CAPABILITY_CREDENTIALS_JSON={"database.owner.api-key":"${customSecret}"}\n`,
+        { mode: 0o600 },
+      );
+      await chmod(workspacePaths(root).env, 0o600);
+
+      const result = await setResearchSetupCredentialFromEnvironment({
+        workspace: root,
+        credentialId: "brave.search.api-key",
+        environmentName: "BRAVE_API_KEY",
+        environment: { BRAVE_API_KEY: braveSecret },
+      });
+      assert.equal(JSON.stringify(result).includes(braveSecret), false);
+      assert.equal(JSON.stringify(result).includes(customSecret), false);
+      const stored = await readFile(workspacePaths(root).env, "utf8");
+      assert.equal(stored.includes(customSecret), true);
+      assert.equal(stored.includes(braveSecret), true);
+      const journal = await readFile(workspacePaths(root).journal, "utf8");
+      assert.equal(journal.includes(customSecret), false);
+      assert.equal(journal.includes(braveSecret), false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("reconciles all deselected setup-managed capabilities while preserving custom capabilities and Skill bytes", async () => {
     const root = await temporaryDirectory();
     try {
@@ -513,6 +606,11 @@ describe("research setup execution and operator safety", () => {
       )}`;
       assert.equal(persisted.includes(secret), false);
       assert.match(persisted, /\[REDACTED\]/);
+      const credentialStore = await readFile(workspacePaths(root).env, "utf8");
+      assert.equal(credentialStore.includes(secret), true);
+      if (platform() !== "win32") {
+        assert.equal((await lstat(workspacePaths(root).env)).mode & 0o077, 0);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -617,6 +715,21 @@ describe("research setup execution and operator safety", () => {
       });
       assert.equal(report.readiness, "BLOCKED");
       assert.equal(JSON.stringify(report).includes(secret), false);
+      const reportChecks = report.checks as Array<{
+        id: string;
+        status: string;
+        minimumAction: string | null;
+      }>;
+      const optionalSetting = reportChecks.find(
+        (check) => check.id === "setting.unpaywall.contact-email",
+      );
+      assert.equal(optionalSetting?.status, "pass");
+      assert.equal(optionalSetting?.minimumAction, null);
+      const optionalCredential = reportChecks.find(
+        (check) => check.id === "credential.semantic-scholar.api-key",
+      );
+      assert.equal(optionalCredential?.status, "pass");
+      assert.equal(optionalCredential?.minimumAction, null);
       assert.equal(
         (await readFile(workspacePaths(root).setupReport, "utf8")).includes(secret),
         false,
@@ -934,6 +1047,126 @@ describe("research setup execution and operator safety", () => {
     }
   });
 
+  it("supports secure, stdin, and explicit-skip Wizard credential sources without disclosure", async () => {
+    const secret = "wizard-direct-hidden-owner-value";
+    for (const inputMethod of ["secure-input", "stdin", "skipped"] as const) {
+      const root = await temporaryDirectory();
+      const stdinCredentials =
+        inputMethod === "stdin" ? { "brave.search.api-key": secret } : undefined;
+      try {
+        const prompt = new ScriptedWizardPrompt(root, {
+          credentialInputMethod: inputMethod,
+          secret,
+        });
+        const result = await executeResearchSetupWizard({
+          workspace: root,
+          environment: {},
+          prompt,
+          ...(stdinCredentials === undefined ? {} : { stdinCredentials }),
+        });
+        assert.equal(result.exitCode, 0);
+        assert.equal((result.value as { status: string }).status, "planned");
+        const serialized = `${JSON.stringify(result.value)}\n${prompt.notes.join("\n")}`;
+        assert.equal(serialized.includes(secret), false);
+        const plan = await loadAndVerifyResearchSetupPlan(workspacePaths(root).setupPlan);
+        if (inputMethod === "skipped") {
+          assert.deepEqual(plan.credentialSources, []);
+          assert.match(serialized, /missingRequiredCredentialIds/);
+          assert.match(serialized, /brave\.search\.api-key/);
+        } else {
+          assert.equal(plan.credentialSources.length, 1);
+          assert.match(
+            plan.credentialSources[0]!.fromEnvironment,
+            inputMethod === "stdin" ? /_STDIN_/ : /_SECURE_INPUT_/,
+          );
+          assert.match(serialized, new RegExp(`"inputMethod": "${inputMethod}"`));
+        }
+        if (stdinCredentials) assert.equal(stdinCredentials["brave.search.api-key"], secret);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("reads bounded credential stdin by logical ID and writes it before capability installation", async () => {
+    const root = await temporaryDirectory();
+    const secret = "stdin-password-manager-owner-value";
+    try {
+      const parsed = await readResearchSetupCredentialStdin(
+        nonTtyInput(`${secret}\nsecond-owner-secret\n`),
+        ["brave.search.api-key", "tiangong.sci.api-key"],
+      );
+      assert.deepEqual(Object.keys(parsed), ["brave.search.api-key", "tiangong.sci.api-key"]);
+      assert.equal(parsed["brave.search.api-key"], secret);
+      await assert.rejects(
+        readResearchSetupCredentialStdin(nonTtyInput(`${secret}\nextra\n`), [
+          "brave.search.api-key",
+        ]),
+        errorCode("RESEARCH_SETUP_CREDENTIAL_STDIN_INVALID"),
+      );
+
+      await createResearchSetupPlan({
+        workspace: root,
+        mode: "production-research",
+        evidenceProfile: EXTERNAL_SKILL_PROFILE,
+        skillIds: [],
+        acceptedLicenseIds: ["brave-search-skills:MIT"],
+        credentialEnvironment: { "brave.search.api-key": "BRAVE_API_KEY" },
+        confirmNetworkDownloads: true,
+      });
+      let stdout = "";
+      let stderr = "";
+      const exitCode = await runCli(
+        [
+          "research",
+          "setup",
+          "credential",
+          "set",
+          "--id",
+          "brave.search.api-key",
+          "--from-stdin",
+          "--workspace",
+          root,
+          "--json",
+        ],
+        {
+          env: {},
+          stdin: nonTtyInput(`${secret}\n`),
+          stdout: { write: (chunk: string) => void (stdout += chunk) },
+          stderr: { write: (chunk: string) => void (stderr += chunk) },
+        },
+      );
+      assert.equal(exitCode, 0);
+      assert.equal(`${stdout}\n${stderr}`.includes(secret), false);
+      assert.equal((await readFile(workspacePaths(root).env, "utf8")).includes(secret), true);
+      const journal = await readFile(workspacePaths(root).journal, "utf8");
+      assert.equal(journal.includes(secret), false);
+      assert.match(journal, /"inputMethod":"stdin"/);
+      if (platform() !== "win32") {
+        assert.equal((await lstat(workspacePaths(root).env)).mode & 0o077, 0);
+      }
+
+      const conflicting = await invoke([
+        "research",
+        "setup",
+        "credential",
+        "set",
+        "--id",
+        "brave.search.api-key",
+        "--prompt",
+        "--from-env",
+        "BRAVE_API_KEY",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(conflicting.exitCode, 2);
+      assert.equal(JSON.parse(conflicting.stderr).error.code, "RESEARCH_SETUP_ARGUMENT_INVALID");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses semantic Wizard colors only for human TTY output", () => {
     assert.equal(
       shouldUseResearchSetupWizardColor({
@@ -1171,12 +1404,23 @@ async function temporaryDirectory(): Promise<string> {
   return mkdtemp(join(tmpdir(), "tiangong-research-setup-test-"));
 }
 
+type ScriptedCredentialInputMethod = "secure-input" | "environment" | "stdin" | "skipped";
+
 class ScriptedWizardPrompt implements ResearchSetupWizardPrompt {
   readonly notes: string[] = [];
   readonly noteTones: ResearchSetupWizardNoteTone[] = [];
   readonly authoringChoices: Array<{ value: string; label: string }> = [];
 
-  constructor(readonly workspace: string) {}
+  readonly credentialInputMethod: ScriptedCredentialInputMethod;
+  readonly secretValue: string;
+
+  constructor(
+    readonly workspace: string,
+    options: { credentialInputMethod?: ScriptedCredentialInputMethod; secret?: string } = {},
+  ) {
+    this.credentialInputMethod = options.credentialInputMethod ?? "environment";
+    this.secretValue = options.secret ?? "scripted-hidden-credential";
+  }
 
   note(message: string, tone: ResearchSetupWizardNoteTone = "info"): void {
     this.notes.push(message);
@@ -1186,6 +1430,10 @@ class ScriptedWizardPrompt implements ResearchSetupWizardPrompt {
   async input(message: string, defaultValue = ""): Promise<string> {
     if (message.includes("Absolute workspace")) return this.workspace;
     return defaultValue;
+  }
+
+  async secret(): Promise<string> {
+    return this.secretValue;
   }
 
   async confirm(message: string, defaultValue: boolean): Promise<boolean> {
@@ -1207,6 +1455,7 @@ class ScriptedWizardPrompt implements ResearchSetupWizardPrompt {
   ): Promise<T> {
     if (message === "Research mode") return "production-research" as T;
     if (message.includes("public-internet")) return defaultValue;
+    if (message.startsWith("Credential source for")) return this.credentialInputMethod as T;
     if (message === "Install targets") return "codex" as T;
     if (message === "Installation scope") return "project" as T;
     return defaultValue;
@@ -1224,4 +1473,8 @@ class ScriptedWizardPrompt implements ResearchSetupWizardPrompt {
   }
 
   close(): void {}
+}
+
+function nonTtyInput(value: string): NodeJS.ReadableStream & { isTTY?: boolean } {
+  return Object.assign(Readable.from([value]), { isTTY: false });
 }

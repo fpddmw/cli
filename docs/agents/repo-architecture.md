@@ -54,7 +54,8 @@ storage writes, queueing, and document status transitions.
   locks, a separately sourced external Skill ecosystem catalog, immutable setup
   plans/state/history, reproducible detached source checkout and exact-copy
   installation, custom external capability admission,
-  owner-environment-to-logical-credential configuration, static/live provider
+  hidden-TTY, bounded-stdin, and owner-environment-to-logical-credential
+  configuration with pre-download owner-only persistence, static/live provider
   diagnostics, explicit orchestrator installation, replacement-time
   setup-managed capability/credential reconciliation, role-constrained
   document/paper companions, required-discovery

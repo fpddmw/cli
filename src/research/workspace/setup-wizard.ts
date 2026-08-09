@@ -1,6 +1,9 @@
+import { closeSync, openSync } from "node:fs";
 import { lstat, mkdir } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { createInterface, type Interface } from "node:readline/promises";
+import { Writable } from "node:stream";
+import { ReadStream as TtyReadStream } from "node:tty";
 
 import { CliError } from "../../errors.js";
 import type { CliIO, Output } from "../../io.js";
@@ -36,6 +39,7 @@ import type { AgentPricing, ResearchMode } from "./types.js";
 export interface ResearchSetupWizardPrompt {
   note(message: string, tone?: ResearchSetupWizardNoteTone): void;
   input(message: string, defaultValue?: string): Promise<string>;
+  secret(message: string): Promise<string>;
   confirm(message: string, defaultValue: boolean): Promise<boolean>;
   select<T extends string>(
     message: string,
@@ -133,14 +137,118 @@ const DEFAULT_CREDENTIAL_ENVIRONMENT: Record<string, string> = {
   "semantic-scholar.api-key": "SEMANTIC_SCHOLAR_API_KEY",
 };
 
+const MAX_CREDENTIAL_STDIN_BYTES = 64 * 1024;
+
+function credentialStdinIds(value: string | undefined): string[] {
+  if (!value) return [];
+  const ids = value
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  if (!ids.length || new Set(ids).size !== ids.length) {
+    throw wizardStdinError("--credential-stdin requires unique logical credential IDs.");
+  }
+  const known = new Set(RESEARCH_SETUP_CREDENTIALS.map((credential) => credential.id));
+  const unknown = ids.filter((id) => !known.has(id));
+  if (unknown.length) {
+    throw wizardStdinError(`Unknown logical credential IDs: ${unknown.join(", ")}.`);
+  }
+  return ids;
+}
+
+export async function readResearchSetupCredentialStdin(
+  input: (NodeJS.ReadableStream & { isTTY?: boolean | undefined }) | undefined,
+  credentialIds: readonly string[],
+): Promise<Record<string, string>> {
+  if (!input || input.isTTY) {
+    throw wizardStdinError("Credential stdin requires a non-interactive input pipe.");
+  }
+  let totalBytes = 0;
+  const chunks: Buffer[] = [];
+  for await (const chunk of input as NodeJS.ReadableStream &
+    AsyncIterable<Buffer | Uint8Array | string>) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.byteLength;
+    if (totalBytes > MAX_CREDENTIAL_STDIN_BYTES) {
+      throw wizardStdinError("Credential stdin exceeds the supported bounded input size.");
+    }
+    chunks.push(buffer);
+  }
+  const lines = Buffer.concat(chunks).toString("utf8").split(/\r?\n/);
+  while (lines.at(-1) === "") lines.pop();
+  if (lines.length !== credentialIds.length) {
+    throw wizardStdinError(
+      `Credential stdin must contain exactly one line for each of ${credentialIds.length} listed logical credential IDs.`,
+    );
+  }
+  const result: Record<string, string> = {};
+  for (const [index, credentialId] of credentialIds.entries()) {
+    const value = lines[index]?.trim() ?? "";
+    const definition = RESEARCH_SETUP_CREDENTIALS.find(
+      (credential) => credential.id === credentialId,
+    )!;
+    if (Buffer.byteLength(value, "utf8") < definition.minimumUtf8Bytes) {
+      clearCredentialRecord(result);
+      throw wizardStdinError(
+        `Credential stdin value for ${credentialId} is absent or does not meet the provider minimum.`,
+      );
+    }
+    result[credentialId] = value;
+  }
+  return result;
+}
+
+function openResearchSetupControllingTerminal(): {
+  input: NodeJS.ReadableStream & { isTTY: boolean };
+  close(): void;
+} {
+  let descriptor: number;
+  try {
+    descriptor = openSync(process.platform === "win32" ? "CONIN$" : "/dev/tty", "r");
+  } catch {
+    throw wizardStdinError(
+      "A controlling terminal is required when credential values are piped to the Wizard.",
+    );
+  }
+  const input = new TtyReadStream(descriptor);
+  return {
+    input,
+    close: () => {
+      try {
+        if (input.isRaw) input.setRawMode(false);
+        input.destroy();
+        closeSync(descriptor);
+      } catch {
+        // Best-effort terminal cleanup after readline has already closed.
+      }
+    },
+  };
+}
+
+function clearCredentialRecord(record: Readonly<Record<string, string>>): void {
+  const mutable = record as Record<string, string>;
+  for (const id of Object.keys(mutable)) {
+    mutable[id] = "";
+    delete mutable[id];
+  }
+}
+
 export async function runResearchSetupWizard(argv: string[], io: CliIO): Promise<number> {
   const args = parseStrictArgs(
     argv,
-    { help: "boolean", json: "boolean", workspace: "string" },
+    {
+      help: "boolean",
+      json: "boolean",
+      workspace: "string",
+      "credential-stdin": "string",
+    },
     "research setup wizard",
   );
   if (strictBoolean(args, "help")) {
-    write(io.stdout, "Usage: tiangong-ai research setup [--workspace <absolute-path>] [--json]\n");
+    write(
+      io.stdout,
+      "Usage: tiangong-ai research setup [--workspace <absolute-path>] [--credential-stdin <logical-id[,logical-id...]>] [--json]\n",
+    );
     return 0;
   }
   if (args.positionals.length) {
@@ -149,7 +257,8 @@ export async function runResearchSetupWizard(argv: string[], io: CliIO): Promise
       exitCode: 2,
     });
   }
-  if (!io.stdin?.isTTY) {
+  const stdinCredentialIds = credentialStdinIds(strictString(args, "credential-stdin"));
+  if (!stdinCredentialIds.length && !io.stdin?.isTTY) {
     throw new CliError("Interactive research setup requires a TTY.", {
       code: "RESEARCH_SETUP_TTY_REQUIRED",
       exitCode: 2,
@@ -162,9 +271,21 @@ export async function runResearchSetupWizard(argv: string[], io: CliIO): Promise
       },
     });
   }
+  if (stdinCredentialIds.length && io.stdin?.isTTY) {
+    throw wizardStdinError(
+      "--credential-stdin requires a non-interactive pipe; use secure input for a terminal value.",
+    );
+  }
+  const stdinCredentials = stdinCredentialIds.length
+    ? await readResearchSetupCredentialStdin(io.stdin, stdinCredentialIds)
+    : {};
+  const controllingTerminal = stdinCredentialIds.length
+    ? openResearchSetupControllingTerminal()
+    : null;
+  const interactiveInput = controllingTerminal?.input ?? io.stdin!;
   const json = strictBoolean(args, "json");
   const prompt = new TextResearchSetupWizardPrompt(
-    io.stdin,
+    interactiveInput,
     io.stderr,
     createResearchSetupWizardTheme(
       shouldUseResearchSetupWizardColor({
@@ -180,9 +301,45 @@ export async function runResearchSetupWizard(argv: string[], io: CliIO): Promise
       ...(workspace === undefined ? {} : { workspace }),
       environment: io.env,
       prompt,
+      stdinCredentials,
     });
     write(io.stdout, stringifyJson(result.value, json));
     return result.exitCode;
+  } finally {
+    prompt.close();
+    controllingTerminal?.close();
+    clearCredentialRecord(stdinCredentials);
+  }
+}
+
+export async function promptResearchSetupCredentialValue(
+  io: CliIO,
+  credentialId: string,
+  json: boolean,
+): Promise<string> {
+  if (!io.stdin?.isTTY) {
+    throw new CliError("Secure credential input requires a TTY.", {
+      code: "RESEARCH_SETUP_TTY_REQUIRED",
+      exitCode: 2,
+      details: {
+        step: "credentials",
+        minimumAction: "Run with --prompt in a terminal, or pipe the value with --from-stdin.",
+      },
+    });
+  }
+  const prompt = new TextResearchSetupWizardPrompt(
+    io.stdin,
+    io.stderr,
+    createResearchSetupWizardTheme(
+      shouldUseResearchSetupWizardColor({
+        outputIsTTY: Boolean((io.stderr as Output & { isTTY?: boolean }).isTTY),
+        json,
+        environment: io.env,
+      }),
+    ),
+  );
+  try {
+    return await prompt.secret(`Secure value for ${credentialId} (input hidden)`);
   } finally {
     prompt.close();
   }
@@ -192,13 +349,14 @@ export async function executeResearchSetupWizard(input: {
   workspace?: string;
   environment: NodeJS.ProcessEnv;
   prompt: ResearchSetupWizardPrompt;
+  stdinCredentials?: Readonly<Record<string, string>>;
 }): Promise<{ exitCode: number; value: unknown }> {
   const { prompt } = input;
   prompt.note(
     [
       "Tiangong Auto Research setup",
       "No Skill is bundled or installed until you review the exact plan and confirm it.",
-      "Credentials are read only from owner environment variables; their values are never displayed.",
+      "Credentials may be entered securely, read from an owner environment variable, or preloaded from stdin. Values are never displayed or written to the plan.",
     ].join("\n"),
     "brand",
   );
@@ -379,159 +537,171 @@ export async function executeResearchSetupWizard(input: {
     selected.map((skill) => skill.id),
     prompt,
   );
-  const credentialEnvironment = await collectCredentialSources(
+  const credentials = await collectCredentialSources(
     selected.map((skill) => skill.id),
     input.environment,
+    input.stdinCredentials ?? {},
     prompt,
   );
-  const acceptedLicenseIds = await collectLicenseAcceptances(
-    selected.map((skill) => skill.id),
-    prompt,
-  );
-  const agentRoutes = await collectAgentRoutes(prompt);
-
-  prompt.note("5. Verification options", "section");
-  const liveChecks = await prompt.confirm(
-    "Run live provider checks after installation? This uses network/quota but does not run model agents.",
-    false,
-  );
-  const allowSyntheticUnstructureUpload =
-    liveChecks && selected.some((skill) => skill.id === "tiangong.document-granular-decompose")
-      ? await prompt.confirm(
-          "Authorize upload of a generated one-page PDF to the configured Unstructure service?",
-          false,
-        )
-      : false;
-  const agentSmoke = await prompt.confirm(
-    "Run producer/reviewer agent smoke checks after installation? This may consume paid model quota.",
-    false,
-  );
-  const confirmAgentSmokeCost = agentSmoke
-    ? await prompt.confirm("I explicitly authorize the agent smoke-check cost", false)
-    : false;
-  if (agentSmoke && !confirmAgentSmokeCost) throw wizardCancelled("agent-smoke-confirmation");
-
-  const missingRequiredCredentialIds = requiredCredentialIds(
-    selected.map((skill) => skill.id).filter(Boolean),
-  ).filter((id) => {
-    const environmentName = credentialEnvironment[id];
-    const definition = RESEARCH_SETUP_CREDENTIALS.find((item) => item.id === id)!;
-    return (
-      !environmentName ||
-      Buffer.byteLength(input.environment[environmentName] ?? "", "utf8") <
-        definition.minimumUtf8Bytes
+  try {
+    const acceptedLicenseIds = await collectLicenseAcceptances(
+      selected.map((skill) => skill.id),
+      prompt,
     );
-  });
-  const preview = {
-    workspace,
-    createWorkspaceDirectory,
-    mode,
-    evidenceProfile,
-    selectedSkillIds: selected.map((skill) => skill.id),
-    install: {
+    const agentRoutes = await collectAgentRoutes(prompt);
+
+    prompt.note("5. Verification options", "section");
+    const liveChecks = await prompt.confirm(
+      "Run live provider checks after installation? This uses network/quota but does not run model agents.",
+      false,
+    );
+    const allowSyntheticUnstructureUpload =
+      liveChecks && selected.some((skill) => skill.id === "tiangong.document-granular-decompose")
+        ? await prompt.confirm(
+            "Authorize upload of a generated one-page PDF to the configured Unstructure service?",
+            false,
+          )
+        : false;
+    const agentSmoke = await prompt.confirm(
+      "Run producer/reviewer agent smoke checks after installation? This may consume paid model quota.",
+      false,
+    );
+    const confirmAgentSmokeCost = agentSmoke
+      ? await prompt.confirm("I explicitly authorize the agent smoke-check cost", false)
+      : false;
+    if (agentSmoke && !confirmAgentSmokeCost) throw wizardCancelled("agent-smoke-confirmation");
+
+    const missingRequiredCredentialIds = requiredCredentialIds(
+      selected.map((skill) => skill.id).filter(Boolean),
+    ).filter((id) => !credentials.environmentBindings[id]);
+    const preview = {
+      workspace,
+      createWorkspaceDirectory,
+      mode,
+      evidenceProfile,
+      selectedSkillIds: selected.map((skill) => skill.id),
+      install: {
+        scope,
+        agents,
+        targets: agents.map((agent) => ({
+          agent,
+          root: setupTargetRoot({ workspace, scope, agent, environment: input.environment }),
+        })),
+      },
+      installer: RESEARCH_SETUP_INSTALLER,
+      sourcePins: [...new Set(selected.map((skill) => skill.sourceId))].map((sourceId) => {
+        const source = setupSource(sourceId);
+        return {
+          id: source.id,
+          locator: source.locator,
+          immutableRef: source.immutableRef,
+        };
+      }),
+      skillPins: selected.map((skill) => ({
+        id: skill.id,
+        role: skill.role,
+        expectedTreeSha256: skill.expectedTreeSha256,
+        licenseId: skill.license.id,
+      })),
+      acceptedLicenseIds,
+      credentialSources: credentials.preview,
+      missingRequiredCredentialIds,
+      checks: { liveChecks, allowSyntheticUnstructureUpload, agentSmoke },
+      networkDownloads: selected.length > 0,
+    };
+    prompt.note("6. Review and apply", "section");
+    prompt.note(`Reviewed setup preview:\n${JSON.stringify(preview, null, 2)}`, "summary");
+    const confirmNetworkDownloads =
+      selected.length === 0 ||
+      (await prompt.confirm(
+        "Authorize downloads of only the displayed pinned npm package and git commits?",
+        false,
+      ));
+    if (!confirmNetworkDownloads) throw wizardCancelled("network-confirmation");
+    if (!(await prompt.confirm("Create this immutable setup plan?", false))) {
+      throw wizardCancelled("plan-confirmation");
+    }
+    if (createWorkspaceDirectory) await mkdir(workspace);
+
+    const replacePlan = await pathExists(workspacePaths(workspace).setupPlan);
+    const plan = await createResearchSetupPlan({
+      workspace,
+      mode,
+      evidenceProfile,
+      skillIds: explicitSkillIds,
       scope,
       agents,
-      targets: agents.map((agent) => ({
-        agent,
-        root: setupTargetRoot({ workspace, scope, agent, environment: input.environment }),
-      })),
-    },
-    installer: RESEARCH_SETUP_INSTALLER,
-    sourcePins: [...new Set(selected.map((skill) => skill.sourceId))].map((sourceId) => {
-      const source = setupSource(sourceId);
-      return {
-        id: source.id,
-        locator: source.locator,
-        immutableRef: source.immutableRef,
-      };
-    }),
-    skillPins: selected.map((skill) => ({
-      id: skill.id,
-      role: skill.role,
-      expectedTreeSha256: skill.expectedTreeSha256,
-      licenseId: skill.license.id,
-    })),
-    acceptedLicenseIds,
-    configuredCredentialEnvironmentNames: Object.entries(credentialEnvironment).map(
-      ([id, environmentName]) => ({
-        id,
-        environmentName,
-        present: Boolean(input.environment[environmentName]),
-      }),
-    ),
-    missingRequiredCredentialIds,
-    checks: { liveChecks, allowSyntheticUnstructureUpload, agentSmoke },
-    networkDownloads: selected.length > 0,
-  };
-  prompt.note("6. Review and apply", "section");
-  prompt.note(`Reviewed setup preview:\n${JSON.stringify(preview, null, 2)}`, "summary");
-  const confirmNetworkDownloads =
-    selected.length === 0 ||
-    (await prompt.confirm(
-      "Authorize downloads of only the displayed pinned npm package and git commits?",
-      false,
-    ));
-  if (!confirmNetworkDownloads) throw wizardCancelled("network-confirmation");
-  if (!(await prompt.confirm("Create this immutable setup plan?", false))) {
-    throw wizardCancelled("plan-confirmation");
-  }
-  if (createWorkspaceDirectory) await mkdir(workspace);
-
-  const replacePlan = await pathExists(workspacePaths(workspace).setupPlan);
-  const plan = await createResearchSetupPlan({
-    workspace,
-    mode,
-    evidenceProfile,
-    skillIds: explicitSkillIds,
-    scope,
-    agents,
-    acceptedLicenseIds,
-    credentialEnvironment,
-    settings,
-    agentRoutes,
-    liveChecks,
-    allowSyntheticUnstructureUpload,
-    agentSmoke,
-    confirmNetworkDownloads,
-    confirmGlobalMutation,
-    confirmAgentSmokeCost,
-    replacePlan,
-    environment: input.environment,
-  });
-  prompt.note(
-    `Plan created: ${workspacePaths(workspace).setupPlan}\nSHA-256: ${plan.planSha256}`,
-    "success",
-  );
-
-  if (missingRequiredCredentialIds.length) {
+      acceptedLicenseIds,
+      credentialEnvironment: credentials.environmentBindings,
+      settings,
+      agentRoutes,
+      liveChecks,
+      allowSyntheticUnstructureUpload,
+      agentSmoke,
+      confirmNetworkDownloads,
+      confirmGlobalMutation,
+      confirmAgentSmokeCost,
+      replacePlan,
+      environment: input.environment,
+    });
     prompt.note(
-      `Apply is blocked until these required owner environment variables are set: ${missingRequiredCredentialIds.join(
-        ", ",
-      )}`,
-      "warning",
+      `Plan created: ${workspacePaths(workspace).setupPlan}\nSHA-256: ${plan.planSha256}`,
+      "success",
     );
+
+    if (missingRequiredCredentialIds.length) {
+      prompt.note(
+        `Apply is blocked until these required logical credentials are configured: ${missingRequiredCredentialIds.join(
+          ", ",
+        )}`,
+        "warning",
+      );
+    } else if (credentials.hasTransientValues) {
+      prompt.note(
+        "Securely entered or stdin values exist only for this apply. Applying now stores them in the owner-only credential store before downloads; choosing no discards them.",
+        "info",
+      );
+    }
+    const applyNow = await prompt.confirm(
+      missingRequiredCredentialIds.length
+        ? "Apply now anyway? Preflight will stop before downloads because required credentials are absent."
+        : "Apply the reviewed plan now?",
+      missingRequiredCredentialIds.length === 0,
+    );
+    if (!applyNow) {
+      return {
+        exitCode: 0,
+        value: {
+          schemaVersion: 1,
+          status: "planned",
+          plan,
+          next: credentials.hasTransientValues
+            ? {
+                minimumAction:
+                  "Secure and stdin values were discarded. Configure those logical credentials again before apply.",
+                credentialCommands: credentials.preview
+                  .filter(
+                    (credential) =>
+                      credential.inputMethod === "secure-input" ||
+                      credential.inputMethod === "stdin",
+                  )
+                  .map(
+                    (credential) =>
+                      `tiangong-ai research setup credential set --id ${credential.id} --prompt --workspace ${workspace} --json`,
+                  ),
+                applyCommand: `tiangong-ai research setup apply --plan ${workspacePaths(workspace).setupPlan} --json`,
+              }
+            : `tiangong-ai research setup apply --plan ${workspacePaths(workspace).setupPlan} --json`,
+        },
+      };
+    }
+    const value = await applyResearchSetupPlan(workspacePaths(workspace).setupPlan, {
+      environment: credentials.applyEnvironment,
+    });
+    return { exitCode: value.state.status === "blocked" ? 3 : 0, value };
+  } finally {
+    credentials.clear();
   }
-  const applyNow = await prompt.confirm(
-    missingRequiredCredentialIds.length
-      ? "Apply now anyway? Preflight will stop before downloads because required credentials are absent."
-      : "Apply the reviewed plan now?",
-    false,
-  );
-  if (!applyNow) {
-    return {
-      exitCode: 0,
-      value: {
-        schemaVersion: 1,
-        status: "planned",
-        plan,
-        next: `tiangong-ai research setup apply --plan ${workspacePaths(workspace).setupPlan} --json`,
-      },
-    };
-  }
-  const value = await applyResearchSetupPlan(workspacePaths(workspace).setupPlan, {
-    environment: input.environment,
-  });
-  return { exitCode: value.state.status === "blocked" ? 3 : 0, value };
 }
 
 function postClosureAuthoringRank(skillId: string): number {
@@ -562,35 +732,143 @@ async function collectSettings(
 async function collectCredentialSources(
   selectedSkillIds: string[],
   environment: NodeJS.ProcessEnv,
+  stdinCredentials: Readonly<Record<string, string>>,
   prompt: ResearchSetupWizardPrompt,
-): Promise<Record<string, string>> {
+): Promise<{
+  environmentBindings: Record<string, string>;
+  applyEnvironment: NodeJS.ProcessEnv;
+  preview: Array<{
+    id: string;
+    inputMethod: "secure-input" | "environment" | "stdin" | "skipped";
+    environmentName?: string;
+    configured: boolean;
+  }>;
+  hasTransientValues: boolean;
+  clear(): void;
+}> {
   const selected = new Set(selectedSkillIds);
-  const result: Record<string, string> = {};
-  for (const credential of RESEARCH_SETUP_CREDENTIALS.filter((item) =>
+  const preloadedStdinCredentials = { ...stdinCredentials };
+  const definitions = RESEARCH_SETUP_CREDENTIALS.filter((item) =>
     item.requiredBy.some((skillId) => selected.has(skillId)),
-  )) {
+  );
+  const selectedCredentialIds = new Set(definitions.map((credential) => credential.id));
+  const unexpectedStdinIds = Object.keys(preloadedStdinCredentials).filter(
+    (id) => !selectedCredentialIds.has(id),
+  );
+  if (unexpectedStdinIds.length) {
+    throw wizardStdinError(
+      `Preloaded stdin credentials were not selected in this plan: ${unexpectedStdinIds.join(", ")}.`,
+    );
+  }
+  const environmentBindings: Record<string, string> = {};
+  const applyEnvironment: NodeJS.ProcessEnv = { ...environment };
+  const transientEnvironmentNames: string[] = [];
+  const preview: Array<{
+    id: string;
+    inputMethod: "secure-input" | "environment" | "stdin" | "skipped";
+    environmentName?: string;
+    configured: boolean;
+  }> = [];
+  for (const credential of definitions) {
     const defaultEnvironmentName = DEFAULT_CREDENTIAL_ENVIRONMENT[credential.id]!;
     const present =
       Buffer.byteLength(environment[defaultEnvironmentName] ?? "", "utf8") >=
       credential.minimumUtf8Bytes;
     prompt.note(
-      `${credential.provider}\n  credential: ${credential.id}\n  obtain/configure: ${credential.obtainAt}\n  ${defaultEnvironmentName}: ${present ? "present" : "not present"}`,
+      `${credential.provider}\n  credential: ${credential.id}\n  obtain/configure: ${credential.obtainAt}\n  default environment: ${defaultEnvironmentName} (${present ? "present" : "not present"})`,
       present ? "info" : "warning",
     );
-    if (!credential.required && !present) {
-      const configure = await prompt.confirm(
-        `Configure optional ${credential.id} from an environment variable?`,
-        false,
+    for (;;) {
+      const inputMethod = await prompt.select(
+        `Credential source for ${credential.id}`,
+        [
+          { value: "secure-input", label: "Enter securely now (recommended)" },
+          { value: "environment", label: "Read from an environment variable" },
+          { value: "stdin", label: "Read from stdin / password manager" },
+          { value: "skipped", label: "Skip for now" },
+        ] as const,
+        credential.required ? "secure-input" : "skipped",
       );
-      if (!configure) continue;
+      if (inputMethod === "skipped") {
+        preview.push({ id: credential.id, inputMethod, configured: false });
+        break;
+      }
+      if (inputMethod === "environment") {
+        const environmentName = (
+          await prompt.input(
+            `Environment variable name for ${credential.id} (never the secret value)`,
+            defaultEnvironmentName,
+          )
+        ).trim();
+        const value = environment[environmentName];
+        if (
+          !environmentName ||
+          !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(environmentName) ||
+          Buffer.byteLength(value ?? "", "utf8") < credential.minimumUtf8Bytes
+        ) {
+          prompt.note(
+            "The named environment variable is absent or does not meet the provider minimum. Choose another source or skip explicitly.",
+            "warning",
+          );
+          continue;
+        }
+        environmentBindings[credential.id] = environmentName;
+        preview.push({
+          id: credential.id,
+          inputMethod,
+          environmentName,
+          configured: true,
+        });
+        break;
+      }
+      const value =
+        inputMethod === "secure-input"
+          ? await prompt.secret(`Secure value for ${credential.id} (input hidden)`)
+          : preloadedStdinCredentials[credential.id];
+      if (inputMethod === "stdin" && value === undefined) {
+        prompt.note(
+          `No stdin value was preloaded for ${credential.id}. Restart with --credential-stdin ${credential.id} and pipe one value line, or choose secure input.`,
+          "warning",
+        );
+        continue;
+      }
+      if (Buffer.byteLength(value ?? "", "utf8") < credential.minimumUtf8Bytes) {
+        prompt.note(
+          "The credential is absent or does not meet the selected provider minimum; no part of it was retained or displayed.",
+          "warning",
+        );
+        continue;
+      }
+      const transientName = transientCredentialEnvironmentName(credential.id, inputMethod);
+      environmentBindings[credential.id] = transientName;
+      applyEnvironment[transientName] = value;
+      transientEnvironmentNames.push(transientName);
+      preview.push({ id: credential.id, inputMethod, configured: true });
+      break;
     }
-    const environmentName = await prompt.input(
-      `Environment variable name for ${credential.id} (never the secret value)`,
-      defaultEnvironmentName,
-    );
-    if (environmentName.trim()) result[credential.id] = environmentName.trim();
   }
-  return result;
+  return {
+    environmentBindings,
+    applyEnvironment,
+    preview,
+    hasTransientValues: transientEnvironmentNames.length > 0,
+    clear: () => {
+      for (const name of transientEnvironmentNames) {
+        applyEnvironment[name] = "";
+        delete applyEnvironment[name];
+      }
+      clearCredentialRecord(preloadedStdinCredentials);
+    },
+  };
+}
+
+function transientCredentialEnvironmentName(
+  credentialId: string,
+  inputMethod: "secure-input" | "stdin",
+): string {
+  const logical = credentialId.replace(/[^A-Za-z0-9]+/g, "_").toUpperCase();
+  const source = inputMethod === "secure-input" ? "SECURE_INPUT" : "STDIN";
+  return `TIANGONG_RESEARCH_SETUP_${source}_${logical}`.slice(0, 128);
 }
 
 async function collectLicenseAcceptances(
@@ -689,17 +967,38 @@ function requiredCredentialIds(selectedSkillIds: string[]): string[] {
   ).map((credential) => credential.id);
 }
 
+class ResearchSetupReadlineOutput extends Writable {
+  readonly isTTY = true;
+  readonly columns = 80;
+  muted = false;
+
+  constructor(readonly target: Output) {
+    super();
+  }
+
+  override _write(
+    chunk: Buffer | string,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    if (!this.muted) write(this.target, chunk.toString());
+    callback();
+  }
+}
+
 class TextResearchSetupWizardPrompt implements ResearchSetupWizardPrompt {
   readonly #readline: Interface;
+  readonly #readlineOutput: ResearchSetupReadlineOutput;
   readonly #output: Output;
   readonly #theme: ResearchSetupWizardTheme;
 
   constructor(input: NodeJS.ReadableStream, output: Output, theme: ResearchSetupWizardTheme) {
     this.#output = output;
     this.#theme = theme;
+    this.#readlineOutput = new ResearchSetupReadlineOutput(output);
     this.#readline = createInterface({
       input,
-      output: output as NodeJS.WritableStream,
+      output: this.#readlineOutput,
       terminal: true,
     });
   }
@@ -713,6 +1012,18 @@ class TextResearchSetupWizardPrompt implements ResearchSetupWizardPrompt {
     const question = `${this.#theme.accent("?")} ${this.#theme.heading(message)}${suffix}: `;
     const answer = (await this.#readline.question(question)).trim();
     return answer || defaultValue;
+  }
+
+  async secret(message: string): Promise<string> {
+    const question = `${this.#theme.accent("?")} ${this.#theme.heading(message)}: `;
+    write(this.#output, question);
+    this.#readlineOutput.muted = true;
+    try {
+      return (await this.#readline.question("")).trim();
+    } finally {
+      this.#readlineOutput.muted = false;
+      write(this.#output, "\n");
+    }
   }
 
   async confirm(message: string, defaultValue: boolean): Promise<boolean> {
@@ -809,5 +1120,17 @@ function wizardError(message: string, step: string): CliError {
     code: "RESEARCH_SETUP_WIZARD_INVALID",
     exitCode: 2,
     details: { step, minimumAction: "Correct the displayed value and restart the Wizard." },
+  });
+}
+
+function wizardStdinError(message: string): CliError {
+  return new CliError(message, {
+    code: "RESEARCH_SETUP_CREDENTIAL_STDIN_INVALID",
+    exitCode: 2,
+    details: {
+      step: "credentials",
+      minimumAction:
+        "Use secure Wizard input, a named owner environment variable, or pipe one bounded line per explicitly listed logical credential ID.",
+    },
   });
 }

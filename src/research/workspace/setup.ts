@@ -10,8 +10,9 @@ import { loadCapabilityDeclarations } from "./capabilities.js";
 import { inspectResearchContext } from "./context.js";
 import {
   inspectCapabilityCredentialEnvironment,
+  loadCapabilityCredentialMapForIds,
   reconcileCapabilityCredentialEnvironment,
-  setCapabilityCredentialFromEnvironment,
+  setCapabilityCredentialValue,
 } from "./credentials.js";
 import {
   configureExternalSkillProfile,
@@ -580,6 +581,13 @@ export async function applyResearchSetupPlan(
     await assertRequiredCredentialPreflight(plan, environment);
     state = await completeSetupStep(root, state, "credential-preflight");
 
+    // Persist an explicitly supplied credential before any installer or source
+    // download. A later installation failure can then resume from the immutable
+    // plan without asking the operator to expose the value again.
+    state = await startSetupStep(root, state, "credentials");
+    await configurePlanCredentials(plan, environment);
+    state = await completeSetupStep(root, state, "credentials");
+
     state = await startSetupStep(root, state, "installation-preflight");
     const selected = plan.selection.skillIds.map(setupSkill);
     const installInspection = await inspectSelectedInstallations(plan, selected, environment);
@@ -663,6 +671,7 @@ export async function applyResearchSetupPlan(
 
     state = await startSetupStep(root, state, "capability-configuration");
     await configureSelectedCapabilities(plan, environment);
+    await reconcilePlanCredentialStores(plan);
     state = await completeSetupStep(root, state, "capability-configuration");
 
     state = await startSetupStep(root, state, "settings");
@@ -674,11 +683,6 @@ export async function applyResearchSetupPlan(
       updatedAt: new Date().toISOString(),
     });
     state = await completeSetupStep(root, state, "settings");
-
-    state = await startSetupStep(root, state, "credentials");
-    await reconcilePlanCredentialStores(plan);
-    await configurePlanCredentials(plan, environment);
-    state = await completeSetupStep(root, state, "credentials");
 
     await appendJournalEvent(paths.journal, "research.setup.applied", "workspace", {
       planSha256: plan.planSha256,
@@ -795,19 +799,7 @@ export async function setResearchSetupCredentialFromEnvironment(input: {
   environment: NodeJS.ProcessEnv;
 }) {
   const root = requireAbsoluteWorkspace(input.workspace);
-  const plan = await loadAndVerifyResearchSetupPlan(workspacePaths(root).setupPlan);
-  const selected = selectedCredentialDefinitions(plan);
-  const credential = selected.find((candidate) => candidate.id === input.credentialId);
-  if (!credential) {
-    throw setupError({
-      code: "RESEARCH_SETUP_CREDENTIAL_INVALID",
-      step: "credentials",
-      reason: `Credential is not declared by the selected setup plan: ${input.credentialId}.`,
-      minimumAction: "Inspect the setup catalog and selected plan credential IDs.",
-      retryCommand: `tiangong-ai research setup status --workspace ${root} --json`,
-      exitCode: 2,
-    });
-  }
+  const { credential } = await selectedSetupCredential(root, input.credentialId);
   assertEnvironmentName(input.environmentName);
   const value = input.environment[input.environmentName];
   if (typeof value !== "string" || Buffer.byteLength(value, "utf8") < credential.minimumUtf8Bytes) {
@@ -820,31 +812,112 @@ export async function setResearchSetupCredentialFromEnvironment(input: {
       exitCode: 3,
     });
   }
+  return persistResearchSetupCredential({
+    root,
+    credentialId: input.credentialId,
+    value,
+    inputMethod: "environment",
+    sourceEnvironmentName: input.environmentName,
+  });
+}
+
+export async function setResearchSetupCredentialValue(input: {
+  workspace: string;
+  credentialId: string;
+  value: string;
+  inputMethod: "secure-input" | "stdin";
+}) {
+  const root = requireAbsoluteWorkspace(input.workspace);
+  const { credential } = await selectedSetupCredential(root, input.credentialId);
+  if (Buffer.byteLength(input.value, "utf8") < credential.minimumUtf8Bytes) {
+    throw setupError({
+      code: "RESEARCH_SETUP_CREDENTIAL_INVALID",
+      step: "credentials",
+      reason: "Credential value is missing or does not meet the selected provider minimum.",
+      minimumAction: "Retry with secure input, stdin, or a configured owner environment variable.",
+      retryCommand: `tiangong-ai research setup credential set --id ${credential.id} --prompt --workspace ${root} --json`,
+      exitCode: 3,
+    });
+  }
+  return persistResearchSetupCredential({
+    root,
+    credentialId: input.credentialId,
+    value: input.value,
+    inputMethod: input.inputMethod,
+  });
+}
+
+async function selectedSetupCredential(root: string, credentialId: string) {
+  const plan = await loadAndVerifyResearchSetupPlan(workspacePaths(root).setupPlan);
+  const selected = selectedCredentialDefinitions(plan);
+  const credential = selected.find((candidate) => candidate.id === credentialId);
+  if (!credential) {
+    throw setupError({
+      code: "RESEARCH_SETUP_CREDENTIAL_INVALID",
+      step: "credentials",
+      reason: `Credential is not declared by the selected setup plan: ${credentialId}.`,
+      minimumAction: "Inspect the setup catalog and selected plan credential IDs.",
+      retryCommand: `tiangong-ai research setup status --workspace ${root} --json`,
+      exitCode: 2,
+    });
+  }
+  return { plan, selected, credential };
+}
+
+async function persistResearchSetupCredential(input: {
+  root: string;
+  credentialId: string;
+  value: string;
+  inputMethod: "secure-input" | "stdin" | "environment";
+  sourceEnvironmentName?: string;
+}) {
+  const { selected, credential } = await selectedSetupCredential(input.root, input.credentialId);
   if (credential.storage === "broker") {
-    const declarations = await loadCapabilityDeclarations(root);
-    await setCapabilityCredentialFromEnvironment({
-      root,
-      capabilities: declarations.capabilities,
+    const currentDeclarations = (await pathExists(
+      workspacePaths(input.root).capabilityDeclarations,
+    ))
+      ? await loadCapabilityDeclarations(input.root)
+      : { capabilities: [] };
+    await setCapabilityCredentialValue({
+      root: input.root,
+      declaredCredentialIds: [
+        ...new Set([
+          ...currentDeclarations.capabilities.flatMap((capability) =>
+            capability.credentials.map((candidate) => candidate.id),
+          ),
+          ...selected
+            .filter((candidate) => candidate.storage === "broker")
+            .map((candidate) => candidate.id),
+        ]),
+      ],
       credentialId: credential.id,
-      environmentName: input.environmentName,
-      environment: input.environment,
+      value: input.value,
+      minimumUtf8Bytes: credential.minimumUtf8Bytes,
     });
   } else {
-    await setAdapterCredential(root, selected, credential.id, value);
+    await setAdapterCredential(
+      input.root,
+      selected.filter((candidate) => candidate.storage === "adapter"),
+      credential.id,
+      input.value,
+    );
   }
   await appendJournalEvent(
-    workspacePaths(root).journal,
+    workspacePaths(input.root).journal,
     "research.setup.credential.configured",
     "workspace",
     {
       credentialId: credential.id,
-      sourceEnvironmentNameSha256: sha256Text(input.environmentName),
+      inputMethod: input.inputMethod,
+      ...(input.sourceEnvironmentName === undefined
+        ? {}
+        : { sourceEnvironmentNameSha256: sha256Text(input.sourceEnvironmentName) }),
       storage: credential.storage,
     },
   );
   return {
     schemaVersion: 1 as const,
-    workspace: root,
+    workspace: input.root,
     credentialId: credential.id,
     configured: true as const,
     storage: credential.storage,
@@ -1031,13 +1104,16 @@ export async function doctorResearchSetup(
     checks.push({
       id: `setting.${setting.id}`,
       category: "configuration",
-      status: configured ? "pass" : setting.required ? "fail" : "warn",
+      status: configured || !setting.required ? "pass" : "fail",
       detail: configured
         ? "Declared non-secret setting is configured."
-        : "Setting is not configured.",
-      minimumAction: configured
-        ? null
-        : `Create a reviewed replacement plan with the ${setting.id} setting.`,
+        : setting.required
+          ? "Required setting is not configured."
+          : "Optional setting was explicitly omitted.",
+      minimumAction:
+        configured || !setting.required
+          ? null
+          : `Create a reviewed replacement plan with the ${setting.id} setting.`,
     });
   }
 
@@ -1079,13 +1155,16 @@ export async function doctorResearchSetup(
     checks.push({
       id: `credential.${credential.id}`,
       category: "credential",
-      status: configured ? "pass" : credential.required ? "fail" : "warn",
+      status: configured || !credential.required ? "pass" : "fail",
       detail: configured
         ? "Credential is present in an owner-only store; its value was not emitted."
-        : "Credential is not configured.",
-      minimumAction: configured
-        ? null
-        : `Run research setup credential set --id ${credential.id} --from-env <OWNER_ENV_NAME> --workspace ${root}.`,
+        : credential.required
+          ? "Required credential is not configured."
+          : "Optional credential was explicitly omitted.",
+      minimumAction:
+        configured || !credential.required
+          ? null
+          : `Run research setup credential set --id ${credential.id} --prompt --workspace ${root}.`,
     });
   }
 
@@ -1130,14 +1209,6 @@ export async function doctorResearchSetup(
       sleeper,
       allowSyntheticUnstructureUpload: options.allowSyntheticUnstructureUpload === true,
     });
-  } else {
-    checks.push({
-      id: "live-provider-checks",
-      category: "live-check",
-      status: "warn",
-      detail: "Live provider checks were not requested.",
-      minimumAction: `Run tiangong-ai research setup doctor --live --workspace ${root} --json after reviewing quota impact.`,
-    });
   }
 
   let workspaceDoctor: Awaited<ReturnType<typeof doctorResearchWorkspace>> | null = null;
@@ -1173,6 +1244,23 @@ export async function doctorResearchSetup(
       status: "fail",
       detail: sanitizeResearchText(error instanceof Error ? error.message : String(error)),
       minimumAction: "Repair workspace runtime state, then rerun setup doctor.",
+    });
+  }
+
+  if (!options.live) {
+    const attestedCapabilitySmoke = workspaceDoctor?.checks.some(
+      (check) => check.id === "capability-live-smoke" && check.status === "pass",
+    );
+    checks.push({
+      id: "live-provider-checks",
+      category: "live-check",
+      status: attestedCapabilitySmoke ? "pass" : "warn",
+      detail: attestedCapabilitySmoke
+        ? "Reused the unexpired, runtime-bound capability smoke attestation."
+        : "Live provider checks were not requested and no reusable attestation is available.",
+      minimumAction: attestedCapabilitySmoke
+        ? null
+        : `Run tiangong-ai research setup doctor --live --workspace ${root} --json after reviewing quota impact.`,
     });
   }
 
@@ -2345,19 +2433,17 @@ async function assertRequiredCredentialPreflight(
   } catch (error) {
     if (error instanceof CliError) throw error;
   }
-  let configuredBrokerIds = new Set<string>();
-  try {
-    const declarations = await loadCapabilityDeclarations(plan.workspace.path);
-    const status = await inspectCapabilityCredentialEnvironment(
-      plan.workspace.path,
-      declarations.capabilities,
-    );
-    configuredBrokerIds = new Set(status.configuredIds);
-  } catch {
-    // A first apply has not configured capability declarations yet. The
-    // reviewed plan's environment mapping remains the only accepted source.
-  }
-  const failures: Array<{ id: string; environmentName: string | null }> = [];
+  const brokerDefinitions = definitions.filter((definition) => definition.storage === "broker");
+  const configuredBrokerIds = new Set(
+    (
+      await loadCapabilityCredentialMapForIds(
+        plan.workspace.path,
+        brokerDefinitions.map((definition) => definition.id),
+        { ignoreUndeclared: true },
+      )
+    ).keys(),
+  );
+  const failures: Array<{ id: string }> = [];
   for (const definition of definitions) {
     const planned = plan.credentialSources.find((candidate) => candidate.id === definition.id);
     const stored =
@@ -2369,10 +2455,7 @@ async function assertRequiredCredentialPreflight(
       Buffer.byteLength(environment[planned.fromEnvironment] ?? "", "utf8") >=
         definition.minimumUtf8Bytes;
     if ((!planned && definition.required && !stored) || (planned && !supplied && !stored)) {
-      failures.push({
-        id: definition.id,
-        environmentName: planned?.fromEnvironment ?? null,
-      });
+      failures.push({ id: definition.id });
     }
   }
   if (failures.length) {
@@ -2382,8 +2465,8 @@ async function assertRequiredCredentialPreflight(
       reason: `Required or explicitly selected credentials are unavailable: ${failures
         .map((failure) => failure.id)
         .join(", ")}.`,
-      minimumAction: `Set the reviewed owner environment variables before any download (${failures
-        .map((failure) => `${failure.id}=${failure.environmentName ?? "<mapping-required>"}`)
+      minimumAction: `Configure each unavailable logical credential with research setup credential set --prompt, --from-stdin, or --from-env before any download (${failures
+        .map((failure) => failure.id)
         .join(", ")}), then retry this exact step.`,
       retryCommand: `tiangong-ai research setup retry --step credential-preflight --workspace ${plan.workspace.path} --json`,
       exitCode: 3,
@@ -3021,7 +3104,7 @@ async function setAdapterCredential(
   credentialId: string,
   value: string,
 ): Promise<void> {
-  const configured = await loadAdapterCredentials(root, definitions);
+  const configured = await loadAdapterCredentials(root, definitions, { ignoreUndeclared: true });
   configured.set(credentialId, value);
   const serialized = Object.fromEntries(
     [...configured.entries()].sort(([left], [right]) => left.localeCompare(right)),

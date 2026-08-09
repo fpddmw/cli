@@ -203,8 +203,8 @@ file, and budget confirmation when `maxCostUsd` exceeds
 ```bash
 tiangong-ai research setup catalog \
   --workspace /absolute/path/to/workspace --json
-# Interactive and user-initiated: select external Skills, credential variable
-# names, licenses, install scope, and checks.
+# Interactive and user-initiated: select external Skills, configure credentials
+# with hidden input/env/stdin, review licenses, choose scope, and run checks.
 tiangong-ai research setup \
   --workspace /absolute/path/to/workspace
 tiangong-ai research setup status \
@@ -225,11 +225,15 @@ is bundled or installed without an explicit Wizard confirmation or plan
 selection. The Wizard recommends a project-local `tiangong-auto-research`
 orchestrator so ordinary research requests can enter the workflow from any
 user-selected workspace directory. It pins the installer integrity, source
-commits, Skill tree hashes, exact destinations, license acceptance, credential
-environment names, settings, and checks. Required credential preflight runs
-before downloads. Project-local copy is the default; global writes, network
-downloads, live provider checks, synthetic document uploads, and paid agent
-smokes each require their applicable confirmation.
+commits, Skill tree hashes, exact destinations, license acceptance, safe
+credential bindings, settings, and checks. For every selected provider, the
+Wizard offers hidden TTY input (recommended), a named owner environment
+variable, preloaded bounded stdin/password-manager input, or an explicit skip.
+Secret values never enter the plan or terminal output. Required credential
+preflight and owner-only storage run before downloads. Project-local copy is
+the default; global writes, network downloads, live provider checks, synthetic
+document uploads, and paid agent smokes each require their applicable
+confirmation.
 
 Production admission requires at least one locked external capability with
 `brokered-network` and `discoveryScopes: ["public-internet"]`; an input plan or
@@ -246,9 +250,20 @@ Search. `internet-research-with-context` additionally selects the
 subscription-dependent LLM Context endpoint, while
 `internet-research-with-media` also selects image and video discovery. A
 provider-plan or authentication failure blocks the selected profile instead of
-silently dropping a Skill. `credential set` reads the value only from the
-explicit owner environment name and stores it under the declared logical ID;
-the value is never returned or journaled.
+silently dropping a Skill. `credential set` accepts exactly one of `--prompt`,
+`--from-stdin`, or `--from-env <name>` and stores the value under the declared
+logical ID; the value is never returned or journaled. For example:
+
+```bash
+tiangong-ai research setup credential set \
+  --id brave.search.api-key --prompt \
+  --workspace /absolute/path/to/workspace --json
+
+op read 'op://Research/Brave/api-key' | \
+  tiangong-ai research setup credential set \
+    --id brave.search.api-key --from-stdin \
+    --workspace /absolute/path/to/workspace --json
+```
 
 The pinned Brave checkout is verified at `skills/<skill-name>` before install.
 An explicitly reviewed replacement plan reconciles the complete setup-managed
@@ -259,9 +274,12 @@ Provider-dependent context/media choices never fall back silently; select the
 baseline in a replacement plan when that is the intended operator decision.
 
 The interactive Wizard uses restrained semantic colors and section markers
-only when its terminal output is a TTY. Set `NO_COLOR` or `TERM=dumb` for plain
-text; `--json` also disables Wizard styling so structured output never contains
-ANSI escape sequences.
+only when its terminal output is a TTY. Hidden credential input is not echoed.
+Set `NO_COLOR` or `TERM=dumb` for plain text; `--json` also disables Wizard
+styling so structured output never contains ANSI escape sequences. Password
+managers may preload one line per logical ID with
+`--credential-stdin <id[,id...]>`; the remaining Wizard questions use the
+controlling terminal.
 
 Optional setup entries have explicit roles. Tiangong SCI is an
 owner-whitelisted POST evidence capability; document decomposition is an input
