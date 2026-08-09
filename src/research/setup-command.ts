@@ -21,12 +21,17 @@ import {
   retryResearchSetup,
   runResearchSetupCompanion,
   setResearchSetupCredentialFromEnvironment,
+  setResearchSetupCredentialValue,
   type ResearchSetupAgentRoutePlan,
   type ResearchSetupEvidenceProfile,
 } from "./workspace/setup.js";
 import { isObject, workspacePaths } from "./workspace/storage.js";
 import type { ResearchMode } from "./workspace/types.js";
-import { runResearchSetupWizard } from "./workspace/setup-wizard.js";
+import {
+  promptResearchSetupCredentialValue,
+  readResearchSetupCredentialStdin,
+  runResearchSetupWizard,
+} from "./workspace/setup-wizard.js";
 
 const COMMON_OPTIONS = { help: "boolean", json: "boolean" } as const;
 const WORKSPACE_OPTIONS = { ...COMMON_OPTIONS, workspace: "string" } as const;
@@ -65,7 +70,7 @@ export function researchSetupHelp(): string {
   tiangong-ai research setup apply [--plan <absolute-json>] [--workspace <absolute-path>] [--skip-doctor] [--json]
   tiangong-ai research setup status [--workspace <absolute-path>] [--json]
   tiangong-ai research setup doctor [--workspace <absolute-path>] [--live] [--allow-synthetic-unstructure-upload] [--agent-smoke --confirm-agent-smoke-cost] [--json]
-  tiangong-ai research setup credential set --id <logical-id> --from-env <name> [--workspace <absolute-path>] [--json]
+  tiangong-ai research setup credential set --id <logical-id> (--prompt | --from-stdin | --from-env <name>) [--workspace <absolute-path>] [--json]
   tiangong-ai research setup companion run --id tiangong.document-granular-decompose --input <absolute-file> --output <absolute-new-file> [--timeout <seconds>] [--workspace <absolute-path>] [--json]
   tiangong-ai research setup companion run --id tiangong.academic-paper-download (--doi <doi> | --title <exact-title> [--author <name>] [--year <yyyy>]) --out <absolute-existing-directory> [--timeout <seconds>] [--workspace <absolute-path>] [--json]
   tiangong-ai research setup retry --step <recorded-step> [--clear-stale-lock --confirm-clear-stale-lock] [--workspace <absolute-path>] [--json]
@@ -75,8 +80,8 @@ export function researchSetupHelp(): string {
 Safety defaults:
   Skills are never bundled or installed implicitly. Plans pin the installer,
   source commits, tree hashes, destinations, licenses, and declared mutations.
-  Project-local copy mode is the default. Credentials are accepted only through
-  named owner environment variables and their values are never printed.
+  Project-local copy mode is the default. Credentials use hidden TTY input,
+  bounded stdin, or named owner environment variables; values are never printed.
   Every selected Skill requires its displayed license id and an explicit
   network-download confirmation; an empty smoke-test plan requires neither.
 `;
@@ -243,24 +248,53 @@ async function runCredential(argv: string[], io: CliIO): Promise<number> {
   }
   const args = parseStrictArgs(
     rest,
-    { ...WORKSPACE_OPTIONS, id: "string", "from-env": "string" },
+    {
+      ...WORKSPACE_OPTIONS,
+      id: "string",
+      prompt: "boolean",
+      "from-stdin": "boolean",
+      "from-env": "string",
+    },
     "research setup credential set",
   );
   if (strictBoolean(args, "help")) return writeSetupHelp(io);
   rejectPositionals(args.positionals, "research setup credential set");
   const credentialId = strictString(args, "id");
   const environmentName = strictString(args, "from-env");
-  if (!credentialId || !environmentName) {
-    throw invalidSetupArgument("research setup credential set requires --id and --from-env.");
+  const prompt = strictBoolean(args, "prompt");
+  const fromStdin = strictBoolean(args, "from-stdin");
+  const sourceCount = Number(Boolean(environmentName)) + Number(prompt) + Number(fromStdin);
+  if (!credentialId || sourceCount !== 1) {
+    throw invalidSetupArgument(
+      "research setup credential set requires --id and exactly one of --prompt, --from-stdin, or --from-env.",
+    );
   }
-  const result = await setResearchSetupCredentialFromEnvironment({
-    workspace: workspaceArgument(args),
-    credentialId,
-    environmentName,
-    environment: io.env,
-  });
-  writeSetupJson(io, result, args);
-  return 0;
+  if (environmentName) {
+    const result = await setResearchSetupCredentialFromEnvironment({
+      workspace: workspaceArgument(args),
+      credentialId,
+      environmentName,
+      environment: io.env,
+    });
+    writeSetupJson(io, result, args);
+    return 0;
+  }
+  let value = "";
+  try {
+    value = prompt
+      ? await promptResearchSetupCredentialValue(io, credentialId, strictBoolean(args, "json"))
+      : (await readResearchSetupCredentialStdin(io.stdin, [credentialId]))[credentialId]!;
+    const result = await setResearchSetupCredentialValue({
+      workspace: workspaceArgument(args),
+      credentialId,
+      value,
+      inputMethod: prompt ? "secure-input" : "stdin",
+    });
+    writeSetupJson(io, result, args);
+    return 0;
+  } finally {
+    value = "";
+  }
 }
 
 async function runCompanion(argv: string[], io: CliIO): Promise<number> {

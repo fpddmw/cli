@@ -103,9 +103,12 @@ project-scoped scheduling/exit semantics, pre-call budget enforcement,
 independent review, closure, and the public command family.
 `test/research-setup.test.ts` covers the separately sourced recommendation
 catalog, immutable plan/tamper checks, explicit licenses and global mutation,
-credential preflight before downloads, resumable setup state, TTY Wizard
-automation and color suppression, pinned Brave source-layout paths across every
-evidence profile, explicit orchestrator/default-baseline selection,
+credential preflight and 0600 persistence before downloads, resumable setup
+state, hidden-TTY/env/bounded-stdin/explicit-skip Wizard paths without secret
+disclosure, TTY Wizard automation and color suppression, pinned Brave
+source-layout paths across every evidence profile, optional setting/credential
+omission without false readiness warnings, reusable runtime-bound live
+attestations, explicit orchestrator/default-baseline selection,
 replacement-time managed capability and credential pruning with custom/Skill
 preservation, explicit smoke-failure blocking, minimal secret environments,
 exact document/paper artifact

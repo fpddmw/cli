@@ -12,6 +12,18 @@ export async function loadCapabilityCredentialMap(
   capabilities: CapabilityDeclaration[],
   options: { ignoreUndeclared?: boolean } = {},
 ): Promise<Map<string, string>> {
+  return loadCapabilityCredentialMapForIds(
+    root,
+    capabilities.flatMap((capability) => capability.credentials.map((credential) => credential.id)),
+    options,
+  );
+}
+
+export async function loadCapabilityCredentialMapForIds(
+  root: string,
+  declaredCredentialIds: readonly string[],
+  options: { ignoreUndeclared?: boolean } = {},
+): Promise<Map<string, string>> {
   const path = workspacePaths(root).env;
   if (!(await pathExists(path))) return new Map();
   const info = await lstat(path).catch(() => {
@@ -26,9 +38,7 @@ export async function loadCapabilityCredentialMap(
   if (process.platform !== "win32" && (info.mode & 0o077) !== 0) {
     throw credentialEnvironmentError("credential environment must have owner-only permissions");
   }
-  const declared = new Set(
-    capabilities.flatMap((capability) => capability.credentials.map((credential) => credential.id)),
-  );
+  const declared = new Set(declaredCredentialIds);
   const configured = new Map<string, string>();
   let foundConfiguration = false;
   const content = await readFile(path, "utf8").catch(() => {
@@ -127,22 +137,57 @@ export async function setCapabilityCredentialFromEnvironment(input: {
   if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(input.environmentName)) {
     throw credentialConfigurationError("credential source environment name is invalid");
   }
-  const declared = new Set(
-    input.capabilities.flatMap((capability) =>
-      capability.credentials.map((credential) => credential.id),
-    ),
-  );
-  if (!declared.has(input.credentialId)) {
-    throw credentialConfigurationError(`credential is not declared: ${input.credentialId}`);
-  }
   const value = input.environment[input.environmentName];
   if (typeof value !== "string" || Buffer.byteLength(value, "utf8") < 8) {
     throw credentialConfigurationError(
       `credential source environment variable is missing or too short: ${input.environmentName}`,
     );
   }
-  const configured = await loadCapabilityCredentialMap(input.root, input.capabilities);
-  configured.set(input.credentialId, value);
+  const result = await setCapabilityCredentialValue({
+    root: input.root,
+    declaredCredentialIds: input.capabilities.flatMap((capability) =>
+      capability.credentials.map((credential) => credential.id),
+    ),
+    credentialId: input.credentialId,
+    value,
+    minimumUtf8Bytes: 8,
+  });
+  return {
+    credentialId: input.credentialId,
+    sourceEnvironmentName: input.environmentName,
+    configured: true,
+    configuredCredentialIds: result.configuredCredentialIds,
+  };
+}
+
+export async function setCapabilityCredentialValue(input: {
+  root: string;
+  declaredCredentialIds: readonly string[];
+  credentialId: string;
+  value: string;
+  minimumUtf8Bytes: number;
+  ignoreUndeclaredExisting?: boolean;
+}): Promise<{
+  credentialId: string;
+  configured: true;
+  configuredCredentialIds: string[];
+}> {
+  const declared = new Set(input.declaredCredentialIds);
+  if (!declared.has(input.credentialId)) {
+    throw credentialConfigurationError(`credential is not declared: ${input.credentialId}`);
+  }
+  if (
+    typeof input.value !== "string" ||
+    Buffer.byteLength(input.value, "utf8") < input.minimumUtf8Bytes
+  ) {
+    throw credentialConfigurationError("credential value is missing or too short");
+  }
+  const configured = await loadCapabilityCredentialMapForIds(
+    input.root,
+    input.declaredCredentialIds,
+    { ignoreUndeclared: input.ignoreUndeclaredExisting === true },
+  );
+  configured.set(input.credentialId, input.value);
   const serialized = Object.fromEntries(
     [...configured.entries()].sort(([left], [right]) => left.localeCompare(right)),
   );
@@ -153,7 +198,6 @@ export async function setCapabilityCredentialFromEnvironment(input: {
   );
   return {
     credentialId: input.credentialId,
-    sourceEnvironmentName: input.environmentName,
     configured: true,
     configuredCredentialIds: [...configured.keys()].sort(),
   };
