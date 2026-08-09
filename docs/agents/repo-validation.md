@@ -17,7 +17,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-08-09
-lastReviewedCommit: 8e990e24c3ab77058a0f67f9bbcea698c6404a3b
+lastReviewedCommit: 6014c3cf3e9bd13a89285e80483f02148a3f0fb0
 ---
 
 # Repo Validation
@@ -65,6 +65,12 @@ docpact lint --root . --worktree --mode enforce
 `npm run prepush:gate` aggregates the lint, coverage, and docpact checks when
 `docpact` is installed locally.
 
+When a pinned research setup commit or the whole-tree hash algorithm changes,
+recompute every affected catalog entry from a clean detached checkout of its
+exact immutable commit. Unit tests remain network-free; the maintainer-side pin
+audit is separate and must confirm every selected source path, not only the tree
+that first exposed a mismatch.
+
 ## Release Flow
 
 `.github/workflows/publish.yml` publishes `@tiangong-ai/cli` to npm from
@@ -106,14 +112,19 @@ catalog, immutable plan/tamper checks, explicit licenses and global mutation,
 credential preflight and 0600 persistence before downloads, resumable setup
 state, hidden-TTY/env/bounded-stdin/explicit-skip Wizard paths without secret
 disclosure, TTY Wizard automation and color suppression, pinned Brave
-source-layout paths across every evidence profile, optional setting/credential
-omission without false readiness warnings, reusable runtime-bound live
+source-layout paths across every evidence profile, deterministic Git checkout
+configuration, safe hash-mismatch diagnostics and pre-installer fail-closed
+behavior, optional setting/credential omission without false readiness
+warnings, reusable runtime-bound live
 attestations, explicit orchestrator/default-baseline selection,
 replacement-time managed capability and credential pruning with custom/Skill
 preservation, explicit smoke-failure blocking, minimal secret environments,
 exact document/paper artifact
 binding, no-overwrite/no-directory-scan behavior, explicit browser handoff, and
 bounded JSON POST broker credential/body redaction.
+`test/research-workspace.test.ts` also fixes the whole-tree traversal order to
+NFC-normalized UTF-8 byte ordering so default ICU locale changes cannot alter a
+capability or setup pin.
 `test/research-runtime-production.test.ts` adds zero-cost
 production evals for permanent evidence and review packets, exact HTTP policy,
 byte/item/offset/estimated-token extraction bounds and raw-object cache reuse,

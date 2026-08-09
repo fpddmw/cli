@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-08-09
-lastReviewedCommit: 8e990e24c3ab77058a0f67f9bbcea698c6404a3b
+lastReviewedCommit: 6014c3cf3e9bd13a89285e80483f02148a3f0fb0
 ---
 
 # Repo Architecture
@@ -52,7 +52,8 @@ storage writes, queueing, and document status transitions.
 - `src/research/workspace/**`: the versioned research workspace protocol. It
   owns context classification, immutable input admission, capability policy
   locks, a separately sourced external Skill ecosystem catalog, immutable setup
-  plans/state/history, reproducible detached source checkout and exact-copy
+  plans/state/history, reproducible detached source checkout with fixed Git
+  line-ending behavior, locale-independent whole-tree hashing, and exact-copy
   installation, custom external capability admission,
   hidden-TTY, bounded-stdin, and owner-environment-to-logical-credential
   configuration with pre-download owner-only persistence, static/live provider
@@ -160,7 +161,12 @@ tree, builds a minimal child environment, and returns hash-bound output for
 later input admission; neither executes inside an agent capsule or becomes
 evidence by itself. Authoring Skills run only after closure. Source
 commit/version and expected whole-tree SHA-256 must match before any role is
-configured or executed.
+configured or executed. The tree-hash contract rejects symlinks and
+canonically equivalent path collisions, normalizes logical paths to NFC, and
+orders directory entries by UTF-8 bytes rather than locale collation. New Git
+source caches set repository-local `core.autocrlf=false` and `core.eol=lf`
+before materializing the detached commit. Hash failures stop before installer
+execution and expose only sanitized, non-secret identifiers and digests.
 
 The platform `sandbox-exec`/Bubblewrap capsule is the agent security boundary.
 Codex does not nest its own sandbox inside that capsule because nested macOS

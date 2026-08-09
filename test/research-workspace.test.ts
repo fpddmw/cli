@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { platform, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
@@ -23,6 +23,7 @@ import { evaluateProjectPreflight } from "../src/research/workspace/preflight.js
 import { runResearchWorkspace, type PackageExecutor } from "../src/research/workspace/runtime.js";
 import {
   hashRegularTree,
+  regularTreeFiles,
   sha256File,
   workspacePaths,
   writeJsonAtomic,
@@ -33,6 +34,25 @@ import {
 } from "../src/research/workspace/workspace.js";
 
 describe("research workspace lifecycle", () => {
+  it("orders regular tree paths by normalized UTF-8 bytes instead of process collation", async () => {
+    const root = await temporaryDirectory();
+    try {
+      for (const name of ["ä.txt", "a.txt", "中.txt", "Z.txt"]) {
+        await writeFile(join(root, name), `${name}\n`);
+      }
+      assert.deepEqual(
+        (await regularTreeFiles(root)).map((path) => basename(path)),
+        ["Z.txt", "a.txt", "ä.txt", "中.txt"],
+      );
+      assert.equal(
+        await hashRegularTree(root),
+        "8440a5d09a4b3a4187e84a9190108f0f93448cdef197408f3bad1a44fe749f8b",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("atomically replaces a read-only JSON destination", async () => {
     const root = await temporaryDirectory();
     const destination = join(root, "capabilities.lock.json");

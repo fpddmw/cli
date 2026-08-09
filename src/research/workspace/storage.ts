@@ -27,6 +27,8 @@ const IGNORED_TREE_NAMES = new Set([
   "node_modules",
 ]);
 
+export const REGULAR_TREE_HASH_ALGORITHM = "sha256-nfc-path-size-content-v2";
+
 export function workspacePaths(root: string): WorkspacePaths {
   const canonicalRoot = resolve(root);
   const control = join(canonicalRoot, RESEARCH_CONTROL_DIRECTORY);
@@ -169,7 +171,7 @@ export async function hashRegularTree(root: string): Promise<string> {
   const files = await regularTreeFiles(root);
   const hash = createHash("sha256");
   for (const path of files) {
-    const logicalPath = relative(root, path).split(sep).join("/");
+    const logicalPath = relative(root, path).split(sep).join("/").normalize("NFC");
     const info = await lstat(path);
     hash.update(`${logicalPath}\0${info.size}\0`, "utf8");
     hash.update(await readFile(path));
@@ -182,7 +184,25 @@ export async function regularTreeFiles(root: string): Promise<string[]> {
   const files: string[] = [];
   async function visit(directory: string): Promise<void> {
     const entries = await readdir(directory, { withFileTypes: true });
-    entries.sort((left, right) => left.name.localeCompare(right.name));
+    const canonicalNames = new Map<string, string>();
+    for (const entry of entries) {
+      const canonicalName = entry.name.normalize("NFC");
+      const previous = canonicalNames.get(canonicalName);
+      if (previous !== undefined && previous !== entry.name) {
+        throw new CliError(
+          `Canonically equivalent names are not allowed in capability trees: ${join(
+            directory,
+            previous,
+          )} and ${join(directory, entry.name)}`,
+          {
+            code: "RESEARCH_CAPABILITY_INVALID",
+            exitCode: 2,
+          },
+        );
+      }
+      canonicalNames.set(canonicalName, entry.name);
+    }
+    entries.sort((left, right) => compareTreeNames(left.name, right.name));
     for (const entry of entries) {
       if (IGNORED_TREE_NAMES.has(entry.name)) continue;
       const path = join(directory, entry.name);
@@ -205,6 +225,15 @@ export async function regularTreeFiles(root: string): Promise<string[]> {
   }
   await visit(root);
   return files;
+}
+
+function compareTreeNames(left: string, right: string): number {
+  const canonicalDifference = Buffer.compare(
+    Buffer.from(left.normalize("NFC"), "utf8"),
+    Buffer.from(right.normalize("NFC"), "utf8"),
+  );
+  if (canonicalDifference !== 0) return canonicalDifference;
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
 }
 
 export async function fileRecord(
