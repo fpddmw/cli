@@ -64,7 +64,7 @@ import {
   writeTextAtomic,
 } from "./storage.js";
 import { packageVersion } from "./constants.js";
-import type { AgentPricing, ResearchMode } from "./types.js";
+import type { AgentKind, AgentPricing, AgentRoute, ResearchMode } from "./types.js";
 import {
   doctorResearchWorkspace,
   initializeResearchWorkspace,
@@ -79,6 +79,8 @@ export type ResearchSetupEvidenceProfile =
   | typeof EXTERNAL_SKILL_MEDIA_PROFILE;
 
 export interface ResearchSetupAgentRoutePlan {
+  producerAgent: AgentKind;
+  reviewerAgent: AgentKind;
   producerModel: string | null;
   reviewerModel: string | null;
   producerPricing: AgentPricing | null;
@@ -268,6 +270,7 @@ export async function createResearchSetupPlan(
   await assertWorkspaceDirectory(root);
   const scope = input.scope ?? "project";
   const agents = normalizeAgents(input.agents ?? ["codex"]);
+  const agentRoutes = normalizeAgentRoutes(input.agentRoutes);
   if (
     !input.confirmNetworkDownloads &&
     input.skillIds.length + BRAVE_PROFILE_SKILLS[input.evidenceProfile].length
@@ -325,6 +328,20 @@ export async function createResearchSetupPlan(
   const selected = resolveSetupSkills([
     ...new Set([...BRAVE_PROFILE_SKILLS[input.evidenceProfile], ...input.skillIds]),
   ]);
+  const producerInstallTarget = agentRoutes.producerAgent === "codex" ? "codex" : "claude-code";
+  if (
+    selected.some((skill) => skill.role === "orchestrator") &&
+    !agents.includes(producerInstallTarget)
+  ) {
+    throw setupError({
+      code: "RESEARCH_SETUP_SELECTION_INVALID",
+      step: "selection",
+      reason: `The native ${agentRoutes.producerAgent} producer requires the orchestrator Skill in its project Skill root.`,
+      minimumAction: `Include ${producerInstallTarget} in --agents, or choose the other native producer.`,
+      retryCommand: "tiangong-ai research setup plan --help",
+      exitCode: 2,
+    });
+  }
   if (selected.some((skill) => skill.role === "evidence-capability") && !agents.includes("codex")) {
     throw setupError({
       code: "RESEARCH_SETUP_SELECTION_INVALID",
@@ -342,7 +359,6 @@ export async function createResearchSetupPlan(
     selected,
     input.credentialEnvironment ?? {},
   );
-  const agentRoutes = normalizeAgentRoutes(input.agentRoutes);
   const targets = plannedInstallTargets(
     root,
     scope,
@@ -723,11 +739,11 @@ export async function applyResearchSetupPlan(
     state = await updateSetupState(root, {
       ...state,
       status:
-        report.readiness === "READY"
-          ? "ready"
-          : report.readiness === "PARTIALLY_READY"
+        report.researchReadiness === "BLOCKED"
+          ? "blocked"
+          : report.overallReadiness === "PARTIALLY_READY"
             ? "partially-ready"
-            : "blocked",
+            : "ready",
       currentStep: null,
       completedSteps: [...new Set([...state.completedSteps, "doctor"])],
     });
@@ -1066,19 +1082,50 @@ export async function doctorResearchSetup(
     }
     throw new Error("Research execution is unsupported on this platform");
   });
-  for (const command of ["codex", "claude"] as const) {
-    await setupDoctorCheck(checks, `agent.${command}`, "agent", async () => {
-      const result = await runner({
-        command,
-        args: ["--version"],
-        cwd: root,
-        environment: agentDoctorEnvironment(environment),
-        timeoutMs: 30_000,
-      });
-      if (result.exitCode !== 0) throw new Error(`${command} is not executable`);
-      return `${command} is executable (${sanitizeResearchText(result.stdout.trim()).slice(0, 160)}).`;
+  checks.push({
+    id: "agent.native-producer",
+    category: "agent",
+    scope: "research-core",
+    status: "pass",
+    detail: `Producer work is bound to the current interactive ${plan.agentRoutes.producerAgent} host; setup will not launch it as a child process.`,
+    minimumAction: null,
+    blocking: true,
+    requiredFor: ["setup", "research-core"],
+  });
+  const reviewerCommand = plan.agentRoutes.reviewerAgent;
+  await setupDoctorCheck(checks, `agent.${reviewerCommand}.reviewer`, "agent", async () => {
+    const result = await runner({
+      command: reviewerCommand,
+      args: ["--version"],
+      cwd: root,
+      environment: agentDoctorEnvironment(environment),
+      timeoutMs: 30_000,
     });
-  }
+    if (result.exitCode !== 0) throw new Error(`${reviewerCommand} is not executable`);
+    return `${reviewerCommand} reviewer CLI is executable (${sanitizeResearchText(result.stdout.trim()).slice(0, 160)}).`;
+  });
+  await setupDoctorCheck(checks, "agent-route-config", "agent", async () => {
+    const config = await loadWorkspaceConfig(root);
+    if (
+      config.producer.executionMode !== "native-host" ||
+      config.reviewer.executionMode !== "headless-cli" ||
+      config.producer.agent === config.reviewer.agent
+    ) {
+      throw new Error(
+        "Workspace must bind producer=native-host and reviewer=headless-cli on different agent families.",
+      );
+    }
+    if (
+      config.mode === "production-research" &&
+      (!config.producer.model ||
+        !config.reviewer.model ||
+        !config.producer.pricing ||
+        !config.reviewer.pricing)
+    ) {
+      throw new Error("Production agent models and reviewed pricing are incomplete.");
+    }
+    return `${config.producer.agent}(native-host) -> ${config.reviewer.agent}(headless-cli).`;
+  });
 
   const selected = plan.selection.skillIds.map(setupSkill);
   const installations = await inspectSelectedInstallations(plan, selected, environment);
@@ -1167,10 +1214,15 @@ export async function doctorResearchSetup(
   await appendDependencyChecks(checks, selected, runner, root, environment);
 
   let capabilityDoctor: Awaited<ReturnType<typeof doctorExternalCapabilities>> | null = null;
+  const blockingBeforeLive = checks
+    .map((check) => normalizeSetupDoctorCheck(check, selected))
+    .filter((check) => check.blocking && check.status === "fail")
+    .map((check) => check.id);
+  const runRequiredLive = options.live === true && blockingBeforeLive.length === 0;
   if (selected.some((skill) => skill.role === "evidence-capability")) {
     try {
       capabilityDoctor = await doctorExternalCapabilities(root, {
-        live: options.live === true,
+        live: runRequiredLive,
         fetcher,
         sleeper,
       });
@@ -1196,7 +1248,22 @@ export async function doctorResearchSetup(
     }
   }
 
-  if (options.live) {
+  if (options.live === true && !runRequiredLive) {
+    checks.push({
+      id: "live.required-capabilities.skipped",
+      category: "live-check",
+      scope: "evidence",
+      status: "fail",
+      detail:
+        "Required live capability probes were not started because a static blocking prerequisite failed.",
+      minimumAction: "Resolve the static blocking prerequisites, then rerun live doctor checks.",
+      blocking: true,
+      requiredFor: ["setup", "research-core"],
+      skippedBecause: blockingBeforeLive.join(", "),
+    });
+  }
+
+  if (runRequiredLive) {
     await appendCompanionLiveChecks(checks, {
       plan,
       selected,
@@ -1205,15 +1272,53 @@ export async function doctorResearchSetup(
       sleeper,
       allowSyntheticUnstructureUpload: options.allowSyntheticUnstructureUpload === true,
     });
+  } else if (
+    options.live === true &&
+    selected.some((skill) =>
+      ["input-preprocessor", "acquisition-adapter", "post-closure-authoring"].includes(skill.role),
+    )
+  ) {
+    checks.push({
+      id: "live.optional-components.skipped",
+      category: "live-check",
+      status: "warn",
+      detail:
+        "Optional component diagnostics were skipped after a static blocking prerequisite failed.",
+      minimumAction: "Resolve the blocking prerequisites before retrying optional diagnostics.",
+      blocking: false,
+      requiredFor: [],
+      skippedBecause: blockingBeforeLive.join(", "),
+    });
   }
 
   let workspaceDoctor: Awaited<ReturnType<typeof doctorResearchWorkspace>> | null = null;
+  const blockingPrerequisiteFailures = checks
+    .map((check) => normalizeSetupDoctorCheck(check, selected))
+    .filter((check) => check.blocking && check.status === "fail")
+    .map((check) => check.id);
+  const runAgentSmoke = options.agentSmoke === true && blockingPrerequisiteFailures.length === 0;
+  if (options.agentSmoke === true && !runAgentSmoke) {
+    checks.push({
+      id: "agent-reviewer-smoke.skipped",
+      category: "agent",
+      scope: "review",
+      status: "fail",
+      detail:
+        "The paid reviewer smoke was not started because a zero/low-cost blocking prerequisite failed.",
+      minimumAction:
+        "Resolve the listed blocking prerequisites, then rerun the explicitly confirmed reviewer smoke.",
+      blocking: true,
+      requiredFor: ["setup", "research-core"],
+      skippedBecause: blockingPrerequisiteFailures.join(", "),
+    });
+  }
   try {
     workspaceDoctor = await doctorResearchWorkspace(root, {
-      agentSmoke: options.agentSmoke === true,
-      capabilitySmoke: options.live === true,
+      agentSmoke: runAgentSmoke,
+      capabilitySmoke: runRequiredLive,
       environment,
       capabilityFetcher: fetcher,
+      ...(capabilityDoctor === null ? {} : { capabilityDoctorResult: capabilityDoctor }),
       ...(options.executor === undefined ? {} : { executor: options.executor }),
     });
     const requiredRuntimeChecks = options.agentSmoke === true || options.live === true;
@@ -1260,11 +1365,19 @@ export async function doctorResearchSetup(
     });
   }
 
-  const readiness = checks.some((check) => check.status === "fail")
+  const scopedChecks = checks.map((check) => normalizeSetupDoctorCheck(check, selected));
+  const researchReadiness = scopedChecks.some((check) => check.blocking && check.status === "fail")
     ? "BLOCKED"
-    : checks.some((check) => check.status === "warn")
-      ? "PARTIALLY_READY"
-      : "READY";
+    : "READY";
+  const preprocessingReadiness = setupDomainReadiness(scopedChecks, "preprocessing");
+  const acquisitionReadiness = setupDomainReadiness(scopedChecks, "acquisition");
+  const authoringReadiness = setupDomainReadiness(scopedChecks, "authoring");
+  const overallReadiness =
+    researchReadiness === "BLOCKED"
+      ? "BLOCKED"
+      : scopedChecks.some((check) => check.status !== "pass")
+        ? "PARTIALLY_READY"
+        : "READY";
   const setupSecrets = [
     ...new Set([
       ...configuredResearchSecrets(environment),
@@ -1281,21 +1394,31 @@ export async function doctorResearchSetup(
       planSha256: plan.planSha256,
       checkedAt: new Date().toISOString(),
       mode: options.live ? "live" : "static",
-      readiness,
-      checks,
+      readiness: researchReadiness,
+      researchReadiness,
+      preprocessingReadiness,
+      acquisitionReadiness,
+      authoringReadiness,
+      overallReadiness,
+      checks: scopedChecks,
       capabilityDoctor,
       workspaceDoctor,
       summary: {
-        pass: checks.filter((check) => check.status === "pass").length,
-        warn: checks.filter((check) => check.status === "warn").length,
-        fail: checks.filter((check) => check.status === "fail").length,
+        pass: scopedChecks.filter((check) => check.status === "pass").length,
+        warn: scopedChecks.filter((check) => check.status === "warn").length,
+        fail: scopedChecks.filter((check) => check.status === "fail").length,
       },
     },
     setupSecrets,
   );
   await writeJsonAtomic(paths.setupReport, report);
   return report as typeof report & {
-    readiness: "READY" | "PARTIALLY_READY" | "BLOCKED";
+    readiness: "READY" | "BLOCKED";
+    researchReadiness: "READY" | "BLOCKED";
+    preprocessingReadiness: SetupDomainReadiness;
+    acquisitionReadiness: SetupDomainReadiness;
+    authoringReadiness: SetupDomainReadiness;
+    overallReadiness: "READY" | "PARTIALLY_READY" | "BLOCKED";
   };
 }
 
@@ -1630,9 +1753,19 @@ function assertPlanMatchesCatalog(plan: ResearchSetupPlan): void {
 }
 
 function validAgentRoutes(value: Record<string, unknown>): boolean {
-  const allowed = new Set(["producerModel", "reviewerModel", "producerPricing", "reviewerPricing"]);
+  const allowed = new Set([
+    "producerAgent",
+    "reviewerAgent",
+    "producerModel",
+    "reviewerModel",
+    "producerPricing",
+    "reviewerPricing",
+  ]);
   if (Object.keys(value).some((key) => !allowed.has(key))) return false;
   if (
+    (value.producerAgent !== "codex" && value.producerAgent !== "claude") ||
+    (value.reviewerAgent !== "codex" && value.reviewerAgent !== "claude") ||
+    value.producerAgent === value.reviewerAgent ||
     !(value.producerModel === null || typeof value.producerModel === "string") ||
     !(value.reviewerModel === null || typeof value.reviewerModel === "string")
   ) {
@@ -1770,12 +1903,41 @@ function normalizedCredentialSources(
 function normalizeAgentRoutes(
   value: Partial<ResearchSetupAgentRoutePlan> | undefined,
 ): ResearchSetupAgentRoutePlan {
+  const producerAgent = normalizeAgentKind(value?.producerAgent ?? "codex", "producer");
+  const reviewerAgent = normalizeAgentKind(
+    value?.reviewerAgent ?? (producerAgent === "codex" ? "claude" : "codex"),
+    "reviewer",
+  );
+  if (producerAgent === reviewerAgent) {
+    throw setupError({
+      code: "RESEARCH_SETUP_AGENT_ROUTE_INVALID",
+      step: "agent-route",
+      reason: "The native producer and independent reviewer must use different agent families.",
+      minimumAction: "Choose Codex + Claude Code in either producer/reviewer order.",
+      retryCommand: "tiangong-ai research setup plan --help",
+      exitCode: 2,
+    });
+  }
   return {
+    producerAgent,
+    reviewerAgent,
     producerModel: normalizeNullableIdentifier(value?.producerModel),
     reviewerModel: normalizeNullableIdentifier(value?.reviewerModel),
     producerPricing: normalizePricing(value?.producerPricing),
     reviewerPricing: normalizePricing(value?.reviewerPricing),
   };
+}
+
+function normalizeAgentKind(value: AgentKind, label: string): AgentKind {
+  if (value === "codex" || value === "claude") return value;
+  throw setupError({
+    code: "RESEARCH_SETUP_AGENT_ROUTE_INVALID",
+    step: "agent-route",
+    reason: `${label} agent must be codex or claude.`,
+    minimumAction: "Choose Codex or Claude Code and keep the reviewer on the other family.",
+    retryCommand: "tiangong-ai research setup plan --help",
+    exitCode: 2,
+  });
 }
 
 function normalizePricing(value: AgentPricing | null | undefined): AgentPricing | null {
@@ -1947,34 +2109,47 @@ async function ensureSetupWorkspace(plan: ResearchSetupPlan): Promise<void> {
 }
 
 async function configureAgentRoutes(plan: ResearchSetupPlan): Promise<void> {
-  if (
-    !plan.agentRoutes.producerModel &&
-    !plan.agentRoutes.reviewerModel &&
-    !plan.agentRoutes.producerPricing &&
-    !plan.agentRoutes.reviewerPricing
-  ) {
-    return;
-  }
   const paths = workspacePaths(plan.workspace.path);
   const config = await loadWorkspaceConfig(plan.workspace.path);
   const updated = {
     ...config,
-    producer: {
-      ...config.producer,
-      ...(plan.agentRoutes.producerModel === null ? {} : { model: plan.agentRoutes.producerModel }),
-      ...(plan.agentRoutes.producerPricing === null
-        ? {}
-        : { pricing: plan.agentRoutes.producerPricing }),
-    },
-    reviewer: {
-      ...config.reviewer,
-      ...(plan.agentRoutes.reviewerModel === null ? {} : { model: plan.agentRoutes.reviewerModel }),
-      ...(plan.agentRoutes.reviewerPricing === null
-        ? {}
-        : { pricing: plan.agentRoutes.reviewerPricing }),
-    },
+    producer: setupAgentRoute(
+      config.producer,
+      plan.agentRoutes.producerAgent,
+      "native-host",
+      plan.agentRoutes.producerModel,
+      plan.agentRoutes.producerPricing,
+    ),
+    reviewer: setupAgentRoute(
+      config.reviewer,
+      plan.agentRoutes.reviewerAgent,
+      "headless-cli",
+      plan.agentRoutes.reviewerModel,
+      plan.agentRoutes.reviewerPricing,
+    ),
   };
   await writeJsonAtomic(paths.config, updated);
+}
+
+function setupAgentRoute(
+  current: AgentRoute,
+  agent: AgentKind,
+  executionMode: "native-host" | "headless-cli",
+  plannedModel: string | null,
+  plannedPricing: AgentPricing | null,
+): AgentRoute {
+  const sameAgent = current.agent === agent;
+  return {
+    agent,
+    executionMode,
+    binary: agent === "codex" ? "codex" : "claude",
+    model: plannedModel ?? (sameAgent ? current.model : null),
+    effort: sameAgent ? (current.effort ?? "low") : "low",
+    ...(agent === "codex" ? { verbosity: sameAgent ? (current.verbosity ?? "low") : "low" } : {}),
+    ...((plannedPricing ?? (sameAgent ? current.pricing : undefined)) === undefined
+      ? {}
+      : { pricing: plannedPricing ?? current.pricing }),
+  };
 }
 
 async function inspectSelectedInstallations(
@@ -3323,6 +3498,12 @@ type SetupDoctorCheck = {
   status: "pass" | "warn" | "fail";
   detail: string;
   minimumAction: string | null;
+  scope?: SetupDoctorScope;
+  componentIds?: string[];
+  requiredFor?: string[];
+  blocking?: boolean;
+  componentGate?: boolean;
+  skippedBecause?: string;
   diagnostics?: {
     code: string;
     executionMode: "setup-doctor" | "broker" | "standalone";
@@ -3332,6 +3513,109 @@ type SetupDoctorCheck = {
     retryAfterSeconds?: number | null;
   };
 };
+
+export type SetupDoctorScope =
+  | "research-core"
+  | "evidence"
+  | "preprocessing"
+  | "acquisition"
+  | "authoring"
+  | "review";
+
+export type SetupDomainReadiness = "READY" | "DEGRADED" | "BLOCKED" | "NOT_REQUIRED";
+
+function normalizeSetupDoctorCheck(
+  check: SetupDoctorCheck,
+  selected: ResearchSetupSkill[],
+): Required<Pick<SetupDoctorCheck, "id" | "category" | "status" | "detail" | "minimumAction">> &
+  Omit<
+    SetupDoctorCheck,
+    "scope" | "componentIds" | "requiredFor" | "blocking" | "componentGate"
+  > & {
+    scope: SetupDoctorScope;
+    componentIds: string[];
+    requiredFor: string[];
+    blocking: boolean;
+    componentGate: boolean;
+  } {
+  const componentIds = check.componentIds ?? setupCheckComponentIds(check, selected);
+  const scope = check.scope ?? setupCheckScope(check, selected, componentIds);
+  const blocking = check.blocking ?? ["research-core", "evidence", "review"].includes(scope);
+  return {
+    ...check,
+    scope,
+    componentIds,
+    requiredFor:
+      check.requiredFor ??
+      (blocking
+        ? ["setup", "research-core"]
+        : componentIds.map((componentId) => `component:${componentId}`)),
+    blocking,
+    componentGate: check.componentGate ?? check.id !== "live.semantic-scholar",
+  };
+}
+
+function setupCheckComponentIds(check: SetupDoctorCheck, selected: ResearchSetupSkill[]): string[] {
+  if (check.id === "live.semantic-scholar") return ["tiangong.academic-paper-download"];
+  if (check.id === "live.tiangong-unstructure") {
+    return ["tiangong.document-granular-decompose"];
+  }
+  if (check.id.startsWith("skill.")) {
+    return selected.filter((skill) => check.id.endsWith(`.${skill.id}`)).map((skill) => skill.id);
+  }
+  if (check.id.startsWith("setting.")) {
+    const id = check.id.slice("setting.".length);
+    const setting = RESEARCH_SETUP_SETTINGS.find((candidate) => candidate.id === id);
+    return selected
+      .filter((skill) => setting?.requiredBy.includes(skill.id))
+      .map((skill) => skill.id);
+  }
+  if (check.id.startsWith("credential.")) {
+    const id = check.id.slice("credential.".length);
+    const credential = RESEARCH_SETUP_CREDENTIALS.find((candidate) => candidate.id === id);
+    return selected
+      .filter((skill) => credential?.requiredBy.includes(skill.id))
+      .map((skill) => skill.id);
+  }
+  if (check.id.startsWith("dependency.")) {
+    const id = check.id.slice("dependency.".length);
+    return selected
+      .filter((skill) => skill.dependencies.some((item) => item.id === id))
+      .map((skill) => skill.id);
+  }
+  return [];
+}
+
+function setupCheckScope(
+  check: SetupDoctorCheck,
+  selected: ResearchSetupSkill[],
+  componentIds: string[],
+): SetupDoctorScope {
+  if (check.id === "live.semantic-scholar") return "acquisition";
+  if (check.id === "live.tiangong-unstructure") return "preprocessing";
+  if (check.category === "evidence-capability" || check.id.includes("capability")) {
+    return "evidence";
+  }
+  if (check.category === "agent" || check.id.includes("attestation")) return "review";
+  const roles = componentIds
+    .map((id) => selected.find((skill) => skill.id === id)?.role)
+    .filter((role): role is ResearchSetupSkill["role"] => Boolean(role));
+  if (roles.includes("evidence-capability")) return "evidence";
+  if (roles.includes("input-preprocessor")) return "preprocessing";
+  if (roles.includes("acquisition-adapter")) return "acquisition";
+  if (roles.includes("post-closure-authoring")) return "authoring";
+  return "research-core";
+}
+
+function setupDomainReadiness(
+  checks: Array<ReturnType<typeof normalizeSetupDoctorCheck>>,
+  scope: Extract<SetupDoctorScope, "preprocessing" | "acquisition" | "authoring">,
+): SetupDomainReadiness {
+  const matching = checks.filter((check) => check.scope === scope);
+  if (matching.length === 0) return "NOT_REQUIRED";
+  if (matching.some((check) => check.blocking && check.status === "fail")) return "BLOCKED";
+  return matching.some((check) => check.status !== "pass") ? "DEGRADED" : "READY";
+}
 
 function requireAbsoluteWorkspace(value: string): string {
   if (!value || !isAbsolute(value) || /[\0\r\n]/.test(value)) {
@@ -3850,6 +4134,25 @@ async function appendCompanionLiveChecks(
 ): Promise<void> {
   if (input.selected.some((skill) => skill.id === "tiangong.academic-paper-download")) {
     await appendSemanticScholarLiveCheck(checks, input);
+    const semanticScholar = checks.findLast((check) => check.id === "live.semantic-scholar");
+    checks.push({
+      id: "companion.tiangong.academic-paper-download",
+      category: "live-check",
+      scope: "acquisition",
+      componentIds: ["tiangong.academic-paper-download"],
+      status: semanticScholar?.status === "pass" ? "pass" : "warn",
+      detail:
+        semanticScholar?.status === "pass"
+          ? "OA resolver diagnostics: Unpaywall=unknown, Semantic Scholar=ready, arXiv=unknown; the deterministic resolver order is unchanged."
+          : "OA resolver diagnostics: Unpaywall=unknown, Semantic Scholar=degraded, arXiv=unknown. The adapter remains available and actual acquisition will stop or request explicit browser handoff only after its ordered OA sources are exhausted.",
+      minimumAction:
+        semanticScholar?.status === "pass"
+          ? null
+          : "Retry the resolver diagnostic later or configure its optional key; unrelated research remains authorized and no standalone evidence fallback is permitted.",
+      blocking: false,
+      componentGate: false,
+      requiredFor: ["component:tiangong.academic-paper-download"],
+    });
   }
 
   if (input.selected.some((skill) => skill.id === "tiangong.document-granular-decompose")) {
@@ -3857,10 +4160,14 @@ async function appendCompanionLiveChecks(
       checks.push({
         id: "live.tiangong-unstructure",
         category: "live-check",
+        scope: "preprocessing",
+        componentIds: ["tiangong.document-granular-decompose"],
         status: "warn",
         detail: "Synthetic document upload was not explicitly authorized, so no document was sent.",
         minimumAction:
           "Rerun setup doctor with the separate synthetic-upload confirmation after reviewing service cost and data policy.",
+        blocking: false,
+        componentGate: true,
       });
     } else {
       await setupDoctorCheck(checks, "live.tiangong-unstructure", "live-check", async () => {
@@ -3938,11 +4245,15 @@ async function appendSemanticScholarLiveCheck(
       checks.push({
         id: "live.semantic-scholar",
         category: "live-check",
+        scope: "acquisition",
+        componentIds: ["tiangong.academic-paper-download"],
         status: "fail",
         detail:
           "Semantic Scholar returned a redirect; credential-bearing redirects are not followed.",
         minimumAction:
-          "Verify the fixed Semantic Scholar endpoint and network policy, then rerun setup doctor; do not fall back to a standalone source wrapper.",
+          "Verify the fixed Semantic Scholar endpoint and network policy before relying on that resolver; do not fall back to a standalone evidence wrapper.",
+        blocking: false,
+        componentGate: false,
         diagnostics: {
           code: "PROVIDER_REDIRECT_REJECTED",
           executionMode: "setup-doctor",
@@ -3962,16 +4273,20 @@ async function appendSemanticScholarLiveCheck(
       checks.push({
         id: "live.semantic-scholar",
         category: "live-check",
+        scope: "acquisition",
+        componentIds: ["tiangong.academic-paper-download"],
         status: "fail",
         detail: sanitizeResearchText(
           `Semantic Scholar live check returned HTTP ${response.status}${detail ? `: ${detail}` : ""}.`,
           apiKey ? [apiKey] : [],
         ),
         minimumAction: rateLimited
-          ? `Wait for the provider quota window${retryAfterSeconds === null ? "" : ` (Retry-After ${retryAfterSeconds}s)`}, then rerun setup doctor. The production workflow remains blocked and must not downgrade to standalone search.`
+          ? `Wait for the provider quota window${retryAfterSeconds === null ? "" : ` (Retry-After ${retryAfterSeconds}s)`}, then rerun this optional resolver diagnostic. Unrelated research remains available and must not downgrade to standalone search.`
           : authenticationFailure
             ? "Replace or remove the optional Semantic Scholar API key, verify provider entitlement, and rerun setup doctor; do not expose the key in output."
-            : "Verify Semantic Scholar availability and the fixed API contract, then rerun setup doctor; do not downgrade the research workflow.",
+            : "Verify Semantic Scholar availability and the fixed API contract before relying on that resolver; do not downgrade the research workflow.",
+        blocking: false,
+        componentGate: false,
         diagnostics: {
           code: authenticationFailure
             ? "PROVIDER_AUTHENTICATION_FAILED"
@@ -3991,23 +4306,31 @@ async function appendSemanticScholarLiveCheck(
     checks.push({
       id: "live.semantic-scholar",
       category: "live-check",
+      scope: "acquisition",
+      componentIds: ["tiangong.academic-paper-download"],
       status: "pass",
       detail: apiKey
         ? "Semantic Scholar accepted the configured optional API key."
         : "Semantic Scholar public API is reachable without an optional API key.",
       minimumAction: null,
+      blocking: false,
+      componentGate: false,
     });
   } catch (error) {
     checks.push({
       id: "live.semantic-scholar",
       category: "live-check",
+      scope: "acquisition",
+      componentIds: ["tiangong.academic-paper-download"],
       status: "fail",
       detail: sanitizeResearchText(
         error instanceof Error ? error.message : String(error),
         apiKey ? [apiKey] : [],
       ),
       minimumAction:
-        "Restore provider connectivity, then rerun setup doctor; the production workflow must remain blocked instead of using a standalone fallback.",
+        "Restore provider connectivity before relying on Semantic Scholar; unrelated research remains available and no standalone fallback is authorized.",
+      blocking: false,
+      componentGate: false,
       diagnostics: {
         code: "PROVIDER_TRANSPORT_FAILED",
         executionMode: "setup-doctor",

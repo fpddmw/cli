@@ -24,6 +24,11 @@ export interface AgentPricing {
 
 export interface AgentRoute {
   agent: AgentKind;
+  /**
+   * Producer reasoning belongs to the current interactive host. Only the
+   * independent reviewer is allowed to run as a child CLI process.
+   */
+  executionMode?: "native-host" | "headless-cli";
   binary: string;
   wrapperTargetBinary?: string;
   model: string | null;
@@ -204,6 +209,7 @@ export interface ProjectEvidenceRequirements {
   dimensions: string[];
   sourceTypes: string[];
   requiredCapabilityIds?: string[];
+  requiredCompanionIds?: string[];
   requiredDiscoveryScopes?: string[];
   minSources: number;
   minFullTextSources: number;
@@ -327,6 +333,7 @@ export interface RunRecord {
   failureDetails?: Record<string, unknown> | null | undefined;
   runtime: AgentRuntimeFingerprint | null;
   telemetry?: AgentExecutionTelemetry | undefined;
+  accountingMode?: "measured" | "reserved-native-host" | "mechanical";
 }
 
 export interface JournalEvent {

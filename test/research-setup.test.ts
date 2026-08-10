@@ -13,6 +13,7 @@ import {
   verifyCapabilities,
 } from "../src/research/workspace/capabilities.js";
 import { inspectResearchContext } from "../src/research/workspace/context.js";
+import { evaluateRequiredResearchCompanions } from "../src/research/workspace/companion-readiness.js";
 import {
   EXTERNAL_SKILL_CONTEXT_PROFILE,
   EXTERNAL_SKILL_MEDIA_PROFILE,
@@ -52,6 +53,10 @@ import {
   sha256Text,
   workspacePaths,
 } from "../src/research/workspace/storage.js";
+import {
+  initializeResearchWorkspace,
+  loadWorkspaceConfig,
+} from "../src/research/workspace/workspace.js";
 
 describe("research setup catalog and immutable plans", () => {
   it("reports a separately sourced, pinned, role-aware recommendation catalog", async () => {
@@ -72,7 +77,7 @@ describe("research setup catalog and immutable plans", () => {
       assert.ok(catalog.sources.every((source) => /^[0-9a-f]{40}$/.test(source.immutableRef)));
       assert.equal(
         catalog.sources.find((source) => source.id === "tiangong-ai-skills")?.immutableRef,
-        "20d4fbb8ffd35af110675f47a66b510d26577453",
+        "24f2549968864c43dfb5a7f995a0e4fceb54d565",
       );
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-sci-search"));
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-report-search"));
@@ -381,7 +386,7 @@ describe("research setup catalog and immutable plans", () => {
       await writeFile(planPath, `${JSON.stringify(plan, null, 2)}\n`);
       const update = await checkResearchSetupUpdates(root);
       assert.equal(update.updateAvailable, true);
-      assert.deepEqual(update.cliVersionDrift, { planned: "0.0.29", active: "0.0.31" });
+      assert.deepEqual(update.cliVersionDrift, { planned: "0.0.29", active: "0.0.32" });
       assert.match(update.policy.minimumAction, /replacement immutable plan/i);
       await assert.rejects(
         loadAndVerifyResearchSetupPlan(planPath),
@@ -819,6 +824,43 @@ describe("research setup execution and operator safety", () => {
     }
   });
 
+  it("applies a Claude native producer with a valid Codex reviewer route", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [],
+        acceptedLicenseIds: [],
+        confirmNetworkDownloads: false,
+        agentRoutes: {
+          producerAgent: "claude",
+          reviewerAgent: "codex",
+        },
+      });
+      await applyResearchSetupPlan(workspacePaths(root).setupPlan, { skipDoctor: true });
+      const config = await loadWorkspaceConfig(root);
+      assert.deepEqual(config.producer, {
+        agent: "claude",
+        executionMode: "native-host",
+        binary: "claude",
+        model: null,
+        effort: "low",
+      });
+      assert.deepEqual(config.reviewer, {
+        agent: "codex",
+        executionMode: "headless-cli",
+        binary: "codex",
+        model: null,
+        effort: "low",
+        verbosity: "low",
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("blocks missing required credentials before downloads and sanitizes retry failures", async () => {
     const root = await temporaryDirectory();
     const secret = "opaque-fixture-owner-secret";
@@ -980,11 +1022,14 @@ describe("research setup execution and operator safety", () => {
         credentialEnvironment: { "semantic-scholar.api-key": "OWNER_VALUE" },
         confirmNetworkDownloads: true,
       });
+      await initializeResearchWorkspace(root, undefined, "smoke-test");
       const report = await doctorResearchSetup(root, {
         environment: { OWNER_VALUE: secret },
         runner: async () => ({ exitCode: 0, stdout: `version ${secret}`, stderr: "" }),
       });
-      assert.equal(report.readiness, "BLOCKED");
+      assert.equal(report.researchReadiness, "READY");
+      assert.equal(report.acquisitionReadiness, "DEGRADED");
+      assert.equal(report.overallReadiness, "PARTIALLY_READY");
       assert.equal(JSON.stringify(report).includes(secret), false);
       const reportChecks = report.checks as Array<{
         id: string;
@@ -1015,12 +1060,20 @@ describe("research setup execution and operator safety", () => {
     }
   });
 
-  it("retries Semantic Scholar 429 once, preserves the blocker, and reports a safe action", async () => {
+  it("retries Semantic Scholar 429 once and scopes the degradation to acquisition", async () => {
     const root = await temporaryDirectory();
     const secret = "semantic-scholar-rate-limit-secret";
     let providerCalls = 0;
     const sleeps: number[] = [];
+    const skill = RESEARCH_SETUP_SKILLS.find(
+      (candidate) => candidate.id === "tiangong.academic-paper-download",
+    )!;
+    const originalTreeSha256 = skill.expectedTreeSha256;
     try {
+      const skillDirectory = join(root, ".agents", "skills", skill.skillName);
+      await mkdir(skillDirectory, { recursive: true });
+      await writeFile(join(skillDirectory, "SKILL.md"), "# Academic paper fixture\n");
+      skill.expectedTreeSha256 = await hashRegularTree(skillDirectory);
       await createResearchSetupPlan({
         workspace: root,
         mode: "smoke-test",
@@ -1030,6 +1083,7 @@ describe("research setup execution and operator safety", () => {
         credentialEnvironment: { "semantic-scholar.api-key": "OWNER_S2_VALUE" },
         confirmNetworkDownloads: true,
       });
+      await initializeResearchWorkspace(root, undefined, "smoke-test");
       const report = await doctorResearchSetup(root, {
         live: true,
         environment: { OWNER_S2_VALUE: secret },
@@ -1039,6 +1093,9 @@ describe("research setup execution and operator safety", () => {
             args.includes("import importlib.metadata as m; print(m.version('pypdf'))")
           ) {
             return { exitCode: 0, stdout: "6.14.2\n", stderr: "" };
+          }
+          if (command === "python3" && args.includes("--version")) {
+            return { exitCode: 0, stdout: "Python 3.12.8\n", stderr: "" };
           }
           return { exitCode: 0, stdout: `${command} fixture-version\n`, stderr: "" };
         },
@@ -1053,22 +1110,29 @@ describe("research setup execution and operator safety", () => {
       });
       assert.equal(providerCalls, 2);
       assert.deepEqual(sleeps, [5_000]);
-      assert.equal(report.readiness, "BLOCKED");
+      assert.equal(report.researchReadiness, "READY");
+      assert.equal(report.acquisitionReadiness, "DEGRADED");
+      assert.equal(report.overallReadiness, "PARTIALLY_READY");
       const check = (
         report.checks as Array<{
           id: string;
           status: string;
           minimumAction: string | null;
           diagnostics?: Record<string, unknown>;
+          blocking?: boolean;
         }>
       ).find((candidate) => candidate.id === "live.semantic-scholar");
       assert.equal(check?.status, "fail");
+      assert.equal(check?.blocking, false);
       assert.equal(check?.diagnostics?.code, "PROVIDER_RATE_LIMITED");
       assert.equal(check?.diagnostics?.networkAttempted, true);
       assert.equal(check?.diagnostics?.retryAfterSeconds, 7);
       assert.match(check?.minimumAction ?? "", /must not downgrade to standalone/i);
       assert.equal(JSON.stringify(report).includes(secret), false);
+      const required = await evaluateRequiredResearchCompanions(root, [skill.id]);
+      assert.equal(required.ready, true, JSON.stringify(required));
     } finally {
+      skill.expectedTreeSha256 = originalTreeSha256;
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -1104,6 +1168,45 @@ describe("research setup execution and operator safety", () => {
       const checks = report.checks as Array<{ id: string; status: string }>;
       assert.equal(checks.find((check) => check.id === "production-runtime")?.status, "fail");
       assert.equal((report.workspaceDoctor as { status: string } | null)?.status, "blocked");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("promotes an optional preprocessor to a project gate only when explicitly required", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: ["tiangong.document-granular-decompose"],
+        acceptedLicenseIds: ["tiangong-ai-skills:MIT"],
+        settings: { "tiangong.unstructure.base-url": "https://unstructure.example.test" },
+        confirmNetworkDownloads: true,
+      });
+      await initializeResearchWorkspace(root, undefined, "smoke-test");
+      const report = await doctorResearchSetup(root, {
+        environment: {},
+        runner: async ({ command, args }) =>
+          command === "python3" && args.includes("--version")
+            ? { exitCode: 0, stdout: "Python 3.12.8\n", stderr: "" }
+            : { exitCode: 0, stdout: `${command} fixture-version\n`, stderr: "" },
+      });
+      assert.equal(report.researchReadiness, "READY");
+      assert.equal(report.preprocessingReadiness, "DEGRADED");
+      const optional = await evaluateRequiredResearchCompanions(root, []);
+      assert.equal(optional.ready, true);
+      const required = await evaluateRequiredResearchCompanions(root, [
+        "tiangong.document-granular-decompose",
+      ]);
+      assert.equal(required.ready, false);
+      assert.ok(
+        required.gaps.includes("required-companion-not-ready:tiangong.document-granular-decompose"),
+      );
+      assert.ok(
+        required.components[0]?.failedChecks.includes("preprocessor-live-check-not-passed"),
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

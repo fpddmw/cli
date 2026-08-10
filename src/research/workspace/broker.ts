@@ -11,7 +11,8 @@ import {
   persistBrokerEvidence,
   storeBrokerEvidenceCache,
 } from "./evidence.js";
-import { appendJournalEvent } from "./journal.js";
+import { appendJournalEvent, readJournal } from "./journal.js";
+import { loadProject } from "./projects.js";
 import { sanitizeResearchRecord, sanitizeResearchText } from "./sanitization.js";
 import {
   canonicalJson,
@@ -36,6 +37,75 @@ export interface CapabilityBroker {
   url: string;
   usage(): { maxCalls: number; startedCalls: number; remainingCalls: number };
   stop(): Promise<void>;
+}
+
+export async function fetchNativeCandidateSource(input: {
+  root: string;
+  projectId: string;
+  request: Record<string, unknown>;
+}): Promise<Record<string, unknown>> {
+  const project = await loadProject(input.root, input.projectId);
+  const discover = project.packages.find((workPackage) => workPackage.stage === "discover");
+  if (discover?.status !== "running" || discover.executor !== "producer") {
+    throw new CliError("Native evidence fetch is allowed only during an active discover stage.", {
+      code: "RESEARCH_NATIVE_STAGE_REQUIRED",
+      exitCode: 3,
+    });
+  }
+  const declarations = await loadCapabilityDeclarations(input.root);
+  const capabilities = declarations.capabilities.filter((capability) =>
+    capability.permissions.includes("brokered-network"),
+  );
+  const verification = await verifyCapabilities(input.root);
+  if (verification.status !== "verified") {
+    throw new CliError("Native evidence fetch requires verified capability locks.", {
+      code: "RESEARCH_CAPABILITY_DRIFT",
+      exitCode: 3,
+      details: verification,
+    });
+  }
+  const config = await loadWorkspaceConfig(input.root);
+  const priorCalls = (await readJournal(workspacePaths(input.root).journal)).filter(
+    (event) => event.scope === input.projectId && event.type === "capability.fetch.attempted",
+  ).length;
+  if (priorCalls >= config.budget.maxBrokerCalls) {
+    await appendJournalEvent(
+      workspacePaths(input.root).journal,
+      "capability.fetch.rejected",
+      input.projectId,
+      {
+        projectId: input.projectId,
+        code: "RESEARCH_BROKER_CALL_LIMIT_EXCEEDED",
+        maxCalls: config.budget.maxBrokerCalls,
+        startedCalls: priorCalls,
+      },
+    );
+    throw new CliError("The bounded broker call budget is exhausted.", {
+      code: "RESEARCH_BROKER_CALL_LIMIT_EXCEEDED",
+      exitCode: 3,
+      details: { maxCalls: config.budget.maxBrokerCalls, startedCalls: priorCalls },
+    });
+  }
+  const credentialMap = await loadCapabilityCredentialMap(input.root, declarations.capabilities);
+  const receipt = await fetchCandidateSource({
+    root: input.root,
+    projectId: input.projectId,
+    capsuleProject: null,
+    capabilities,
+    credentialMap,
+    workspaceResponseBytes: config.budget.maxBrokerResponseBytes,
+    workspaceContextTokens: config.budget.maxBrokerContextTokens,
+    workspaceMaxItems: config.budget.maxBrokerItems,
+    arguments: input.request,
+  });
+  return {
+    ...receipt,
+    brokerBudget: {
+      maxCalls: config.budget.maxBrokerCalls,
+      startedCalls: priorCalls + 1,
+      remainingCalls: Math.max(0, config.budget.maxBrokerCalls - priorCalls - 1),
+    },
+  };
 }
 
 interface BrokerCallBudget {
@@ -275,7 +345,7 @@ async function handleMcpRequest(input: {
 async function fetchCandidateSource(input: {
   root: string;
   projectId: string;
-  capsuleProject: string;
+  capsuleProject: string | null;
   capabilities: CapabilityDeclaration[];
   credentialMap: Map<string, string>;
   workspaceResponseBytes: number;
@@ -476,7 +546,9 @@ async function fetchCandidateSource(input: {
           raw,
           context.bytes,
         );
-        await stageContextObject(input.capsuleProject, receipt.contextLocator, context.bytes);
+        if (input.capsuleProject) {
+          await stageContextObject(input.capsuleProject, receipt.contextLocator, context.bytes);
+        }
         await appendCompletedReceipt(input.root, input.projectId, receipt, cacheKeySha256);
         return brokerToolResult(receipt, context.bytes, cached.contentType);
       }
@@ -630,7 +702,9 @@ async function fetchCandidateSource(input: {
       bytes,
       context.bytes,
     );
-    await stageContextObject(input.capsuleProject, receipt.contextLocator, context.bytes);
+    if (input.capsuleProject) {
+      await stageContextObject(input.capsuleProject, receipt.contextLocator, context.bytes);
+    }
     if (!credential) await storeBrokerEvidenceCache(input.root, cacheKeySha256, receipt);
     await appendCompletedReceipt(input.root, input.projectId, receipt, cacheKeySha256);
     return brokerToolResult(receipt, context.bytes, contentType);
@@ -1105,7 +1179,16 @@ function brokerFailureKind(error: unknown): string {
 
 function validateHttpsUrl(value: string): URL {
   const url = new URL(value);
-  if (url.protocol !== "https:" || url.username || url.password || !url.hostname) {
+  const sensitive =
+    /^(access_token|api[_-]?key|apikey|auth|authorization|cookie|key|password|secret|session|sig|signature|token)$/i;
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.hash ||
+    !url.hostname ||
+    [...url.searchParams.keys()].some((key) => sensitive.test(key))
+  ) {
     throw new Error("broker URL must be credential-free HTTPS");
   }
   return url;

@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-09
-lastReviewedCommit: 14c804e61b3768489253533ee754b6f7e75460ea
+lastReviewedAt: 2026-08-10
+lastReviewedCommit: bef62f8d48c42eaff14fa2bd7eba1be83a46a58b
 ---
 
 # Tiangong AI CLI
@@ -314,7 +314,8 @@ can inspect `capability doctor`, `project preflight`, `project init`, and `run`
 syntax safely from an empty or unrelated directory.
 
 The requirements object declares `dimensions`, `sourceTypes`, optional
-`requiredCapabilityIds` and `requiredDiscoveryScopes`, `minSources`,
+`requiredCapabilityIds`, `requiredCompanionIds`, and
+`requiredDiscoveryScopes`, `minSources`,
 `minFullTextSources`, `minDatedSources`, and optional inclusive
 `publicationDateFrom` / `publicationDateTo` boundaries (`YYYY-MM-DD` or
 `null`). Explicit capability/scope requirements are exact: wildcard web or SCI
@@ -332,17 +333,17 @@ full source. Symlinks, duplicate content, changed hashes, and context above
 
 The workspace stores its current protocol state under `.tiangong-research/`.
 Each project follows five ordered stages: evidence discovery, analysis,
-synthesis, independent review, and mechanical closure. Producer work defaults
-to Codex, independent review defaults to Claude, and a run is blocked when both
-routes use the same agent family.
+synthesis, independent review, and mechanical closure. Discover, analyze, and
+synthesize run in the current interactive Codex app/session or Claude Code
+session. The CLI never launches a nested producer process. Independent review
+runs through the other configured agent family's CLI, and execution is blocked
+when the two roles use the same family.
 
-Research execution requires `/usr/bin/sandbox-exec` on macOS or Bubblewrap
-(`bwrap`) on Linux. Windows can inspect and configure workspaces but does not
-execute research packages. That outer platform sandbox is the execution
-boundary. Codex is therefore started with its nested sandbox disabled: nesting
-Seatbelt on macOS can cancel MCP calls even though the process is already
-confined. Shell and unified-exec tools remain disabled, as do undeclared Codex
-integrations.
+Independent reviewer execution requires `/usr/bin/sandbox-exec` on macOS or
+Bubblewrap (`bwrap`) on Linux. Windows can inspect and configure workspaces but
+does not launch reviewer packages. The current native producer remains governed
+by its host application's own permissions; the CLI supplies a hash-bound packet
+and deterministic broker commands, not a second nested sandbox or agent.
 
 Add immutable local evidence, verify the workspace, and execute ready work:
 
@@ -356,6 +357,14 @@ tiangong-ai research workspace doctor --workspace /absolute/path/to/workspace \
   --agent-smoke --capability-smoke
 tiangong-ai research run --workspace /absolute/path/to/workspace \
   --project gpu-resource-impact --progress-jsonl
+# When stopReason is native-stage-required, perform the returned stage here:
+tiangong-ai research project stage prepare gpu-resource-impact \
+  --stage discover --host-agent codex \
+  --workspace /absolute/path/to/workspace --json
+tiangong-ai research project stage submit gpu-resource-impact \
+  --session SESSION_ID --output /absolute/path/to/discover.json \
+  --confirm-model EXPECTED_MODEL \
+  --workspace /absolute/path/to/workspace --json
 tiangong-ai research status --workspace /absolute/path/to/workspace --json
 ```
 
@@ -365,11 +374,13 @@ JSON/JSONL `projectId`, so historical blocked siblings do not alter its exit
 status. Omit `--project` and use `--max-parallel` only for an intentional
 workspace-wide run.
 
-Inputs are admitted by SHA-256. Agent work runs with a dedicated capsule HOME
-in an ephemeral platform sandbox. Only the minimal supported agent auth file is
-copied into that HOME. A formatting repair reuses that capsule copy only after
-its SHA-256 still matches the owner source; changed, symlinked, or non-owner-only
-authentication stops execution instead of being overwritten. For Claude, an
+Inputs are admitted by SHA-256. Native producer preparation creates an
+ephemeral, hash-bound packet directory but does not copy agent authentication
+or start an agent. The independent reviewer runs with a dedicated capsule HOME
+in an ephemeral platform sandbox. Only the minimal supported reviewer auth file
+is copied into that HOME. A reviewer formatting repair reuses that capsule copy
+only after its SHA-256 still matches the owner source; changed, symlinked, or
+non-owner-only authentication stops execution instead of being overwritten. For Claude, an
 owner-only user `settings.json` is never
 copied; only the whitelisted API key/token and HTTPS base URL fields from its
 `env` object are injected in memory. Permissions, hooks, additional directories,
@@ -377,17 +388,17 @@ and unrelated settings are not admitted. Codex project-root discovery is
 terminated by a capsule-local marker/config override, so a parent workspace
 `.codex/config.toml` is neither required nor made readable. The workspace
 credential file and the rest of the host home are not admitted. Production
-doctor is blocked until
-`--agent-smoke` actually starts both routes inside this boundary. A successful
-smoke creates a 24-hour attestation bound to workspace config, capability lock,
-output schema, and the resolved agent binary/wrapper fingerprints. Production
-execution stops before invocation if the attestation expires or any bound value
-drifts. While that attestation remains current, a plain `workspace doctor`
-revalidates its hashes and the currently resolved producer/reviewer runtime
-fingerprints, then reuses the attested agent and capability smoke results.
-Passing the smoke flags explicitly performs fresh checks instead; missing,
-expired, or drifted attestations remain blocking and include the refresh action.
-Use the exact `codex` / `claude` route by default. A custom wrapper must use an
+doctor is blocked until `--agent-smoke` actually starts the independent reviewer
+inside this boundary. The native producer is verified as the current host and
+is never smoke-tested as a child process. A successful smoke creates a 24-hour
+attestation bound to workspace config, capability lock, output schema, and the
+resolved reviewer binary/wrapper fingerprints. Production review stops before
+invocation if the attestation expires or any bound value drifts. While that
+attestation remains current, a plain `workspace doctor` revalidates its hashes
+and the current reviewer runtime fingerprint before reuse. Passing the smoke
+flags explicitly performs fresh checks instead; missing, expired, or drifted
+attestations remain blocking and include the refresh action. Use the exact
+`codex` / `claude` route by default. A custom reviewer wrapper must use an
 absolute `binary` plus an absolute `wrapperTargetBinary`; the runtime injects
 the resolved target path and independently hashes the target executable, route
 launcher/wrapper, and internal adapter. A wrapper that performs an unpinned
@@ -395,12 +406,13 @@ PATH lookup is not a reproducible route.
 
 The CLI owns the authoritative JSON Schemas for discovery, analysis,
 synthesis, and review. Inspect one with `research schema show <stage> --json`.
-Codex and Claude receive the schema through their structured-output options;
-the CLI materializes the validated final object. A syntax/schema failure gets
-at most one separately budgeted formatting repair, never a full blind retry.
-The same isolated repair may correct mechanically diagnosed provenance or
-finding/source bindings; it has no broker or research tools and cannot add new
-facts.
+Native producer preparation returns the exact schema and prompt to the current
+host; `stage submit` validates and atomically materializes its JSON. A rejected
+native submission keeps the bound session for an explicit correction and never
+launches a repair model. The independent reviewer receives its schema through
+the reviewer CLI's structured-output option; a reviewer syntax/schema or
+mechanical binding failure gets at most one separately budgeted formatting-only
+repair with no research tools.
 
 Total, per-package, output, repair, broker-response bytes, estimated broker
 context tokens, context items, wall-time, output-count, output-size, and attempt
@@ -411,41 +423,27 @@ synthesis, and 175,000 for review. Primary output is bounded at 6,000 tokens
 and a separately invoked repair at 4,000. These are admission ceilings rather
 than a target spend and can be lowered only when the resulting pre-call
 reservations still fit.
-Before an agent starts, the runtime reserves the package token and conservative
-price budget. The call-level check accounts for prompt and schema bytes at
-three bytes per token, repeats input allowance for every permitted API turn,
-adds the maximum bounded broker context for every permitted discovery turn,
-and adds primary output plus a potential isolated repair's input and output;
-insufficient package or remaining project budget prevents invocation. The
-preflight uses the same reservation calculator and additionally reserves the
-entire admitted capability-documentation budget on every broker turn, so a
-project cannot pass admission and then fail solely because runtime applies a
-stricter token formula. Review admission reserves three maximum-size generated
-artifacts plus one globally bounded evidence-excerpt bundle; runtime applies
-that same stage-specific context ceiling. The
-provider cost cap is the current package reservation, not the remaining
-workspace allowance. Tool-free Codex primary stages reserve two protocol turns;
-Claude JSON Schema primary stages reserve and receive a three-turn provider cap,
-matching the current Claude Code structured-output exchange. External tools
-remain disabled. Formatting repair omits the provider
-schema tool, uses one plain-JSON turn, and remains subject to the CLI schema and
-semantic validators. Current Codex and Claude CLI adapters report
-output usage only after execution, so preflight identifies
-`outputTokenLimitEnforcement` as `post-execution`; captured bytes provide a
-separate process bound. Discovery capture allowance includes the bounded MCP
-tool contexts as well as the requested model output, and over-limit output fails
-without promotion. New workspaces also enforce a six-call broker budget
-mechanically; every successful result reports the remaining calls and excess
-calls are rejected before another provider fetch or evidence promotion.
-Preflight also reports per-stage `maxTurns` and `turnLimitEnforcement`: Claude
-receives a provider-side turn cap, while the current Codex CLI exposes no such
-flag, so its turn allowance is reservation guidance plus post-execution
-accounting and rejection. Usage records separate input, cached-input, and output
-tokens; `inputTokens` excludes
-the separately reported cached portion. Configured pricing fills cost when the
-provider does not report it. Run records and JSONL progress also preserve
-sanitized event/item counts, provider turns, tool calls, reasoning tokens, and
-bounded provider errors.
+Before project initialization and every executable package, the control plane
+requires the complete token and conservative price reservation to fit. Native
+producer stages reserve prompt, schema, admitted context, bounded broker
+context, and output allowance, but the host app does not expose trusted
+per-stage usage telemetry to this CLI. A successful native submit therefore
+charges the full reviewed package reservation and records
+`accountingMode=reserved-native-host`; submit still enforces the exact schema,
+output bytes/tokens, provenance, coverage, hashes, and remaining project budget.
+It does not claim a provider-side turn or output-token cap for the host app.
+
+Independent review uses the pre-call reservation calculator and the reviewer's
+provider-side structured-output/turn controls where available. Review admission
+reserves three maximum-size generated artifacts plus one globally bounded
+evidence-excerpt bundle, and formatting repair remains one separately budgeted,
+tool-free JSON correction. New workspaces also enforce a six-call broker budget
+mechanically; every successful native evidence fetch reports the remaining
+calls and excess calls are rejected before another provider request or evidence
+promotion. Reviewer usage records separate input, cached-input, and output
+tokens; configured pricing fills cost when the provider omits it. Run records
+and JSONL progress preserve sanitized accounting mode, event/item counts,
+provider turns, tool calls, reasoning tokens, and bounded provider errors.
 
 Every evidence source must resolve to an admitted input or a completed broker
 receipt. Successful broker bodies are immutable content-addressed objects under
@@ -459,20 +457,23 @@ context, broker objects, and registered local input hashes before recording
 their safe locators. Capsule deletion therefore does not delete the durable
 review chain.
 
-Discovery receives only the capability broker as an execution tool. The CLI
-embeds the exact staged capability manifest and each external Skill's top-level
-`SKILL.md` in the prompt, so the producer does not need filesystem or shell
-access and cannot execute provider examples directly. The manifest includes
-the locked, non-secret HTTPS endpoint rather than only its host, so the model
-never has to guess a provider path. Broker responses include
-the exact bounded context inline with the hash-bound receipt; raw objects remain
-in the permanent evidence store for audit.
-Analyze and synthesize receive bounded, hash-verified prior-stage artifacts in
-their prompt with tools disabled. Review is also tool-free and uses the
+Native discovery preparation embeds the exact staged capability manifest and
+each external Skill's top-level `SKILL.md`. The current host may fetch admitted
+evidence only with `research project evidence fetch`, whose bounded request file
+contains logical IDs but no credential values. The manifest includes the locked,
+non-secret HTTPS endpoint rather than only its host, and each response returns
+the exact bounded context plus a hash-bound receipt while retaining the raw
+object in the permanent evidence store. Host web/search/database tools cannot
+substitute for a required broker receipt.
+Analyze and synthesize packets contain bounded, hash-verified prior-stage
+artifacts and require no external evidence calls. Review is tool-free and uses the
 reviewer's route-specific structured-output turn cap:
 its prompt embeds the complete generated artifacts and a deterministic,
 globally bounded set of excerpts distributed across registered local contexts
-and broker receipts. The packet hash is schema-bound, but complete packet
+and broker receipts. Broker excerpts prioritize deterministic, sanitized
+projections of the exact raw-response items selected by admitted evidence JSON
+Pointers; uncited receipts retain metadata-only bindings, and unresolved
+pointers receive a bounded-context fallback. The packet hash is schema-bound, but complete packet
 metadata is not redundantly copied into model context. Full local files,
 original per-receipt bounded contexts, raw broker objects, and the complete
 packet remain hash-bound for durable human/mechanical audit; the model must not
@@ -547,21 +548,27 @@ tiangong-ai research capability credential set \
 
 The broker injects declared credentials only for admitted HTTPS hosts. Agent
 processes do not receive this variable. Keep the file owner-only (`chmod 600`)
-and run `research capability doctor --live` plus production
-`research workspace doctor --agent-smoke --capability-smoke` before a run.
+and run the production setup/workspace doctor before a run. Setup doctor reuses
+one capability probe and never starts the paid reviewer smoke while a blocking
+static or low-cost prerequisite is already failing.
 Capability doctor retries only one 429 response with bounded `Retry-After`
 backoff; deterministic 4xx, missing subscription, authentication, drift, and
 content-type failures stop explicitly. It retains only a bounded sanitized
 provider code/detail and safe request ID, with an actionable baseline-or-
-subscription decision for `OPTION_NOT_IN_PLAN`. An explicitly requested agent
-or capability smoke failure makes setup readiness `BLOCKED`, never a warning.
+subscription decision for `OPTION_NOT_IN_PLAN`. Required evidence/reviewer
+failures make `researchReadiness=BLOCKED`. Optional preprocessing, acquisition,
+and authoring checks have separate readiness fields; they block only a project
+or operation that explicitly lists the exact component in
+`requiredCompanionIds`.
 Credential diagnostics distinguish standalone ambient absence,
 broker-store absence, policy-rejected injection, and provider 401/403. Every
 such diagnostic identifies the execution mode, credential scope, whether a
 network request occurred, and a minimum action without returning credentials
-or raw authentication responses. The optional Semantic Scholar live check also
-performs only one bounded 429 retry; a second 429 remains an explicit setup
-blocker and never triggers a standalone fallback.
+or raw authentication responses. The optional Semantic Scholar resolver check
+also performs only one bounded 429 retry. A second 429 leaves acquisition
+`DEGRADED`, does not block unrelated research, and never triggers a standalone
+fallback; the academic adapter can still use its unchanged Unpaywall → Semantic
+Scholar OA → arXiv → explicit browser-handoff order.
 The broker preserves a sanitized non-2xx excerpt, safe request ID, and
 `Retry-After`. It performs at most one inline 429 retry when the declared or
 default delay is at most five seconds; longer throttles return an actionable
