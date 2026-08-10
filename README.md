@@ -341,7 +341,8 @@ when the two roles use the same family.
 
 Independent reviewer execution requires `/usr/bin/sandbox-exec` on macOS or
 Bubblewrap (`bwrap`) on Linux. Windows can inspect and configure workspaces but
-does not launch reviewer packages. The current native producer remains governed
+does not launch reviewer packages; smoke-test setup reports a non-blocking
+warning there, while production readiness fails closed. The current native producer remains governed
 by its host application's own permissions; the CLI supplies a hash-bound packet
 and deterministic broker commands, not a second nested sandbox or agent.
 

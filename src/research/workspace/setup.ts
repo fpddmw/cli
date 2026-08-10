@@ -1063,25 +1063,43 @@ export async function doctorResearchSetup(
       return `${command} is executable (${sanitizeResearchText(result.stdout.trim()).slice(0, 120)}).`;
     });
   }
-  await setupDoctorCheck(checks, "platform-sandbox", "runtime", async () => {
-    if (platform() === "darwin") {
-      const info = await lstat("/usr/bin/sandbox-exec").catch(() => undefined);
-      if (!info?.isFile()) throw new Error("/usr/bin/sandbox-exec is unavailable");
-      return "macOS sandbox-exec is available.";
-    }
-    if (platform() === "linux") {
-      const result = await runner({
-        command: "bwrap",
-        args: ["--version"],
-        cwd: root,
-        environment: installerEnvironment(environment),
-        timeoutMs: 15_000,
-      });
-      if (result.exitCode !== 0) throw new Error("Bubblewrap is unavailable");
-      return "Linux Bubblewrap is available.";
-    }
-    throw new Error("Research execution is unsupported on this platform");
-  });
+  if (platform() === "win32") {
+    const production = plan.workspace.mode === "production-research";
+    checks.push({
+      id: "platform-sandbox",
+      category: "runtime",
+      scope: "research-core",
+      status: production ? "fail" : "warn",
+      detail: production
+        ? "Production research execution is unsupported on Windows because no approved capsule sandbox is available."
+        : "Windows can inspect and smoke-test setup state, but native research execution requires an approved macOS or Linux capsule sandbox.",
+      minimumAction: production
+        ? "Run production research on macOS with sandbox-exec or Linux with Bubblewrap."
+        : "Use macOS or Linux before switching this workspace to production-research mode.",
+      blocking: production,
+      requiredFor: production ? ["setup", "research-core"] : [],
+    });
+  } else {
+    await setupDoctorCheck(checks, "platform-sandbox", "runtime", async () => {
+      if (platform() === "darwin") {
+        const info = await lstat("/usr/bin/sandbox-exec").catch(() => undefined);
+        if (!info?.isFile()) throw new Error("/usr/bin/sandbox-exec is unavailable");
+        return "macOS sandbox-exec is available.";
+      }
+      if (platform() === "linux") {
+        const result = await runner({
+          command: "bwrap",
+          args: ["--version"],
+          cwd: root,
+          environment: installerEnvironment(environment),
+          timeoutMs: 15_000,
+        });
+        if (result.exitCode !== 0) throw new Error("Bubblewrap is unavailable");
+        return "Linux Bubblewrap is available.";
+      }
+      throw new Error("Research execution is unsupported on this platform");
+    });
+  }
   checks.push({
     id: "agent.native-producer",
     category: "agent",

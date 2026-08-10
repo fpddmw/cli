@@ -29,6 +29,9 @@ lastReviewedCommit: bef62f8d48c42eaff14fa2bd7eba1be83a46a58b
 - Source: TypeScript
 - Stable launcher: `bin/tiangong-ai.js`
 - Research execution sandbox: macOS `sandbox-exec` or Linux Bubblewrap
+- Windows validates setup and deterministic logic in smoke-test mode, but
+  production research readiness remains blocked without an approved capsule
+  sandbox.
 - Repository text checkout uses LF line endings through `.gitattributes`; this
   keeps Prettier behavior consistent across Linux, macOS, and Windows CI
   runners.
