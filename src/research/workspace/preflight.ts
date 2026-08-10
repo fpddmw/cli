@@ -10,6 +10,7 @@ import type {
   WorkspaceConfig,
 } from "./types.js";
 import { loadWorkspaceConfig, verifyDoctorAttestation } from "./workspace.js";
+import { evaluateRequiredResearchCompanions } from "./companion-readiness.js";
 
 export const RESEARCH_AGENT_PROTOCOL_OVERHEAD_TOKENS: Record<AgentRoute["agent"], number> = {
   codex: 5_000,
@@ -43,6 +44,10 @@ export async function evaluateProjectPreflight(
   const capabilityVerification = await verifyCapabilities(root);
   const doctorAttestation =
     config.mode === "production-research" ? await verifyDoctorAttestation(root) : null;
+  const companionReadiness = await evaluateRequiredResearchCompanions(
+    root,
+    requirements?.requiredCompanionIds ?? [],
+  );
   const networkCapabilities = capabilities.capabilities
     .filter((capability) => capability.permissions.includes("brokered-network"))
     .map((capability) => ({
@@ -84,7 +89,8 @@ export async function evaluateProjectPreflight(
   ) {
     gaps.push("explicit-agent-effort-missing");
   }
-  if (config.mode === "production-research" && !config.producer.verbosity) {
+  const codexRoute = config.producer.agent === "codex" ? config.producer : config.reviewer;
+  if (config.mode === "production-research" && !codexRoute.verbosity) {
     gaps.push("explicit-codex-verbosity-missing");
   }
   if (
@@ -106,6 +112,7 @@ export async function evaluateProjectPreflight(
   if (doctorAttestation && doctorAttestation.status !== "verified") {
     gaps.push(`doctor-attestation-${doctorAttestation.status}`);
   }
+  gaps.push(...companionReadiness.gaps);
   if (tokenReservation > config.budget.maxTokens) {
     gaps.push(
       `package-token-reservations-exceed-total:${tokenReservation}/${config.budget.maxTokens}`,
@@ -269,6 +276,7 @@ export async function evaluateProjectPreflight(
             checkedAt: doctorAttestation.attestation?.checkedAt ?? null,
             expiresAt: doctorAttestation.attestation?.expiresAt ?? null,
           },
+    companionReadiness,
     gaps,
     coverageGaps,
     budget: {
@@ -291,7 +299,7 @@ export async function evaluateProjectPreflight(
       stageContextTokenReservations,
       recommendedDiscoverOutputTokens,
       outputTokenLimitEnforcement: {
-        producer: "post-execution",
+        producer: "reserved-native-host-on-submit",
         reviewer: "post-execution",
       },
       preCallTokenReservations,
@@ -300,15 +308,16 @@ export async function evaluateProjectPreflight(
     executionPolicy: {
       producer: {
         agent: config.producer.agent,
+        executionMode: config.producer.executionMode,
         model: config.producer.model,
         effort: config.producer.effort ?? null,
         verbosity: config.producer.verbosity ?? null,
         wrapperTargetPinned: Boolean(config.producer.wrapperTargetBinary),
-        turnLimitEnforcement:
-          config.producer.agent === "claude" ? "provider" : "reservation-and-post-execution",
+        turnLimitEnforcement: "native-host-instruction-and-reserved-accounting",
       },
       reviewer: {
         agent: config.reviewer.agent,
+        executionMode: config.reviewer.executionMode,
         model: config.reviewer.model,
         effort: config.reviewer.effort ?? null,
         verbosity: config.reviewer.verbosity ?? null,

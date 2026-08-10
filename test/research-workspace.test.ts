@@ -20,7 +20,13 @@ import {
   loadProject,
 } from "../src/research/workspace/projects.js";
 import { evaluateProjectPreflight } from "../src/research/workspace/preflight.js";
-import { runResearchWorkspace, type PackageExecutor } from "../src/research/workspace/runtime.js";
+import {
+  prepareNativeResearchStage,
+  runResearchWorkspace as runNativeControlledWorkspace,
+  runResearchWorkspaceWithInjectedProducerForTesting as runResearchWorkspace,
+  submitNativeResearchStage,
+  type PackageExecutor,
+} from "../src/research/workspace/runtime.js";
 import {
   hashRegularTree,
   regularTreeFiles,
@@ -841,6 +847,113 @@ describe("research project execution", () => {
     },
   );
 
+  it("keeps producer reasoning in the native host and launches only the reviewer", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      await initializeProject(root, "native-host", "Evaluate a native-host research flow.");
+      const inputPath = join(root, "native-evidence.txt");
+      await writeFile(inputPath, "Measured native-host evidence.\n");
+      await addProjectInput(root, "native-host", inputPath, "primary");
+
+      let unexpectedProducerCalls = 0;
+      const stopped = await runNativeControlledWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 5, dryRun: false, environment: {} },
+        async () => {
+          unexpectedProducerCalls += 1;
+          throw new Error("the control plane must not launch a producer");
+        },
+      );
+      assert.equal(stopped.stopReason, "native-stage-required");
+      assert.equal(unexpectedProducerCalls, 0);
+
+      const nativeAgents: string[] = [];
+      const nativeExecutor = fakeExecutor(nativeAgents);
+      for (const stage of ["discover", "analyze", "synthesize"] as const) {
+        const packet = await prepareNativeResearchStage({
+          root,
+          projectId: "native-host",
+          stage,
+          hostAgent: "codex",
+        });
+        assert.match(packet.prompt, /current interactive host session/i);
+        assert.match(packet.prompt, /do not launch codex exec/i);
+        assert.equal(packet.commands.submit.argv.includes("--confirm-model"), false);
+        const session = JSON.parse(
+          await readFile(
+            join(workspacePaths(root).projects, "native-host", "native", "active.json"),
+            "utf8",
+          ),
+        ) as { capsuleRoot: string; capsuleProject: string };
+        const execution = await nativeExecutor({
+          route: {
+            agent: "codex",
+            executionMode: "native-host",
+            binary: "codex",
+            model: packet.expectedModel,
+          },
+          prompt: packet.prompt,
+          outputSchema: packet.outputSchema,
+          requestId: packet.sessionId,
+          purpose: "primary",
+          capsuleRoot: session.capsuleRoot,
+          projectRoot: session.capsuleProject,
+          workspaceRoot: root,
+          timeoutSeconds: packet.limits.maxWallSeconds,
+          maxTurns: 1,
+          maxOutputTokens: packet.limits.maxOutputTokens,
+          maxCostUsd: packet.limits.reservedMaxCostUsd,
+          toolPolicy: "none",
+          environment: {},
+          brokerUrl: null,
+        });
+        const outputPath = join(root, `${stage}-${packet.sessionId}.json`);
+        await writeFile(outputPath, execution.stdout);
+        await submitNativeResearchStage({
+          root,
+          projectId: "native-host",
+          sessionId: packet.sessionId,
+          outputPath,
+          confirmedModel: packet.expectedModel,
+        });
+      }
+
+      const launched: string[] = [];
+      const completed = await runNativeControlledWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 5, dryRun: false, environment: {} },
+        fakeExecutor(launched),
+      );
+      assert.equal(completed.status, "complete", JSON.stringify(completed));
+      assert.deepEqual(nativeAgents, ["codex", "codex", "codex"]);
+      assert.deepEqual(launched, ["claude"]);
+      const project = await loadProject(root, "native-host");
+      assert.equal(project.status, "complete");
+      assert.equal(project.usage.tokens, 360_010);
+      const runFiles = await regularTreeFiles(
+        join(workspacePaths(root).projects, "native-host", "runs"),
+      );
+      const runRecords = await Promise.all(
+        runFiles.map(
+          async (path) =>
+            JSON.parse(await readFile(path, "utf8")) as {
+              packageId: string;
+              accountingMode?: string;
+            },
+        ),
+      );
+      assert.ok(
+        runRecords
+          .filter((record) => ["discover", "analyze", "synthesize"].includes(record.packageId))
+          .every((record) => record.accountingMode === "reserved-native-host"),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("registers immutable inputs and closes through different agent families", async () => {
     const root = await temporaryDirectory();
     const inputParent = await temporaryDirectory();
@@ -1145,9 +1258,19 @@ describe("research project execution", () => {
       await initializeResearchWorkspace(root, undefined);
       const paths = workspacePaths(root);
       const config = JSON.parse(await readFile(paths.config, "utf8")) as {
-        reviewer: { agent: string; binary: string; model: string | null };
+        reviewer: {
+          agent: string;
+          executionMode: "native-host" | "headless-cli";
+          binary: string;
+          model: string | null;
+        };
       };
-      config.reviewer = { agent: "codex", binary: "codex", model: null };
+      config.reviewer = {
+        agent: "codex",
+        executionMode: "headless-cli",
+        binary: "codex",
+        model: null,
+      };
       await writeFile(paths.config, `${JSON.stringify(config, null, 2)}\n`);
       await initializeProject(root, "same-family", "Evaluate one independently reviewed question.");
 
@@ -1483,7 +1606,7 @@ describe("research workspace CLI", () => {
       );
       assert.ok(value.gaps.includes("embedded-stage-context-reservation-exceeds-total:2000/1500"));
       assert.deepEqual(value.budget.outputTokenLimitEnforcement, {
-        producer: "post-execution",
+        producer: "reserved-native-host-on-submit",
         reviewer: "post-execution",
       });
     } finally {
@@ -1794,7 +1917,7 @@ describe("research workspace CLI", () => {
         review: 30_000,
       });
       assert.deepEqual(preflightValue.budget.outputTokenLimitEnforcement, {
-        producer: "post-execution",
+        producer: "reserved-native-host-on-submit",
         reviewer: "post-execution",
       });
       assert.deepEqual(preflightValue.budget.maxTurns, {
@@ -1806,7 +1929,7 @@ describe("research workspace CLI", () => {
       });
       assert.equal(
         preflightValue.executionPolicy.producer.turnLimitEnforcement,
-        "reservation-and-post-execution",
+        "native-host-instruction-and-reserved-accounting",
       );
       assert.equal(preflightValue.executionPolicy.reviewer.turnLimitEnforcement, "provider");
       assert.ok(

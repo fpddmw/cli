@@ -422,6 +422,20 @@ export async function executeResearchSetupWizard(input: {
     ],
     "production-research",
   );
+  const producerAgent = await prompt.select<"codex" | "claude">(
+    "Current native research host",
+    [
+      {
+        value: "codex",
+        label: "Codex app/session (research here; Claude Code reviews independently)",
+      },
+      {
+        value: "claude",
+        label: "Claude Code interactive session (research here; Codex CLI reviews independently)",
+      },
+    ],
+    "codex",
+  );
   const evidenceChoices: Array<{ value: ResearchSetupEvidenceProfile; label: string }> = [
     { value: EXTERNAL_SKILL_PROFILE, label: "Brave web + news (recommended baseline)" },
     {
@@ -490,19 +504,28 @@ export async function executeResearchSetupWizard(input: {
 
   prompt.note("3. Installation targets", "section");
   const evidenceSelected = selected.some((skill) => skill.role === "evidence-capability");
-  const agentChoice = await prompt.select(
-    "Install targets",
-    evidenceSelected
-      ? [
+  const producerTarget = producerAgent === "codex" ? "codex" : "claude-code";
+  const installChoices = evidenceSelected
+    ? producerAgent === "claude"
+      ? [{ value: "both", label: "Codex capabilities + Claude Code orchestrator (required)" }]
+      : [
           { value: "codex", label: "Codex only (.agents/skills)" },
           { value: "both", label: "Codex and Claude Code (two copied trees)" },
         ]
-      : [
-          { value: "codex", label: "Codex only (.agents/skills)" },
-          { value: "claude-code", label: "Claude Code only (.claude/skills)" },
-          { value: "both", label: "Codex and Claude Code" },
-        ],
-    "codex",
+    : [
+        {
+          value: producerTarget,
+          label:
+            producerTarget === "codex"
+              ? "Codex only (.agents/skills)"
+              : "Claude Code only (.claude/skills)",
+        },
+        { value: "both", label: "Codex and Claude Code" },
+      ];
+  const agentChoice = await prompt.select(
+    "Install targets",
+    installChoices,
+    evidenceSelected && producerAgent === "claude" ? "both" : producerTarget,
   );
   const agents: ResearchSetupAgent[] =
     agentChoice === "both" ? ["codex", "claude-code"] : [agentChoice as ResearchSetupAgent];
@@ -548,7 +571,7 @@ export async function executeResearchSetupWizard(input: {
       selected.map((skill) => skill.id),
       prompt,
     );
-    const agentRoutes = await collectAgentRoutes(prompt);
+    const agentRoutes = await collectAgentRoutes(prompt, producerAgent);
 
     prompt.note("5. Verification options", "section");
     const liveChecks = await prompt.confirm(
@@ -563,7 +586,7 @@ export async function executeResearchSetupWizard(input: {
           )
         : false;
     const agentSmoke = await prompt.confirm(
-      "Run producer/reviewer agent smoke checks after installation? This may consume paid model quota.",
+      "Run the independent reviewer CLI smoke after installation? This may consume paid model quota.",
       false,
     );
     const confirmAgentSmokeCost = agentSmoke
@@ -908,8 +931,12 @@ async function collectLicenseAcceptances(
 
 async function collectAgentRoutes(
   prompt: ResearchSetupWizardPrompt,
+  producerAgent: "codex" | "claude",
 ): Promise<Partial<ResearchSetupAgentRoutePlan>> {
-  if (!(await prompt.confirm("Configure exact producer/reviewer model IDs now?", false))) return {};
+  const reviewerAgent = producerAgent === "codex" ? "claude" : "codex";
+  if (!(await prompt.confirm("Configure exact native-producer/reviewer model IDs now?", false))) {
+    return { producerAgent, reviewerAgent };
+  }
   const producerModel = (await prompt.input("Producer model ID (blank to defer)", "")).trim();
   const reviewerModel = (await prompt.input("Reviewer model ID (blank to defer)", "")).trim();
   let producerPricing: AgentPricing | undefined;
@@ -919,6 +946,8 @@ async function collectAgentRoutes(
     reviewerPricing = await collectPricing("Reviewer", prompt);
   }
   return {
+    producerAgent,
+    reviewerAgent,
     ...(producerModel ? { producerModel } : {}),
     ...(reviewerModel ? { reviewerModel } : {}),
     ...(producerPricing ? { producerPricing } : {}),

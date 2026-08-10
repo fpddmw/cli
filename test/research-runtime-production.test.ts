@@ -15,9 +15,13 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
-import { startCapabilityBroker } from "../src/research/workspace/broker.js";
+import {
+  fetchNativeCandidateSource,
+  startCapabilityBroker,
+} from "../src/research/workspace/broker.js";
 import { readAndVerifyProjectInputPlan } from "../src/research/workspace/input-plan.js";
 import { appendJournalEvent } from "../src/research/workspace/journal.js";
+import { doctorExternalCapabilities } from "../src/research/workspace/external-skills.js";
 import {
   loadProjectEvidenceReceipts,
   stageProjectEvidence,
@@ -30,7 +34,12 @@ import {
   loadProject,
   retryProjectPackage,
 } from "../src/research/workspace/projects.js";
-import { runResearchWorkspace, type PackageExecutor } from "../src/research/workspace/runtime.js";
+import {
+  abortNativeResearchStage,
+  prepareNativeResearchStage,
+  runResearchWorkspaceWithInjectedProducerForTesting as runResearchWorkspace,
+  type PackageExecutor,
+} from "../src/research/workspace/runtime.js";
 import {
   hashRegularTree,
   regularTreeFiles,
@@ -44,6 +53,62 @@ import {
 } from "../src/research/workspace/workspace.js";
 
 describe("production research evidence and broker", () => {
+  it("binds one native-host evidence fetch to the active discover stage", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    const originalFetch = globalThis.fetch;
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, "native-fetch", "Evaluate native broker evidence.");
+      await installNetworkCapability(root, skillParent);
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "native-fetch",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      assert.ok(packet.commands.fetchEvidence);
+      globalThis.fetch = async () =>
+        new Response('{"records":[{"id":"native"}]}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      const receipt = await fetchNativeCandidateSource({
+        root,
+        projectId: "native-fetch",
+        request: {
+          capability_id: "method.public-source",
+          url: "https://source.test/items?q=native",
+        },
+      });
+      assert.match(String(receipt.locator), /^evidence\/objects\//);
+      assert.equal((receipt.brokerBudget as { startedCalls: number }).startedCalls, 1);
+      await assert.rejects(
+        fetchNativeCandidateSource({
+          root,
+          projectId: "native-fetch",
+          request: {
+            capability_id: "method.public-source",
+            url: "https://source.test/items?api_key=must-not-leak",
+          },
+        }),
+        /locked endpoint or method policy/i,
+      );
+      assert.doesNotMatch(await readFile(workspacePaths(root).journal, "utf8"), /must-not-leak/);
+      await abortNativeResearchStage({
+        root,
+        projectId: "native-fetch",
+        sessionId: packet.sessionId,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("persists exact broker evidence and includes verified objects in the review packet", async () => {
     const root = await temporaryDirectory();
     const skillParent = await temporaryDirectory();
@@ -301,29 +366,36 @@ describe("production research evidence and broker", () => {
       const result = await runResearchWorkspace(
         root,
         { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
-        brokerBackedExecutor(async (request) => {
-          assert.equal(request.maxTurns, 3);
-          assert.doesNotMatch(request.prompt, /### inputs\/review-packet\.json/);
-          assert.match(request.prompt, /TRUNCATED: the full object/);
-          const contextPath = join(request.projectRoot, "inputs", "review-evidence-context.txt");
-          const contextInfo = await lstat(contextPath);
-          const config = JSON.parse(await readFile(workspacePaths(root).config, "utf8")) as {
-            budget: { maxInputContextTokens: number };
-          };
-          assert.ok(contextInfo.size <= config.budget.maxInputContextTokens * 3);
-          const packet = JSON.parse(
-            await readFile(join(request.projectRoot, "inputs", "review-packet.json"), "utf8"),
-          ) as {
-            evidenceReceipts: Array<{ locator: string }>;
-            evidenceFiles: Array<{ path: string; bytes: number }>;
-          };
-          assert.equal(packet.evidenceReceipts.length, 4);
-          assert.ok(packet.evidenceFiles.some((file) => file.bytes > contextInfo.size));
-          for (const receipt of packet.evidenceReceipts) {
-            assert.ok(await readFile(join(request.projectRoot, receipt.locator)));
-          }
-          reviewed = true;
-        }, false),
+        brokerBackedExecutor(
+          async (request) => {
+            assert.equal(request.maxTurns, 3);
+            assert.doesNotMatch(request.prompt, /### inputs\/review-packet\.json/);
+            assert.match(request.prompt, /TRUNCATED: the full object/);
+            assert.match(request.prompt, /jsonPointer: \/records\/2/);
+            assert.match(request.prompt, /"id": 3/);
+            assert.doesNotMatch(request.prompt, /"id": 1/);
+            const contextPath = join(request.projectRoot, "inputs", "review-evidence-context.txt");
+            const contextInfo = await lstat(contextPath);
+            const config = JSON.parse(await readFile(workspacePaths(root).config, "utf8")) as {
+              budget: { maxInputContextTokens: number };
+            };
+            assert.ok(contextInfo.size <= config.budget.maxInputContextTokens * 3);
+            const packet = JSON.parse(
+              await readFile(join(request.projectRoot, "inputs", "review-packet.json"), "utf8"),
+            ) as {
+              evidenceReceipts: Array<{ locator: string }>;
+              evidenceFiles: Array<{ path: string; bytes: number }>;
+            };
+            assert.equal(packet.evidenceReceipts.length, 4);
+            assert.ok(packet.evidenceFiles.some((file) => file.bytes > contextInfo.size));
+            for (const receipt of packet.evidenceReceipts) {
+              assert.ok(await readFile(join(request.projectRoot, receipt.locator)));
+            }
+            reviewed = true;
+          },
+          false,
+          "/records/2",
+        ),
       );
       assert.equal(result.status, "complete", JSON.stringify(result));
       assert.equal(reviewed, true);
@@ -445,7 +517,7 @@ describe("production research evidence and broker", () => {
           name: "fetch_candidate_source",
           arguments: {
             capability_id: "method.public-source",
-            url: "https://source.test/limited?token=request-secret",
+            url: "https://source.test/limited?query=request-secret",
           },
         });
         const text = JSON.stringify(response);
@@ -743,6 +815,53 @@ describe("production research evidence and broker", () => {
 });
 
 describe("production research control plane", () => {
+  it("reuses one capability probe and skips paid reviewer smoke after a blocking failure", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await installNetworkCapability(root, skillParent);
+      await lockCapabilities(root);
+      let liveCalls = 0;
+      const capabilityDoctor = await doctorExternalCapabilities(root, {
+        live: true,
+        fetcher: async () => {
+          liveCalls += 1;
+          return new Response('{"error":"unavailable"}', {
+            status: 503,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      });
+      assert.equal(capabilityDoctor.status, "blocked");
+      let agentCalls = 0;
+      const report = await doctorResearchWorkspace(root, {
+        capabilitySmoke: true,
+        agentSmoke: true,
+        capabilityDoctorResult: capabilityDoctor,
+        capabilityFetcher: async () => {
+          throw new Error("duplicate capability probe");
+        },
+        executor: async () => {
+          agentCalls += 1;
+          throw new Error("paid smoke must be skipped");
+        },
+      });
+      assert.equal(report.status, "blocked");
+      assert.equal(liveCalls, 1);
+      assert.equal(agentCalls, 0);
+      assert.equal(
+        report.checks.find((check) => check.id === "agent-sandbox-smoke.skipped")?.status,
+        "fail",
+      );
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("binds full local evidence while embedding only bounded reviewer context", async () => {
     const root = await temporaryDirectory();
     const sourceRoot = await temporaryDirectory();
@@ -1555,7 +1674,7 @@ describe("production research control plane", () => {
       assert.equal(withSmoke.status, "ready", JSON.stringify(withSmoke));
       assert.deepEqual(
         smokeRequests.map((request) => request.route.agent),
-        ["codex", "claude"],
+        ["claude"],
       );
       assert.ok(smokeRequests.every((request) => request.purpose === "doctor"));
       assert.equal((await verifyDoctorAttestation(root)).status, "verified");
@@ -1580,13 +1699,13 @@ describe("production research control plane", () => {
         environment: {},
         runtimeFingerprinter: async (route) => ({
           ...mockRuntime(route),
-          binarySha256: route.agent === "codex" ? "c".repeat(64) : "a".repeat(64),
+          binarySha256: route.agent === "claude" ? "c".repeat(64) : "a".repeat(64),
         }),
       });
       assert.equal(runtimeDrift.status, "blocked");
       assert.match(
         runtimeDrift.checks.find((check) => check.id === "doctor-attestation")?.detail ?? "",
-        /codex runtime fingerprint drifted/,
+        /claude runtime fingerprint drifted/,
       );
       const driftedConfig = JSON.parse(await readFile(paths.config, "utf8")) as {
         budget: { maxInputContextTokens: number };
@@ -1809,6 +1928,7 @@ async function installNetworkCapability(
 function brokerBackedExecutor(
   onReview: (request: AgentExecutionRequest) => void | Promise<void>,
   assertSmallPaginatedContext = true,
+  sourceJsonPointer = "/records/0",
 ): PackageExecutor {
   return async (request) => {
     const stage = stageFrom(request);
@@ -1837,7 +1957,7 @@ function brokerBackedExecutor(
               doi: null,
               publicationDate: null,
               excerpt: "One bounded record.",
-              jsonPointer: "/records/0",
+              jsonPointer: sourceJsonPointer,
               quality: { level: "primary", rationale: "Direct response." },
               applicability: "Declared question.",
               coverageDimensions: ["research-question"],
@@ -1870,9 +1990,9 @@ function brokerBackedExecutor(
       assert.ok(packet.evidenceReceipts.length >= 1);
       assert.match(request.prompt, /### inputs\/review-evidence-context\.txt/);
       if (assertSmallPaginatedContext) {
-        assert.match(request.prompt, /\{"id":1(?:,|\})/);
-        assert.match(request.prompt, /\{"id":2(?:,|\})/);
-        assert.doesNotMatch(request.prompt, /\{"id":3(?:,|\})/);
+        assert.match(request.prompt, /"id": 1/);
+        assert.doesNotMatch(request.prompt, /"id": 2/);
+        assert.doesNotMatch(request.prompt, /"id": 3/);
       }
       for (const file of packet.evidenceFiles) {
         assert.ok(await readFile(join(request.projectRoot, file.path)));

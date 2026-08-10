@@ -327,6 +327,9 @@ export async function forkProject(
         ...source.evidenceRequirements,
         dimensions: [...source.evidenceRequirements.dimensions],
         sourceTypes: [...source.evidenceRequirements.sourceTypes],
+        requiredCapabilityIds: [...(source.evidenceRequirements.requiredCapabilityIds ?? [])],
+        requiredCompanionIds: [...(source.evidenceRequirements.requiredCompanionIds ?? [])],
+        requiredDiscoveryScopes: [...(source.evidenceRequirements.requiredDiscoveryScopes ?? [])],
       },
       packages,
       usage: {
@@ -533,6 +536,7 @@ function defaultEvidenceRequirements(config: WorkspaceConfig): ProjectEvidenceRe
         dimensions: ["research-question"],
         sourceTypes: ["primary"],
         requiredCapabilityIds: [],
+        requiredCompanionIds: [],
         requiredDiscoveryScopes: [],
         minSources: 3,
         minFullTextSources: 1,
@@ -544,6 +548,7 @@ function defaultEvidenceRequirements(config: WorkspaceConfig): ProjectEvidenceRe
         dimensions: ["research-question"],
         sourceTypes: [],
         requiredCapabilityIds: [],
+        requiredCompanionIds: [],
         requiredDiscoveryScopes: [],
         minSources: 1,
         minFullTextSources: 0,
@@ -561,6 +566,9 @@ export function normalizeEvidenceRequirements(
     sourceTypes: [...new Set(value.sourceTypes.map(normalizeRequirementId))].sort(),
     requiredCapabilityIds: [
       ...new Set((value.requiredCapabilityIds ?? []).map(normalizeRequirementId)),
+    ].sort(),
+    requiredCompanionIds: [
+      ...new Set((value.requiredCompanionIds ?? []).map(normalizeRequirementId)),
     ].sort(),
     requiredDiscoveryScopes: [
       ...new Set((value.requiredDiscoveryScopes ?? []).map(normalizeRequirementId)),
@@ -593,6 +601,9 @@ function isEvidenceRequirements(value: unknown): value is ProjectEvidenceRequire
     ((value as ProjectEvidenceRequirements).requiredCapabilityIds === undefined ||
       (Array.isArray((value as ProjectEvidenceRequirements).requiredCapabilityIds) &&
         (value as ProjectEvidenceRequirements).requiredCapabilityIds!.every(validRequirementId))) &&
+    ((value as ProjectEvidenceRequirements).requiredCompanionIds === undefined ||
+      (Array.isArray((value as ProjectEvidenceRequirements).requiredCompanionIds) &&
+        (value as ProjectEvidenceRequirements).requiredCompanionIds!.every(validRequirementId))) &&
     ((value as ProjectEvidenceRequirements).requiredDiscoveryScopes === undefined ||
       (Array.isArray((value as ProjectEvidenceRequirements).requiredDiscoveryScopes) &&
         (value as ProjectEvidenceRequirements).requiredDiscoveryScopes!.every(

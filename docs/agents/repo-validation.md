@@ -16,8 +16,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-09
-lastReviewedCommit: 14c804e61b3768489253533ee754b6f7e75460ea
+lastReviewedAt: 2026-08-10
+lastReviewedCommit: bef62f8d48c42eaff14fa2bd7eba1be83a46a58b
 ---
 
 # Repo Validation
@@ -29,6 +29,9 @@ lastReviewedCommit: 14c804e61b3768489253533ee754b6f7e75460ea
 - Source: TypeScript
 - Stable launcher: `bin/tiangong-ai.js`
 - Research execution sandbox: macOS `sandbox-exec` or Linux Bubblewrap
+- Windows validates setup and deterministic logic in smoke-test mode, but
+  production research readiness remains blocked without an approved capsule
+  sandbox.
 - Repository text checkout uses LF line endings through `.gitattributes`; this
   keeps Prettier behavior consistent across Linux, macOS, and Windows CI
   runners.
@@ -127,7 +130,11 @@ replacement-time managed capability and credential pruning with custom/Skill
 preservation, explicit smoke-failure blocking, minimal secret environments,
 exact document/paper artifact
 binding, no-overwrite/no-directory-scan behavior, explicit browser handoff, and
-bounded JSON POST broker credential/body redaction.
+bounded JSON POST broker credential/body redaction. Readiness tests additionally
+prove that one capability probe is reused, paid reviewer smoke is skipped after
+a blocking prerequisite, Semantic Scholar throttling degrades only acquisition,
+and an optional preprocessor becomes a hard gate only when its exact catalog ID
+is required by the project.
 `test/research-workspace.test.ts` also fixes the whole-tree traversal order to
 NFC-normalized UTF-8 byte ordering so default ICU locale changes cannot alter a
 capability or setup pin.
@@ -141,7 +148,8 @@ bounded local context with full-source review, stage tool isolation, runtime
 target/wrapper/adapter fingerprinting and drift rejection, telemetry redaction,
 owner-only whitelisted Claude settings authentication, production doctor
 attestation creation, default-doctor reuse, current-runtime drift rejection,
-two-protocol-turn tool-free review with exact local/broker bounded views,
+two-protocol-turn tool-free review with exact local views and cited broker
+items selected from hash-bound raw responses by admitted JSON Pointer,
 persistent packet/context tamper rejection at closure, JSONL progress, and
 append-only retry/fork recovery. `test/research-external-skills.test.ts`
 validates the pinned external recommendation catalog, actionable missing-install
@@ -154,25 +162,32 @@ diagnostics, bounded sanitized provider code/detail/request-ID retention,
 source-to-installed-tree binding, refusal to bless drift through lock/configure/import,
 internal-source rejection, invalid-definition errors, sensitive health-URL
 rejection, and blocked catalog/doctor status for symlinked credential files.
+Native-host regression coverage proves that ordinary `research run` never
+invokes the producer executor, prepare/submit advances discover through
+synthesize with hash-bound sessions and reserved accounting, native broker
+fetches remain call-bounded and sanitized, and only the other-family reviewer
+CLI is launched before mechanical closure.
 Production tests additionally require an external
 public-internet plan and block downstream work when any capability marked
 `requiredForDiscovery` lacks a broker receipt. The failure distinguishes a
 capability that was never exercised from one that was attempted but yielded no
 admissible receipt, including only sanitized failure-kind metadata.
 
-Executor regression coverage also verifies that Codex receives exactly one
-external-sandbox bypass flag and no nested `--sandbox read-only` flag, while
-shell and unified-exec remain disabled. It also verifies the capsule-local
-project-root marker/config override that prevents parent project-config reads.
+Reviewer executor regression coverage verifies that a Codex reviewer receives
+exactly one external-sandbox bypass flag and no nested `--sandbox read-only`
+flag, while shell and unified-exec remain disabled. It also verifies the
+capsule-local project-root marker/config override that prevents parent
+project-config reads.
 Primary/repair reuse tests verify that an identical owner-only auth copy is
 accepted idempotently while source drift is rejected without overwriting the
 capsule file.
 Leaf-command help tests run from an unmanaged directory before workspace
 resolution. A deterministic fake Codex emits a
 90 KiB MCP result to prove the capture reservation includes bounded tool
-context instead of failing at the historical 64 KiB floor. Runtime tests verify
-that discovery has no filesystem tool policy and receives the exact locked
-manifest and staged top-level Skill documentation inline.
+context instead of failing at the historical 64 KiB floor. The retained
+test-only injected-producer seam verifies legacy broker packet bounds without
+being reachable from the public CLI; native runtime tests cover the public
+prepare/fetch/submit protocol.
 Preflight/runtime parity coverage verifies that the full bounded capability
 documentation allowance is reserved for every possible broker turn and fits
 the default discovery package before project admission.

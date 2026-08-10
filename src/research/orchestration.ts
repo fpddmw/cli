@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
 import { CliError } from "../errors.js";
@@ -23,6 +23,7 @@ import {
   inspectExternalSkillCatalog,
 } from "./workspace/external-skills.js";
 import { appendJournalEvent } from "./workspace/journal.js";
+import { fetchNativeCandidateSource } from "./workspace/broker.js";
 import { readAndVerifyProjectInputPlan } from "./workspace/input-plan.js";
 import {
   addProjectInput,
@@ -36,7 +37,12 @@ import {
   retryProjectPackage,
 } from "./workspace/projects.js";
 import { evaluateProjectPreflight } from "./workspace/preflight.js";
-import { runResearchWorkspace } from "./workspace/runtime.js";
+import {
+  abortNativeResearchStage,
+  prepareNativeResearchStage,
+  runResearchWorkspace,
+  submitNativeResearchStage,
+} from "./workspace/runtime.js";
 import { schemaForStage } from "./workspace/schemas.js";
 import { sha256Text, workspacePaths } from "./workspace/storage.js";
 import type { ProjectEvidenceRequirements, ProjectInput, ResearchMode } from "./workspace/types.js";
@@ -85,6 +91,10 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--workspace <path>] [--json]
   tiangong-ai research project retry <project-id> [--package <package-id>] [--workspace <path>] [--json]
   tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|analyze|synthesize] [--workspace <path>] [--json]
+  tiangong-ai research project stage prepare <project-id> --stage discover|analyze|synthesize --host-agent codex|claude [--workspace <path>] [--json]
+  tiangong-ai research project stage submit <project-id> --session <id> --output <absolute-json> [--confirm-model <id>] [--workspace <path>] [--json]
+  tiangong-ai research project stage abort <project-id> --session <id> [--workspace <path>] [--json]
+  tiangong-ai research project evidence fetch <project-id> --request <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research schema show <discover|analyze|synthesize|review|doctor> [--json]
   tiangong-ai research status [--project <project-id>] [--workspace <absolute-path>] [--json]
   tiangong-ai research run [--project <project-id>] [--max-parallel <1-8>] [--max-cycles <1-100>] [--dry-run] [--progress-jsonl] [--workspace <absolute-path>] [--json]
@@ -339,6 +349,104 @@ async function runCapability(argv: string[], io: CliIO): Promise<number> {
 async function runProject(argv: string[], io: CliIO): Promise<number> {
   const [action, ...rest] = argv;
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action === "stage") {
+    const [stageAction, ...stageRest] = rest;
+    if (stageAction === "prepare") {
+      const args = parseStrictArgs(
+        stageRest,
+        { ...WORKSPACE_OPTIONS, stage: "string", "host-agent": "string" },
+        "research project stage prepare",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project stage prepare");
+      const stage = nativeProducerStage(strictString(args, "stage"));
+      const hostAgent = nativeHostAgent(strictString(args, "host-agent"));
+      const root = await workspaceFromArgs(args);
+      const result = await prepareNativeResearchStage({ root, projectId, stage, hostAgent });
+      writeJson(io, result, args);
+      return 0;
+    }
+    if (stageAction === "submit") {
+      const args = parseStrictArgs(
+        stageRest,
+        {
+          ...WORKSPACE_OPTIONS,
+          session: "string",
+          output: "string",
+          "confirm-model": "string",
+        },
+        "research project stage submit",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project stage submit");
+      const sessionId = strictString(args, "session");
+      const outputPath = strictString(args, "output");
+      if (!sessionId || !outputPath) {
+        throw new CliError("stage submit requires --session and --output.", {
+          code: "RESEARCH_NATIVE_STAGE_OUTPUT_INVALID",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      const result = await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId,
+        outputPath,
+        confirmedModel: strictString(args, "confirm-model") ?? null,
+      });
+      writeJson(io, result, args);
+      return 0;
+    }
+    if (stageAction === "abort") {
+      const args = parseStrictArgs(
+        stageRest,
+        { ...WORKSPACE_OPTIONS, session: "string" },
+        "research project stage abort",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project stage abort");
+      const sessionId = strictString(args, "session");
+      if (!sessionId) {
+        throw new CliError("stage abort requires --session.", {
+          code: "RESEARCH_NATIVE_STAGE_SESSION_REQUIRED",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      const result = await abortNativeResearchStage({ root, projectId, sessionId });
+      writeJson(io, result, args);
+      return 0;
+    }
+    throw unknownAction("research project stage", stageAction ?? "");
+  }
+  if (action === "evidence") {
+    const [evidenceAction, ...evidenceRest] = rest;
+    if (evidenceAction !== "fetch") {
+      throw unknownAction("research project evidence", evidenceAction ?? "");
+    }
+    const args = parseStrictArgs(
+      evidenceRest,
+      { ...WORKSPACE_OPTIONS, request: "string" },
+      "research project evidence fetch",
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(args.positionals, "research project evidence fetch");
+    const requestPath = strictString(args, "request");
+    if (!requestPath) {
+      throw new CliError("evidence fetch requires --request.", {
+        code: "RESEARCH_BROKER_REQUEST_INVALID",
+        exitCode: 2,
+      });
+    }
+    const request = await readNativeEvidenceRequest(requestPath);
+    const root = await workspaceFromArgs(args);
+    const result = await withWorkspaceLock(root, "research.native-evidence.fetch", () =>
+      fetchNativeCandidateSource({ root, projectId, request }),
+    );
+    writeJson(io, result, args);
+    return 0;
+  }
   if (action === "init") {
     const args = parseStrictArgs(
       rest,
@@ -554,6 +662,8 @@ async function readEvidenceRequirements(path: string): Promise<ProjectEvidenceRe
     !Array.isArray((value as ProjectEvidenceRequirements).sourceTypes) ||
     ((value as ProjectEvidenceRequirements).requiredCapabilityIds !== undefined &&
       !Array.isArray((value as ProjectEvidenceRequirements).requiredCapabilityIds)) ||
+    ((value as ProjectEvidenceRequirements).requiredCompanionIds !== undefined &&
+      !Array.isArray((value as ProjectEvidenceRequirements).requiredCompanionIds)) ||
     ((value as ProjectEvidenceRequirements).requiredDiscoveryScopes !== undefined &&
       !Array.isArray((value as ProjectEvidenceRequirements).requiredDiscoveryScopes)) ||
     typeof (value as ProjectEvidenceRequirements).minSources !== "number" ||
@@ -576,6 +686,7 @@ async function readEvidenceRequirements(path: string): Promise<ProjectEvidenceRe
   return normalizeEvidenceRequirements({
     ...(value as ProjectEvidenceRequirements),
     requiredCapabilityIds: (value as ProjectEvidenceRequirements).requiredCapabilityIds ?? [],
+    requiredCompanionIds: (value as ProjectEvidenceRequirements).requiredCompanionIds ?? [],
     requiredDiscoveryScopes: (value as ProjectEvidenceRequirements).requiredDiscoveryScopes ?? [],
   });
 }
@@ -596,6 +707,55 @@ function resumeStage(value: string | undefined): "discover" | "analyze" | "synth
     code: "RESEARCH_PROJECT_FORK_INVALID",
     exitCode: 2,
   });
+}
+
+function nativeProducerStage(value: string | undefined): "discover" | "analyze" | "synthesize" {
+  if (value === "discover" || value === "analyze" || value === "synthesize") return value;
+  throw new CliError("--stage must be discover, analyze, or synthesize.", {
+    code: "RESEARCH_NATIVE_STAGE_INVALID",
+    exitCode: 2,
+  });
+}
+
+function nativeHostAgent(value: string | undefined): "codex" | "claude" {
+  if (value === "codex" || value === "claude") return value;
+  throw new CliError("--host-agent must be codex or claude.", {
+    code: "RESEARCH_NATIVE_HOST_INVALID",
+    exitCode: 2,
+  });
+}
+
+async function readNativeEvidenceRequest(path: string): Promise<Record<string, unknown>> {
+  if (!isAbsolute(path)) {
+    throw new CliError("--request must be an absolute JSON file path.", {
+      code: "RESEARCH_BROKER_REQUEST_INVALID",
+      exitCode: 2,
+    });
+  }
+  const selected = resolve(path);
+  const info = await lstat(selected).catch(() => undefined);
+  if (!info?.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) {
+    throw new CliError("--request must be a bounded regular non-symlink JSON file.", {
+      code: "RESEARCH_BROKER_REQUEST_INVALID",
+      exitCode: 2,
+    });
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(selected, "utf8")) as unknown;
+  } catch {
+    throw new CliError("--request contains invalid JSON.", {
+      code: "RESEARCH_BROKER_REQUEST_INVALID",
+      exitCode: 2,
+    });
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new CliError("--request must contain one JSON object.", {
+      code: "RESEARCH_BROKER_REQUEST_INVALID",
+      exitCode: 2,
+    });
+  }
+  return value as Record<string, unknown>;
 }
 
 async function workspaceFromArgs(args: ReturnType<typeof parseStrictArgs>): Promise<string> {

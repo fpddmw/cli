@@ -103,12 +103,19 @@ export async function initializeResearchWorkspace(
     mode,
     producer: {
       agent: "codex",
+      executionMode: "native-host",
       binary: "codex",
       model: null,
       effort: "low",
       verbosity: "low",
     },
-    reviewer: { agent: "claude", binary: "claude", model: null, effort: "low" },
+    reviewer: {
+      agent: "claude",
+      executionMode: "headless-cli",
+      binary: "claude",
+      model: null,
+      effort: "low",
+    },
     budget: { ...DEFAULT_BUDGET },
   };
   const runtimeLock: RuntimeLock = {
@@ -269,6 +276,7 @@ export interface DoctorOptions {
   agentSmoke?: boolean;
   capabilitySmoke?: boolean;
   capabilityFetcher?: typeof fetch;
+  capabilityDoctorResult?: Awaited<ReturnType<typeof doctorExternalCapabilities>>;
   environment?: NodeJS.ProcessEnv;
   executor?: (request: AgentExecutionRequest) => Promise<ExecutionResult>;
   runtimeFingerprinter?: (
@@ -334,12 +342,27 @@ export async function doctorResearchWorkspace(
         : "Production research requires an external public-internet capability; local evidence alone is not sufficient.",
     });
   }
+  const staticAgentPrerequisitesReady = Boolean(
+    config &&
+    config.producer.executionMode === "native-host" &&
+    config.reviewer.executionMode === "headless-cli" &&
+    config.producer.agent !== config.reviewer.agent &&
+    (config.mode !== "production-research" ||
+      (config.producer.model &&
+        config.reviewer.model &&
+        config.producer.pricing &&
+        config.reviewer.pricing)) &&
+    !checks.some((check) => check.status === "fail"),
+  );
+  const runCapabilitySmoke = options.capabilitySmoke === true && staticAgentPrerequisitesReady;
   const externalCapabilityDoctor = capabilityDeclarations
     ? await checked(checks, "external-skill-readiness", async () => {
-        const value = await doctorExternalCapabilities(workspace, {
-          live: options.capabilitySmoke === true,
-          ...(options.capabilityFetcher ? { fetcher: options.capabilityFetcher } : {}),
-        });
+        const value =
+          options.capabilityDoctorResult ??
+          (await doctorExternalCapabilities(workspace, {
+            live: runCapabilitySmoke,
+            ...(options.capabilityFetcher ? { fetcher: options.capabilityFetcher } : {}),
+          }));
         if (value.status !== "ready") {
           throw new Error(value.failures.join("; ") || "external capability readiness failed");
         }
@@ -358,7 +381,7 @@ export async function doctorResearchWorkspace(
     config?.mode === "production-research" &&
     marker &&
     capabilityDeclarations &&
-    (!options.agentSmoke || !options.capabilitySmoke)
+    !(options.agentSmoke === true && options.capabilitySmoke === true)
       ? await inspectReusableDoctorAttestation(
           workspace,
           config,
@@ -370,7 +393,9 @@ export async function doctorResearchWorkspace(
     reusableAttestation?.status === "verified" ? reusableAttestation.attestation : null;
   if (hasNetworkCapabilities) {
     const liveCapabilityReady =
-      (options.capabilitySmoke === true && externalCapabilityDoctor?.status === "ready") ||
+      (runCapabilitySmoke &&
+        externalCapabilityDoctor?.mode === "live" &&
+        externalCapabilityDoctor.status === "ready") ||
       attested !== null;
     checks.push({
       id: "capability-live-smoke",
@@ -380,7 +405,9 @@ export async function doctorResearchWorkspace(
           ? "fail"
           : "warn",
       detail:
-        options.capabilitySmoke === true && externalCapabilityDoctor?.status === "ready"
+        runCapabilitySmoke &&
+        externalCapabilityDoctor?.mode === "live" &&
+        externalCapabilityDoctor.status === "ready"
           ? "All configured brokered capability health checks passed."
           : attested
             ? `Reused verified capability smoke from the doctor attestation valid until ${attested.expiresAt}.`
@@ -410,6 +437,23 @@ export async function doctorResearchWorkspace(
       id: "independent-review-route",
       status: "pass",
       detail: `${config.producer.agent} -> ${config.reviewer.agent}`,
+    });
+  }
+  if (
+    config &&
+    (config.producer.executionMode !== "native-host" ||
+      config.reviewer.executionMode !== "headless-cli")
+  ) {
+    checks.push({
+      id: "execution-mode-boundary",
+      status: "fail",
+      detail: "Producer must use native-host and reviewer must use headless-cli.",
+    });
+  } else if (config) {
+    checks.push({
+      id: "execution-mode-boundary",
+      status: "pass",
+      detail: "producer=native-host reviewer=headless-cli",
     });
   }
   if (
@@ -451,9 +495,18 @@ export async function doctorResearchWorkspace(
     });
   }
   if (config) {
-    if (options.agentSmoke) {
+    if (options.agentSmoke && !attested) {
       const smokeResults: AgentSmokeResult[] = [];
-      for (const route of [config.producer, config.reviewer]) {
+      const blockingPrerequisitesPassed = !checks.some((check) => check.status === "fail");
+      if (!blockingPrerequisitesPassed) {
+        checks.push({
+          id: "agent-sandbox-smoke.skipped",
+          status: "fail",
+          detail:
+            "Independent reviewer smoke was skipped because a zero/low-cost blocking prerequisite failed.",
+        });
+      }
+      for (const route of blockingPrerequisitesPassed ? [config.reviewer] : []) {
         const result = await checked(checks, `agent-sandbox-smoke.${route.agent}`, async () => {
           const value = await runAgentSmokeCheck(
             workspace,
@@ -467,7 +520,7 @@ export async function doctorResearchWorkspace(
         if (result) smokeResults.push(result);
       }
       const smoke =
-        smokeResults.length === 2
+        smokeResults.length === 1
           ? {
               runtimes: smokeResults
                 .map((result) => result.runtime)
@@ -476,7 +529,9 @@ export async function doctorResearchWorkspace(
                 .map((result) => result.usage)
                 .sort((left, right) => left.agent.localeCompare(right.agent)),
               capabilitySmoke:
-                options.capabilitySmoke && externalCapabilityDoctor?.status === "ready"
+                runCapabilitySmoke &&
+                externalCapabilityDoctor?.mode === "live" &&
+                externalCapabilityDoctor.status === "ready"
                   ? externalCapabilityDoctor.capabilities
                       .filter((capability) => capability.health.status !== "not-applicable")
                       .map((capability) => ({
@@ -487,15 +542,15 @@ export async function doctorResearchWorkspace(
                         targetSha256: capability.health.targetSha256,
                         httpStatus: capability.health.httpStatus,
                       }))
-                  : (attested?.capabilitySmoke ?? []),
+                  : [],
             }
           : undefined;
       checks.push({
         id: "agent-sandbox-smoke",
         status: smoke ? "pass" : "fail",
         detail: smoke
-          ? "Both isolated producer and reviewer smoke checks passed."
-          : `${smokeResults.length}/2 isolated agent smoke checks passed.`,
+          ? "The isolated independent-reviewer CLI smoke passed."
+          : `${smokeResults.length}/1 isolated reviewer smoke checks passed.`,
       });
       if (
         smoke &&
@@ -515,8 +570,8 @@ export async function doctorResearchWorkspace(
         id: "agent-sandbox-smoke",
         status: attested ? "pass" : config.mode === "production-research" ? "fail" : "warn",
         detail: attested
-          ? `Reused verified producer/reviewer runtime fingerprints from the doctor attestation valid until ${attested.expiresAt}.`
-          : "Producer/reviewer execution smoke was not run; rerun doctor with --agent-smoke before production research.",
+          ? `Reused the verified independent-reviewer runtime fingerprint from the doctor attestation valid until ${attested.expiresAt}.`
+          : "Independent-reviewer execution smoke was not run; rerun doctor with --agent-smoke before production research.",
       });
       if (config.mode === "production-research") {
         checks.push({
@@ -551,7 +606,7 @@ async function inspectReusableDoctorAttestation(
   const verification = await verifyDoctorAttestation(workspace);
   if (verification.status !== "verified" || !verification.attestation) return verification;
   const errors: string[] = [];
-  for (const route of [config.producer, config.reviewer]) {
+  for (const route of [config.reviewer]) {
     const expected = verification.attestation.runtimes.find(
       (runtime) => runtime.agent === route.agent && runtime.model === route.model,
     );
@@ -756,6 +811,15 @@ export async function verifyDoctorAttestation(root: string): Promise<{
   if (value.doctorSchemaSha256 !== sha256Text(canonicalJson(schemaForStage("doctor")))) {
     errors.push("doctor schema drifted");
   }
+  const reviewerRuntime = value.runtimes[0];
+  const reviewerUsage = value.smokeUsage[0];
+  if (
+    reviewerRuntime?.agent !== config.reviewer.agent ||
+    reviewerRuntime.model !== config.reviewer.model ||
+    reviewerUsage?.agent !== config.reviewer.agent
+  ) {
+    errors.push("independent reviewer attestation binding drifted");
+  }
   if (config.mode === "production-research") {
     const expectedCapabilityIds = declarations.capabilities
       .filter((capability) => capability.permissions.includes("brokered-network"))
@@ -791,13 +855,13 @@ function isDoctorAttestation(value: unknown): value is WorkspaceDoctorAttestatio
     !Number.isFinite(Date.parse(value.expiresAt)) ||
     hashFields.some((hash) => typeof hash !== "string" || !/^[0-9a-f]{64}$/.test(hash)) ||
     !Array.isArray(value.runtimes) ||
-    value.runtimes.length !== 2 ||
+    value.runtimes.length !== 1 ||
     !Array.isArray(value.capabilitySmoke) ||
     !value.capabilitySmoke.every(isCapabilitySmokeRow) ||
     new Set(value.capabilitySmoke.map((row) => (isObject(row) ? row.id : null))).size !==
       value.capabilitySmoke.length ||
     !Array.isArray(value.smokeUsage) ||
-    value.smokeUsage.length !== 2
+    value.smokeUsage.length !== 1
   ) {
     return false;
   }
@@ -907,6 +971,12 @@ function isWorkspaceConfig(value: unknown): value is WorkspaceConfig {
   if (!isObject(value) || value.schemaVersion !== 1) return false;
   if (value.mode !== "smoke-test" && value.mode !== "production-research") return false;
   if (!isAgentRoute(value.producer) || !isAgentRoute(value.reviewer)) return false;
+  if (
+    value.producer.executionMode !== "native-host" ||
+    value.reviewer.executionMode !== "headless-cli"
+  ) {
+    return false;
+  }
   const budget = value.budget;
   return (
     isObject(budget) &&
@@ -944,6 +1014,9 @@ function isAgentRoute(value: unknown): value is AgentRoute {
     !(
       isObject(value) &&
       (value.agent === "codex" || value.agent === "claude") &&
+      (value.executionMode === undefined ||
+        value.executionMode === "native-host" ||
+        value.executionMode === "headless-cli") &&
       typeof value.binary === "string" &&
       value.binary.length > 0 &&
       (value.wrapperTargetBinary === undefined ||

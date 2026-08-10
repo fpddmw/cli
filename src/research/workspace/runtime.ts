@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { cp, lstat, readFile, rm } from "node:fs/promises";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { CliError } from "../../errors.js";
 import {
@@ -88,6 +88,7 @@ export interface WorkspaceRunResult {
     | "dry-run"
     | "all-projects-complete"
     | "project-blocked"
+    | "native-stage-required"
     | "cycle-limit"
     | "no-ready-work"
     | "no-projects";
@@ -105,6 +106,24 @@ export async function runResearchWorkspace(
   root: string,
   options: RunOptions,
   packageExecutor: PackageExecutor = executeAgent,
+): Promise<WorkspaceRunResult> {
+  return runResearchWorkspaceInternal(root, options, packageExecutor, false);
+}
+
+/** @internal Test-only seam for exercising deterministic package admission with fake agents. */
+export async function runResearchWorkspaceWithInjectedProducerForTesting(
+  root: string,
+  options: RunOptions,
+  packageExecutor: PackageExecutor,
+): Promise<WorkspaceRunResult> {
+  return runResearchWorkspaceInternal(root, options, packageExecutor, true);
+}
+
+async function runResearchWorkspaceInternal(
+  root: string,
+  options: RunOptions,
+  packageExecutor: PackageExecutor,
+  allowInjectedProducerForTesting: boolean,
 ): Promise<WorkspaceRunResult> {
   validateRunOptions(options);
   const requestId = randomUUID();
@@ -126,7 +145,7 @@ export async function runResearchWorkspace(
       const verification = await verifyDoctorAttestation(root);
       if (verification.status !== "verified" || !verification.attestation) {
         throw new CliError(
-          "Production research requires a current successful producer/reviewer doctor smoke.",
+          "Production research requires a current successful independent-reviewer doctor smoke.",
           {
             code: "RESEARCH_DOCTOR_ATTESTATION_REQUIRED",
             exitCode: 3,
@@ -162,6 +181,7 @@ export async function runResearchWorkspace(
         .filter(
           (item): item is { project: ProjectState; workPackage: WorkPackage } =>
             Boolean(item.workPackage) &&
+            (allowInjectedProducerForTesting || item.workPackage?.executor !== "producer") &&
             item.project.status !== "blocked" &&
             item.project.status !== "complete",
         )
@@ -201,6 +221,543 @@ export async function runResearchWorkspace(
       }),
     );
     return result;
+  });
+}
+
+export interface NativeStagePacket {
+  schemaVersion: 1;
+  kind: "tiangong-native-research-stage";
+  sessionId: string;
+  projectId: string;
+  packageId: string;
+  stage: "discover" | "analyze" | "synthesize";
+  hostAgent: AgentRoute["agent"];
+  expectedModel: string | null;
+  preparedAt: string;
+  bindingSha256: string;
+  prompt: string;
+  outputSchema: Record<string, unknown>;
+  limits: {
+    maxOutputBytes: number;
+    maxOutputTokens: number;
+    reservedPackageTokens: number;
+    reservedMaxCostUsd: number;
+    maxWallSeconds: number;
+  };
+  commands: {
+    fetchEvidence: { argv: string[]; requestSchema: Record<string, unknown> } | null;
+    submit: { argv: string[] };
+    abort: { argv: string[] };
+  };
+  rules: string[];
+  packetSha256: string;
+}
+
+interface NativeStageSession {
+  schemaVersion: 1;
+  kind: "tiangong-native-research-stage-session";
+  packet: NativeStagePacket;
+  capsuleRoot: string;
+  capsuleProject: string;
+  sessionSha256: string;
+}
+
+export async function prepareNativeResearchStage(input: {
+  root: string;
+  projectId: string;
+  stage: "discover" | "analyze" | "synthesize";
+  hostAgent: AgentRoute["agent"];
+}): Promise<NativeStagePacket> {
+  return withWorkspaceLock(input.root, "research.native-stage.prepare", async () => {
+    await verifyJournal(workspacePaths(input.root).journal);
+    const config = await loadWorkspaceConfig(input.root);
+    assertExecutionConfiguration(config);
+    if (config.producer.agent !== input.hostAgent) {
+      throw new CliError(
+        `This workspace requires the current native ${config.producer.agent} host, not ${input.hostAgent}.`,
+        { code: "RESEARCH_NATIVE_HOST_MISMATCH", exitCode: 3 },
+      );
+    }
+    const capabilityVerification = await verifyCapabilities(input.root);
+    if (capabilityVerification.status !== "verified") {
+      throw new CliError("Native research requires verified capability locks.", {
+        code: "RESEARCH_CAPABILITY_DRIFT",
+        exitCode: 3,
+        details: capabilityVerification,
+      });
+    }
+    if (config.mode === "production-research") {
+      const attestation = await verifyDoctorAttestation(input.root);
+      if (attestation.status !== "verified") {
+        throw new CliError("Native research requires a current independent-reviewer attestation.", {
+          code: "RESEARCH_DOCTOR_ATTESTATION_REQUIRED",
+          exitCode: 3,
+          details: { status: attestation.status, errors: attestation.errors },
+        });
+      }
+    }
+    const project = await loadProject(input.root, input.projectId);
+    if (
+      config.mode === "production-research" &&
+      config.budget.maxCostUsd > config.budget.confirmationCostUsd &&
+      !project.budgetConfirmedAt
+    ) {
+      throw new CliError("Production research budget has not been explicitly confirmed.", {
+        code: "RESEARCH_BUDGET_CONFIRMATION_REQUIRED",
+        exitCode: 3,
+      });
+    }
+    const activePath = nativeStageSessionPath(input.root, project.id);
+    if (await pathExists(activePath)) {
+      const active = await readNativeStageSession(input.root, project.id);
+      if (
+        active.packet.stage === input.stage &&
+        active.packet.hostAgent === input.hostAgent &&
+        project.packages.find((item) => item.id === active.packet.packageId)?.status === "running"
+      ) {
+        await assertNativeStageBinding(input.root, project, active.packet);
+        return active.packet;
+      }
+      throw new CliError("Another native stage session is already active for this project.", {
+        code: "RESEARCH_NATIVE_STAGE_ACTIVE",
+        exitCode: 3,
+        details: { sessionId: active.packet.sessionId, stage: active.packet.stage },
+      });
+    }
+    const workPackage = nextReadyPackage(project);
+    if (!workPackage || workPackage.executor !== "producer" || workPackage.stage !== input.stage) {
+      throw new CliError(`Stage ${input.stage} is not the next native producer package.`, {
+        code: "RESEARCH_NATIVE_STAGE_NOT_READY",
+        exitCode: 3,
+        details: { readyPackage: workPackage?.id ?? null },
+      });
+    }
+    if (workPackage.attempts >= workPackage.maxAttempts) {
+      throw new CliError("Native producer package exhausted its reviewed attempt limit.", {
+        code: "RESEARCH_PACKAGE_ATTEMPTS_EXHAUSTED",
+        exitCode: 3,
+      });
+    }
+    const reservation = reservePackageBudget(project, workPackage, config);
+    const sessionId = randomUUID();
+    let capsule: Capsule | null = null;
+    let preparedStatePersisted = false;
+    try {
+      capsule = await createCapsule(input.root, project, workPackage, sessionId, config);
+      const stageContextContent = await stageContextForPackage(
+        capsule.projectRoot,
+        workPackage,
+        config,
+      );
+      const declarations = await loadCapabilityDeclarations(input.root);
+      const hasBrokeredEvidence = declarations.capabilities.some((capability) =>
+        capability.permissions.includes("brokered-network"),
+      );
+      const basePrompt = packagePrompt(
+        project,
+        workPackage,
+        capsule.inputManifest,
+        capsule.stagedSkills,
+        capsule.capabilityDocumentation,
+        null,
+        capsule.contextBundle,
+        capsule.contextBundleContent,
+        stageContextContent,
+        config.budget.maxBrokerCalls,
+      );
+      const prompt = [
+        "Perform this producer stage in the current interactive host session. Do not launch codex exec, claude -p, or any other nested reasoning agent.",
+        input.stage === "discover" && hasBrokeredEvidence
+          ? "For every internet/database request, write one non-secret request JSON file and invoke the packet's fetchEvidence argv through the CLI control plane. Use only its returned bounded context and receipt. Do not use standalone web search as evidence."
+          : "Do not acquire additional evidence in this stage.",
+        basePrompt,
+        "Save only the final schema-conforming JSON object to a new regular file, then submit it with the packet's submit command. The CLI remains the sole authority for validation and atomic promotion.",
+      ].join("\n\n");
+      const preparedAt = new Date().toISOString();
+      const bindingSha256 = await nativeStageBinding(input.root, project, workPackage);
+      const packetCore = {
+        schemaVersion: 1 as const,
+        kind: "tiangong-native-research-stage" as const,
+        sessionId,
+        projectId: project.id,
+        packageId: workPackage.id,
+        stage: input.stage,
+        hostAgent: input.hostAgent,
+        expectedModel: config.producer.model,
+        preparedAt,
+        bindingSha256,
+        prompt,
+        outputSchema: schemaForStage(
+          input.stage,
+          null,
+          input.stage === "discover" && !hasBrokeredEvidence
+            ? { inputOnlyProvenanceIds: capsule.inputManifest.map((record) => record.id) }
+            : {},
+        ),
+        limits: {
+          maxOutputBytes: config.budget.maxBytesPerPackage,
+          maxOutputTokens: config.budget.maxOutputTokens,
+          reservedPackageTokens: config.budget.packageMaxTokens[input.stage],
+          reservedMaxCostUsd: reservation.costUsd,
+          maxWallSeconds: config.budget.packageMaxWallSeconds[input.stage],
+        },
+        commands: {
+          fetchEvidence:
+            input.stage === "discover" && hasBrokeredEvidence
+              ? {
+                  argv: [
+                    "tiangong-ai",
+                    "research",
+                    "project",
+                    "evidence",
+                    "fetch",
+                    project.id,
+                    "--request",
+                    "<absolute-request.json>",
+                    "--workspace",
+                    input.root,
+                    "--json",
+                  ],
+                  requestSchema: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: ["capability_id", "url"],
+                    properties: {
+                      capability_id: { type: "string" },
+                      credential_id: { type: "string" },
+                      url: { type: "string", format: "uri" },
+                      request_body: { type: "object" },
+                      json_pointer: { type: "string" },
+                      item_offset: { type: "integer", minimum: 0 },
+                      max_items: { type: "integer", minimum: 1 },
+                      cache_mode: { enum: ["prefer", "bypass"] },
+                    },
+                  },
+                }
+              : null,
+          submit: {
+            argv: [
+              "tiangong-ai",
+              "research",
+              "project",
+              "stage",
+              "submit",
+              project.id,
+              "--session",
+              sessionId,
+              "--output",
+              "<absolute-output.json>",
+              ...(config.producer.model ? ["--confirm-model", config.producer.model] : []),
+              "--workspace",
+              input.root,
+              "--json",
+            ],
+          },
+          abort: {
+            argv: [
+              "tiangong-ai",
+              "research",
+              "project",
+              "stage",
+              "abort",
+              project.id,
+              "--session",
+              sessionId,
+              "--workspace",
+              input.root,
+              "--json",
+            ],
+          },
+        },
+        rules: [
+          "Current native host performs producer reasoning; the CLI does not spawn a producer.",
+          "Only broker receipts or registered immutable inputs may support discover output.",
+          "Do not place credentials, cookies, authorization data, or sensitive URL parameters in request/output files.",
+          "A file's existence is not success; submit performs schema, provenance, budget, hash, and atomic-commit checks.",
+        ],
+      };
+      const packet: NativeStagePacket = {
+        ...packetCore,
+        packetSha256: sha256Text(canonicalJson(packetCore)),
+      };
+      const sessionCore = {
+        schemaVersion: 1 as const,
+        kind: "tiangong-native-research-stage-session" as const,
+        packet,
+        capsuleRoot: capsule.capsuleRoot,
+        capsuleProject: capsule.projectRoot,
+      };
+      const session: NativeStageSession = {
+        ...sessionCore,
+        sessionSha256: sha256Text(canonicalJson(sessionCore)),
+      };
+      const now = new Date().toISOString();
+      workPackage.status = "running";
+      workPackage.attempts += 1;
+      workPackage.startedAt = now;
+      workPackage.completedAt = null;
+      workPackage.lastError = null;
+      workPackage.lastFailureKind = null;
+      workPackage.retryNotBefore = null;
+      refreshProject(project);
+      await ensureDirectory(dirname(activePath));
+      await writeJsonAtomic(activePath, session);
+      await saveProject(input.root, project);
+      preparedStatePersisted = true;
+      await appendJournalEvent(
+        workspacePaths(input.root).journal,
+        "native.stage.prepared",
+        project.id,
+        {
+          sessionId,
+          packetSha256: packet.packetSha256,
+          bindingSha256,
+          projectId: project.id,
+          packageId: workPackage.id,
+          stage: input.stage,
+          hostAgent: input.hostAgent,
+          expectedModel: config.producer.model,
+          accountingMode: "reserved-native-host",
+        },
+      );
+      return packet;
+    } catch (error) {
+      if (!preparedStatePersisted) {
+        await rm(activePath, { force: true });
+        if (capsule) await rm(capsule.capsuleRoot, { recursive: true, force: true });
+      }
+      throw error;
+    }
+  });
+}
+
+export async function submitNativeResearchStage(input: {
+  root: string;
+  projectId: string;
+  sessionId: string;
+  outputPath: string;
+  confirmedModel: string | null;
+}): Promise<{
+  projectId: string;
+  packageId: string;
+  stage: string;
+  status: "complete";
+  outputs: OutputRecord[];
+  usage: Record<string, unknown>;
+}> {
+  return withWorkspaceLock(input.root, "research.native-stage.submit", async () => {
+    const session = await readNativeStageSession(input.root, input.projectId);
+    if (session.packet.sessionId !== input.sessionId) {
+      throw new CliError("Native stage session ID does not match the active session.", {
+        code: "RESEARCH_NATIVE_STAGE_SESSION_MISMATCH",
+        exitCode: 3,
+      });
+    }
+    const outputPath = requireNativeOutputPath(input.outputPath);
+    const outputInfo = await lstat(outputPath).catch(() => undefined);
+    if (!outputInfo?.isFile() || outputInfo.isSymbolicLink()) {
+      throw new CliError("Native stage output must be an existing regular non-symlink file.", {
+        code: "RESEARCH_NATIVE_STAGE_OUTPUT_INVALID",
+        exitCode: 2,
+      });
+    }
+    if (outputInfo.size > session.packet.limits.maxOutputBytes) {
+      throw new CliError("Native stage output exceeds the reviewed byte limit.", {
+        code: "RESEARCH_NATIVE_STAGE_OUTPUT_INVALID",
+        exitCode: 3,
+      });
+    }
+    const raw = await readFile(outputPath, "utf8");
+    const config = await loadWorkspaceConfig(input.root);
+    assertExecutionConfiguration(config);
+    if (input.confirmedModel !== session.packet.expectedModel) {
+      throw new CliError("The confirmed native model does not match the reviewed route.", {
+        code: "RESEARCH_NATIVE_MODEL_MISMATCH",
+        exitCode: 3,
+        details: { expectedModel: session.packet.expectedModel },
+      });
+    }
+    const project = await loadProject(input.root, input.projectId);
+    const workPackage = packageById(project, session.packet.packageId);
+    if (workPackage.status !== "running" || workPackage.executor !== "producer") {
+      throw new CliError("The bound native producer package is no longer running.", {
+        code: "RESEARCH_NATIVE_STAGE_SESSION_MISMATCH",
+        exitCode: 3,
+      });
+    }
+    await assertNativeStageBinding(input.root, project, session.packet);
+    try {
+      await materializeAndValidateStageOutput(
+        input.root,
+        project,
+        session.capsuleProject,
+        workPackage,
+        raw,
+        null,
+      );
+      const elapsed = Math.max(0.001, (Date.now() - Date.parse(session.packet.preparedAt)) / 1_000);
+      const outputTokens = Math.ceil(
+        Buffer.byteLength(raw, "utf8") / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
+      );
+      const reservedTokens = config.budget.packageMaxTokens[session.packet.stage];
+      const result: ExecutionResult = {
+        exitCode: 0,
+        stdout: raw,
+        stderr: "",
+        tokens: reservedTokens,
+        inputTokens: Math.max(0, reservedTokens - outputTokens),
+        cachedInputTokens: 0,
+        outputTokens,
+        costUsd: roundMoney(reservedAgentPackageCost(config.producer, reservedTokens, config)),
+        wallSeconds: elapsed,
+        model: config.producer.model,
+        runtime: null,
+      };
+      assertActualPackageBudget(
+        project,
+        workPackage,
+        config,
+        result,
+        config.budget.maxOutputTokens,
+      );
+      assertProjectedBudget(project, config, result);
+      if (workPackage.stage === "discover") {
+        await assertEvidenceCoverage(
+          input.root,
+          project,
+          resolveContained(session.capsuleProject, "outputs/evidence.json"),
+        );
+      }
+      const outputs = await validateAndImportOutputs(
+        input.root,
+        project,
+        workPackage,
+        session.capsuleProject,
+        config,
+        null,
+      );
+      applyUsage(project, result);
+      workPackage.status = "complete";
+      workPackage.completedAt = new Date().toISOString();
+      workPackage.lastError = null;
+      workPackage.lastFailureKind = null;
+      workPackage.retryNotBefore = null;
+      refreshProject(project);
+      await saveProject(input.root, project);
+      await writeRunRecord(input.root, {
+        schemaVersion: 1,
+        runId: session.packet.sessionId,
+        projectId: project.id,
+        packageId: workPackage.id,
+        executor: config.producer.agent,
+        startedAt: session.packet.preparedAt,
+        completedAt: workPackage.completedAt,
+        exitCode: 0,
+        tokens: result.tokens,
+        inputTokens: result.inputTokens,
+        cachedInputTokens: result.cachedInputTokens,
+        outputTokens: result.outputTokens,
+        costUsd: result.costUsd,
+        wallSeconds: result.wallSeconds,
+        outputs,
+        stdoutSha256: sha256Text(raw),
+        stderrSha256: sha256Text(""),
+        failureKind: null,
+        failureDetails: null,
+        runtime: null,
+        accountingMode: "reserved-native-host",
+      });
+      const usage = { ...usageSlice(result), accountingMode: "reserved-native-host" };
+      await appendJournalEvent(
+        workspacePaths(input.root).journal,
+        "native.stage.completed",
+        project.id,
+        {
+          sessionId: session.packet.sessionId,
+          packetSha256: session.packet.packetSha256,
+          projectId: project.id,
+          packageId: workPackage.id,
+          stage: workPackage.stage,
+          outputs,
+          usage,
+        },
+      );
+      await rm(nativeStageSessionPath(input.root, project.id), { force: true });
+      await rm(session.capsuleRoot, { recursive: true, force: true });
+      return {
+        projectId: project.id,
+        packageId: workPackage.id,
+        stage: workPackage.stage,
+        status: "complete",
+        outputs,
+        usage,
+      };
+    } catch (error) {
+      await appendJournalEvent(
+        workspacePaths(input.root).journal,
+        "native.stage.submit.rejected",
+        input.projectId,
+        {
+          sessionId: session.packet.sessionId,
+          packetSha256: session.packet.packetSha256,
+          error: bounded(
+            sanitizeResearchText(error instanceof Error ? error.message : String(error)),
+            1_000,
+          ),
+        },
+      );
+      throw error;
+    }
+  });
+}
+
+export async function abortNativeResearchStage(input: {
+  root: string;
+  projectId: string;
+  sessionId: string;
+}): Promise<{ projectId: string; packageId: string; status: "ready" | "blocked" }> {
+  return withWorkspaceLock(input.root, "research.native-stage.abort", async () => {
+    const session = await readNativeStageSession(input.root, input.projectId);
+    if (session.packet.sessionId !== input.sessionId) {
+      throw new CliError("Native stage session ID does not match the active session.", {
+        code: "RESEARCH_NATIVE_STAGE_SESSION_MISMATCH",
+        exitCode: 3,
+      });
+    }
+    const project = await loadProject(input.root, input.projectId);
+    const workPackage = packageById(project, session.packet.packageId);
+    if (workPackage.status !== "running") {
+      throw new CliError("The native stage package is not running.", {
+        code: "RESEARCH_NATIVE_STAGE_SESSION_MISMATCH",
+        exitCode: 3,
+      });
+    }
+    workPackage.status = workPackage.attempts < workPackage.maxAttempts ? "retry" : "failed";
+    workPackage.completedAt = new Date().toISOString();
+    workPackage.lastError = "Native stage was explicitly aborted before submission.";
+    workPackage.lastFailureKind = "deterministic";
+    workPackage.retryNotBefore = null;
+    refreshProject(project);
+    await saveProject(input.root, project);
+    await appendJournalEvent(
+      workspacePaths(input.root).journal,
+      "native.stage.aborted",
+      project.id,
+      {
+        sessionId: session.packet.sessionId,
+        packetSha256: session.packet.packetSha256,
+        projectId: project.id,
+        packageId: workPackage.id,
+        stage: workPackage.stage,
+      },
+    );
+    await rm(nativeStageSessionPath(input.root, project.id), { force: true });
+    await rm(session.capsuleRoot, { recursive: true, force: true });
+    return {
+      projectId: project.id,
+      packageId: workPackage.id,
+      status: project.status === "blocked" ? "blocked" : "ready",
+    };
   });
 }
 
@@ -868,11 +1425,13 @@ async function writeReviewEvidenceContext(
     "TIANGONG REVIEW EVIDENCE CONTEXT v1",
     "The following are deterministic excerpts from hash-verified bounded views. Full objects and original bounded contexts remain bound in the review packet.",
   ].join("\n");
-  const views: Array<{ prefix: string; content: string; suffix: string }> = [
+  const brokerReferences = await loadBrokerReviewReferences(capsuleProject);
+  const views: Array<{ prefix: string; content: string; suffix: string; active: boolean }> = [
     {
       prefix: "--- LOCAL INPUT CONTEXT BUNDLE ---\n--- BEGIN BOUNDED REVIEW EXCERPT ---\n",
-      content: inputContextBundle.trimEnd(),
+      content: sanitizeResearchText(inputContextBundle.trimEnd()),
       suffix: "\n--- END BOUNDED REVIEW EXCERPT ---",
+      active: true,
     },
   ];
   const seen = new Set<string>();
@@ -882,9 +1441,10 @@ async function writeReviewEvidenceContext(
     if (seen.has(receipt.contextLocator)) continue;
     seen.add(receipt.contextLocator);
     const metadata = reviewSafeReceipt(receipt);
-    const content = reviewableTextContentType(receipt.contentType)
-      ? await readFile(resolveContained(capsuleProject, receipt.contextLocator), "utf8")
-      : "[Binary bounded view omitted from model context; verify the bound file mechanically.]";
+    const references = brokerReferences.get(receipt.attemptId) ?? [];
+    const content = references.length
+      ? await citedBrokerReviewContent(capsuleProject, receipt, references)
+      : "[No admitted evidence source cites this receipt; its raw object and bounded context remain hash-bound in the review packet.]";
     views.push({
       prefix: [
         `--- BROKER RECEIPT ${receipt.attemptId} ---`,
@@ -894,11 +1454,13 @@ async function writeReviewEvidenceContext(
       ].join("\n"),
       content: content.trimEnd(),
       suffix: "\n--- END BOUNDED REVIEW EXCERPT ---",
+      active: references.length > 0,
     });
   }
-  const fixedContent = [header, ...views.map((view) => `${view.prefix}${view.suffix}`)].join(
-    "\n\n",
-  );
+  const fixedContent = [
+    header,
+    ...views.map((view) => `${view.prefix}${view.active ? "" : view.content}${view.suffix}`),
+  ].join("\n\n");
   const fixedBytes = Buffer.byteLength(`${fixedContent}\n`, "utf8");
   if (fixedBytes > maxBytes) {
     throw new CliError("Review evidence metadata exceeds the configured context budget.", {
@@ -907,12 +1469,15 @@ async function writeReviewEvidenceContext(
       details: { fixedBytes, maxBytes, views: views.length },
     });
   }
-  const contentBudgetPerView = Math.floor((maxBytes - fixedBytes) / views.length);
+  const activeViews = views.filter((view) => view.active).length;
+  const contentBudgetPerView = Math.floor((maxBytes - fixedBytes) / activeViews);
   const sections = [
     header,
     ...views.map(
       (view) =>
-        `${view.prefix}${boundedUtf8ReviewExcerpt(view.content, contentBudgetPerView)}${view.suffix}`,
+        `${view.prefix}${
+          view.active ? boundedUtf8ReviewExcerpt(view.content, contentBudgetPerView) : view.content
+        }${view.suffix}`,
     ),
   ];
   const logicalPath = "inputs/review-evidence-context.txt";
@@ -946,6 +1511,116 @@ async function writeReviewEvidenceContext(
     capsule,
     persistent: await fileRecord(persistentPath, persistentLogicalPath),
   };
+}
+
+interface BrokerReviewReference {
+  sourceId: string;
+  title: string;
+  jsonPointer: string | null;
+  excerpt: string | null;
+}
+
+async function loadBrokerReviewReferences(
+  capsuleProject: string,
+): Promise<Map<string, BrokerReviewReference[]>> {
+  const evidencePath = resolveContained(capsuleProject, "outputs/evidence.json");
+  if (!(await pathExists(evidencePath))) return new Map();
+  const evidence = await readJsonFile<Record<string, unknown>>(evidencePath, "Research evidence");
+  const references = new Map<string, BrokerReviewReference[]>();
+  if (!Array.isArray(evidence.sources)) return references;
+  for (const source of evidence.sources) {
+    if (!isObject(source) || !isObject(source.provenance)) continue;
+    if (source.provenance.kind !== "broker" || typeof source.provenance.id !== "string") continue;
+    if (typeof source.id !== "string" || typeof source.title !== "string") continue;
+    const current = references.get(source.provenance.id) ?? [];
+    current.push({
+      sourceId: source.id,
+      title: source.title,
+      jsonPointer: typeof source.jsonPointer === "string" ? source.jsonPointer : null,
+      excerpt: typeof source.excerpt === "string" ? source.excerpt : null,
+    });
+    references.set(source.provenance.id, current);
+  }
+  for (const values of references.values()) {
+    values.sort((left, right) => left.sourceId.localeCompare(right.sourceId));
+  }
+  return references;
+}
+
+async function citedBrokerReviewContent(
+  capsuleProject: string,
+  receipt: Awaited<ReturnType<typeof loadProjectEvidenceReceipts>>[number],
+  references: BrokerReviewReference[],
+): Promise<string> {
+  let rawValue: unknown;
+  if (jsonReviewContentType(receipt.contentType)) {
+    try {
+      rawValue = JSON.parse(
+        await readFile(resolveContained(capsuleProject, receipt.locator), "utf8"),
+      ) as unknown;
+    } catch {
+      rawValue = undefined;
+    }
+  }
+  let needsFallback = false;
+  const sections = [
+    "The following items are deterministic, sanitized projections selected from the hash-bound raw broker object by the JSON Pointers declared in admitted evidence.",
+  ];
+  for (const reference of references) {
+    const lines = [
+      `--- CITED EVIDENCE SOURCE ${reference.sourceId} ---`,
+      `title: ${reference.title}`,
+      `jsonPointer: ${reference.jsonPointer ?? "unavailable"}`,
+    ];
+    if (rawValue !== undefined && reference.jsonPointer !== null) {
+      try {
+        const selected = resolveReviewJsonPointer(rawValue, reference.jsonPointer);
+        lines.push("exactItem:", JSON.stringify(selected, null, 2));
+      } catch {
+        needsFallback = true;
+        lines.push("exactItem: [JSON Pointer did not resolve; bounded-context fallback follows.] ");
+      }
+    } else {
+      needsFallback = true;
+      lines.push("exactItem: [Exact JSON item unavailable; bounded-context fallback follows.] ");
+    }
+    if (reference.excerpt !== null) lines.push(`declaredExcerpt: ${reference.excerpt}`);
+    sections.push(lines.join("\n"));
+  }
+  if (needsFallback) {
+    const fallback = reviewableTextContentType(receipt.contentType)
+      ? await readFile(resolveContained(capsuleProject, receipt.contextLocator), "utf8")
+      : "[Binary bounded view omitted from model context; verify the bound file mechanically.]";
+    sections.push(`--- BOUNDED CONTEXT FALLBACK ---\n${fallback.trimEnd()}`);
+  }
+  return sanitizeResearchText(sections.join("\n\n"));
+}
+
+function jsonReviewContentType(contentType: string): boolean {
+  return /^application\/(?:[^;]+\+)?json(?:;|$)/i.test(contentType);
+}
+
+function resolveReviewJsonPointer(value: unknown, pointer: string): unknown {
+  if (pointer === "") return value;
+  if (!pointer.startsWith("/") || /~(?:[^01]|$)/.test(pointer)) {
+    throw new Error("invalid JSON Pointer");
+  }
+  let selected = value;
+  for (const rawPart of pointer.slice(1).split("/")) {
+    const part = rawPart.replaceAll("~1", "/").replaceAll("~0", "~");
+    if (
+      Array.isArray(selected) &&
+      /^(0|[1-9][0-9]*)$/.test(part) &&
+      Number(part) < selected.length
+    ) {
+      selected = selected[Number(part)];
+    } else if (isObject(selected) && Object.hasOwn(selected, part)) {
+      selected = selected[part];
+    } else {
+      throw new Error("JSON Pointer does not resolve");
+    }
+  }
+  return selected;
 }
 
 function reviewableTextContentType(contentType: string): boolean {
@@ -1549,8 +2224,13 @@ function computeEvidenceCoverage(
   };
 }
 
-async function assertEvidenceCoverage(root: string, project: ProjectState): Promise<void> {
-  const path = resolveContained(projectRoot(root, project.id), "outputs/evidence.json");
+async function assertEvidenceCoverage(
+  root: string,
+  project: ProjectState,
+  evidencePath?: string,
+): Promise<void> {
+  const path =
+    evidencePath ?? resolveContained(projectRoot(root, project.id), "outputs/evidence.json");
   const value = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
   const sources = value.sources as Array<Record<string, unknown>>;
   const declared = value.coverage as Record<string, unknown>;
@@ -2065,6 +2745,15 @@ function remainingWallSeconds(project: ProjectState, config: WorkspaceConfig): n
 }
 
 function assertExecutionConfiguration(config: WorkspaceConfig): void {
+  if (
+    config.producer.executionMode !== "native-host" ||
+    config.reviewer.executionMode !== "headless-cli"
+  ) {
+    throw new CliError(
+      "Research requires a native-host producer and a separate headless-CLI reviewer.",
+      { code: "RESEARCH_EXECUTION_MODE_INVALID", exitCode: 3 },
+    );
+  }
   if (config.producer.agent === config.reviewer.agent) {
     throw new CliError("Research producer and reviewer must use different agent families.", {
       code: "RESEARCH_REVIEW_ROUTE_INVALID",
@@ -2391,6 +3080,13 @@ async function summarizeRun(
   }));
   const unfinished = summaries.filter((project) => project.status !== "complete");
   const hasReadyPackage = summaries.some((project) => project.readyPackage !== null);
+  const nativeStageRequired = projects.some((project) =>
+    project.packages.some(
+      (workPackage) =>
+        workPackage.executor === "producer" &&
+        (workPackage.status === "ready" || workPackage.status === "running"),
+    ),
+  );
   const status =
     summaries.length > 0 && summaries.every((project) => project.status === "complete")
       ? "complete"
@@ -2404,9 +3100,11 @@ async function summarizeRun(
         ? "all-projects-complete"
         : hasReadyPackage && cycles >= maxCycles
           ? "cycle-limit"
-          : status === "blocked"
-            ? "project-blocked"
-            : "no-ready-work";
+          : nativeStageRequired
+            ? "native-stage-required"
+            : status === "blocked"
+              ? "project-blocked"
+              : "no-ready-work";
   return {
     workspace: root,
     requestId,
@@ -2446,6 +3144,146 @@ function deterministicError(message: string): CliError {
 
 function projectRoot(root: string, projectId: string): string {
   return join(workspacePaths(root).projects, projectId);
+}
+
+function nativeStageSessionPath(root: string, projectId: string): string {
+  return join(projectRoot(root, projectId), "native", "active.json");
+}
+
+async function readNativeStageSession(
+  root: string,
+  projectId: string,
+): Promise<NativeStageSession> {
+  const path = nativeStageSessionPath(root, projectId);
+  const info = await lstat(path).catch(() => undefined);
+  if (!info?.isFile() || info.isSymbolicLink()) {
+    throw new CliError("No valid native stage session is active for this project.", {
+      code: "RESEARCH_NATIVE_STAGE_SESSION_REQUIRED",
+      exitCode: 3,
+    });
+  }
+  const value = await readJsonFile<unknown>(path, "Native research stage session");
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    value.kind !== "tiangong-native-research-stage-session" ||
+    !isObject(value.packet) ||
+    typeof value.capsuleRoot !== "string" ||
+    typeof value.capsuleProject !== "string" ||
+    typeof value.sessionSha256 !== "string"
+  ) {
+    throw new CliError("Native stage session has an unsupported shape.", {
+      code: "RESEARCH_NATIVE_STAGE_SESSION_INVALID",
+      exitCode: 3,
+    });
+  }
+  const { sessionSha256, ...core } = value;
+  if (sha256Text(canonicalJson(core)) !== sessionSha256) {
+    throw new CliError("Native stage session failed its content hash.", {
+      code: "RESEARCH_NATIVE_STAGE_SESSION_INVALID",
+      exitCode: 3,
+    });
+  }
+  const packet = value.packet as unknown as NativeStagePacket;
+  const { packetSha256, ...packetCore } = packet;
+  if (
+    packet.schemaVersion !== 1 ||
+    packet.kind !== "tiangong-native-research-stage" ||
+    packet.projectId !== projectId ||
+    typeof packetSha256 !== "string" ||
+    sha256Text(canonicalJson(packetCore)) !== packetSha256
+  ) {
+    throw new CliError("Native stage packet failed its content hash or project binding.", {
+      code: "RESEARCH_NATIVE_STAGE_SESSION_INVALID",
+      exitCode: 3,
+    });
+  }
+  const runtimeRoot = resolve(workspacePaths(root).runtime);
+  const capsuleRoot = resolve(value.capsuleRoot);
+  const capsuleProject = resolve(value.capsuleProject);
+  if (
+    relative(runtimeRoot, capsuleRoot).startsWith("..") ||
+    relative(capsuleRoot, capsuleProject).startsWith("..") ||
+    !(await lstat(capsuleRoot).catch(() => undefined))?.isDirectory() ||
+    !(await lstat(capsuleProject).catch(() => undefined))?.isDirectory()
+  ) {
+    throw new CliError("Native stage capsule is missing or outside the workspace runtime.", {
+      code: "RESEARCH_NATIVE_STAGE_SESSION_INVALID",
+      exitCode: 3,
+    });
+  }
+  return value as unknown as NativeStageSession;
+}
+
+async function nativeStageBinding(
+  root: string,
+  project: ProjectState,
+  workPackage: WorkPackage,
+): Promise<string> {
+  const paths = workspacePaths(root);
+  const outputRoot = join(projectRoot(root, project.id), "outputs");
+  const outputs: OutputRecord[] = [];
+  if (await pathExists(outputRoot)) {
+    for (const path of await regularTreeFiles(outputRoot)) {
+      outputs.push(
+        await fileRecord(path, relative(projectRoot(root, project.id), path).replaceAll("\\", "/")),
+      );
+    }
+  }
+  return sha256Text(
+    canonicalJson({
+      projectId: project.id,
+      questionSha256: sha256Text(project.question),
+      evidenceRequirements: project.evidenceRequirements,
+      inputs: project.inputs.map((record) => ({
+        id: record.id,
+        role: record.role,
+        sha256: record.sha256,
+        bytes: record.bytes,
+        contextSha256: record.contextSha256 ?? null,
+        contextBytes: record.contextBytes ?? null,
+      })),
+      package: {
+        id: workPackage.id,
+        stage: workPackage.stage,
+        dependencies: workPackage.dependencies,
+        expectedOutputs: workPackage.expectedOutputs,
+      },
+      outputs,
+      configSha256: await sha256File(paths.config),
+      runtimeLockSha256: await sha256File(paths.runtimeLock),
+      capabilityDeclarationsSha256: await sha256File(paths.capabilityDeclarations),
+      capabilityLockSha256: (await pathExists(paths.capabilityLock))
+        ? await sha256File(paths.capabilityLock)
+        : null,
+    }),
+  );
+}
+
+async function assertNativeStageBinding(
+  root: string,
+  project: ProjectState,
+  packet: NativeStagePacket,
+): Promise<void> {
+  const workPackage = packageById(project, packet.packageId);
+  const actual = await nativeStageBinding(root, project, workPackage);
+  if (actual !== packet.bindingSha256) {
+    throw new CliError("Native stage inputs, configuration, or admitted outputs drifted.", {
+      code: "RESEARCH_NATIVE_STAGE_BINDING_DRIFT",
+      exitCode: 3,
+      details: { expectedSha256: packet.bindingSha256, actualSha256: actual },
+    });
+  }
+}
+
+function requireNativeOutputPath(value: string): string {
+  if (!value || !isAbsolute(value) || /[\0\r\n]/.test(value)) {
+    throw new CliError("Native stage output requires an explicit absolute file path.", {
+      code: "RESEARCH_NATIVE_STAGE_OUTPUT_INVALID",
+      exitCode: 2,
+    });
+  }
+  return resolve(value);
 }
 
 function validateRunOptions(options: RunOptions): void {

@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-09
-lastReviewedCommit: 14c804e61b3768489253533ee754b6f7e75460ea
+lastReviewedAt: 2026-08-10
+lastReviewedCommit: bef62f8d48c42eaff14fa2bd7eba1be83a46a58b
 ---
 
 # Repo Architecture
@@ -66,19 +66,24 @@ storage writes, queueing, and document status transitions.
   one bounded short-delay 429 retry with sanitized journal provenance,
   a mechanically enforced per-run broker-call budget,
   content-addressed permanent evidence, paged broker views/cache,
-  schema-driven agent output and isolated repair, dedicated capsule homes,
+  hash-bound native-host producer stage prepare/submit/abort, one-shot native
+  broker fetches, schema-driven reviewer output and isolated repair, dedicated
+  reviewer capsule homes,
   pre-review deterministic Markdown newline-artifact normalization with
   content-free journal provenance,
   hash-verified idempotent capsule-auth reuse across primary/repair calls,
-  separately fingerprinted agent targets/wrappers/adapters, hash-bound doctor
-  attestations with expiry-aware reuse and live runtime-drift verification,
+  separately fingerprinted reviewer targets/wrappers/adapters, hash-bound
+  reviewer doctor attestations with expiry-aware reuse and live runtime-drift
+  verification,
   complete pre-call package and tool-context reservations,
   one shared preflight/runtime reservation formula with bounded capability
   documentation included at admission,
   tool-context-aware process capture, classified retries,
-  project-scoped scheduling/exit status, JSONL progress, recovery events,
-  persistent review packets/bounded evidence contexts, tool-free independent
-  review, and mechanical closure-time hash verification.
+  project-scoped scheduling/exit status, JSONL progress, recovery events, exact
+  companion readiness gates, domain-scoped setup readiness, persistent review
+  packets/bounded evidence contexts with exact cited-item JSON-Pointer
+  projections, tool-free independent review, and
+  mechanical closure-time hash verification.
 - `src/education/**`: education search command handling and source specs for
   course, education, and textbook edge-search functions.
 - `src/edge-search.ts`: shared edge-search forwarding helper. It derives
@@ -125,12 +130,14 @@ server recommendations may lengthen only the health refresh interval.
 
 ## Skill Boundary
 
-Reusable skills may call this CLI as a wrapper. Skills collect task intent,
-select smoke or production mode, prepare evidence requirements, obtain budget
-confirmation, and report CLI output. They do not duplicate the CLI's output
-schemas, coverage gate, workspace state transitions, capability admission,
-scheduling, sandboxing, budget enforcement, provenance, review, closure, batch
-logic, API request construction, retries, or checkpoint semantics.
+Reusable skills may call this CLI as a deterministic control plane. Skills
+collect task intent, select smoke or production mode, prepare evidence
+requirements, obtain budget confirmation, and direct the current interactive
+Codex or Claude Code host through hash-bound producer packets. They do not
+launch a nested producer CLI or duplicate output schemas, coverage gates,
+workspace state transitions, capability admission, scheduling, budgets,
+provenance, review, closure, API request construction, retries, or checkpoint
+semantics.
 
 Research method implementations are external Skills. Setup may copy only
 user-selected, separately licensed trees after freezing the installer integrity,
@@ -166,7 +173,11 @@ Document decomposition is an input-preprocessor and paper download is an
 acquisition adapter. Their explicit companion command verifies the installed
 tree, builds a minimal child environment, and returns hash-bound output for
 later input admission; neither executes inside an agent capsule or becomes
-evidence by itself. Authoring Skills run only after closure. Source
+evidence by itself. Authoring Skills run only after closure. Optional companion
+failures are domain-scoped diagnostics unless a project's
+`requiredCompanionIds` (or the explicit operation itself) names that exact
+component. Semantic Scholar resolver throttling therefore degrades acquisition
+without globally blocking research. Source
 commit/version and expected whole-tree SHA-256 must match before any role is
 configured or executed. The tree-hash contract rejects symlinks and
 canonically equivalent path collisions, normalizes logical paths to NFC, and
@@ -175,13 +186,13 @@ source caches set repository-local `core.autocrlf=false` and `core.eol=lf`
 before materializing the detached commit. Hash failures stop before installer
 execution and expose only sanitized, non-secret identifiers and digests.
 
-The platform `sandbox-exec`/Bubblewrap capsule is the agent security boundary.
-Codex does not nest its own sandbox inside that capsule because nested macOS
-Seatbelt prevents reliable MCP execution. The adapter disables shell,
-unified-exec, filesystem, and undeclared integration tools for discovery, then
-embeds the locked capability manifest and each staged top-level `SKILL.md` in
-the prompt. The only discovery execution tool is the scoped broker. Later
-stages are tool-free and receive only bounded, hash-verified context.
+The current interactive host is the producer boundary: the CLI prepares an
+ephemeral hash-bound packet but does not start Codex or Claude for discover,
+analyze, or synthesize. Discovery uses explicit one-shot broker commands whose
+request files contain logical IDs only. Later producer packets contain bounded,
+hash-verified prior artifacts. The platform `sandbox-exec`/Bubblewrap capsule
+is used for the independently launched reviewer CLI; that adapter disables
+shell, unified-exec, filesystem, and undeclared integrations.
 Every brokered manifest entry carries a locked non-secret HTTPS endpoint;
 initial targets and GET redirects are checked against that endpoint scope
 before a provider request.
@@ -189,8 +200,9 @@ Broker diagnostics keep standalone ambient credentials, broker logical
 credentials, injection policy, and provider authentication as separate failure
 classes. They expose only execution mode, credential scope, network-attempt
 state, safe request metadata, and minimum action. Setup doctor performs one
-bounded Semantic Scholar 429 retry and retains the blocker if quota remains
-unavailable; no managed research path silently downgrades to a direct wrapper.
-Codex receives a capsule-local project-root marker override so parent host
+bounded Semantic Scholar 429 retry and reports a remaining throttle in
+acquisition readiness without changing research-core readiness; no managed
+research path silently downgrades to a direct wrapper. When Codex is the
+reviewer, it receives a capsule-local project-root marker override so parent host
 `.codex/config.toml` discovery stops at the capsule boundary without widening
 the sandbox's readable roots.
