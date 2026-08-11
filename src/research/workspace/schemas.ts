@@ -160,6 +160,131 @@ const evidenceSchema: JsonSchema = {
   },
 };
 
+const discoveryCloseoutSchema: JsonSchema = {
+  $id: "https://schemas.tiangong.ai/research/discovery-closeout-v2.json",
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "limitations", "dimensionJudgments", "gaps"],
+  properties: {
+    schemaVersion: { type: "integer", const: 2 },
+    limitations: { type: "array", items: { type: "string" } },
+    dimensionJudgments: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "status"],
+        properties: {
+          id: { type: "string", pattern: IDENTIFIER },
+          status: { type: "string", enum: ["covered", "partial", "missing"] },
+        },
+      },
+    },
+    gaps: { type: "array", items: { type: "string" } },
+  },
+};
+
+const discoveryAssessmentBatchSchema: JsonSchema = {
+  $id: "https://schemas.tiangong.ai/research/discovery-assessment-batch-v1.json",
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "assessments"],
+  properties: {
+    schemaVersion: { type: "integer", const: 1 },
+    assessments: {
+      type: "array",
+      minItems: 1,
+      maxItems: 25,
+      items: {
+        oneOf: [
+          {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "decision",
+              "candidateId",
+              "sourceId",
+              "sourceType",
+              "relevance",
+              "quality",
+              "applicability",
+              "coverageDimensions",
+              "limitations",
+            ],
+            properties: {
+              decision: { type: "string", const: "admit" },
+              candidateId: { type: "string", pattern: IDENTIFIER },
+              sourceId: { type: "string", pattern: IDENTIFIER },
+              sourceType: { type: "string", pattern: IDENTIFIER },
+              relevance: nonEmptyString,
+              quality: {
+                type: "object",
+                additionalProperties: false,
+                required: ["level", "rationale"],
+                properties: {
+                  level: {
+                    type: "string",
+                    enum: ["primary", "secondary", "tertiary", "unknown"],
+                  },
+                  rationale: nonEmptyString,
+                },
+              },
+              applicability: nonEmptyString,
+              coverageDimensions: {
+                type: "array",
+                items: { type: "string", pattern: IDENTIFIER },
+              },
+              limitations: { type: "array", items: { type: "string" } },
+            },
+          },
+          {
+            type: "object",
+            additionalProperties: false,
+            required: ["decision", "candidateId", "reasonCode", "rationale"],
+            properties: {
+              decision: { type: "string", const: "reject" },
+              candidateId: { type: "string", pattern: IDENTIFIER },
+              reasonCode: { type: "string", pattern: IDENTIFIER },
+              rationale: nonEmptyString,
+            },
+          },
+        ],
+      },
+    },
+  },
+};
+
+const acquisitionAuditSchema: JsonSchema = {
+  $id: "https://schemas.tiangong.ai/research/acquisition-audit-v1.json",
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "decisions", "limitations", "gaps"],
+  properties: {
+    schemaVersion: { type: "integer", const: 1 },
+    decisions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["sourceId", "candidateId", "artifactIds", "status", "rationale", "limitations"],
+        properties: {
+          sourceId: { type: "string", pattern: IDENTIFIER },
+          candidateId: { type: "string", pattern: IDENTIFIER },
+          artifactIds: {
+            type: "array",
+            items: { type: "string", pattern: IDENTIFIER },
+          },
+          status: { type: "string", enum: ["accepted", "limited", "rejected"] },
+          rationale: nonEmptyString,
+          limitations: { type: "array", items: { type: "string" } },
+        },
+      },
+    },
+    limitations: { type: "array", items: { type: "string" } },
+    gaps: { type: "array", items: { type: "string" } },
+  },
+};
+
 const analysisSchema: JsonSchema = {
   $id: "https://schemas.tiangong.ai/research/analysis-v1.json",
   type: "object",
@@ -246,24 +371,10 @@ export function schemaForStage(
   context: StageSchemaContext = {},
 ): JsonSchema {
   if (stage === "discover") {
-    const schema = structuredClone(evidenceSchema);
-    if (context.inputOnlyProvenanceIds?.length) {
-      const rootProperties = schema.properties as Record<string, unknown>;
-      const sources = rootProperties.sources as Record<string, unknown>;
-      const source = sources.items as Record<string, unknown>;
-      const sourceProperties = source.properties as Record<string, unknown>;
-      const provenance = sourceProperties.provenance as Record<string, unknown>;
-      const provenanceProperties = provenance.properties as Record<string, unknown>;
-      provenanceProperties.kind = { type: "string", const: "input" };
-      provenanceProperties.id = {
-        type: "string",
-        enum: [...new Set(context.inputOnlyProvenanceIds)].sort(),
-        description:
-          "Exact immutable input ID from the declared capsule input manifest; this is not the evidence source ID.",
-      };
-    }
-    return schema;
+    void context;
+    return structuredClone(discoveryCloseoutSchema);
   }
+  if (stage === "acquire") return structuredClone(acquisitionAuditSchema);
   if (stage === "analyze") return structuredClone(analysisSchema);
   if (stage === "synthesize") return structuredClone(synthesisSchema);
   if (stage === "doctor") return structuredClone(doctorSchema);
@@ -282,6 +393,43 @@ export function schemaForStage(
     },
   };
   return schema;
+}
+
+export function schemaForDiscoveryAssessmentBatch(): JsonSchema {
+  return structuredClone(discoveryAssessmentBatchSchema);
+}
+
+export function parseDiscoveryAssessmentBatch(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  const sanitized = sanitizeResearchValue(value);
+  if (!isObject(sanitized)) {
+    throw new StructuredOutputError("Discovery assessment batch must be a JSON object.");
+  }
+  const key = canonicalJson(discoveryAssessmentBatchSchema);
+  const validate = validators.get(key) ?? compileValidator(key, discoveryAssessmentBatchSchema);
+  if (!validate(sanitized)) {
+    throw new StructuredOutputError("Discovery assessment batch failed its JSON Schema.", {
+      validation: formatValidationErrors(validate.errors),
+    });
+  }
+  const assessments = sanitized.assessments as Array<Record<string, unknown>>;
+  const candidateIds = assessments.map((assessment) => assessment.candidateId);
+  if (new Set(candidateIds).size !== candidateIds.length) {
+    throw new StructuredOutputError(
+      "Discovery assessment batch cannot assess one candidate more than once.",
+    );
+  }
+  for (const [index, assessment] of assessments.entries()) {
+    if (assessment.decision !== "admit") continue;
+    const dimensions = assessment.coverageDimensions as unknown[];
+    if (new Set(dimensions).size !== dimensions.length) {
+      throw new StructuredOutputError(
+        `Discovery assessment /assessments/${index}/coverageDimensions contains duplicates.`,
+      );
+    }
+  }
+  return sanitized;
 }
 
 export function parseStructuredStageOutput(
@@ -334,6 +482,42 @@ export function parseStructuredStageOutput(
   return { value, fileContent: `${JSON.stringify(value, null, 2)}\n`, normalizations: [] };
 }
 
+export function parseEvidenceRecord(raw: string): Record<string, unknown> {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch (error) {
+    throw new StructuredOutputError("Materialized evidence record is not valid JSON.", {
+      validation: error instanceof Error ? error.message : String(error),
+    });
+  }
+  value = sanitizeResearchValue(value);
+  if (!isObject(value)) {
+    throw new StructuredOutputError("Materialized evidence record must be a JSON object.");
+  }
+  const key = canonicalJson(evidenceSchema);
+  const validate = validators.get(key) ?? compileValidator(key, evidenceSchema);
+  if (!validate(value)) {
+    throw new StructuredOutputError("Materialized evidence record failed its JSON Schema.", {
+      validation: formatValidationErrors(validate.errors),
+    });
+  }
+  const sources = value.sources as Array<Record<string, unknown>>;
+  const sourceIds = sources.map((source) => source.id);
+  if (new Set(sourceIds).size !== sourceIds.length) {
+    throw new StructuredOutputError("Materialized evidence source IDs must be unique.");
+  }
+  for (const [index, source] of sources.entries()) {
+    const dimensions = source.coverageDimensions as unknown[];
+    if (new Set(dimensions).size !== dimensions.length) {
+      throw new StructuredOutputError(
+        `Materialized evidence /sources/${index}/coverageDimensions contains duplicates.`,
+      );
+    }
+  }
+  return value;
+}
+
 function normalizeSynthesisMarkdown(markdown: string): {
   content: string;
   replacements: number;
@@ -353,25 +537,24 @@ function normalizeSynthesisMarkdown(markdown: string): {
 function assertUniqueStringCollections(stage: StructuredStage, value: Record<string, unknown>) {
   const collections: Array<{ path: string; value: unknown }> = [];
   if (stage === "discover") {
-    const sources = Array.isArray(value.sources) ? value.sources : [];
-    for (const [index, source] of sources.entries()) {
-      if (isObject(source)) {
+    const dimensions = Array.isArray(value.dimensionJudgments) ? value.dimensionJudgments : [];
+    collections.push({
+      path: "/dimensionJudgments/ids",
+      value: dimensions.map((item) => (isObject(item) ? item.id : null)),
+    });
+  }
+  if (stage === "acquire") {
+    const decisions = Array.isArray(value.decisions) ? value.decisions : [];
+    collections.push({
+      path: "/decisions/sourceIds",
+      value: decisions.map((item) => (isObject(item) ? item.sourceId : null)),
+    });
+    for (const [index, decision] of decisions.entries()) {
+      if (isObject(decision)) {
         collections.push({
-          path: `/sources/${index}/coverageDimensions`,
-          value: source.coverageDimensions,
+          path: `/decisions/${index}/artifactIds`,
+          value: decision.artifactIds,
         });
-      }
-    }
-    if (isObject(value.coverage)) {
-      collections.push({ path: "/coverage/sourceTypes", value: value.coverage.sourceTypes });
-      const dimensions = Array.isArray(value.coverage.dimensions) ? value.coverage.dimensions : [];
-      for (const [index, dimension] of dimensions.entries()) {
-        if (isObject(dimension)) {
-          collections.push({
-            path: `/coverage/dimensions/${index}/sourceIds`,
-            value: dimension.sourceIds,
-          });
-        }
       }
     }
   }

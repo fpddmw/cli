@@ -1,16 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { loadCapabilityDeclarations, verifyCapabilities } from "./capabilities.js";
 import { loadCapabilityCredentialMap } from "./credentials.js";
 import {
   loadBrokerEvidenceCache,
+  loadProjectEvidenceReceipts,
   persistBrokerEvidence,
   storeBrokerEvidenceCache,
 } from "./evidence.js";
+import { registerBrokerCandidates } from "./evidence-ledger.js";
+import { deriveDiscoveryPlan } from "./discovery-planning.js";
 import { appendJournalEvent, readJournal } from "./journal.js";
 import { loadProject } from "./projects.js";
 import { sanitizeResearchRecord, sanitizeResearchText } from "./sanitization.js";
@@ -66,26 +69,13 @@ export async function fetchNativeCandidateSource(input: {
   }
   const config = await loadWorkspaceConfig(input.root);
   const priorCalls = (await readJournal(workspacePaths(input.root).journal)).filter(
-    (event) => event.scope === input.projectId && event.type === "capability.fetch.attempted",
+    (event) => event.scope === input.projectId && event.type === "capability.fetch.requested",
   ).length;
-  if (priorCalls >= config.budget.maxBrokerCalls) {
-    await appendJournalEvent(
-      workspacePaths(input.root).journal,
-      "capability.fetch.rejected",
-      input.projectId,
-      {
-        projectId: input.projectId,
-        code: "RESEARCH_BROKER_CALL_LIMIT_EXCEEDED",
-        maxCalls: config.budget.maxBrokerCalls,
-        startedCalls: priorCalls,
-      },
-    );
-    throw new CliError("The bounded broker call budget is exhausted.", {
-      code: "RESEARCH_BROKER_CALL_LIMIT_EXCEEDED",
-      exitCode: 3,
-      details: { maxCalls: config.budget.maxBrokerCalls, startedCalls: priorCalls },
-    });
-  }
+  const discoveryPlan = deriveDiscoveryPlan(
+    project.evidenceRequirements,
+    config,
+    capabilities.map((capability) => capability.id),
+  );
   const credentialMap = await loadCapabilityCredentialMap(input.root, declarations.capabilities);
   const receipt = await fetchCandidateSource({
     root: input.root,
@@ -97,13 +87,21 @@ export async function fetchNativeCandidateSource(input: {
     workspaceContextTokens: config.budget.maxBrokerContextTokens,
     workspaceMaxItems: config.budget.maxBrokerItems,
     arguments: input.request,
+    onBrokerRequest: () => {
+      if (priorCalls >= discoveryPlan.maxCalls)
+        throw brokerCallLimitError(discoveryPlan.maxCalls, priorCalls);
+    },
   });
+  const startedCalls = (await readJournal(workspacePaths(input.root).journal)).filter(
+    (event) => event.scope === input.projectId && event.type === "capability.fetch.requested",
+  ).length;
   return {
     ...receipt,
     brokerBudget: {
-      maxCalls: config.budget.maxBrokerCalls,
-      startedCalls: priorCalls + 1,
-      remainingCalls: Math.max(0, config.budget.maxBrokerCalls - priorCalls - 1),
+      maxCalls: discoveryPlan.maxCalls,
+      hardCallLimit: discoveryPlan.hardCallLimit,
+      startedCalls,
+      remainingCalls: Math.max(0, discoveryPlan.maxCalls - startedCalls),
     },
   };
 }
@@ -133,9 +131,21 @@ export async function startCapabilityBroker(
   }
   const credentialMap = await loadCapabilityCredentialMap(root, declarations.capabilities);
   const config = await loadWorkspaceConfig(root);
+  const projectPath = join(workspacePaths(root).projects, projectId, "project.json");
+  const project = (await pathExists(projectPath)) ? await loadProject(root, projectId) : null;
+  const maxCalls = project
+    ? deriveDiscoveryPlan(
+        project.evidenceRequirements,
+        config,
+        networkCapabilities.map((capability) => capability.id),
+      ).maxCalls
+    : config.budget.maxBrokerCalls;
+  const priorCalls = (await readJournal(workspacePaths(root).journal)).filter(
+    (event) => event.scope === projectId && event.type === "capability.fetch.requested",
+  ).length;
   const callBudget: BrokerCallBudget = {
-    maxCalls: config.budget.maxBrokerCalls,
-    startedCalls: 0,
+    maxCalls,
+    startedCalls: priorCalls,
   };
   const routeToken = randomUUID().replaceAll("-", "");
   const route = `/mcp/${routeToken}`;
@@ -262,31 +272,6 @@ async function handleMcpRequest(input: {
         sendToolError(input.response, body, "Unsupported tool call.");
         return;
       }
-      if (input.callBudget.startedCalls >= input.callBudget.maxCalls) {
-        await appendJournalEvent(
-          workspacePaths(input.root).journal,
-          "capability.fetch.rejected",
-          input.projectId,
-          {
-            projectId: input.projectId,
-            code: "RESEARCH_BROKER_CALL_LIMIT_EXCEEDED",
-            maxCalls: input.callBudget.maxCalls,
-            startedCalls: input.callBudget.startedCalls,
-          },
-        );
-        sendToolError(
-          input.response,
-          body,
-          JSON.stringify({
-            code: "RESEARCH_BROKER_CALL_LIMIT_EXCEEDED",
-            message:
-              "The bounded broker call budget is exhausted; produce the best supported result from admitted receipts.",
-            maxCalls: input.callBudget.maxCalls,
-          }),
-        );
-        return;
-      }
-      input.callBudget.startedCalls += 1;
       try {
         const receipt = await fetchCandidateSource({
           root: input.root,
@@ -298,6 +283,12 @@ async function handleMcpRequest(input: {
           workspaceContextTokens: input.workspaceContextTokens,
           workspaceMaxItems: input.workspaceMaxItems,
           arguments: params.arguments,
+          onBrokerRequest: () => {
+            if (input.callBudget.startedCalls >= input.callBudget.maxCalls) {
+              throw brokerCallLimitError(input.callBudget.maxCalls, input.callBudget.startedCalls);
+            }
+            input.callBudget.startedCalls += 1;
+          },
         });
         sendRpcResult(input.response, body, {
           content: [
@@ -318,6 +309,19 @@ async function handleMcpRequest(input: {
           ],
         });
       } catch (error) {
+        if (error instanceof CliError && error.code === "RESEARCH_BROKER_CALL_LIMIT_EXCEEDED") {
+          await appendJournalEvent(
+            workspacePaths(input.root).journal,
+            "capability.fetch.rejected",
+            input.projectId,
+            {
+              projectId: input.projectId,
+              code: error.code,
+              maxCalls: input.callBudget.maxCalls,
+              startedCalls: input.callBudget.startedCalls,
+            },
+          );
+        }
         const detail =
           error instanceof CliError
             ? JSON.stringify({ code: error.code, message: error.message, details: error.details })
@@ -352,6 +356,7 @@ async function fetchCandidateSource(input: {
   workspaceContextTokens: number;
   workspaceMaxItems: number;
   arguments: Record<string, unknown>;
+  onBrokerRequest?: () => void;
 }): Promise<Record<string, unknown>> {
   const capabilityId = input.arguments.capability_id;
   const credentialId = input.arguments.credential_id;
@@ -494,6 +499,107 @@ async function fetchCandidateSource(input: {
       accept: capability.http.accept,
     }),
   );
+  input.onBrokerRequest?.();
+  await appendJournalEvent(
+    workspacePaths(input.root).journal,
+    "capability.fetch.requested",
+    input.projectId,
+    {
+      attemptId,
+      projectId: input.projectId,
+      capabilityId,
+      credentialId: effectiveCredentialId,
+      targetSha256: sha256Text(target.toString()),
+      method: capability.http.method,
+      requestBodySha256: encodedRequestBody ? sha256Text(encodedRequestBody) : null,
+      cacheMode,
+      cacheKeySha256,
+    },
+  );
+  const projectReuse = await findProjectRequestReuse(
+    input.root,
+    input.projectId,
+    cacheKeySha256,
+    effectiveCredentialId,
+  );
+  if (projectReuse) {
+    const raw = await readFile(
+      resolveContained(workspacePaths(input.root).control, projectReuse.locator),
+    );
+    const context = buildContextView(
+      raw,
+      projectReuse.contentType,
+      jsonPointer as string | undefined,
+      requestedItemOffset,
+      maxItems,
+      input.workspaceContextTokens * BROKER_CONTEXT_BYTES_PER_TOKEN,
+    );
+    const receipt = await persistBrokerEvidence(
+      input.root,
+      {
+        attemptId,
+        projectId: input.projectId,
+        capabilityId,
+        credentialId: effectiveCredentialId,
+        status: projectReuse.status,
+        contentType: projectReuse.contentType,
+        sourceSha256: projectReuse.sourceSha256,
+        contextItems: context.items,
+        contextOffset: context.offset,
+        contextTotalItems: context.totalItems,
+        contextNextOffset: context.nextOffset,
+        contextTruncated: context.truncated,
+        redactions: projectReuse.redactions,
+        retrievedAt: projectReuse.retrievedAt,
+        cacheHit: true,
+      },
+      raw,
+      context.bytes,
+    );
+    if (input.capsuleProject) {
+      await stageContextObject(input.capsuleProject, receipt.contextLocator, context.bytes);
+    }
+    const candidates = await registerBrokerCandidates({
+      root: input.root,
+      projectId: input.projectId,
+      receipt,
+      contextBytes: context.bytes,
+      selectedJsonPointer: context.selectedJsonPointer,
+      itemOffset: context.offset,
+    });
+    await appendJournalEvent(
+      workspacePaths(input.root).journal,
+      "capability.fetch.reused",
+      input.projectId,
+      {
+        attemptId,
+        reusedAttemptId: projectReuse.attemptId,
+        projectId: input.projectId,
+        capabilityId,
+        credentialId: effectiveCredentialId,
+        cacheKeySha256,
+        contextOffset: context.offset,
+        contextItems: context.items,
+        candidateCount: candidates.length,
+      },
+    );
+    await appendCompletedReceipt(
+      input.root,
+      input.projectId,
+      receipt,
+      cacheKeySha256,
+      candidates.length,
+      false,
+      "project",
+    );
+    return brokerToolResult(
+      receipt,
+      context.bytes,
+      projectReuse.contentType,
+      candidates,
+      "project",
+    );
+  }
   await appendJournalEvent(
     workspacePaths(input.root).journal,
     "capability.fetch.attempted",
@@ -540,6 +646,7 @@ async function fetchCandidateSource(input: {
             contextTotalItems: context.totalItems,
             contextNextOffset: context.nextOffset,
             contextTruncated: context.truncated,
+            redactions: cached.redactions,
             retrievedAt: cached.retrievedAt,
             cacheHit: true,
           },
@@ -549,8 +656,30 @@ async function fetchCandidateSource(input: {
         if (input.capsuleProject) {
           await stageContextObject(input.capsuleProject, receipt.contextLocator, context.bytes);
         }
-        await appendCompletedReceipt(input.root, input.projectId, receipt, cacheKeySha256);
-        return brokerToolResult(receipt, context.bytes, cached.contentType);
+        const candidates = await registerBrokerCandidates({
+          root: input.root,
+          projectId: input.projectId,
+          receipt,
+          contextBytes: context.bytes,
+          selectedJsonPointer: context.selectedJsonPointer,
+          itemOffset: context.offset,
+        });
+        await appendCompletedReceipt(
+          input.root,
+          input.projectId,
+          receipt,
+          cacheKeySha256,
+          candidates.length,
+          false,
+          "workspace",
+        );
+        return brokerToolResult(
+          receipt,
+          context.bytes,
+          cached.contentType,
+          candidates,
+          "workspace",
+        );
       }
     }
     const headers = new Headers(capability.http.staticHeaders);
@@ -672,9 +801,9 @@ async function fetchCandidateSource(input: {
         details: { contentType, allowedContentTypes: capability.http.allowedContentTypes },
       });
     }
-    assertNoSensitiveResponseMaterial(bytes, contentType);
+    const persistable = preparePersistableResponse(bytes, contentType);
     const context = buildContextView(
-      bytes,
+      persistable.bytes,
       contentType,
       jsonPointer as string | undefined,
       requestedItemOffset,
@@ -696,22 +825,40 @@ async function fetchCandidateSource(input: {
         contextTotalItems: context.totalItems,
         contextNextOffset: context.nextOffset,
         contextTruncated: context.truncated,
+        redactions: persistable.redactions,
         retrievedAt: new Date().toISOString(),
         cacheHit: false,
       },
-      bytes,
+      persistable.bytes,
       context.bytes,
     );
     if (input.capsuleProject) {
       await stageContextObject(input.capsuleProject, receipt.contextLocator, context.bytes);
     }
     if (!credential) await storeBrokerEvidenceCache(input.root, cacheKeySha256, receipt);
-    await appendCompletedReceipt(input.root, input.projectId, receipt, cacheKeySha256);
-    return brokerToolResult(receipt, context.bytes, contentType);
+    const candidates = await registerBrokerCandidates({
+      root: input.root,
+      projectId: input.projectId,
+      receipt,
+      contextBytes: context.bytes,
+      selectedJsonPointer: context.selectedJsonPointer,
+      itemOffset: context.offset,
+    });
+    await appendCompletedReceipt(
+      input.root,
+      input.projectId,
+      receipt,
+      cacheKeySha256,
+      candidates.length,
+      true,
+      null,
+    );
+    return brokerToolResult(receipt, context.bytes, contentType, candidates, null);
   } catch (error) {
+    const reportedError = structuredBrokerFailure(error, capabilityId, effectiveCredentialId);
     const safeDetails =
-      error instanceof CliError && isObject(error.details)
-        ? sanitizeResearchRecord(error.details, [...input.credentialMap.values()])
+      reportedError instanceof CliError && isObject(reportedError.details)
+        ? sanitizeResearchRecord(reportedError.details, [...input.credentialMap.values()])
         : {};
     await appendJournalEvent(
       workspacePaths(input.root).journal,
@@ -722,23 +869,56 @@ async function fetchCandidateSource(input: {
         capabilityId,
         credentialId: effectiveCredentialId,
         error: bounded(
-          sanitizeResearchText(error instanceof Error ? error.message : String(error), [
-            ...input.credentialMap.values(),
-          ]),
+          sanitizeResearchText(reportedError.message, [...input.credentialMap.values()]),
           500,
         ),
-        failureKind: brokerFailureKind(error),
+        failureKind: brokerFailureKind(reportedError),
         ...safeDetails,
       },
     );
-    throw error;
+    throw reportedError;
   }
+}
+
+function structuredBrokerFailure(
+  error: unknown,
+  capabilityId: string,
+  credentialId: string | null,
+): CliError {
+  if (error instanceof CliError) return error;
+  const message = error instanceof Error ? error.message : String(error);
+  const disclosureRejected = /credential-like material|credential disclosure screening/i.test(
+    message,
+  );
+  return new CliError(
+    disclosureRejected
+      ? "The provider response was rejected by disclosure screening and was not persisted."
+      : bounded(sanitizeResearchText(message), 500),
+    {
+      code: disclosureRejected
+        ? "RESEARCH_BROKER_RESPONSE_REJECTED"
+        : "RESEARCH_BROKER_FETCH_FAILED",
+      exitCode: 3,
+      details: {
+        executionMode: "broker",
+        credentialScope: "broker",
+        networkAttempted: true,
+        minimumAction: disclosureRejected
+          ? "Refine the request or capability response projection so credential-like provider fields are excluded before retrying."
+          : "Inspect the sanitized broker failure, then retry only after correcting the deterministic request/provider condition or a transient network failure.",
+        capabilityId,
+        credentialId,
+      },
+    },
+  );
 }
 
 function brokerToolResult(
   receipt: object,
   context: Buffer,
   contentType: string,
+  candidates: Awaited<ReturnType<typeof registerBrokerCandidates>>,
+  reuseScope: "project" | "workspace" | null,
 ): Record<string, unknown> {
   const inline = contentType.includes("json") || contentType.startsWith("text/");
   return {
@@ -747,7 +927,60 @@ function brokerToolResult(
       encoding: inline ? "utf8" : "not-inlined",
       text: inline ? context.toString("utf8") : null,
     },
+    candidates,
+    networkAttempted: reuseScope === null,
+    reuseScope,
   };
+}
+
+function preparePersistableResponse(
+  bytes: Buffer,
+  contentType: string,
+): { bytes: Buffer; redactions: number } {
+  if (!contentType.includes("json")) {
+    assertNoSensitiveResponseMaterial(bytes, contentType);
+    return { bytes, redactions: 0 };
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(bytes.toString("utf8")) as unknown;
+  } catch {
+    throw new Error("JSON response body is not valid JSON");
+  }
+  const result = redactSensitiveJson(value);
+  const persistable = Buffer.from(JSON.stringify(result.value), "utf8");
+  assertNoSensitiveResponseMaterial(persistable, contentType);
+  return { bytes: persistable, redactions: result.redactions };
+}
+
+function redactSensitiveJson(value: unknown): { value: unknown; redactions: number } {
+  if (Array.isArray(value)) {
+    const items: unknown[] = [];
+    let redactions = 0;
+    for (const item of value) {
+      const result = redactSensitiveJson(item);
+      items.push(result.value);
+      redactions += result.redactions;
+    }
+    return { value: items, redactions };
+  }
+  if (!isObject(value)) {
+    if (typeof value !== "string") return { value, redactions: 0 };
+    const sanitized = sanitizeResearchText(value);
+    return { value: sanitized, redactions: sanitized === value ? 0 : 1 };
+  }
+  const result: Record<string, unknown> = {};
+  let redactions = 0;
+  for (const [key, item] of Object.entries(value)) {
+    if (sensitiveJsonKey(key)) {
+      redactions += 1;
+      continue;
+    }
+    const child = redactSensitiveJson(item);
+    result[key] = child.value;
+    redactions += child.redactions;
+  }
+  return { value: result, redactions };
 }
 
 function assertNoSensitiveResponseMaterial(bytes: Buffer, contentType: string): void {
@@ -787,11 +1020,15 @@ async function delay(milliseconds: number): Promise<void> {
 function containsSensitiveJsonField(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(containsSensitiveJsonField);
   if (!isObject(value)) return false;
-  const sensitive =
-    /^(access_token|api[_-]?key|apikey|authorization|cookie|password|secret|session|token)$/i;
   return Object.entries(value).some(
     ([key, item]) =>
-      (sensitive.test(key) && item !== null && item !== "") || containsSensitiveJsonField(item),
+      (sensitiveJsonKey(key) && item !== null && item !== "") || containsSensitiveJsonField(item),
+  );
+}
+
+function sensitiveJsonKey(key: string): boolean {
+  return /^(access_token|api[_-]?key|apikey|authorization|cookie|password|secret|session|token)$/i.test(
+    key,
   );
 }
 
@@ -817,6 +1054,9 @@ async function appendCompletedReceipt(
   projectId: string,
   receipt: Awaited<ReturnType<typeof persistBrokerEvidence>>,
   cacheKeySha256: string,
+  candidateCount: number,
+  networkAttempted: boolean,
+  reuseScope: "project" | "workspace" | null,
 ): Promise<void> {
   await appendJournalEvent(workspacePaths(root).journal, "capability.fetch.completed", projectId, {
     attemptId: receipt.attemptId,
@@ -838,10 +1078,51 @@ async function appendCompletedReceipt(
     contextTotalItems: receipt.contextTotalItems ?? null,
     contextNextOffset: receipt.contextNextOffset ?? null,
     contextTruncated: receipt.contextTruncated,
+    redactions: receipt.redactions,
+    candidateCount,
+    networkAttempted,
+    reuseScope,
     retrievedAt: receipt.retrievedAt,
     servedAt: receipt.servedAt,
     cacheHit: receipt.cacheHit,
     cacheKeySha256,
+  });
+}
+
+async function findProjectRequestReuse(
+  root: string,
+  projectId: string,
+  cacheKeySha256: string,
+  credentialId: string | null,
+): Promise<Awaited<ReturnType<typeof loadProjectEvidenceReceipts>>[number] | null> {
+  const events = await readJournal(workspacePaths(root).journal);
+  const completed = [...events]
+    .reverse()
+    .find(
+      (event) =>
+        event.scope === projectId &&
+        event.type === "capability.fetch.completed" &&
+        event.payload.cacheKeySha256 === cacheKeySha256 &&
+        event.payload.credentialId === credentialId &&
+        typeof event.payload.attemptId === "string",
+    );
+  if (!completed) return null;
+  const receipts = await loadProjectEvidenceReceipts(root, projectId);
+  return receipts.find((receipt) => receipt.attemptId === completed.payload.attemptId) ?? null;
+}
+
+function brokerCallLimitError(maxCalls: number, startedCalls: number): CliError {
+  return new CliError("The derived broker call budget is exhausted.", {
+    code: "RESEARCH_BROKER_CALL_LIMIT_EXCEEDED",
+    exitCode: 3,
+    details: {
+      executionMode: "broker",
+      networkAttempted: false,
+      maxCalls,
+      startedCalls,
+      minimumAction:
+        "Assess the registered candidates and coverage gaps; increase the reviewed hard ceiling only if a justified gap-fill batch remains.",
+    },
   });
 }
 
@@ -965,6 +1246,7 @@ function buildContextView(
   totalItems: number | null;
   nextOffset: number | null;
   truncated: boolean;
+  selectedJsonPointer: string | null;
 } {
   if (!Number.isInteger(maxContextBytes) || maxContextBytes < 1) {
     throw new Error("broker context byte limit is invalid");
@@ -981,6 +1263,7 @@ function buildContextView(
       totalItems: null,
       nextOffset: null,
       truncated: boundedBytes.byteLength < bytes.byteLength,
+      selectedJsonPointer: null,
     };
   }
   let parsed: unknown;
@@ -989,7 +1272,13 @@ function buildContextView(
   } catch {
     throw new Error("JSON response body is not valid JSON");
   }
-  const selected = jsonPointer === undefined ? parsed : resolveJsonPointer(parsed, jsonPointer);
+  const automaticSelection = jsonPointer === undefined ? defaultCandidateCollection(parsed) : null;
+  const selectedJsonPointer = jsonPointer ?? automaticSelection?.jsonPointer ?? null;
+  const selected = automaticSelection
+    ? automaticSelection.value
+    : jsonPointer === undefined
+      ? parsed
+      : resolveJsonPointer(parsed, jsonPointer);
   if (Array.isArray(selected)) {
     const limited: unknown[] = [];
     for (const item of selected.slice(itemOffset, itemOffset + maxItems)) {
@@ -1006,6 +1295,7 @@ function buildContextView(
       totalItems: selected.length,
       nextOffset,
       truncated: itemOffset > 0 || nextOffset !== null,
+      selectedJsonPointer,
     };
   }
   if (isObject(selected)) {
@@ -1025,6 +1315,7 @@ function buildContextView(
       totalItems: entries.length,
       nextOffset,
       truncated: itemOffset > 0 || nextOffset !== null,
+      selectedJsonPointer,
     };
   }
   if (itemOffset !== 0) throw new Error("item_offset is supported only for JSON collections");
@@ -1037,6 +1328,7 @@ function buildContextView(
       totalItems: 1,
       nextOffset: null,
       truncated: false,
+      selectedJsonPointer,
     };
   }
   if (typeof selected !== "string") {
@@ -1060,7 +1352,24 @@ function buildContextView(
     totalItems: 1,
     nextOffset: null,
     truncated: true,
+    selectedJsonPointer,
   };
+}
+
+function defaultCandidateCollection(
+  value: unknown,
+): { value: unknown[]; jsonPointer: string } | null {
+  if (!isObject(value)) return null;
+  for (const [jsonPointer, candidate] of [
+    ["/web/results", isObject(value.web) ? value.web.results : undefined],
+    ["/results", value.results],
+    ["/records", value.records],
+    ["/items", value.items],
+    ["/data", value.data],
+  ] as const) {
+    if (Array.isArray(candidate)) return { value: candidate, jsonPointer };
+  }
+  return null;
 }
 
 function jsonBytes(value: unknown): Buffer {

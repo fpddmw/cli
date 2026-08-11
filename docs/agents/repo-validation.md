@@ -16,8 +16,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-10
-lastReviewedCommit: bef62f8d48c42eaff14fa2bd7eba1be83a46a58b
+lastReviewedAt: 2026-08-11
+lastReviewedCommit: 2ce7ad7cd36c1aeba577bc72e4095ed3a81debd6
 ---
 
 # Repo Validation
@@ -173,6 +173,21 @@ public-internet plan and block downstream work when any capability marked
 capability that was never exercised from one that was attempted but yielded no
 admissible receipt, including only sanitized failure-kind metadata.
 
+`test/research-evidence-ledger.test.ts` covers append-only ledger integrity,
+cross-receipt canonical deduplication, bounded incremental discovery judgments,
+compact closeout, and dynamic coverage-derived discovery budgets with early
+stop and a hard ceiling. `test/research-acquisition.test.ts` covers native-lead
+formalization, hashed native activity, exact download-event and concurrent-file
+isolation, failed/cancelled non-commit behavior, sensitive locator redaction,
+PDF/ZIP/OpenXML structure checks, false-PDF rejection, derived-artifact lineage,
+parent URL inheritance and conflicting derivative URL rejection, binary-only
+versus producer-readable full text, artifact drift, immutable
+snapshot/delta lineage, and non-destructive addenda. Workspace/runtime tests
+additionally verify default superseded-project filtering, authoritative fork
+lineage, archive/abandon dispositions, durable user/external handoffs and
+challenge gates, and closure rejection when any bound snapshot-chain object
+drifts.
+
 Reviewer executor regression coverage verifies that a Codex reviewer receives
 exactly one external-sandbox bypass flag and no nested `--sandbox read-only`
 flag, while shell and unified-exec remain disabled. It also verifies the
@@ -191,6 +206,7 @@ prepare/fetch/submit protocol.
 Preflight/runtime parity coverage verifies that the full bounded capability
 documentation allowance is reserved for every possible broker turn and fits
 the default discovery package before project admission.
-Broker tests also prove that the configured call ceiling rejects an excess
-request before another provider fetch while retaining a sanitized journal
-event and the already admitted receipt.
+Broker tests also prove that the configured view ceiling rejects an excess
+request before another provider fetch while retaining a sanitized journal event
+and the already admitted receipt. Project-cache reuse avoids a second provider
+call but still consumes one bounded context-view reservation.

@@ -157,6 +157,10 @@ export function projectInputsFromPlan(
     ...(entry.contextRanges && entry.contextRanges.length
       ? { contextRanges: entry.contextRanges.map((range) => ({ ...range })) }
       : {}),
+    sourceType: entry.sourceType,
+    dimensions: [...entry.dimensions],
+    fullText: entry.fullText,
+    publicationDate: entry.publicationDate,
     addedAt,
   }));
 }

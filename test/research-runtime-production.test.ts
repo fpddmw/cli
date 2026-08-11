@@ -14,7 +14,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
+import { CliError } from "../src/errors.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
+import { registerEvidenceArtifact } from "../src/research/workspace/artifacts.js";
+import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
 import {
   fetchNativeCandidateSource,
   startCapabilityBroker,
@@ -26,6 +29,10 @@ import {
   loadProjectEvidenceReceipts,
   stageProjectEvidence,
 } from "../src/research/workspace/evidence.js";
+import {
+  evidenceLedgerPath,
+  listEvidenceCandidates,
+} from "../src/research/workspace/evidence-ledger.js";
 import type { AgentExecutionRequest } from "../src/research/workspace/executor.js";
 import {
   addProjectInput,
@@ -33,6 +40,7 @@ import {
   initializeProject,
   loadProject,
   retryProjectPackage,
+  saveProject,
 } from "../src/research/workspace/projects.js";
 import {
   abortNativeResearchStage,
@@ -53,6 +61,192 @@ import {
 } from "../src/research/workspace/workspace.js";
 
 describe("production research evidence and broker", () => {
+  it("auto-selects and paginates known provider result collections", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    const originalFetch = globalThis.fetch;
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, "provider-result-collections", "Bound provider results.");
+      await installNetworkCapability(root, skillParent);
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "provider-result-collections",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      globalThis.fetch = async (request) => {
+        const shape = new URL(String(request)).searchParams.get("shape");
+        const results = [0, 1, 2].map((index) => ({
+          title: `${shape}-${index}`,
+          url: `https://source.test/${shape}/${index}`,
+        }));
+        return new Response(
+          JSON.stringify(shape === "web" ? { web: { results } } : { type: "news", results }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      };
+
+      for (const shape of ["news", "web"] as const) {
+        const result = await fetchNativeCandidateSource({
+          root,
+          projectId: "provider-result-collections",
+          request: {
+            capability_id: "method.public-source",
+            url: `https://source.test/items?shape=${shape}`,
+            max_items: 2,
+          },
+        });
+        assert.equal(result.contextItems, 2);
+        assert.equal(result.contextTotalItems, 3);
+        assert.equal(result.contextNextOffset, 2);
+        assert.equal(result.contextTruncated, true);
+        assert.equal((result.candidates as unknown[]).length, 2);
+        assert.deepEqual(
+          (result.candidates as Array<{ origin: { jsonPointer: string } }>).map(
+            (candidate) => candidate.origin.jsonPointer,
+          ),
+          [
+            `/${shape === "web" ? "web/results" : "results"}/0`,
+            `/${shape === "web" ? "web/results" : "results"}/1`,
+          ],
+        );
+        const bounded = result.boundedContext as { encoding: string; text: string };
+        assert.equal(bounded.encoding, "utf8");
+        assert.equal((JSON.parse(bounded.text) as unknown[]).length, 2);
+      }
+      await abortNativeResearchStage({
+        root,
+        projectId: "provider-result-collections",
+        sessionId: packet.sessionId,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("persists a safe derivative when a JSON provider response contains credential-like metadata", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    const originalFetch = globalThis.fetch;
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, "sensitive-provider-response", "Reject unsafe provider data.");
+      await installNetworkCapability(root, skillParent);
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "sensitive-provider-response",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      globalThis.fetch = async () =>
+        new Response(
+          '{"results":[{"title":"Safe result","url":"https://source.test/public","api_key":"provider-secret-marker"}]}',
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+
+      const result = await fetchNativeCandidateSource({
+        root,
+        projectId: "sensitive-provider-response",
+        request: {
+          capability_id: "method.public-source",
+          url: "https://source.test/items?q=sensitive-response",
+          json_pointer: "/results",
+        },
+      });
+      assert.equal(result.redactions, 1);
+      assert.equal((result.candidates as unknown[]).length, 1);
+      const receipts = await loadProjectEvidenceReceipts(root, "sensitive-provider-response");
+      assert.equal(receipts.length, 1);
+      const persisted = await readFile(
+        join(workspacePaths(root).control, receipts[0]!.locator),
+        "utf8",
+      );
+      assert.match(persisted, /Safe result/);
+      assert.doesNotMatch(persisted, /api_key|provider-secret-marker/);
+      const journal = await readFile(workspacePaths(root).journal, "utf8");
+      assert.match(journal, /capability\.fetch\.completed/);
+      assert.doesNotMatch(journal, /provider-secret-marker/);
+      await abortNativeResearchStage({
+        root,
+        projectId: "sensitive-provider-response",
+        sessionId: packet.sessionId,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("returns a structured sanitized error for an unprojectable sensitive text response", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    const originalFetch = globalThis.fetch;
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, "sensitive-text-response", "Reject unsafe provider text.");
+      await installNetworkCapability(root, skillParent, {
+        accept: "text/plain",
+        allowedContentTypes: ["text/plain"],
+        maxResponseBytes: 64 * 1024,
+        maxItems: 20,
+      });
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "sensitive-text-response",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      globalThis.fetch = async () =>
+        new Response("Authorization: Bearer provider-secret-marker", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+
+      await assert.rejects(
+        fetchNativeCandidateSource({
+          root,
+          projectId: "sensitive-text-response",
+          request: {
+            capability_id: "method.public-source",
+            url: "https://source.test/items?q=sensitive-text",
+          },
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof CliError);
+          assert.equal(error.code, "RESEARCH_BROKER_RESPONSE_REJECTED");
+          assert.doesNotMatch(error.message, /provider-secret-marker/);
+          return true;
+        },
+      );
+      assert.equal((await loadProjectEvidenceReceipts(root, "sensitive-text-response")).length, 0);
+      const journal = await readFile(workspacePaths(root).journal, "utf8");
+      assert.match(journal, /capability\.fetch\.failed/);
+      assert.doesNotMatch(journal, /provider-secret-marker/);
+      await abortNativeResearchStage({
+        root,
+        projectId: "sensitive-text-response",
+        sessionId: packet.sessionId,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("binds one native-host evidence fetch to the active discover stage", async () => {
     const root = await temporaryDirectory();
     const skillParent = await temporaryDirectory();
@@ -98,6 +292,82 @@ describe("production research evidence and broker", () => {
       await abortNativeResearchStage({
         root,
         projectId: "native-fetch",
+        sessionId: packet.sessionId,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("reuses an equivalent project request without another provider call while bounding views", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    const originalFetch = globalThis.fetch;
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const configPath = workspacePaths(root).config;
+      const config = JSON.parse(await readFile(configPath, "utf8")) as {
+        budget: { maxBrokerCalls: number };
+      };
+      config.budget.maxBrokerCalls = 2;
+      await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+      await initializeProject(root, "project-request-reuse", "Deduplicate one project request.");
+      await installNetworkCapability(root, skillParent);
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "project-request-reuse",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      let providerCalls = 0;
+      globalThis.fetch = async () => {
+        providerCalls += 1;
+        return new Response(
+          '{"records":[{"title":"Stable source","url":"https://source.test/public"}]}',
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      };
+      const request = {
+        capability_id: "method.public-source",
+        url: "https://source.test/items?q=stable",
+        json_pointer: "/records",
+        cache_mode: "bypass",
+      };
+      const first = await fetchNativeCandidateSource({
+        root,
+        projectId: "project-request-reuse",
+        request,
+      });
+      const second = await fetchNativeCandidateSource({
+        root,
+        projectId: "project-request-reuse",
+        request,
+      });
+      assert.equal(providerCalls, 1);
+      assert.equal(first.networkAttempted, true);
+      assert.equal(second.networkAttempted, false);
+      assert.equal(second.reuseScope, "project");
+      assert.equal((second.brokerBudget as { startedCalls: number }).startedCalls, 2);
+      await assert.rejects(
+        fetchNativeCandidateSource({
+          root,
+          projectId: "project-request-reuse",
+          request,
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_BROKER_CALL_LIMIT_EXCEEDED",
+      );
+      assert.equal(providerCalls, 1);
+      assert.equal((await loadProjectEvidenceReceipts(root, "project-request-reuse")).length, 2);
+      const journal = await readFile(workspacePaths(root).journal, "utf8");
+      assert.match(journal, /capability\.fetch\.reused/);
+      await abortNativeResearchStage({
+        root,
+        projectId: "project-request-reuse",
         sessionId: packet.sessionId,
       });
     } finally {
@@ -249,7 +519,11 @@ describe("production research evidence and broker", () => {
           reviewVerified = true;
         }),
       );
-      assert.equal(result.status, "complete", JSON.stringify(result));
+      assert.equal(
+        result.status,
+        "complete",
+        JSON.stringify({ result, project: await loadProject(root, "broker-evidence") }),
+      );
       assert.equal(reviewVerified, true);
       const review = JSON.parse(
         await readFile(
@@ -371,9 +645,9 @@ describe("production research evidence and broker", () => {
             assert.equal(request.maxTurns, 3);
             assert.doesNotMatch(request.prompt, /### inputs\/review-packet\.json/);
             assert.match(request.prompt, /TRUNCATED: the full object/);
-            assert.match(request.prompt, /jsonPointer: \/records\/2/);
-            assert.match(request.prompt, /"id": 3/);
-            assert.doesNotMatch(request.prompt, /"id": 1/);
+            assert.match(request.prompt, /jsonPointer: \/records\/0/);
+            assert.match(request.prompt, /"id": 1/);
+            assert.doesNotMatch(request.prompt, /"id": 2/);
             const contextPath = join(request.projectRoot, "inputs", "review-evidence-context.txt");
             const contextInfo = await lstat(contextPath);
             const config = JSON.parse(await readFile(workspacePaths(root).config, "utf8")) as {
@@ -394,10 +668,14 @@ describe("production research evidence and broker", () => {
             reviewed = true;
           },
           false,
-          "/records/2",
+          "/records/0",
         ),
       );
-      assert.equal(result.status, "complete", JSON.stringify(result));
+      assert.equal(
+        result.status,
+        "complete",
+        JSON.stringify({ result, project: await loadProject(root, "bounded-review-context") }),
+      );
       assert.equal(reviewed, true);
       assert.equal((await loadProjectEvidenceReceipts(root, "bounded-review-context")).length, 4);
     } finally {
@@ -815,6 +1093,87 @@ describe("production research evidence and broker", () => {
 });
 
 describe("production research control plane", () => {
+  it("binds selected acquired text into producer, reviewer, claim, and review ledgers", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(
+        root,
+        "artifact-review-binding",
+        "Evaluate acquired artifact binding.",
+      );
+      const input = join(root, "artifact-seed.txt");
+      const acquired = join(root, "acquired-full-text.txt");
+      await writeFile(input, "seed evidence\n");
+      await writeFile(acquired, "unique acquired full-text evidence\n");
+      await addProjectInput(root, "artifact-review-binding", input, "primary");
+      const normal = deterministicExecutor();
+      let artifactId: string | null = null;
+      let producerSawArtifact = false;
+      let reviewerSawArtifact = false;
+      const executor: PackageExecutor = async (request) => {
+        const stage = stageFrom(request);
+        if (stage === "acquire" && request.purpose === "primary") {
+          const [candidate] = await listEvidenceCandidates(
+            request.workspaceRoot,
+            "artifact-review-binding",
+          );
+          assert.ok(candidate);
+          const artifact = await registerEvidenceArtifact({
+            root: request.workspaceRoot,
+            projectId: "artifact-review-binding",
+            candidateId: candidate.id,
+            path: acquired,
+          });
+          artifactId = artifact.artifactId;
+          const evidence = JSON.parse(
+            await readFile(join(request.projectRoot, "outputs", "evidence.json"), "utf8"),
+          ) as { sources: Array<{ id: string }> };
+          return execution(
+            JSON.stringify({
+              schemaVersion: 1,
+              decisions: evidence.sources.map((source) => ({
+                sourceId: source.id,
+                candidateId: candidate.id,
+                artifactIds: [artifact.artifactId],
+                status: "accepted",
+                rationale: "Exact text artifact registered.",
+                limitations: [],
+              })),
+              limitations: [],
+              gaps: [],
+            }),
+          );
+        }
+        if (stage === "analyze") {
+          producerSawArtifact = request.prompt.includes("unique acquired full-text evidence");
+        }
+        if (stage === "review") {
+          const context = await readFile(
+            join(request.projectRoot, "inputs", "review-evidence-context.txt"),
+            "utf8",
+          );
+          reviewerSawArtifact = context.includes("unique acquired full-text evidence");
+        }
+        return normal(request);
+      };
+      const result = await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
+        executor,
+      );
+      assert.equal(result.status, "complete", JSON.stringify(result));
+      assert.ok(artifactId);
+      assert.equal(producerSawArtifact, true);
+      assert.equal(reviewerSawArtifact, true);
+      const ledger = await readFile(evidenceLedgerPath(root, "artifact-review-binding"), "utf8");
+      assert.match(ledger, /"type":"claim\.used"/);
+      assert.match(ledger, /"type":"review\.bound"/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("reuses one capability probe and skips paid reviewer smoke after a blocking failure", async () => {
     const root = await temporaryDirectory();
     const skillParent = await temporaryDirectory();
@@ -931,25 +1290,19 @@ describe("production research control plane", () => {
               assert.doesNotMatch(request.prompt, /Full evidence line/);
               assert.match(request.prompt, new RegExp(input.id));
               const schema = request.outputSchema as {
-                properties: {
-                  sources: {
-                    items: {
-                      properties: {
-                        provenance: { properties: { id: { enum: string[] } } };
-                      };
-                    };
-                  };
-                };
+                $id: string;
+                properties: Record<string, unknown>;
               };
-              assert.deepEqual(
-                schema.properties.sources.items.properties.provenance.properties.id.enum,
-                [input.id],
+              assert.equal(
+                schema.$id,
+                "https://schemas.tiangong.ai/research/discovery-closeout-v2.json",
               );
+              assert.equal("admissions" in schema.properties, false);
             }
             if (stage === "analyze") {
               assert.equal(request.toolPolicy, "none");
               assert.equal(request.brokerUrl, null);
-              assert.match(request.prompt, /"title":\s*"Input source"/);
+              assert.match(request.prompt, /"title":\s*"full-source\.txt"/);
             }
             if (stage === "synthesize") {
               assert.equal(request.toolPolicy, "none");
@@ -1033,7 +1386,7 @@ describe("production research control plane", () => {
       ]);
       const project = await loadProject(root, "repair-json");
       assert.equal(project.packages[0]?.attempts, 1);
-      assert.equal(project.usage.tokens, 37);
+      assert.equal(project.usage.tokens, 47);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1092,7 +1445,111 @@ describe("production research control plane", () => {
     }
   });
 
-  it("repairs a mechanically invalid provenance binding without repeating research", async () => {
+  it("repairs polluted report URLs before starting the independent reviewer", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(
+        root,
+        "repair-report-url",
+        "Evaluate report URL validation behavior.",
+      );
+      const input = join(root, "url-evidence.txt");
+      await writeFile(input, "measured evidence\n");
+      await addProjectInput(root, "repair-report-url", input, "primary");
+      const calls: Array<{ stage: string; purpose: string }> = [];
+      const normal = deterministicExecutor();
+      const executor: PackageExecutor = async (request) => {
+        const stage = stageFrom(request);
+        calls.push({ stage, purpose: request.purpose });
+        if (stage === "synthesize" && request.purpose === "primary") {
+          return execution(
+            JSON.stringify({
+              schemaVersion: 1,
+              reportMarkdown:
+                "# Findings\n\nPolluted official URL: `https://example.test/download%60`.\n\n# Limitations\n\nMust be repaired.",
+            }),
+            5,
+          );
+        }
+        return normal(request);
+      };
+      const result = await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
+        executor,
+      );
+      assert.equal(result.status, "complete", JSON.stringify(result));
+      assert.deepEqual(
+        calls.filter((call) => call.stage === "synthesize"),
+        [
+          { stage: "synthesize", purpose: "primary" },
+          { stage: "synthesize", purpose: "repair" },
+        ],
+      );
+      assert.equal(calls.filter((call) => call.stage === "review").length, 1);
+      const report = await readFile(
+        join(workspacePaths(root).projects, "repair-report-url", "outputs", "report.md"),
+        "utf8",
+      );
+      assert.doesNotMatch(report, /%60|`https?:\/\//);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a Markdown link followed by an inline evidence ID", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(
+        root,
+        "markdown-link-evidence-id",
+        "Evaluate valid Markdown URL boundary behavior.",
+      );
+      const input = join(root, "link-evidence.txt");
+      await writeFile(input, "measured evidence\n");
+      await addProjectInput(root, "markdown-link-evidence-id", input, "primary");
+      const calls: Array<{ stage: string; purpose: string }> = [];
+      const normal = deterministicExecutor();
+      const executor: PackageExecutor = async (request) => {
+        const stage = stageFrom(request);
+        calls.push({ stage, purpose: request.purpose });
+        if (stage === "synthesize") {
+          return execution(
+            JSON.stringify({
+              schemaVersion: 1,
+              reportMarkdown:
+                "# Findings\n\n[Bound source](https://example.test/evidence)（`source-1`） and [second source](https://example.test/second)（`source-2`） support the finding.\n\n# Limitations\n\nBounded context only.",
+            }),
+            5,
+          );
+        }
+        return normal(request);
+      };
+      const result = await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
+        executor,
+      );
+      assert.equal(
+        result.status,
+        "complete",
+        JSON.stringify({
+          result,
+          project: await loadProject(root, "markdown-link-evidence-id"),
+        }),
+      );
+      assert.deepEqual(
+        calls.filter((call) => call.stage === "synthesize"),
+        [{ stage: "synthesize", purpose: "primary" }],
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs a mechanically invalid discovery closeout without repeating research", async () => {
     const root = await temporaryDirectory();
     try {
       await initializeResearchWorkspace(root, undefined);
@@ -1107,16 +1564,15 @@ describe("production research control plane", () => {
         calls.push({ stage, purpose: request.purpose });
         if (stage === "discover" && request.purpose === "primary") {
           const value = (await inputEvidenceValue(request)) as {
-            sources: Array<{ id: string; provenance: { id: string } }>;
+            dimensionJudgments: Array<{ id: string; status: string }>;
           } & Record<string, unknown>;
-          const source = value.sources[0] as { id: string; provenance: { id: string } };
-          source.provenance.id = source.id;
+          value.dimensionJudgments[0]!.id = "not-a-reviewed-dimension";
           return execution(JSON.stringify(value), 5);
         }
         if (stage === "discover" && request.purpose === "repair") {
           assert.equal(request.maxTurns, 1);
-          assert.match(request.prompt, /invalid provenance/);
-          assert.match(request.prompt, new RegExp(admitted.id));
+          assert.match(request.prompt, /dimension judgments/i);
+          assert.ok(admitted.id);
           return execution(JSON.stringify(await inputEvidenceValue(request)), 2);
         }
         return normal(request);
@@ -1420,20 +1876,8 @@ describe("production research control plane", () => {
           const value = await inputEvidenceValue(request, {
             gaps: ["No directly normalized comparison."],
           });
-          const source = (value.sources as Array<{ fullTextAvailable: boolean }>)[0]!;
-          source.fullTextAvailable = false;
-          const coverage = value.coverage as {
-            dimensions: Array<{ status: string }>;
-            sourceTypes: string[];
-            fullTextSources: number;
-            datedSources: number;
-            decision: string;
-          };
-          coverage.dimensions[0]!.status = "partial";
-          coverage.sourceTypes = [];
-          coverage.fullTextSources = 0;
-          coverage.datedSources = 99;
-          coverage.decision = "insufficient";
+          const dimensions = value.dimensionJudgments as Array<{ status: string }>;
+          dimensions[0]!.status = "partial";
           return execution(JSON.stringify(value));
         },
       );
@@ -1461,6 +1905,18 @@ describe("production research control plane", () => {
       assert.equal(evidence.coverage.datedSources, 0);
       assert.equal(evidence.coverage.decision, "pass");
       assert.deepEqual(evidence.coverage.gaps, ["No directly normalized comparison."]);
+      const snapshot = JSON.parse(
+        await readFile(
+          join(
+            workspacePaths(root).projects,
+            "partial-coverage",
+            "outputs",
+            "evidence-snapshot.json",
+          ),
+          "utf8",
+        ),
+      ) as { coverage: { dimensions: Array<{ status: string }> } };
+      assert.equal(snapshot.coverage.dimensions[0]?.status, "partial");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1480,9 +1936,9 @@ describe("production research control plane", () => {
         { maxParallel: 1, maxCycles: 2, dryRun: false, environment: {} },
         async (request) => {
           const value = await inputEvidenceValue(request);
-          const source = (value.sources as Array<Record<string, unknown>>)[0]!;
-          source.url = `https://proxy-user:proxy-password@example.test/paper?token=${secret}&X-Amz-Signature=${secret}#token=${secret}`;
-          source.excerpt = `Authorization: Bearer ${secret}; Cookie: session=${secret}`;
+          const admission = (value.admissions as Array<Record<string, unknown>>)[0]!;
+          admission.candidateId = "unknown-sensitive-candidate";
+          admission.relevance = `Authorization: Bearer ${secret}; Cookie: session=${secret}; https://proxy-user:proxy-password@example.test/paper?token=${secret}`;
           return execution(JSON.stringify(value));
         },
       );
@@ -1541,6 +1997,9 @@ describe("production research control plane", () => {
       const input = join(root, "dated-source.txt");
       await writeFile(input, "dated source\n");
       await addProjectInput(root, "date-coverage", input, "primary");
+      const datedProject = await loadProject(root, "date-coverage");
+      datedProject.inputs[0]!.publicationDate = "2019-06-01";
+      await saveProject(root, datedProject);
       let calls = 0;
       const result = await runResearchWorkspace(
         root,
@@ -1755,7 +2214,7 @@ describe("production research control plane", () => {
       assert.equal(events.at(-1)?.type, "run.completed");
       assert.ok(events.every((event) => event.requestId === first.requestId));
       const retried = await retryProjectPackage(root, "recover-source", "analyze");
-      assert.equal(retried.packages[1]?.status, "ready");
+      assert.equal(retried.packages[2]?.status, "ready");
       const completed = await runResearchWorkspace(
         root,
         { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
@@ -1766,7 +2225,8 @@ describe("production research control plane", () => {
       const forked = await forkProject(root, "recover-source", "recover-fork", "analyze");
       assert.equal(forked.packages[0]?.status, "complete");
       assert.equal(forked.packages[1]?.status, "complete");
-      assert.equal(forked.packages[2]?.status, "ready");
+      assert.equal(forked.packages[2]?.status, "complete");
+      assert.equal(forked.packages[3]?.status, "ready");
       const forkResult = await runResearchWorkspace(
         root,
         { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
@@ -1789,7 +2249,7 @@ describe("production research control plane", () => {
 
       const reviewed = await runResearchWorkspace(
         root,
-        { maxParallel: 1, maxCycles: 4, dryRun: false, environment: {} },
+        { maxParallel: 1, maxCycles: 5, dryRun: false, environment: {} },
         deterministicExecutor(),
       );
       assert.equal(reviewed.status, "ready", JSON.stringify(reviewed));
@@ -1809,6 +2269,7 @@ describe("production research control plane", () => {
       const originalPacket = await readFile(packetPath, "utf8");
       const packet = JSON.parse(originalPacket) as {
         reviewEvidenceContext: { path: string };
+        snapshotChain: Array<{ path: string }>;
       };
       await writeFile(
         packetPath,
@@ -1832,14 +2293,13 @@ describe("production research control plane", () => {
 
       await retryProjectPackage(root, "tampered-review-packet", "close");
       await writeFile(packetPath, originalPacket);
-      await writeFile(
-        join(
-          workspacePaths(root).projects,
-          "tampered-review-packet",
-          packet.reviewEvidenceContext.path,
-        ),
-        "tampered review evidence context\n",
+      const contextPath = join(
+        workspacePaths(root).projects,
+        "tampered-review-packet",
+        packet.reviewEvidenceContext.path,
       );
+      const originalContext = await readFile(contextPath);
+      await writeFile(contextPath, "tampered review evidence context\n");
       const contextClosure = await runResearchWorkspace(
         root,
         { maxParallel: 1, maxCycles: 1, dryRun: false, environment: {} },
@@ -1849,6 +2309,33 @@ describe("production research control plane", () => {
       assert.match(
         (await loadProject(root, "tampered-review-packet")).packages.at(-1)?.lastError ?? "",
         /review evidence context/i,
+      );
+
+      await retryProjectPackage(root, "tampered-review-packet", "close");
+      await writeFile(contextPath, originalContext);
+      const snapshotRecord = packet.snapshotChain[0]!;
+      const snapshotPath = join(
+        workspacePaths(root).projects,
+        "tampered-review-packet",
+        snapshotRecord.path,
+      );
+      await chmod(snapshotPath, 0o600);
+      await writeFile(snapshotPath, '{"tampered":true}\n');
+      const snapshotClosure = await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 1, dryRun: false, environment: {} },
+        deterministicExecutor(),
+      );
+      assert.equal(snapshotClosure.status, "blocked", JSON.stringify(snapshotClosure));
+      assert.match(
+        (await loadProject(root, "tampered-review-packet")).packages.at(-1)?.lastError ?? "",
+        /snapshot|immutable copy/i,
+      );
+      assert.equal(
+        await lstat(
+          join(workspacePaths(root).projects, "tampered-review-packet", "outputs", "closure.json"),
+        ).catch(() => null),
+        null,
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -1913,7 +2400,7 @@ async function installNetworkCapability(
             healthCheck: {
               url: healthUrl.toString(),
               credentialId: null,
-              expectedContentTypes: ["application/json"],
+              expectedContentTypes: [httpPolicy.allowedContentTypes[0]!],
             },
           },
         ],
@@ -1936,45 +2423,26 @@ function brokerBackedExecutor(
       assert.equal(request.toolPolicy, "none");
       assert.match(request.prompt, /complete external capability documentation bundle/i);
       assert.match(request.prompt, /name: public-source-fetch/);
-      const [receipt] = JSON.parse(
-        await readFile(join(request.projectRoot, "inputs", "evidence-receipts.json"), "utf8"),
-      ) as Array<Record<string, unknown>>;
-      assert.ok(receipt);
+      const state = JSON.parse(
+        await readFile(join(request.projectRoot, "project.json"), "utf8"),
+      ) as { id: string };
+      const [candidate] = await listEvidenceCandidates(request.workspaceRoot, state.id);
+      assert.ok(candidate);
+      assert.equal(candidate.origin.jsonPointer, sourceJsonPointer);
+      await recordDiscoveryAssessmentBatch({
+        root: request.workspaceRoot,
+        projectId: state.id,
+        value: {
+          schemaVersion: 1,
+          assessments: [admissionAssessment(candidate.id, "broker-source")],
+        },
+      });
       return execution(
         JSON.stringify({
-          schemaVersion: 1,
-          sources: [
-            {
-              id: "broker-source",
-              title: "Broker source",
-              locator: receipt.locator,
-              relevance: "Direct evidence.",
-              provenance: { kind: "broker", id: receipt.attemptId },
-              sourceType: "primary",
-              retrievedAt: receipt.retrievedAt,
-              fullTextAvailable: true,
-              url: null,
-              doi: null,
-              publicationDate: null,
-              excerpt: "One bounded record.",
-              jsonPointer: sourceJsonPointer,
-              quality: { level: "primary", rationale: "Direct response." },
-              applicability: "Declared question.",
-              coverageDimensions: ["research-question"],
-            },
-          ],
+          schemaVersion: 2,
           limitations: [],
-          coverage: {
-            dimensions: [
-              { id: "research-question", status: "covered", sourceIds: ["broker-source"] },
-            ],
-            sourceTypes: ["primary"],
-            fullTextSources: 1,
-            datedSources: 0,
-            publicationDateRange: { earliest: null, latest: null },
-            decision: "pass",
-            gaps: [],
-          },
+          dimensionJudgments: [{ id: "research-question", status: "covered" }],
+          gaps: [],
         }),
       );
     }
@@ -1984,7 +2452,7 @@ function brokerBackedExecutor(
       ) as {
         packetSha256: string;
         evidenceFiles: Array<{ path: string; sha256: string }>;
-        evidenceReceipts: Array<{ locator: string; sha256: string }>;
+        evidenceReceipts: Array<{ attemptId: string; locator: string; sha256: string }>;
       };
       assert.ok(packet.evidenceFiles.length >= 1);
       assert.ok(packet.evidenceReceipts.length >= 1);
@@ -2008,9 +2476,12 @@ function deterministicExecutor(): PackageExecutor {
   return async (request) => {
     const stage = stageFrom(request);
     if (stage === "discover") return execution(JSON.stringify(await inputEvidenceValue(request)));
+    if (stage === "acquire") {
+      return execution(JSON.stringify(await acquisitionValue(request)));
+    }
     if (stage === "analyze") {
       const evidence = JSON.parse(
-        await readFile(join(request.projectRoot, "outputs", "evidence.json"), "utf8"),
+        await readFile(join(request.projectRoot, "outputs", "evidence-snapshot.json"), "utf8"),
       ) as { sources: Array<{ id: string }> };
       const sourceId = evidence.sources[0]?.id ?? "source-1";
       return execution(
@@ -2048,6 +2519,39 @@ function deterministicExecutor(): PackageExecutor {
   };
 }
 
+async function acquisitionValue(request: AgentExecutionRequest): Promise<Record<string, unknown>> {
+  const state = JSON.parse(await readFile(join(request.projectRoot, "project.json"), "utf8")) as {
+    id: string;
+  };
+  const evidence = JSON.parse(
+    await readFile(join(request.projectRoot, "outputs", "evidence.json"), "utf8"),
+  ) as {
+    sources: Array<{ id: string; provenance: { kind: "input" | "broker"; id: string } }>;
+  };
+  const candidates = await listEvidenceCandidates(request.workspaceRoot, state.id);
+  return {
+    schemaVersion: 1,
+    decisions: evidence.sources.map((source) => {
+      const candidate = candidates.find((item) =>
+        source.provenance.kind === "input"
+          ? item.origin.inputId === source.provenance.id
+          : item.origin.receiptId === source.provenance.id,
+      );
+      assert.ok(candidate, `missing ledger candidate for ${source.id}`);
+      return {
+        sourceId: source.id,
+        candidateId: candidate.id,
+        artifactIds: [],
+        status: "accepted",
+        rationale: "The immutable input or broker record is usable within its declared scope.",
+        limitations: [],
+      };
+    }),
+    limitations: [],
+    gaps: [],
+  };
+}
+
 async function inputEvidenceValue(
   request: AgentExecutionRequest,
   override: {
@@ -2059,52 +2563,55 @@ async function inputEvidenceValue(
   } = {},
 ): Promise<Record<string, unknown>> {
   const state = JSON.parse(await readFile(join(request.projectRoot, "project.json"), "utf8")) as {
+    id: string;
     inputs: Array<{ id: string; path: string }>;
+    evidenceRequirements: { dimensions: string[] };
   };
   const input = state.inputs[0];
   assert.ok(input);
+  const candidate = (await listEvidenceCandidates(request.workspaceRoot, state.id)).find(
+    (item) => item.origin.inputId === input.id,
+  );
+  assert.ok(candidate);
   const coverageDimensions = override.coverageDimensions ?? ["research-question"];
-  const dimensions = override.dimensions ?? coverageDimensions;
-  const publicationDate = override.publicationDate ?? null;
-  return {
-    schemaVersion: 1,
-    sources: [
-      {
-        id: "source-1",
-        title: "Input source",
-        locator: input.path,
-        relevance: "Direct evidence.",
-        provenance: { kind: "input", id: input.id },
-        sourceType: "primary",
-        retrievedAt: "2026-08-06T00:00:00.000Z",
-        fullTextAvailable: true,
-        url: null,
-        doi: null,
-        publicationDate,
-        excerpt: "Measured evidence.",
-        jsonPointer: null,
-        quality: { level: "primary", rationale: "Direct input." },
-        applicability: "Declared question.",
-        coverageDimensions,
-      },
-    ],
-    limitations: [],
-    coverage: {
-      dimensions: dimensions.map((id) => ({
-        id,
-        status: coverageDimensions.includes(id) ? "covered" : "missing",
-        sourceIds: coverageDimensions.includes(id) ? ["source-1"] : [],
-      })),
-      sourceTypes: ["primary"],
-      fullTextSources: 1,
-      datedSources: publicationDate === null ? 0 : 1,
-      publicationDateRange: {
-        earliest: publicationDate,
-        latest: publicationDate,
-      },
-      decision: override.decision ?? "pass",
-      gaps: override.gaps ?? [],
+  const dimensions = state.evidenceRequirements.dimensions;
+  void override.dimensions;
+  void override.decision;
+  void override.publicationDate;
+  await recordDiscoveryAssessmentBatch({
+    root: request.workspaceRoot,
+    projectId: state.id,
+    value: {
+      schemaVersion: 1,
+      assessments: [admissionAssessment(candidate.id, "source-1", coverageDimensions)],
     },
+  });
+  return {
+    schemaVersion: 2,
+    limitations: [],
+    dimensionJudgments: dimensions.map((id) => ({
+      id,
+      status: coverageDimensions.includes(id) ? "covered" : "missing",
+    })),
+    gaps: override.gaps ?? [],
+  };
+}
+
+function admissionAssessment(
+  candidateId: string,
+  sourceId: string,
+  coverageDimensions: string[] = ["research-question"],
+): Record<string, unknown> {
+  return {
+    decision: "admit",
+    candidateId,
+    sourceId,
+    sourceType: "primary",
+    relevance: "Direct evidence.",
+    quality: { level: "primary", rationale: "Direct input or response." },
+    applicability: "Declared question.",
+    coverageDimensions,
+    limitations: [],
   };
 }
 

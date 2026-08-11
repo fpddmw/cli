@@ -42,8 +42,8 @@ import type {
 
 const DOCTOR_ATTESTATION_TTL_MS = 24 * 60 * 60 * 1000;
 
-const DEFAULT_BUDGET = {
-  maxTokens: 550_000,
+const DEFAULT_SMOKE_BUDGET = {
+  maxTokens: 650_000,
   maxCostUsd: 60,
   maxWallSeconds: 72 * 60 * 60,
   maxFilesPerPackage: 20,
@@ -52,12 +52,14 @@ const DEFAULT_BUDGET = {
   confirmationCostUsd: 10,
   packageMaxTokens: {
     discover: 230_000,
-    analyze: 60_000,
+    acquire: 80_000,
+    analyze: 70_000,
     synthesize: 70_000,
-    review: 175_000,
+    review: 190_000,
   },
   packageMaxWallSeconds: {
     discover: 2 * 60 * 60,
+    acquire: 2 * 60 * 60,
     analyze: 2 * 60 * 60,
     synthesize: 60 * 60,
     review: 60 * 60,
@@ -66,9 +68,45 @@ const DEFAULT_BUDGET = {
   maxRepairTokens: 4_000,
   maxBrokerResponseBytes: 512 * 1024,
   maxBrokerContextTokens: 12_000,
-  maxBrokerCalls: 6,
+  // This is a reviewed hard ceiling. Each project derives a smaller working
+  // budget from its evidence requirements and stops as soon as coverage is met.
+  maxBrokerCalls: 24,
   maxBrokerItems: 100,
   maxInputContextTokens: 12_000,
+} as const;
+
+// Production uses deliberately generous but finite ceilings. Coverage-driven
+// planning and early stop control ordinary spend; these values are the final
+// runaway guard, not a target for a successful research run.
+const DEFAULT_PRODUCTION_BUDGET = {
+  maxTokens: 20_000_000,
+  maxCostUsd: 2_000,
+  maxWallSeconds: 14 * 24 * 60 * 60,
+  maxFilesPerPackage: 500,
+  maxBytesPerPackage: 512 * 1024 * 1024,
+  maxAttemptsPerPackage: 3,
+  confirmationCostUsd: 10,
+  packageMaxTokens: {
+    discover: 12_000_000,
+    acquire: 2_000_000,
+    analyze: 1_500_000,
+    synthesize: 1_500_000,
+    review: 2_500_000,
+  },
+  packageMaxWallSeconds: {
+    discover: 48 * 60 * 60,
+    acquire: 48 * 60 * 60,
+    analyze: 24 * 60 * 60,
+    synthesize: 24 * 60 * 60,
+    review: 24 * 60 * 60,
+  },
+  maxOutputTokens: 32_000,
+  maxRepairTokens: 16_000,
+  maxBrokerResponseBytes: 8 * 1024 * 1024,
+  maxBrokerContextTokens: 32_000,
+  maxBrokerCalls: 256,
+  maxBrokerItems: 500,
+  maxInputContextTokens: 128_000,
 } as const;
 
 export async function initializeResearchWorkspace(
@@ -116,7 +154,9 @@ export async function initializeResearchWorkspace(
       model: null,
       effort: "low",
     },
-    budget: { ...DEFAULT_BUDGET },
+    budget: structuredClone(
+      mode === "production-research" ? DEFAULT_PRODUCTION_BUDGET : DEFAULT_SMOKE_BUDGET,
+    ),
   };
   const runtimeLock: RuntimeLock = {
     schemaVersion: 1,
@@ -989,11 +1029,13 @@ function isWorkspaceConfig(value: unknown): value is WorkspaceConfig {
     positiveNumber(budget.confirmationCostUsd) &&
     isObject(budget.packageMaxTokens) &&
     positiveInteger(budget.packageMaxTokens.discover) &&
+    positiveInteger(budget.packageMaxTokens.acquire) &&
     positiveInteger(budget.packageMaxTokens.analyze) &&
     positiveInteger(budget.packageMaxTokens.synthesize) &&
     positiveInteger(budget.packageMaxTokens.review) &&
     isObject(budget.packageMaxWallSeconds) &&
     positiveInteger(budget.packageMaxWallSeconds.discover) &&
+    positiveInteger(budget.packageMaxWallSeconds.acquire) &&
     positiveInteger(budget.packageMaxWallSeconds.analyze) &&
     positiveInteger(budget.packageMaxWallSeconds.synthesize) &&
     positiveInteger(budget.packageMaxWallSeconds.review) &&

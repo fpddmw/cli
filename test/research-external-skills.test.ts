@@ -446,8 +446,16 @@ describe("external database capability admission and doctor", () => {
         assert.equal(receipt.cacheHit, false);
         assert.deepEqual(receipt.boundedContext, {
           encoding: "utf8",
-          text: '{"records":[{"id":"evidence-1"}]}\n',
+          text: '[{"id":"evidence-1"}]\n',
         });
+        assert.equal(
+          (
+            receipt.candidates as Array<{
+              origin: { jsonPointer: string };
+            }>
+          )[0]?.origin.jsonPointer,
+          "/records/0",
+        );
         assert.equal(observedAuthorization, `Bearer ${fakeSecret}`);
         assert.equal(providerCalls, 1);
 

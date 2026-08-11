@@ -1,5 +1,6 @@
 import { loadCapabilityDeclarations, verifyCapabilities } from "./capabilities.js";
 import { hasPublicInternetCapability } from "./external-skills.js";
+import { deriveDiscoveryPlan } from "./discovery-planning.js";
 import { schemaForStage } from "./schemas.js";
 import { canonicalJson, sha256Text } from "./storage.js";
 import type {
@@ -60,6 +61,13 @@ export async function evaluateProjectPreflight(
       requiredForDiscovery: capability.requiredForDiscovery,
       coverage: capability.coverage,
     }));
+  const discoveryPlan = requirements
+    ? deriveDiscoveryPlan(
+        requirements,
+        config,
+        networkCapabilities.map((capability) => capability.id),
+      )
+    : null;
   const packageTokens = config.budget.packageMaxTokens;
   const tokenReservation = Object.values(packageTokens).reduce((sum, value) => sum + value, 0);
   const wallReservation = Object.values(config.budget.packageMaxWallSeconds).reduce(
@@ -70,6 +78,7 @@ export async function evaluateProjectPreflight(
     config.producer.pricing && config.reviewer.pricing
       ? roundMoney(
           reservedAgentPackageCost(config.producer, packageTokens.discover, config) +
+            reservedAgentPackageCost(config.producer, packageTokens.acquire, config) +
             reservedAgentPackageCost(config.producer, packageTokens.analyze, config) +
             reservedAgentPackageCost(config.producer, packageTokens.synthesize, config) +
             reservedAgentPackageCost(config.reviewer, packageTokens.review, config),
@@ -113,6 +122,9 @@ export async function evaluateProjectPreflight(
     gaps.push(`doctor-attestation-${doctorAttestation.status}`);
   }
   gaps.push(...companionReadiness.gaps);
+  if (discoveryPlan) {
+    gaps.push(...discoveryPlan.constraintGaps.map((gap) => `discovery-plan-constraint:${gap}`));
+  }
   if (tokenReservation > config.budget.maxTokens) {
     gaps.push(
       `package-token-reservations-exceed-total:${tokenReservation}/${config.budget.maxTokens}`,
@@ -128,8 +140,18 @@ export async function evaluateProjectPreflight(
       `package-cost-reservations-exceed-total:${estimatedMaxCostUsd}/${config.budget.maxCostUsd}`,
     );
   }
-  const outputAndRepairReservation = config.budget.maxOutputTokens + config.budget.maxRepairTokens;
+  const discoverOutputTokens =
+    discoveryPlan?.recommendedOutputTokens ?? config.budget.maxOutputTokens;
+  const stageOutputReservations: Record<AgentPackageStage, number> = {
+    discover: discoverOutputTokens,
+    acquire: config.budget.maxOutputTokens,
+    analyze: config.budget.maxOutputTokens,
+    synthesize: config.budget.maxOutputTokens,
+    review: config.budget.maxOutputTokens,
+  };
   for (const [stage, tokens] of Object.entries(packageTokens)) {
+    const outputAndRepairReservation =
+      stageOutputReservations[stage as AgentPackageStage] + config.budget.maxRepairTokens;
     if (tokens < outputAndRepairReservation) {
       gaps.push(
         `package-output-repair-reservation-exceeds-${stage}:${outputAndRepairReservation}/${tokens}`,
@@ -137,19 +159,15 @@ export async function evaluateProjectPreflight(
     }
   }
   const stageContextTokenReservations = {
-    analyze: config.budget.maxOutputTokens,
-    synthesize: config.budget.maxOutputTokens * 2,
-    review: config.budget.maxInputContextTokens + config.budget.maxOutputTokens * 3,
+    acquire: discoverOutputTokens,
+    analyze: config.budget.maxInputContextTokens,
+    synthesize: config.budget.maxInputContextTokens,
+    review: config.budget.maxInputContextTokens + config.budget.maxOutputTokens * 4,
   };
   const producerStructuredOutputMaxTurns = researchStructuredOutputMaxTurns(config.producer);
   const reviewerStructuredOutputMaxTurns = researchStructuredOutputMaxTurns(config.reviewer);
   const embeddedStageContextReservation = stageContextTokenReservations.synthesize;
-  if (embeddedStageContextReservation > config.budget.maxInputContextTokens) {
-    gaps.push(
-      `embedded-stage-context-reservation-exceeds-total:${embeddedStageContextReservation}/${config.budget.maxInputContextTokens}`,
-    );
-  }
-  const recommendedDiscoverOutputTokens = requirements ? 768 + requirements.minSources * 320 : null;
+  const recommendedDiscoverOutputTokens = discoveryPlan?.recommendedOutputTokens ?? null;
   if (
     config.mode === "production-research" &&
     recommendedDiscoverOutputTokens !== null &&
@@ -170,16 +188,19 @@ export async function evaluateProjectPreflight(
     );
   }
   const maxTurns = {
-    discover: networkCapabilities.length
-      ? RESEARCH_BROKER_MAX_TURNS
-      : producerStructuredOutputMaxTurns,
+    // The native producer receives one prepared packet and submits one closeout.
+    // Broker fetches are separately bounded CLI operations, not repeated nested
+    // agent turns; their complete context allowance is reserved below.
+    discover:
+      config.producer.executionMode === "native-host" ? 1 : producerStructuredOutputMaxTurns,
+    acquire: producerStructuredOutputMaxTurns,
     analyze: producerStructuredOutputMaxTurns,
     synthesize: producerStructuredOutputMaxTurns,
     review: reviewerStructuredOutputMaxTurns,
     repair: RESEARCH_REPAIR_MAX_TURNS,
   };
   const schemaTokens = Object.fromEntries(
-    (["discover", "analyze", "synthesize", "review"] as const).map((stage) => [
+    (["discover", "acquire", "analyze", "synthesize", "review"] as const).map((stage) => [
       stage,
       Math.ceil(
         Buffer.byteLength(
@@ -207,18 +228,27 @@ export async function evaluateProjectPreflight(
       schemaTokens.discover,
       maxTurns.discover,
       config,
-      config.budget.maxBrokerContextTokens * config.budget.maxBrokerCalls,
+      config.budget.maxBrokerContextTokens *
+        (discoveryPlan?.maxCalls ?? config.budget.maxBrokerCalls),
+      discoverOutputTokens,
+    ),
+    acquire: estimatedStageTokenReservation(
+      config.producer,
+      stageContextTokenReservations.acquire,
+      schemaTokens.acquire,
+      producerStructuredOutputMaxTurns,
+      config,
     ),
     analyze: estimatedStageTokenReservation(
       config.producer,
-      config.budget.maxOutputTokens,
+      stageContextTokenReservations.analyze,
       schemaTokens.analyze,
       producerStructuredOutputMaxTurns,
       config,
     ),
     synthesize: estimatedStageTokenReservation(
       config.producer,
-      config.budget.maxOutputTokens * 2,
+      stageContextTokenReservations.synthesize,
       schemaTokens.synthesize,
       producerStructuredOutputMaxTurns,
       config,
@@ -291,6 +321,7 @@ export async function evaluateProjectPreflight(
       estimatedMaxCostUsd,
       maxBrokerContextTokens: config.budget.maxBrokerContextTokens,
       maxBrokerCalls: config.budget.maxBrokerCalls,
+      plannedBrokerCalls: discoveryPlan?.maxCalls ?? config.budget.maxBrokerCalls,
       maxOutputTokens: config.budget.maxOutputTokens,
       maxRepairTokens: config.budget.maxRepairTokens,
       estimatedInputContextTokens,
@@ -298,6 +329,7 @@ export async function evaluateProjectPreflight(
       embeddedStageContextReservation,
       stageContextTokenReservations,
       recommendedDiscoverOutputTokens,
+      discoveryPlan,
       outputTokenLimitEnforcement: {
         producer: "reserved-native-host-on-submit",
         reviewer: "post-execution",
@@ -347,6 +379,7 @@ function estimatedStageTokenReservation(
   primaryMaxTurns: number,
   config: WorkspaceConfig,
   potentialToolContextTokens = 0,
+  maxOutputTokens = config.budget.maxOutputTokens,
 ): number {
   return calculateAgentCallTokenReservation({
     route,
@@ -356,7 +389,7 @@ function estimatedStageTokenReservation(
       schemaTokens +
       Math.ceil((RESEARCH_MAX_REPAIR_SOURCE_BYTES + 2_048) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN),
     maxTurns: primaryMaxTurns,
-    maxOutputTokens: config.budget.maxOutputTokens,
+    maxOutputTokens,
     maxToolContextTokens: potentialToolContextTokens,
     maxRepairTokens: config.budget.maxRepairTokens,
     reserveRepair: true,

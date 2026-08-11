@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-10
-lastReviewedCommit: bef62f8d48c42eaff14fa2bd7eba1be83a46a58b
+lastReviewedAt: 2026-08-11
+lastReviewedCommit: 2ce7ad7cd36c1aeba577bc72e4095ed3a81debd6
 ---
 
 # Repo Architecture
@@ -64,8 +64,18 @@ storage writes, queueing, and document status transitions.
   diagnostics, bounded local-input plans, a scoped HTTPS GET/JSON-POST MCP
   broker with inline bounded result contexts,
   one bounded short-delay 429 retry with sanitized journal provenance,
-  a mechanically enforced per-run broker-call budget,
-  content-addressed permanent evidence, paged broker views/cache,
+  a coverage-derived working broker-view budget under a reviewed workspace
+  ceiling, content-addressed permanent evidence, paged broker views/cache,
+  a hash-chained candidate/admission/artifact/claim/review ledger,
+  deterministic candidate deduplication and a supplemental native Web bridge,
+  coverage-derived discovery call planning with early stop and a hard ceiling,
+  append-only incremental candidate assessment with a compact discovery
+  closeout, native Web/Browser activity receipts whose sensitive inputs are
+  retained only by hash, exact download-event binding, and explicit exact-file
+  artifact registration with PDF/ZIP/OpenXML validation,
+  acquisition audits, immutable parent/delta evidence snapshots, addendum
+  supersession, one authoritative project lineage with explicit
+  archive/abandon dispositions, and default historical-project filtering,
   hash-bound native-host producer stage prepare/submit/abort, one-shot native
   broker fetches, schema-driven reviewer output and isolated repair, dedicated
   reviewer capsule homes,
@@ -78,8 +88,11 @@ storage writes, queueing, and document status transitions.
   complete pre-call package and tool-context reservations,
   one shared preflight/runtime reservation formula with bounded capability
   documentation included at admission,
+  mode-specific budgets with low-cost smoke defaults and deliberately generous
+  but finite production runaway ceilings,
   tool-context-aware process capture, classified retries,
-  project-scoped scheduling/exit status, JSONL progress, recovery events, exact
+  project-scoped scheduling/exit status, durable user-action and
+  external-response handoffs, JSONL progress, recovery events, exact
   companion readiness gates, domain-scoped setup readiness, persistent review
   packets/bounded evidence contexts with exact cited-item JSON-Pointer
   projections, tool-free independent review, and
@@ -188,11 +201,30 @@ execution and expose only sanitized, non-secret identifiers and digests.
 
 The current interactive host is the producer boundary: the CLI prepares an
 ephemeral hash-bound packet but does not start Codex or Claude for discover,
-analyze, or synthesize. Discovery uses explicit one-shot broker commands whose
-request files contain logical IDs only. Later producer packets contain bounded,
-hash-verified prior artifacts. The platform `sandbox-exec`/Bubblewrap capsule
-is used for the independently launched reviewer CLI; that adapter disables
-shell, unified-exec, filesystem, and undeclared integrations.
+acquire, analyze, or synthesize. Discovery uses explicit one-shot broker
+commands whose request files contain logical IDs only. It records candidate
+judgments in bounded append-only batches instead of returning a source-sized
+JSON document. Native Web/Browser discovery remains visible as hashed activity
+and supplemental candidates; the same URL or DOI must be formalized through
+the broker before admission. Acquisition binds a completed network download to
+the exact selected file and download event before artifact registration,
+requires derived text to name its parent artifact, and lets that derivative
+inherit only the parent's canonical source URL instead of fabricating a second
+download binding; a conflicting URL is rejected. Acquisition then produces a
+complete source audit, and analysis starts only after a verified immutable
+snapshot. Later
+producer packets contain bounded, hash-verified prior artifacts. The platform
+`sandbox-exec`/Bubblewrap capsule is used for the independently launched
+reviewer CLI; that adapter disables shell, unified-exec, filesystem, and
+undeclared integrations.
+
+When a producer reaches login, MFA, CAPTCHA, paywall, authorization, or another
+human-only boundary, it records the activity and requests a durable
+`user-action-required` handoff. When a material gap requires an institution or
+other third party to respond, it requests `external-response-required` and
+stops substitute searching. Resolution is an explicit journaled operation;
+neither state consumes another producer attempt while waiting.
+
 Every brokered manifest entry carries a locked non-secret HTTPS endpoint;
 initial targets and GET redirects are checked against that endpoint scope
 before a provider request.

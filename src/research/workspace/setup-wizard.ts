@@ -30,6 +30,7 @@ import {
   applyResearchSetupPlan,
   createResearchSetupPlan,
   inspectResearchSetupStatus,
+  resolveResearchSetupWorkspacePath,
   type ResearchSetupAgentRoutePlan,
   type ResearchSetupEvidenceProfile,
 } from "./setup.js";
@@ -367,17 +368,26 @@ export async function executeResearchSetupWizard(input: {
   if (!isAbsolute(workspaceInput)) {
     throw wizardError("Workspace must be an absolute path.", "workspace");
   }
-  const workspace = resolve(workspaceInput);
-  const existingInfo = await lstat(workspace).catch(() => undefined);
+  const requestedWorkspace = resolve(workspaceInput);
+  const existingInfo = await lstat(requestedWorkspace).catch(() => undefined);
   let createWorkspaceDirectory = false;
   if (!existingInfo) {
     createWorkspaceDirectory = await prompt.confirm(
-      `Directory does not exist. Create exactly ${workspace}?`,
+      `Directory does not exist. Create exactly ${requestedWorkspace}?`,
       false,
     );
     if (!createWorkspaceDirectory) throw wizardCancelled("workspace");
   } else if (!existingInfo.isDirectory() || existingInfo.isSymbolicLink()) {
     throw wizardError("Workspace must be a regular non-symlink directory.", "workspace");
+  }
+  const workspace = await resolveResearchSetupWorkspacePath(requestedWorkspace, {
+    allowMissingLeaf: createWorkspaceDirectory,
+  });
+  if (workspace !== requestedWorkspace) {
+    prompt.note(
+      `Resolved workspace path for the reviewed plan:\n${requestedWorkspace}\n→ ${workspace}`,
+      "info",
+    );
   }
 
   if (existingInfo && (await pathExists(workspacePaths(workspace).setupPlan))) {
