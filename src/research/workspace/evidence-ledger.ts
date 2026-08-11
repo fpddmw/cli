@@ -281,7 +281,7 @@ export async function registerNativeDiscoveryCandidate(input: {
 }): Promise<{
   candidate: EvidenceCandidate;
   duplicate: boolean;
-  admissionStatus: "supplemental-not-admitted";
+  admissionStatus: "supplemental-not-admitted" | "formalized-not-admitted";
   nextAction: string;
 }> {
   const allowedKeys = new Set(["title", "url", "doi", "publicationDate", "excerpt"]);
@@ -342,12 +342,17 @@ export async function registerNativeDiscoveryCandidate(input: {
       canonicalKeySha256: existing.canonicalKeySha256,
       occurrence,
     });
+    const formalized = existing.occurrences.some(
+      (existingOccurrence) =>
+        existingOccurrence.kind === "broker" || existingOccurrence.kind === "input",
+    );
     return {
       candidate: { ...existing, occurrences: [...existing.occurrences, occurrence] },
       duplicate: true,
-      admissionStatus: "supplemental-not-admitted",
-      nextAction:
-        "Fetch this URL/DOI through a reviewed broker capability. The immutable receipt will attach to the same candidate before formal admission.",
+      admissionStatus: formalized ? "formalized-not-admitted" : "supplemental-not-admitted",
+      nextAction: formalized
+        ? "This candidate already has immutable broker or input provenance and may be assessed. It remains unadmitted until an explicit discovery assessment records an admit decision."
+        : "Fetch this URL/DOI through a reviewed broker capability. The immutable receipt will attach to the same candidate before formal admission.",
     };
   }
   await appendEvidenceLedgerEvent(input.root, input.projectId, "candidate.discovered", {

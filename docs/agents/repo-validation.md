@@ -180,7 +180,8 @@ stop and a hard ceiling. `test/research-acquisition.test.ts` covers native-lead
 formalization, hashed native activity, exact download-event and concurrent-file
 isolation, failed/cancelled non-commit behavior, sensitive locator redaction,
 PDF/ZIP/OpenXML structure checks, false-PDF rejection, derived-artifact lineage,
-binary-only versus producer-readable full text, artifact drift, immutable
+parent URL inheritance and conflicting derivative URL rejection, binary-only
+versus producer-readable full text, artifact drift, immutable
 snapshot/delta lineage, and non-destructive addenda. Workspace/runtime tests
 additionally verify default superseded-project filtering, authoritative fork
 lineage, archive/abandon dispositions, durable user/external handoffs and

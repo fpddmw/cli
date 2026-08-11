@@ -143,6 +143,7 @@ export async function registerEvidenceArtifact(input: {
     );
   }
   let derivedFromArtifactId: string | null = null;
+  let derivedFromArtifact: EvidenceArtifactRecord | null = null;
   if (input.derivedFromArtifactId) {
     const registered = await loadEvidenceArtifactRecords(input.root, input.projectId);
     const parent = registered.find(
@@ -155,18 +156,29 @@ export async function registerEvidenceArtifact(input: {
       );
     }
     derivedFromArtifactId = parent.artifactId;
+    derivedFromArtifact = parent;
   }
-  if (input.sourceUrl && !downloadBinding) {
+  const declaredSourceUrl = canonicalSourceUrl(input.sourceUrl);
+  if (declaredSourceUrl && !downloadBinding && !derivedFromArtifact) {
     throw artifactError(
       "Network-derived artifacts require an exact completed download binding.",
       "RESEARCH_DOWNLOAD_BINDING_REQUIRED",
     );
   }
-  const declaredSourceUrl = canonicalSourceUrl(input.sourceUrl);
   if (downloadBinding && declaredSourceUrl && declaredSourceUrl !== downloadBinding.downloadUrl) {
     throw artifactError(
       "Artifact source URL does not match its exact download binding.",
       "RESEARCH_DOWNLOAD_BINDING_INVALID",
+    );
+  }
+  if (
+    derivedFromArtifact &&
+    declaredSourceUrl &&
+    declaredSourceUrl !== derivedFromArtifact.sourceUrl
+  ) {
+    throw artifactError(
+      "Derived artifact source URL does not match its registered parent artifact.",
+      "RESEARCH_ARTIFACT_BINDING_INVALID",
     );
   }
   const bytes = await readFile(sourcePath);
@@ -186,7 +198,7 @@ export async function registerEvidenceArtifact(input: {
     bytes: bytes.byteLength,
     mediaType,
     originalFilename: sanitizeFilename(basename(sourcePath)),
-    sourceUrl: downloadBinding?.downloadUrl ?? declaredSourceUrl,
+    sourceUrl: downloadBinding?.downloadUrl ?? derivedFromArtifact?.sourceUrl ?? declaredSourceUrl,
     license: boundedOptionalMetadata(input.license, "license"),
     licenseUrl: canonicalSourceUrl(input.licenseUrl),
     hostType: boundedOptionalMetadata(input.hostType, "host type"),

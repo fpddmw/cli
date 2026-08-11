@@ -382,7 +382,10 @@ The acquire packet audits every provisional source and registers only explicit
 files—never a directory or “latest download.” PDF and Office artifacts are
 structurally verified and content-addressed. A registered binary full file is
 review-bound but is not counted as producer-readable full text unless an
-admitted UTF-8 text/JSON/HTML/CSV/Markdown derivative exists.
+admitted UTF-8 text/JSON/HTML/CSV/Markdown derivative exists. Such a derivative
+names its registered parent and inherits that parent's canonical source URL;
+it does not invent a second network-download binding, and a conflicting URL is
+rejected.
 
 Successful acquisition freezes an immutable evidence snapshot before analysis.
 The reviewer and mechanical closure bind and recheck the snapshot chain,

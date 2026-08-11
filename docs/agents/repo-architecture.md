@@ -208,8 +208,11 @@ JSON document. Native Web/Browser discovery remains visible as hashed activity
 and supplemental candidates; the same URL or DOI must be formalized through
 the broker before admission. Acquisition binds a completed network download to
 the exact selected file and download event before artifact registration,
-requires derived text to name its parent artifact, and produces a complete
-source audit; analysis starts only after a verified immutable snapshot. Later
+requires derived text to name its parent artifact, and lets that derivative
+inherit only the parent's canonical source URL instead of fabricating a second
+download binding; a conflicting URL is rejected. Acquisition then produces a
+complete source audit, and analysis starts only after a verified immutable
+snapshot. Later
 producer packets contain bounded, hash-verified prior artifacts. The platform
 `sandbox-exec`/Bubblewrap capsule is used for the independently launched
 reviewer CLI; that adapter disables shell, unified-exec, filesystem, and

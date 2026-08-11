@@ -117,8 +117,22 @@ describe("research acquisition and evidence snapshots", () => {
         projectId: "artifact-project",
         candidateId: candidate.id,
         path: selectedText,
+        sourceUrl: "https://example.test/paper?utm_source=derived",
         derivedFromArtifactId: artifact.artifactId,
       });
+      assert.equal(textArtifact.sourceUrl, artifact.sourceUrl);
+      await assert.rejects(
+        registerEvidenceArtifact({
+          root,
+          projectId: "artifact-project",
+          candidateId: candidate.id,
+          path: selectedText,
+          sourceUrl: "https://other.example.test/paper",
+          derivedFromArtifactId: artifact.artifactId,
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_ARTIFACT_BINDING_INVALID",
+      );
       const workbookPath = join(staging, "supporting.xlsx");
       const workbookBytes = storedZip([
         ["[Content_Types].xml", Buffer.from("<Types/>")],
@@ -666,6 +680,17 @@ describe("research acquisition and evidence snapshots", () => {
         formalized?.occurrences.map((occurrence) => occurrence.kind),
         ["native", "broker"],
       );
+      const relinked = await registerNativeDiscoveryCandidate({
+        root,
+        projectId: "native-formalized",
+        value: {
+          title: "Official result rediscovered in native Web",
+          url: "https://example.test/formal-source",
+          publicationDate: "2026-08-11",
+        },
+      });
+      assert.equal(relinked.admissionStatus, "formalized-not-admitted");
+      assert.match(relinked.nextAction, /may be assessed/i);
 
       const discoverOutput = join(staging, "formalized-discover.json");
       await recordAdmission(root, "native-formalized", native.candidate.id, "formal-source");
