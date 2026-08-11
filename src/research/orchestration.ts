@@ -27,6 +27,7 @@ import { fetchNativeCandidateSource } from "./workspace/broker.js";
 import { registerEvidenceArtifact } from "./workspace/artifacts.js";
 import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
 import { inspectDiscoveryProgress } from "./workspace/discovery-status.js";
+import { recordDiscoveryAssessmentBatch } from "./workspace/discovery.js";
 import { registerNativeDiscoveryCandidate } from "./workspace/evidence-ledger.js";
 import { readAndVerifyProjectInputPlan } from "./workspace/input-plan.js";
 import {
@@ -103,6 +104,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project stage abort <project-id> --session <id> [--workspace <path>] [--json]
   tiangong-ai research project evidence fetch <project-id> --request <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence candidate register <project-id> --record <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence assessment record <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence artifact register <project-id> --candidate <id> --path <absolute-file> [--media-type <type>] [--source-url <https-url>] [--license <declared-license>] [--license-url <https-url>] [--host-type <type>] [--article-version <version>] [--workspace <path>] [--json]
   tiangong-ai research schema show <discover|acquire|analyze|synthesize|review|doctor> [--json]
   tiangong-ai research status [--project <project-id>] [--all] [--workspace <absolute-path>] [--json]
@@ -462,6 +464,40 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       );
       const result = await withWorkspaceLock(root, "research.native-candidate.register", () =>
         registerNativeDiscoveryCandidate({ root, projectId, value: record }),
+      );
+      writeJson(io, result, args);
+      return 0;
+    }
+    if (evidenceAction === "assessment") {
+      const [assessmentAction, ...assessmentRest] = evidenceRest;
+      if (assessmentAction !== "record") {
+        throw unknownAction("research project evidence assessment", assessmentAction ?? "");
+      }
+      const args = parseStrictArgs(
+        assessmentRest,
+        { ...WORKSPACE_OPTIONS, record: "string" },
+        "research project evidence assessment record",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(
+        args.positionals,
+        "research project evidence assessment record",
+      );
+      const recordPath = strictString(args, "record");
+      if (!recordPath) {
+        throw new CliError("assessment record requires --record.", {
+          code: "RESEARCH_DISCOVERY_ASSESSMENT_INVALID",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      const record = await readBoundedJsonRecord(
+        recordPath,
+        "--record",
+        "RESEARCH_DISCOVERY_ASSESSMENT_INVALID",
+      );
+      const result = await withWorkspaceLock(root, "research.discovery-assessment.record", () =>
+        recordDiscoveryAssessmentBatch({ root, projectId, value: record }),
       );
       writeJson(io, result, args);
       return 0;

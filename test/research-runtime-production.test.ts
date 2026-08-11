@@ -17,6 +17,7 @@ import { describe, it } from "node:test";
 import { CliError } from "../src/errors.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import { registerEvidenceArtifact } from "../src/research/workspace/artifacts.js";
+import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
 import {
   fetchNativeCandidateSource,
   startCapabilityBroker,
@@ -1290,13 +1291,13 @@ describe("production research control plane", () => {
               assert.match(request.prompt, new RegExp(input.id));
               const schema = request.outputSchema as {
                 $id: string;
-                properties: { admissions: { items: { properties: Record<string, unknown> } } };
+                properties: Record<string, unknown>;
               };
               assert.equal(
                 schema.$id,
-                "https://schemas.tiangong.ai/research/discovery-admission-v1.json",
+                "https://schemas.tiangong.ai/research/discovery-closeout-v2.json",
               );
-              assert.equal("locator" in schema.properties.admissions.items.properties, false);
+              assert.equal("admissions" in schema.properties, false);
             }
             if (stage === "analyze") {
               assert.equal(request.toolPolicy, "none");
@@ -1548,7 +1549,7 @@ describe("production research control plane", () => {
     }
   });
 
-  it("repairs a mechanically invalid provenance binding without repeating research", async () => {
+  it("repairs a mechanically invalid discovery closeout without repeating research", async () => {
     const root = await temporaryDirectory();
     try {
       await initializeResearchWorkspace(root, undefined);
@@ -1563,16 +1564,14 @@ describe("production research control plane", () => {
         calls.push({ stage, purpose: request.purpose });
         if (stage === "discover" && request.purpose === "primary") {
           const value = (await inputEvidenceValue(request)) as {
-            admissions: Array<{ candidateId: string; sourceId: string }>;
+            dimensionJudgments: Array<{ id: string; status: string }>;
           } & Record<string, unknown>;
-          const admission = value.admissions[0]!;
-          admission.candidateId = admission.sourceId;
+          value.dimensionJudgments[0]!.id = "not-a-reviewed-dimension";
           return execution(JSON.stringify(value), 5);
         }
         if (stage === "discover" && request.purpose === "repair") {
           assert.equal(request.maxTurns, 1);
-          assert.match(request.prompt, /unknown candidate/i);
-          assert.match(request.prompt, /candidateId/);
+          assert.match(request.prompt, /dimension judgments/i);
           assert.ok(admitted.id);
           return execution(JSON.stringify(await inputEvidenceValue(request)), 2);
         }
@@ -2430,22 +2429,17 @@ function brokerBackedExecutor(
       const [candidate] = await listEvidenceCandidates(request.workspaceRoot, state.id);
       assert.ok(candidate);
       assert.equal(candidate.origin.jsonPointer, sourceJsonPointer);
+      await recordDiscoveryAssessmentBatch({
+        root: request.workspaceRoot,
+        projectId: state.id,
+        value: {
+          schemaVersion: 1,
+          assessments: [admissionAssessment(candidate.id, "broker-source")],
+        },
+      });
       return execution(
         JSON.stringify({
-          schemaVersion: 1,
-          admissions: [
-            {
-              candidateId: candidate.id,
-              sourceId: "broker-source",
-              sourceType: "primary",
-              relevance: "Direct evidence.",
-              quality: { level: "primary", rationale: "Direct response." },
-              applicability: "Declared question.",
-              coverageDimensions: ["research-question"],
-              limitations: [],
-            },
-          ],
-          rejections: [],
+          schemaVersion: 2,
           limitations: [],
           dimensionJudgments: [{ id: "research-question", status: "covered" }],
           gaps: [],
@@ -2584,27 +2578,40 @@ async function inputEvidenceValue(
   void override.dimensions;
   void override.decision;
   void override.publicationDate;
+  await recordDiscoveryAssessmentBatch({
+    root: request.workspaceRoot,
+    projectId: state.id,
+    value: {
+      schemaVersion: 1,
+      assessments: [admissionAssessment(candidate.id, "source-1", coverageDimensions)],
+    },
+  });
   return {
-    schemaVersion: 1,
-    admissions: [
-      {
-        candidateId: candidate.id,
-        sourceId: "source-1",
-        sourceType: "primary",
-        relevance: "Direct evidence.",
-        quality: { level: "primary", rationale: "Direct input." },
-        applicability: "Declared question.",
-        coverageDimensions,
-        limitations: [],
-      },
-    ],
-    rejections: [],
+    schemaVersion: 2,
     limitations: [],
     dimensionJudgments: dimensions.map((id) => ({
       id,
       status: coverageDimensions.includes(id) ? "covered" : "missing",
     })),
     gaps: override.gaps ?? [],
+  };
+}
+
+function admissionAssessment(
+  candidateId: string,
+  sourceId: string,
+  coverageDimensions: string[] = ["research-question"],
+): Record<string, unknown> {
+  return {
+    decision: "admit",
+    candidateId,
+    sourceId,
+    sourceType: "primary",
+    relevance: "Direct evidence.",
+    quality: { level: "primary", rationale: "Direct input or response." },
+    applicability: "Declared question.",
+    coverageDimensions,
+    limitations: [],
   };
 }
 

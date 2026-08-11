@@ -55,6 +55,7 @@ import {
 } from "./sanitization.js";
 import {
   parseEvidenceRecord,
+  schemaForDiscoveryAssessmentBatch,
   parseStructuredStageOutput,
   schemaForStage,
   StructuredOutputError,
@@ -270,6 +271,7 @@ export interface NativeStagePacket {
   commands: {
     fetchEvidence: { argv: string[]; requestSchema: Record<string, unknown> } | null;
     registerCandidate: { argv: string[]; recordSchema: Record<string, unknown> } | null;
+    recordAssessment: { argv: string[]; recordSchema: Record<string, unknown> } | null;
     registerArtifact: {
       argv: string[];
       supportedMediaTypes: string[];
@@ -476,7 +478,7 @@ export async function prepareNativeResearchStage(input: {
       const prompt = [
         "Perform this producer stage in the current interactive host session. Do not launch codex exec, claude -p, or any other nested reasoning agent.",
         input.stage === "discover" && hasBrokeredEvidence
-          ? "For every internet/database request, write one non-secret request JSON file and invoke the packet's fetchEvidence argv through the CLI control plane. Use only its returned bounded context and receipt. Do not use standalone web search as evidence."
+          ? "For every internet/database request, write one non-secret request JSON file and invoke the packet's fetchEvidence argv through the CLI control plane. Use only its returned bounded context and receipt. Assess candidates in bounded batches with recordAssessment as they arrive; the final output is only a small coverage closeout. Do not use standalone web search as evidence."
           : input.stage === "acquire"
             ? "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. Register each exact downloaded/decomposed file with registerArtifact before submitting the audit. Never scan a download directory or infer success from file existence."
             : "Do not acquire additional evidence in this stage.",
@@ -586,6 +588,26 @@ export async function prepareNativeResearchStage(input: {
                     "host-type",
                     "article-version",
                   ],
+                }
+              : null,
+          recordAssessment:
+            input.stage === "discover"
+              ? {
+                  argv: [
+                    "tiangong-ai",
+                    "research",
+                    "project",
+                    "evidence",
+                    "assessment",
+                    "record",
+                    project.id,
+                    "--record",
+                    "<absolute-assessment-batch.json>",
+                    "--workspace",
+                    input.root,
+                    "--json",
+                  ],
+                  recordSchema: schemaForDiscoveryAssessmentBatch(),
                 }
               : null,
           registerCandidate:
@@ -3203,7 +3225,7 @@ function packagePrompt(
 ): string {
   const stageInstructions: Record<WorkPackage["stage"], string> = {
     discover:
-      "Return only compact admission judgments defined by the supplied JSON Schema. The control plane has already assigned every immutable input and broker result a candidateId and retains its title, URL, DOI, dates, receipt, locator, JSON Pointer, hashes, and retrieval metadata. Reference candidateId; never repeat or invent those deterministic fields. Give each admitted candidate a concise sourceId plus source type, relevance, quality, applicability, coverage dimensions, and limitations. Record only meaningful explicit rejections; omitted candidates remain unassessed for later gap filling. Report one judgment for every reviewed dimension. Native Web or Browser discoveries are supplemental candidates only and cannot be admitted until an immutable broker receipt is attached to the same canonical URL or DOI. The CLI mechanically joins judgments to provenance, derives counts/date range/coverage, and rejects unknown or unformalized candidates.",
+      "Assess candidates incrementally through the packet's recordAssessment command; do not accumulate a source-sized final response. The control plane has already assigned every immutable input and broker result a candidateId and retains its title, URL, DOI, dates, receipt, locator, JSON Pointer, hashes, and retrieval metadata. Reference candidateId; never repeat or invent those deterministic fields. Give each admitted candidate a concise sourceId plus source type, relevance, quality, applicability, coverage dimensions, and limitations. Record meaningful explicit rejections; omitted candidates remain unassessed for later gap filling. Native Web or Browser discoveries are supplemental candidates only and cannot be admitted until an immutable broker receipt is attached to the same canonical URL or DOI. After broad search, strict assessment, and focused gap filling, return only the small closeout object with one judgment for every reviewed dimension plus limitations and remaining gaps. The CLI mechanically joins the latest recorded assessments to provenance, derives counts/date range/coverage, and rejects unknown or unformalized candidates.",
     acquire:
       "Audit every provisionally admitted source exactly once. For each source, bind its ledger candidateId, list only artifactIds returned by the exact artifact registration command, and choose accepted, limited, or rejected with a concise rationale and explicit limitations. A broker receipt is an immutable discovery record but is not full text. Use an empty artifactIds array only when intentionally retaining a source as metadata/abstract evidence or when the source is an already registered local input. Put unresolved blocking acquisition or coverage deficiencies in gaps; put honest non-blocking scope constraints in limitations. Do not invent file paths, hashes, URLs, artifact IDs, or successful downloads.",
     analyze:

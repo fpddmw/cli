@@ -73,7 +73,15 @@ export async function inspectDiscoveryProgress(
   const failed = projectEvents.filter((event) => event.type === "capability.fetch.failed");
   const latestDecisions = new Map<string, "admitted" | "rejected">();
   for (const event of ledgerEvents) {
-    if (event.type === "candidate.admitted") {
+    if (
+      event.type === "candidate.assessed" &&
+      (event.payload.decision === "admit" || event.payload.decision === "reject")
+    ) {
+      latestDecisions.set(
+        String(event.payload.candidateId),
+        event.payload.decision === "admit" ? "admitted" : "rejected",
+      );
+    } else if (event.type === "candidate.admitted") {
       latestDecisions.set(String(event.payload.candidateId), "admitted");
     } else if (event.type === "candidate.rejected") {
       latestDecisions.set(String(event.payload.candidateId), "rejected");
@@ -142,6 +150,7 @@ export async function inspectDiscoveryProgress(
     missingRequired,
     exercised,
     callsRemaining,
+    requested.length,
     recommendedAction,
   );
   return {
@@ -173,6 +182,7 @@ function nextDiscoveryBatch(
   missingRequired: string[],
   exercised: Set<string>,
   callsRemaining: number,
+  callsUsed: number,
   action: DiscoveryProgress["recommendedAction"],
 ): DiscoveryProgress["nextBatch"] {
   if (callsRemaining < 1 || action === "continue-pipeline") return null;
@@ -194,6 +204,13 @@ function nextDiscoveryBatch(
     };
   }
   const available = [...new Set(plan.plannedBatches.flatMap((batch) => batch.capabilityIds))];
+  if (callsUsed < plan.firstPassCalls) {
+    return {
+      kind: "coverage-first-pass",
+      capabilityIds: available,
+      maxCalls: Math.min(callsRemaining, plan.firstPassCalls - callsUsed),
+    };
+  }
   return {
     kind: "gap-fill",
     capabilityIds: available,

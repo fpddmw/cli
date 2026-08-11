@@ -1,7 +1,7 @@
 import type { ProjectEvidenceRequirements, ResearchBudget, WorkspaceConfig } from "./types.js";
 
 export interface DiscoveryBatchPlan {
-  kind: "required-first-pass" | "supplemental-first-pass" | "gap-fill";
+  kind: "required-first-pass" | "supplemental-first-pass" | "coverage-first-pass" | "gap-fill";
   capabilityIds: string[];
   maxCalls: number;
 }
@@ -12,6 +12,8 @@ export interface DiscoveryPlan {
   targetDatedSources: number;
   hardCallLimit: number;
   maxCalls: number;
+  firstPassCalls: number;
+  gapFillReserveCalls: number;
   expectedUniqueSourcesPerCall: number;
   maxItemsPerCall: number;
   recommendedOutputTokens: number;
@@ -32,8 +34,8 @@ export function deriveDiscoveryPlan(
   const available = [...new Set(availableCapabilityIds)].sort();
   const supplemental = available.filter((id) => !requiredCapabilityIds.includes(id));
   const callsForSources = Math.ceil(requirements.minSources / 5);
-  const callsForDimensions = Math.ceil(requirements.dimensions.length / 2);
-  const callsForSourceTypes = Math.ceil(Math.max(1, requirements.sourceTypes.length) / 2);
+  const callsForDimensions = Math.max(1, Math.ceil(requirements.dimensions.length / 2));
+  const callsForSourceTypes = Math.max(1, requirements.sourceTypes.length);
   const firstPassCalls = Math.max(
     1,
     requiredCapabilityIds.length,
@@ -41,7 +43,20 @@ export function deriveDiscoveryPlan(
     callsForDimensions,
     callsForSourceTypes,
   );
-  const gapFillCalls = Math.max(2, Math.ceil(requirements.minSources / 15));
+  // Heterogeneous research needs a real second pass after broad discovery.
+  // Reserve independent room for source-type/dimension gaps plus the expensive
+  // dated/full-text targets instead of letting one max() collapse all of them
+  // into the historical six-view smoke ceiling.
+  const gapFillCalls = Math.max(
+    2,
+    Math.ceil(Math.max(1, requirements.sourceTypes.length) / 2) +
+      Math.ceil(Math.max(1, requirements.dimensions.length) / 2) +
+      Math.max(
+        1,
+        Math.ceil(requirements.minFullTextSources / 2),
+        Math.ceil(requirements.minDatedSources / 5),
+      ),
+  );
   // Even a small/smoke requirement needs enough room to exercise multiple
   // channels and one focused gap-fill pass. The workspace value remains the
   // reviewed hard ceiling; this is a derived target, not an unconditional
@@ -76,17 +91,14 @@ export function deriveDiscoveryPlan(
   const recommendedOutputTokens = roundUp(
     Math.max(
       1_024,
-      768 +
-        requirements.minSources * 110 +
-        requirements.dimensions.length * 35 +
-        requirements.sourceTypes.length * 25,
+      768 + requirements.dimensions.length * 96 + requirements.sourceTypes.length * 32,
     ),
     128,
   );
   const outputTokenLimit = Math.min(budget.maxOutputTokens, recommendedOutputTokens);
   if (budget.maxOutputTokens < recommendedOutputTokens) {
     constraintGaps.push(
-      `discover output ceiling ${budget.maxOutputTokens} is below the compact schema recommendation ${recommendedOutputTokens}`,
+      `discover output ceiling ${budget.maxOutputTokens} is below the closeout schema recommendation ${recommendedOutputTokens}`,
     );
   }
   const reservedDiscoverTokens = Math.min(
@@ -99,8 +111,19 @@ export function deriveDiscoveryPlan(
   );
   const requiredFirstPassCalls = Math.min(requiredCapabilityIds.length, maxCalls);
   const remainingAfterRequired = Math.max(0, maxCalls - requiredFirstPassCalls);
-  const supplementalCalls = Math.min(supplemental.length, remainingAfterRequired);
-  const remainingGapCalls = Math.max(0, remainingAfterRequired - supplementalCalls);
+  const supplementalCalls = Math.min(
+    supplemental.length,
+    remainingAfterRequired,
+    Math.max(0, firstPassCalls - requiredFirstPassCalls),
+  );
+  const coverageCalls = Math.min(
+    Math.max(0, firstPassCalls - requiredFirstPassCalls - supplementalCalls),
+    Math.max(0, remainingAfterRequired - supplementalCalls),
+  );
+  const remainingGapCalls = Math.max(
+    0,
+    maxCalls - requiredFirstPassCalls - supplementalCalls - coverageCalls,
+  );
   const plannedBatches: DiscoveryBatchPlan[] = [];
   if (requiredFirstPassCalls) {
     plannedBatches.push({
@@ -116,6 +139,13 @@ export function deriveDiscoveryPlan(
       maxCalls: supplementalCalls,
     });
   }
+  if (coverageCalls) {
+    plannedBatches.push({
+      kind: "coverage-first-pass",
+      capabilityIds: available,
+      maxCalls: coverageCalls,
+    });
+  }
   if (remainingGapCalls || plannedBatches.length === 0) {
     plannedBatches.push({
       kind: "gap-fill",
@@ -129,6 +159,8 @@ export function deriveDiscoveryPlan(
     targetDatedSources: requirements.minDatedSources,
     hardCallLimit: budget.maxBrokerCalls,
     maxCalls,
+    firstPassCalls: Math.min(firstPassCalls, maxCalls),
+    gapFillReserveCalls: remainingGapCalls,
     expectedUniqueSourcesPerCall,
     maxItemsPerCall,
     recommendedOutputTokens,

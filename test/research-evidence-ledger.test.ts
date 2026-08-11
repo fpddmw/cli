@@ -144,41 +144,21 @@ describe("research evidence ledger", () => {
     }
   });
 
-  it("uses compact discovery admissions instead of model-generated deterministic provenance", () => {
+  it("uses an incremental discovery closeout instead of one source-sized final container", () => {
     const schema = schemaForStage("discover");
-    assert.equal(schema.$id, "https://schemas.tiangong.ai/research/discovery-admission-v1.json");
+    assert.equal(schema.$id, "https://schemas.tiangong.ai/research/discovery-closeout-v2.json");
     const parsed = parseStructuredStageOutput(
       "discover",
       JSON.stringify({
-        schemaVersion: 1,
-        admissions: [
-          {
-            candidateId: "candidate-1",
-            sourceId: "measured-result",
-            sourceType: "academic",
-            relevance: "Directly addresses the intervention.",
-            quality: { level: "primary", rationale: "Primary measurement." },
-            applicability: "Applies to the measured region.",
-            coverageDimensions: ["empirical-evidence"],
-            limitations: ["Single-region observation."],
-          },
-        ],
-        rejections: [],
+        schemaVersion: 2,
         limitations: ["Full texts require acquisition."],
         dimensionJudgments: [{ id: "empirical-evidence", status: "covered" }],
         gaps: ["No counterevidence acquired yet."],
       }),
     );
-    assert.equal(parsed.value.admissions instanceof Array, true);
-    assert.equal(
-      "locator" in (parsed.value.admissions as Array<Record<string, unknown>>)[0]!,
-      false,
-    );
-    assert.equal("url" in (parsed.value.admissions as Array<Record<string, unknown>>)[0]!, false);
-    assert.equal(
-      "retrievedAt" in (parsed.value.admissions as Array<Record<string, unknown>>)[0]!,
-      false,
-    );
+    assert.equal(parsed.value.schemaVersion, 2);
+    assert.equal("admissions" in parsed.value, false);
+    assert.equal("rejections" in parsed.value, false);
   });
 
   it("derives call, batch, and output budgets from reviewed coverage requirements", () => {
@@ -222,6 +202,51 @@ describe("research evidence ledger", () => {
     ]);
     assert.ok(plan.plannedBatches.length >= 2);
     assert.ok(plan.reservedDiscoverTokens <= config.budget.packageMaxTokens.discover);
+  });
+
+  it("reserves enough focused search and gap-fill views for heterogeneous production work", () => {
+    const requirements: ProjectEvidenceRequirements = {
+      dimensions: [
+        "academic-evidence",
+        "official-data",
+        "government-policy",
+        "competitive-landscape",
+        "counterevidence",
+      ],
+      sourceTypes: ["academic", "news", "government", "official-data", "competitive-research"],
+      requiredCapabilityIds: ["method.web", "method.news", "method.database"],
+      requiredCompanionIds: ["tiangong.academic-paper-download"],
+      requiredDiscoveryScopes: ["public-internet", "database:research"],
+      minSources: 15,
+      minFullTextSources: 5,
+      minDatedSources: 10,
+      publicationDateFrom: "2024-01-01",
+      publicationDateTo: "2026-08-11",
+    };
+    const config = {
+      budget: {
+        maxBrokerCalls: 24,
+        maxBrokerItems: 100,
+        maxOutputTokens: 6_000,
+        maxRepairTokens: 1_000,
+        maxBrokerContextTokens: 12_000,
+        packageMaxTokens: { discover: 300_000 },
+      },
+    } as unknown as WorkspaceConfig;
+    const plan = deriveDiscoveryPlan(requirements, config, [
+      "method.web",
+      "method.news",
+      "method.database",
+    ]);
+
+    assert.ok(plan.maxCalls >= 12, JSON.stringify(plan));
+    assert.ok(plan.maxCalls <= plan.hardCallLimit);
+    assert.ok(
+      plan.plannedBatches.some(
+        (batch) => batch.kind === "gap-fill" && batch.maxCalls >= requirements.sourceTypes.length,
+      ),
+      JSON.stringify(plan),
+    );
   });
 });
 

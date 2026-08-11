@@ -160,74 +160,13 @@ const evidenceSchema: JsonSchema = {
   },
 };
 
-const discoveryAdmissionSchema: JsonSchema = {
-  $id: "https://schemas.tiangong.ai/research/discovery-admission-v1.json",
+const discoveryCloseoutSchema: JsonSchema = {
+  $id: "https://schemas.tiangong.ai/research/discovery-closeout-v2.json",
   type: "object",
   additionalProperties: false,
-  required: [
-    "schemaVersion",
-    "admissions",
-    "rejections",
-    "limitations",
-    "dimensionJudgments",
-    "gaps",
-  ],
+  required: ["schemaVersion", "limitations", "dimensionJudgments", "gaps"],
   properties: {
-    schemaVersion: { type: "integer", const: 1 },
-    admissions: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: [
-          "candidateId",
-          "sourceId",
-          "sourceType",
-          "relevance",
-          "quality",
-          "applicability",
-          "coverageDimensions",
-          "limitations",
-        ],
-        properties: {
-          candidateId: { type: "string", pattern: IDENTIFIER },
-          sourceId: { type: "string", pattern: IDENTIFIER },
-          sourceType: { type: "string", pattern: IDENTIFIER },
-          relevance: nonEmptyString,
-          quality: {
-            type: "object",
-            additionalProperties: false,
-            required: ["level", "rationale"],
-            properties: {
-              level: {
-                type: "string",
-                enum: ["primary", "secondary", "tertiary", "unknown"],
-              },
-              rationale: nonEmptyString,
-            },
-          },
-          applicability: nonEmptyString,
-          coverageDimensions: {
-            type: "array",
-            items: { type: "string", pattern: IDENTIFIER },
-          },
-          limitations: { type: "array", items: { type: "string" } },
-        },
-      },
-    },
-    rejections: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["candidateId", "reasonCode", "rationale"],
-        properties: {
-          candidateId: { type: "string", pattern: IDENTIFIER },
-          reasonCode: { type: "string", pattern: IDENTIFIER },
-          rationale: nonEmptyString,
-        },
-      },
-    },
+    schemaVersion: { type: "integer", const: 2 },
     limitations: { type: "array", items: { type: "string" } },
     dimensionJudgments: {
       type: "array",
@@ -242,6 +181,76 @@ const discoveryAdmissionSchema: JsonSchema = {
       },
     },
     gaps: { type: "array", items: { type: "string" } },
+  },
+};
+
+const discoveryAssessmentBatchSchema: JsonSchema = {
+  $id: "https://schemas.tiangong.ai/research/discovery-assessment-batch-v1.json",
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "assessments"],
+  properties: {
+    schemaVersion: { type: "integer", const: 1 },
+    assessments: {
+      type: "array",
+      minItems: 1,
+      maxItems: 25,
+      items: {
+        oneOf: [
+          {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "decision",
+              "candidateId",
+              "sourceId",
+              "sourceType",
+              "relevance",
+              "quality",
+              "applicability",
+              "coverageDimensions",
+              "limitations",
+            ],
+            properties: {
+              decision: { type: "string", const: "admit" },
+              candidateId: { type: "string", pattern: IDENTIFIER },
+              sourceId: { type: "string", pattern: IDENTIFIER },
+              sourceType: { type: "string", pattern: IDENTIFIER },
+              relevance: nonEmptyString,
+              quality: {
+                type: "object",
+                additionalProperties: false,
+                required: ["level", "rationale"],
+                properties: {
+                  level: {
+                    type: "string",
+                    enum: ["primary", "secondary", "tertiary", "unknown"],
+                  },
+                  rationale: nonEmptyString,
+                },
+              },
+              applicability: nonEmptyString,
+              coverageDimensions: {
+                type: "array",
+                items: { type: "string", pattern: IDENTIFIER },
+              },
+              limitations: { type: "array", items: { type: "string" } },
+            },
+          },
+          {
+            type: "object",
+            additionalProperties: false,
+            required: ["decision", "candidateId", "reasonCode", "rationale"],
+            properties: {
+              decision: { type: "string", const: "reject" },
+              candidateId: { type: "string", pattern: IDENTIFIER },
+              reasonCode: { type: "string", pattern: IDENTIFIER },
+              rationale: nonEmptyString,
+            },
+          },
+        ],
+      },
+    },
   },
 };
 
@@ -363,7 +372,7 @@ export function schemaForStage(
 ): JsonSchema {
   if (stage === "discover") {
     void context;
-    return structuredClone(discoveryAdmissionSchema);
+    return structuredClone(discoveryCloseoutSchema);
   }
   if (stage === "acquire") return structuredClone(acquisitionAuditSchema);
   if (stage === "analyze") return structuredClone(analysisSchema);
@@ -384,6 +393,43 @@ export function schemaForStage(
     },
   };
   return schema;
+}
+
+export function schemaForDiscoveryAssessmentBatch(): JsonSchema {
+  return structuredClone(discoveryAssessmentBatchSchema);
+}
+
+export function parseDiscoveryAssessmentBatch(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  const sanitized = sanitizeResearchValue(value);
+  if (!isObject(sanitized)) {
+    throw new StructuredOutputError("Discovery assessment batch must be a JSON object.");
+  }
+  const key = canonicalJson(discoveryAssessmentBatchSchema);
+  const validate = validators.get(key) ?? compileValidator(key, discoveryAssessmentBatchSchema);
+  if (!validate(sanitized)) {
+    throw new StructuredOutputError("Discovery assessment batch failed its JSON Schema.", {
+      validation: formatValidationErrors(validate.errors),
+    });
+  }
+  const assessments = sanitized.assessments as Array<Record<string, unknown>>;
+  const candidateIds = assessments.map((assessment) => assessment.candidateId);
+  if (new Set(candidateIds).size !== candidateIds.length) {
+    throw new StructuredOutputError(
+      "Discovery assessment batch cannot assess one candidate more than once.",
+    );
+  }
+  for (const [index, assessment] of assessments.entries()) {
+    if (assessment.decision !== "admit") continue;
+    const dimensions = assessment.coverageDimensions as unknown[];
+    if (new Set(dimensions).size !== dimensions.length) {
+      throw new StructuredOutputError(
+        `Discovery assessment /assessments/${index}/coverageDimensions contains duplicates.`,
+      );
+    }
+  }
+  return sanitized;
 }
 
 export function parseStructuredStageOutput(
@@ -491,28 +537,6 @@ function normalizeSynthesisMarkdown(markdown: string): {
 function assertUniqueStringCollections(stage: StructuredStage, value: Record<string, unknown>) {
   const collections: Array<{ path: string; value: unknown }> = [];
   if (stage === "discover") {
-    const admissions = Array.isArray(value.admissions) ? value.admissions : [];
-    collections.push({
-      path: "/admissions/candidateIds",
-      value: admissions.map((item) => (isObject(item) ? item.candidateId : null)),
-    });
-    collections.push({
-      path: "/admissions/sourceIds",
-      value: admissions.map((item) => (isObject(item) ? item.sourceId : null)),
-    });
-    for (const [index, admission] of admissions.entries()) {
-      if (isObject(admission)) {
-        collections.push({
-          path: `/admissions/${index}/coverageDimensions`,
-          value: admission.coverageDimensions,
-        });
-      }
-    }
-    const rejections = Array.isArray(value.rejections) ? value.rejections : [];
-    collections.push({
-      path: "/rejections/candidateIds",
-      value: rejections.map((item) => (isObject(item) ? item.candidateId : null)),
-    });
     const dimensions = Array.isArray(value.dimensionJudgments) ? value.dimensionJudgments : [];
     collections.push({
       path: "/dimensionJudgments/ids",

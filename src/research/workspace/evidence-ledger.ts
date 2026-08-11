@@ -24,6 +24,7 @@ const MAX_EXCERPT_LENGTH = 2_000;
 export type EvidenceLedgerEventType =
   | "candidate.discovered"
   | "candidate.duplicate"
+  | "candidate.assessed"
   | "candidate.admitted"
   | "candidate.rejected"
   | "artifact.registered"
@@ -89,6 +90,7 @@ export async function cloneEvidenceLedger(
   const replayable = new Set<EvidenceLedgerEventType>([
     "candidate.discovered",
     "candidate.duplicate",
+    "candidate.assessed",
     "candidate.admitted",
     "candidate.rejected",
     "artifact.registered",

@@ -14,6 +14,7 @@ import {
 import { registerEvidenceArtifact } from "../src/research/workspace/artifacts.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import { persistBrokerEvidence } from "../src/research/workspace/evidence.js";
+import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
 import {
   evidenceLedgerPath,
   listEvidenceCandidates,
@@ -55,24 +56,12 @@ describe("research acquisition and evidence snapshots", () => {
       });
       const [candidate] = await listEvidenceCandidates(root, "artifact-project");
       assert.ok(candidate);
+      await recordAdmission(root, "artifact-project", candidate.id, "exact-source");
       const discoverOutput = join(staging, "discover.json");
       await writeFile(
         discoverOutput,
         JSON.stringify({
-          schemaVersion: 1,
-          admissions: [
-            {
-              candidateId: candidate.id,
-              sourceId: "exact-source",
-              sourceType: "primary",
-              relevance: "Direct test source.",
-              quality: { level: "primary", rationale: "Registered local evidence." },
-              applicability: "Exact acquisition test.",
-              coverageDimensions: ["research-question"],
-              limitations: [],
-            },
-          ],
-          rejections: [],
+          schemaVersion: 2,
           limitations: [],
           dimensionJudgments: [{ id: "research-question", status: "covered" }],
           gaps: [],
@@ -256,24 +245,12 @@ describe("research acquisition and evidence snapshots", () => {
       });
       const [candidate] = await listEvidenceCandidates(root, "artifact-safety");
       assert.ok(candidate);
+      await recordAdmission(root, "artifact-safety", candidate.id, "source-1");
       const discoverOutput = join(staging, "discover.json");
       await writeFile(
         discoverOutput,
         JSON.stringify({
-          schemaVersion: 1,
-          admissions: [
-            {
-              candidateId: candidate.id,
-              sourceId: "source-1",
-              sourceType: "primary",
-              relevance: "Direct.",
-              quality: { level: "primary", rationale: "Direct." },
-              applicability: "Test.",
-              coverageDimensions: ["research-question"],
-              limitations: [],
-            },
-          ],
-          rejections: [],
+          schemaVersion: 2,
           limitations: [],
           dimensionJudgments: [{ id: "research-question", status: "covered" }],
           gaps: [],
@@ -389,6 +366,7 @@ describe("research acquisition and evidence snapshots", () => {
       });
       const [candidate] = await listEvidenceCandidates(root, "source-addendum");
       assert.ok(candidate);
+      await recordAdmission(root, "source-addendum", candidate.id, "source-1");
       const discoverOutput = join(staging, "addendum-discover.json");
       await writeFile(discoverOutput, JSON.stringify(discoveryValue(candidate.id, "source-1")));
       await submitNativeResearchStage({
@@ -501,19 +479,8 @@ describe("research acquisition and evidence snapshots", () => {
         (error: unknown) =>
           error instanceof CliError && error.code === "RESEARCH_EVIDENCE_LEDGER_INVALID",
       );
-      const output = join(staging, "native-discover.json");
-      await writeFile(
-        output,
-        JSON.stringify(discoveryValue(registered.candidate.id, "native-source")),
-      );
       await assert.rejects(
-        submitNativeResearchStage({
-          root,
-          projectId: "native-candidate",
-          sessionId: discover.sessionId,
-          outputPath: output,
-          confirmedModel: discover.expectedModel,
-        }),
+        recordAdmission(root, "native-candidate", registered.candidate.id, "native-source"),
         (error: unknown) =>
           error instanceof CliError && error.code === "RESEARCH_STRUCTURED_OUTPUT_INVALID",
       );
@@ -598,6 +565,7 @@ describe("research acquisition and evidence snapshots", () => {
       );
 
       const discoverOutput = join(staging, "formalized-discover.json");
+      await recordAdmission(root, "native-formalized", native.candidate.id, "formal-source");
       await writeFile(
         discoverOutput,
         JSON.stringify(discoveryValue(native.candidate.id, "formal-source")),
@@ -686,6 +654,7 @@ async function freezeInputOnlyProject(
   });
   const [candidate] = await listEvidenceCandidates(root, projectId);
   assert.ok(candidate);
+  await recordAdmission(root, projectId, candidate.id, "source-1");
   const discoverOutput = join(staging, `${projectId}-discover.json`);
   await writeFile(discoverOutput, JSON.stringify(discoveryValue(candidate.id, "source-1")));
   await submitNativeResearchStage({
@@ -714,25 +683,42 @@ async function freezeInputOnlyProject(
 }
 
 function discoveryValue(candidateId: string, sourceId: string): Record<string, unknown> {
+  void candidateId;
+  void sourceId;
   return {
-    schemaVersion: 1,
-    admissions: [
-      {
-        candidateId,
-        sourceId,
-        sourceType: "primary",
-        relevance: "Direct source evidence.",
-        quality: { level: "primary", rationale: "Registered immutable input." },
-        applicability: "Directly applicable.",
-        coverageDimensions: ["research-question"],
-        limitations: [],
-      },
-    ],
-    rejections: [],
+    schemaVersion: 2,
     limitations: [],
     dimensionJudgments: [{ id: "research-question", status: "covered" }],
     gaps: [],
   };
+}
+
+async function recordAdmission(
+  root: string,
+  projectId: string,
+  candidateId: string,
+  sourceId: string,
+): Promise<void> {
+  await recordDiscoveryAssessmentBatch({
+    root,
+    projectId,
+    value: {
+      schemaVersion: 1,
+      assessments: [
+        {
+          decision: "admit",
+          candidateId,
+          sourceId,
+          sourceType: "primary",
+          relevance: "Direct source evidence.",
+          quality: { level: "primary", rationale: "Registered immutable input." },
+          applicability: "Directly applicable.",
+          coverageDimensions: ["research-question"],
+          limitations: [],
+        },
+      ],
+    },
+  });
 }
 
 function acquisitionValue(candidateId: string, sourceId: string): Record<string, unknown> {

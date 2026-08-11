@@ -7,11 +7,12 @@ import {
 } from "./evidence-ledger.js";
 import { loadProjectEvidenceReceipts } from "./evidence.js";
 import { readJournal } from "./journal.js";
-import { StructuredOutputError } from "./schemas.js";
-import { canonicalJson, isObject, sha256Text } from "./storage.js";
+import { parseDiscoveryAssessmentBatch, StructuredOutputError } from "./schemas.js";
+import { canonicalJson, isObject, readJsonFile, sha256Text, workspacePaths } from "./storage.js";
 import type { ProjectState } from "./types.js";
 
 interface DiscoveryAdmission {
+  decision: "admit";
   candidateId: string;
   sourceId: string;
   sourceType: string;
@@ -23,6 +24,7 @@ interface DiscoveryAdmission {
 }
 
 interface DiscoveryRejection {
+  decision: "reject";
   candidateId: string;
   reasonCode: string;
   rationale: string;
@@ -33,10 +35,8 @@ interface DimensionJudgment {
   status: "covered" | "partial" | "missing";
 }
 
-export interface DiscoveryAdmissionValue {
-  schemaVersion: 1;
-  admissions: DiscoveryAdmission[];
-  rejections: DiscoveryRejection[];
+export interface DiscoveryCloseoutValue {
+  schemaVersion: 2;
   limitations: string[];
   dimensionJudgments: DimensionJudgment[];
   gaps: string[];
@@ -47,7 +47,10 @@ export async function materializeDiscoveryEvidence(
   project: ProjectState,
   value: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const admissionValue = parseAdmissionValue(value);
+  const closeout = parseCloseoutValue(value);
+  const assessments = await latestDiscoveryAssessments(root, project.id);
+  const admissions = assessments.filter(isAdmission);
+  const rejections = assessments.filter(isRejection);
   const candidates = new Map(
     (await listEvidenceCandidates(root, project.id)).map((candidate) => [candidate.id, candidate]),
   );
@@ -58,8 +61,8 @@ export async function materializeDiscoveryEvidence(
     ]),
   );
   const inputs = new Map(project.inputs.map((input) => [input.id, input]));
-  const admittedCandidateIds = new Set(admissionValue.admissions.map((item) => item.candidateId));
-  const rejectedCandidateIds = new Set(admissionValue.rejections.map((item) => item.candidateId));
+  const admittedCandidateIds = new Set(admissions.map((item) => item.candidateId));
+  const rejectedCandidateIds = new Set(rejections.map((item) => item.candidateId));
   for (const candidateId of [...admittedCandidateIds, ...rejectedCandidateIds]) {
     if (!candidates.has(candidateId)) {
       throw discoveryError(`Discovery decision refers to unknown candidate ${candidateId}.`);
@@ -71,7 +74,7 @@ export async function materializeDiscoveryEvidence(
     }
   }
   const requiredDimensions = new Set(project.evidenceRequirements.dimensions);
-  const judgmentIds = new Set(admissionValue.dimensionJudgments.map((item) => item.id));
+  const judgmentIds = new Set(closeout.dimensionJudgments.map((item) => item.id));
   if (
     judgmentIds.size !== requiredDimensions.size ||
     [...requiredDimensions].some((dimension) => !judgmentIds.has(dimension))
@@ -80,7 +83,7 @@ export async function materializeDiscoveryEvidence(
       "Dimension judgments must cover every reviewed evidence dimension exactly once.",
     );
   }
-  const sources = admissionValue.admissions.map((admission) => {
+  const sources = admissions.map((admission) => {
     if (admission.coverageDimensions.some((dimension) => !requiredDimensions.has(dimension))) {
       throw discoveryError(
         `Admission ${admission.sourceId} declares an unreviewed evidence dimension.`,
@@ -123,15 +126,15 @@ export async function materializeDiscoveryEvidence(
       coverageDimensions: admission.coverageDimensions,
     };
   });
-  const sourceLimitations = admissionValue.admissions.flatMap((admission) =>
+  const sourceLimitations = admissions.flatMap((admission) =>
     admission.limitations.map((limitation) => `${admission.sourceId}: ${limitation}`),
   );
   return {
     schemaVersion: 1,
     sources,
-    limitations: [...new Set([...admissionValue.limitations, ...sourceLimitations])],
+    limitations: [...new Set([...closeout.limitations, ...sourceLimitations])],
     coverage: {
-      dimensions: admissionValue.dimensionJudgments.map((item) => ({
+      dimensions: closeout.dimensionJudgments.map((item) => ({
         id: item.id,
         status: item.status,
         sourceIds: [],
@@ -141,7 +144,7 @@ export async function materializeDiscoveryEvidence(
       datedSources: 0,
       publicationDateRange: { earliest: null, latest: null },
       decision: "pass",
-      gaps: admissionValue.gaps,
+      gaps: closeout.gaps,
     },
   };
 }
@@ -151,14 +154,15 @@ export async function commitDiscoveryDecisions(
   projectId: string,
   value: Record<string, unknown>,
 ): Promise<void> {
-  const admissionValue = parseAdmissionValue(value);
+  parseCloseoutValue(value);
+  const assessments = await latestDiscoveryAssessments(root, projectId);
   const events = await readJournal(evidenceLedgerPath(root, projectId));
   const committed = new Set(
     events
       .filter((event) => event.type === "candidate.admitted" || event.type === "candidate.rejected")
       .map((event) => `${event.type}:${String(event.payload.judgmentSha256)}`),
   );
-  for (const admission of admissionValue.admissions) {
+  for (const admission of assessments.filter(isAdmission)) {
     const judgmentSha256 = sha256Text(canonicalJson(admission));
     const key = `candidate.admitted:${judgmentSha256}`;
     if (committed.has(key)) continue;
@@ -170,7 +174,7 @@ export async function commitDiscoveryDecisions(
       coverageDimensions: admission.coverageDimensions,
     });
   }
-  for (const rejection of admissionValue.rejections) {
+  for (const rejection of assessments.filter(isRejection)) {
     const judgmentSha256 = sha256Text(canonicalJson(rejection));
     const key = `candidate.rejected:${judgmentSha256}`;
     if (committed.has(key)) continue;
@@ -181,6 +185,116 @@ export async function commitDiscoveryDecisions(
       judgmentSha256,
     });
   }
+}
+
+export async function recordDiscoveryAssessmentBatch(input: {
+  root: string;
+  projectId: string;
+  value: Record<string, unknown>;
+}): Promise<{
+  recorded: number;
+  unchanged: number;
+  assessedCandidates: number;
+  admittedCandidates: number;
+  rejectedCandidates: number;
+}> {
+  const parsed = parseDiscoveryAssessmentBatch(input.value);
+  const assessments = parsed.assessments as Array<DiscoveryAdmission | DiscoveryRejection>;
+  const project = await readJsonFile<Record<string, unknown>>(
+    join(workspacePaths(input.root).projects, input.projectId, "project.json"),
+    `Research project ${input.projectId}`,
+  );
+  const packages = Array.isArray(project.packages) ? project.packages : [];
+  const discover = packages.find(
+    (workPackage) => isObject(workPackage) && workPackage.stage === "discover",
+  );
+  if (!isObject(discover) || discover.status !== "running") {
+    throw discoveryError(
+      "Discovery assessments may be recorded only during the active discover stage.",
+    );
+  }
+  const requiredDimensions = new Set(
+    isObject(project.evidenceRequirements) && Array.isArray(project.evidenceRequirements.dimensions)
+      ? project.evidenceRequirements.dimensions.filter(
+          (dimension): dimension is string => typeof dimension === "string",
+        )
+      : [],
+  );
+  const candidates = new Map(
+    (await listEvidenceCandidates(input.root, input.projectId)).map((candidate) => [
+      candidate.id,
+      candidate,
+    ]),
+  );
+  for (const assessment of assessments) {
+    const candidate = candidates.get(assessment.candidateId);
+    if (!candidate) {
+      throw discoveryError(
+        `Discovery assessment refers to unknown candidate ${assessment.candidateId}.`,
+      );
+    }
+    if (assessment.decision === "admit") {
+      if (assessment.coverageDimensions.some((dimension) => !requiredDimensions.has(dimension))) {
+        throw discoveryError(
+          `Admission ${assessment.sourceId} declares an unreviewed evidence dimension.`,
+        );
+      }
+      if (
+        !candidate.occurrences.some((origin) => origin.kind === "input" || origin.kind === "broker")
+      ) {
+        throw discoveryError(
+          `Native candidate ${candidate.id} must be formalized by a broker receipt before admission.`,
+        );
+      }
+    }
+  }
+
+  const existing = await latestDiscoveryAssessments(input.root, input.projectId);
+  const replacementIds = new Set(assessments.map((assessment) => assessment.candidateId));
+  const sourceOwners = new Map(
+    existing
+      .filter(isAdmission)
+      .filter((assessment) => !replacementIds.has(assessment.candidateId))
+      .map((assessment) => [assessment.sourceId, assessment.candidateId]),
+  );
+  for (const assessment of assessments.filter(isAdmission)) {
+    const owner = sourceOwners.get(assessment.sourceId);
+    if (owner && owner !== assessment.candidateId) {
+      throw discoveryError(`Source ID ${assessment.sourceId} is already assigned to ${owner}.`);
+    }
+    sourceOwners.set(assessment.sourceId, assessment.candidateId);
+  }
+
+  const priorHashes = new Set(
+    (await readJournal(evidenceLedgerPath(input.root, input.projectId)))
+      .filter((event) => event.type === "candidate.assessed")
+      .map((event) => String(event.payload.assessmentSha256)),
+  );
+  let recorded = 0;
+  let unchanged = 0;
+  for (const assessment of assessments) {
+    const assessmentSha256 = sha256Text(canonicalJson(assessment));
+    if (priorHashes.has(assessmentSha256)) {
+      unchanged += 1;
+      continue;
+    }
+    await appendEvidenceLedgerEvent(input.root, input.projectId, "candidate.assessed", {
+      candidateId: assessment.candidateId,
+      decision: assessment.decision,
+      assessment,
+      assessmentSha256,
+    });
+    priorHashes.add(assessmentSha256);
+    recorded += 1;
+  }
+  const latest = await latestDiscoveryAssessments(input.root, input.projectId);
+  return {
+    recorded,
+    unchanged,
+    assessedCandidates: latest.length,
+    admittedCandidates: latest.filter(isAdmission).length,
+    rejectedCandidates: latest.filter(isRejection).length,
+  };
 }
 
 function brokerProvenance(
@@ -210,26 +324,40 @@ function inputProvenance(
   return { kind: "input", id: input.id, locator: expectedLocator };
 }
 
-function parseAdmissionValue(value: Record<string, unknown>): DiscoveryAdmissionValue {
+async function latestDiscoveryAssessments(
+  root: string,
+  projectId: string,
+): Promise<Array<DiscoveryAdmission | DiscoveryRejection>> {
+  const events = await readJournal(evidenceLedgerPath(root, projectId));
+  const latest = new Map<string, DiscoveryAdmission | DiscoveryRejection>();
+  for (const event of events) {
+    if (event.type !== "candidate.assessed" || !isObject(event.payload.assessment)) continue;
+    const assessment = event.payload.assessment;
+    if (!isAdmission(assessment) && !isRejection(assessment)) {
+      throw discoveryError("Persisted discovery assessment is malformed.");
+    }
+    latest.set(assessment.candidateId, assessment);
+  }
+  return [...latest.values()];
+}
+
+function parseCloseoutValue(value: Record<string, unknown>): DiscoveryCloseoutValue {
   if (
-    value.schemaVersion !== 1 ||
-    !Array.isArray(value.admissions) ||
-    !Array.isArray(value.rejections) ||
+    value.schemaVersion !== 2 ||
     !Array.isArray(value.limitations) ||
     !Array.isArray(value.dimensionJudgments) ||
     !Array.isArray(value.gaps) ||
-    value.admissions.some((item) => !isAdmission(item)) ||
-    value.rejections.some((item) => !isRejection(item)) ||
     value.dimensionJudgments.some((item) => !isDimensionJudgment(item))
   ) {
-    throw discoveryError("Discovery admission value is malformed.");
+    throw discoveryError("Discovery closeout value is malformed.");
   }
-  return value as unknown as DiscoveryAdmissionValue;
+  return value as unknown as DiscoveryCloseoutValue;
 }
 
 function isAdmission(value: unknown): value is DiscoveryAdmission {
   return (
     isObject(value) &&
+    value.decision === "admit" &&
     typeof value.candidateId === "string" &&
     typeof value.sourceId === "string" &&
     typeof value.sourceType === "string" &&
@@ -248,6 +376,7 @@ function isAdmission(value: unknown): value is DiscoveryAdmission {
 function isRejection(value: unknown): value is DiscoveryRejection {
   return (
     isObject(value) &&
+    value.decision === "reject" &&
     typeof value.candidateId === "string" &&
     typeof value.reasonCode === "string" &&
     typeof value.rationale === "string"

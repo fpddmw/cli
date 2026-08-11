@@ -8,6 +8,7 @@ import { runCli } from "../src/cli.js";
 import { lockCapabilities, verifyCapabilities } from "../src/research/workspace/capabilities.js";
 import { startCapabilityBroker } from "../src/research/workspace/broker.js";
 import { inspectResearchContext } from "../src/research/workspace/context.js";
+import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
 import { listEvidenceCandidates } from "../src/research/workspace/evidence-ledger.js";
 import { executeAgent, fingerprintAgentRoute } from "../src/research/workspace/executor.js";
 import {
@@ -889,6 +890,15 @@ describe("research project execution", () => {
         if (stage === "discover") {
           assert.ok(packet.discovery);
           assert.ok(packet.commands.registerCandidate);
+          assert.ok(packet.commands.recordAssessment);
+          assert.equal(
+            (
+              packet.commands.recordAssessment.recordSchema.properties as {
+                assessments: { maxItems: number };
+              }
+            ).assessments.maxItems,
+            25,
+          );
           assert.equal(packet.discovery.calls.max, 6);
           assert.equal(packet.discovery.calls.hardLimit, 24);
           assert.equal(packet.discovery.recommendedAction, "assess-unassessed-candidates");
@@ -1564,7 +1574,7 @@ describe("research workspace CLI", () => {
       const schemaValue = JSON.parse(schema.stdout) as Record<string, unknown>;
       assert.equal(
         schemaValue.$id,
-        "https://schemas.tiangong.ai/research/discovery-admission-v1.json",
+        "https://schemas.tiangong.ai/research/discovery-closeout-v2.json",
       );
       for (const stage of [
         "discover",
@@ -1752,7 +1762,7 @@ describe("research workspace CLI", () => {
         budget: { outputTokenLimitEnforcement: Record<string, string> };
       };
       assert.ok(
-        value.gaps.includes("discover-output-reservation-below-schema-recommendation:1000/1280"),
+        value.gaps.includes("discover-output-reservation-below-schema-recommendation:1000/1024"),
       );
       assert.deepEqual(value.budget.outputTokenLimitEnforcement, {
         producer: "reserved-native-host-on-submit",
@@ -2066,13 +2076,13 @@ describe("research workspace CLI", () => {
       assert.ok(preflightValue.inputPlan.inputs.every((input) => input.id.startsWith("input-")));
       assert.equal(preflightValue.doctorAttestation.status, "verified");
       assert.match(preflightValue.doctorAttestation.attestationSha256, /^[a-f0-9]{64}$/);
-      assert.equal(preflightValue.budget.recommendedDiscoverOutputTokens, 1_152);
+      assert.equal(preflightValue.budget.recommendedDiscoverOutputTokens, 1_024);
       assert.ok(
         preflightValue.budget.embeddedStageContextReservation <=
           preflightValue.budget.maxInputContextTokens,
       );
       assert.deepEqual(preflightValue.budget.stageContextTokenReservations, {
-        acquire: 1_152,
+        acquire: 1_024,
         analyze: 12_000,
         synthesize: 12_000,
         review: 36_000,
@@ -2226,24 +2236,30 @@ function fakeExecutor(agentLog: string[]): PackageExecutor {
             (item) => item.origin.inputId === admittedInput.id,
           )
         : undefined;
+      if (admittedInput && candidate) {
+        await recordDiscoveryAssessmentBatch({
+          root: request.workspaceRoot,
+          projectId: capsuleState.id,
+          value: {
+            schemaVersion: 1,
+            assessments: [
+              {
+                decision: "admit",
+                candidateId: candidate.id,
+                sourceId: "source-1",
+                sourceType: "primary",
+                relevance: "Directly measures the declared comparison.",
+                quality: { level: "primary", rationale: "Direct measurement." },
+                applicability: "Applies to the declared bounded comparison.",
+                coverageDimensions: ["research-question"],
+                limitations: [],
+              },
+            ],
+          },
+        });
+      }
       structured = {
-        schemaVersion: 1,
-        admissions:
-          admittedInput && candidate
-            ? [
-                {
-                  candidateId: candidate.id,
-                  sourceId: "source-1",
-                  sourceType: "primary",
-                  relevance: "Directly measures the declared comparison.",
-                  quality: { level: "primary", rationale: "Direct measurement." },
-                  applicability: "Applies to the declared bounded comparison.",
-                  coverageDimensions: ["research-question"],
-                  limitations: [],
-                },
-              ]
-            : [],
-        rejections: [],
+        schemaVersion: 2,
         limitations: [],
         dimensionJudgments: [
           {
