@@ -16,8 +16,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-11
-lastReviewedCommit: 2ce7ad7cd36c1aeba577bc72e4095ed3a81debd6
+lastReviewedAt: 2026-08-12
+lastReviewedCommit: ac34420a63cb02898f8c38b1c1af64f0439e862f
 ---
 
 # Repo Validation
@@ -80,6 +80,12 @@ network. It enables Docker's privileged namespace mode solely so the non-root
 test process can exercise the real nested Bubblewrap capsule instead of skipping
 or mocking it; the isolation assertion still rejects root execution, host HOME,
 global Skills, and global CLI state.
+
+On a Linux test host where
+`/proc/sys/kernel/apparmor_restrict_unprivileged_userns` is `1`, the local gate
+stops before building and reports the exact prerequisite. The operator or CI
+runner must set that host policy to `0` for the test lifetime; the test script
+does not mutate host kernel policy itself.
 
 `npm run prepush:gate` aggregates the lint, coverage, and docpact checks when
 `docpact` is installed locally.

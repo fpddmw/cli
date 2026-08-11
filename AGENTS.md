@@ -15,8 +15,8 @@ checkPaths:
   - .docpact/config.yaml
   - docs/agents/**
   - src/**
-lastReviewedAt: 2026-08-11
-lastReviewedCommit: 2ce7ad7cd36c1aeba577bc72e4095ed3a81debd6
+lastReviewedAt: 2026-08-12
+lastReviewedCommit: ac34420a63cb02898f8c38b1c1af64f0439e862f
 ---
 
 # Tiangong AI CLI Contract

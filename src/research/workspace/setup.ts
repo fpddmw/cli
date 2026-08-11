@@ -810,9 +810,25 @@ export async function inspectResearchSetupStatus(
   workspace: string,
   environment: NodeJS.ProcessEnv = process.env,
 ) {
-  const root = requireAbsoluteWorkspace(resolve(workspace));
+  const requestedRoot = requireAbsoluteWorkspace(resolve(workspace));
+  const requestedPaths = workspacePaths(requestedRoot);
+  const plan = await loadAndVerifyResearchSetupPlan(requestedPaths.setupPlan);
+  const canonicalRequestedRoot = await realpath(requestedRoot).catch(() => requestedRoot);
+  if (canonicalRequestedRoot !== plan.workspace.path) {
+    throw setupError({
+      code: "RESEARCH_SETUP_WORKSPACE_INVALID",
+      step: "workspace",
+      reason: "The setup plan is bound to a different canonical workspace path.",
+      minimumAction: "Run setup status against the exact workspace recorded in the setup plan.",
+      retryCommand: researchSetupApplyCommand({
+        version: plan.cli.version,
+        planPath: workspacePaths(plan.workspace.path).setupPlan,
+      }),
+      exitCode: 2,
+    });
+  }
+  const root = plan.workspace.path;
   const paths = workspacePaths(root);
-  const plan = await loadAndVerifyResearchSetupPlan(paths.setupPlan);
   const storedState = await loadSetupState(root, plan.planSha256);
   const state = setupStateForOutput(storedState, plan, root);
   const selected = plan.selection.skillIds.map(setupSkill);

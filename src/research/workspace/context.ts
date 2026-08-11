@@ -1,4 +1,4 @@
-import { lstat } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { dirname, join, parse, resolve } from "node:path";
 
 import {
@@ -25,7 +25,9 @@ export async function inspectResearchContext(selectedPath: string): Promise<Cont
   while (true) {
     const control = join(cursor, RESEARCH_CONTROL_DIRECTORY);
     if (await pathExists(control)) {
-      const setup = await inspectManagedSetup(control, cursor);
+      const workspaceRoot = await realpath(cursor).catch(() => cursor);
+      const workspaceControl = join(workspaceRoot, RESEARCH_CONTROL_DIRECTORY);
+      const setup = await inspectManagedSetup(workspaceControl, workspaceRoot);
       const markerPath = join(control, "workspace.json");
       if (!(await pathExists(markerPath))) {
         if (setup) {

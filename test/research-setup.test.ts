@@ -49,6 +49,10 @@ import {
   setResearchSetupCredentialFromEnvironment,
 } from "../src/research/workspace/setup.js";
 import {
+  researchSetupApplyCommand,
+  researchSetupRetryCommand,
+} from "../src/research/workspace/setup-invocation.js";
+import {
   createResearchSetupWizardTheme,
   executeResearchSetupWizard,
   formatResearchSetupWizardNote,
@@ -293,7 +297,10 @@ describe("research setup catalog and immutable plans", () => {
         },
         next: {
           action: "apply",
-          retryCommand: `npx --yes --package @tiangong-ai/cli@${plan.cli.version} -- tiangong-ai research setup apply --plan ${workspacePaths(canonicalRoot).setupPlan} --json`,
+          retryCommand: researchSetupApplyCommand({
+            version: plan.cli.version,
+            planPath: workspacePaths(canonicalRoot).setupPlan,
+          }),
         },
       });
       const status = await inspectResearchSetupStatus(root);
@@ -1027,7 +1034,13 @@ describe("research setup execution and operator safety", () => {
         credentialEnvironment: { "brave.search.api-key": "OWNER_VALUE" },
         confirmNetworkDownloads: true,
       });
-      const recoverySkill = join(root, ".agents", "skills", "tiangong-auto-research-recovery");
+      const canonicalRoot = plan.workspace.path;
+      const recoverySkill = join(
+        canonicalRoot,
+        ".agents",
+        "skills",
+        "tiangong-auto-research-recovery",
+      );
       assert.ok(
         plan.mutations.some(
           (mutation) => mutation.step === "recovery-shim" && mutation.target === recoverySkill,
@@ -1102,7 +1115,11 @@ describe("research setup execution and operator safety", () => {
       });
       assert.equal(
         status.state.lastError?.retryCommand,
-        `npx --yes --package @tiangong-ai/cli@${status.plan.cliVersion} -- tiangong-ai research setup retry --step source-checkout --workspace ${root} --json`,
+        researchSetupRetryCommand({
+          version: status.plan.cliVersion,
+          workspace: canonicalRoot,
+          step: "source-checkout",
+        }),
       );
       assert.equal(status.next?.action, "retry");
       assert.deepEqual(status.credentialReadiness, {
@@ -1195,12 +1212,18 @@ describe("research setup execution and operator safety", () => {
 
   it("removes only its verified recovery shim after the full orchestrator is available", async () => {
     const root = await temporaryDirectory();
+    const canonicalRoot = await realpath(root);
     const skill = RESEARCH_SETUP_SKILLS.find(
       (candidate) => candidate.id === "tiangong.auto-research",
     )!;
     const originalTreeSha256 = skill.expectedTreeSha256;
-    const installedSkill = join(root, ".agents", "skills", skill.skillName);
-    const recoverySkill = join(root, ".agents", "skills", "tiangong-auto-research-recovery");
+    const installedSkill = join(canonicalRoot, ".agents", "skills", skill.skillName);
+    const recoverySkill = join(
+      canonicalRoot,
+      ".agents",
+      "skills",
+      "tiangong-auto-research-recovery",
+    );
     try {
       await mkdir(installedSkill, { recursive: true });
       await writeFile(join(installedSkill, "SKILL.md"), "# verified full orchestrator fixture\n");
