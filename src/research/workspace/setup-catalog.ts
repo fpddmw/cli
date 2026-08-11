@@ -114,7 +114,7 @@ export const RESEARCH_SETUP_SELECTION_GUIDANCE = {
 } as const;
 
 const BRAVE_COMMIT = "3e088af66eb61f1c207c22b2be0278ca8744d1d1";
-const TIANGONG_SKILLS_COMMIT = "24f2549968864c43dfb5a7f995a0e4fceb54d565";
+const TIANGONG_SKILLS_COMMIT = "c9470b88f52d35629d3d9fb21ee7713048b44c3b";
 const ANTHROPIC_SKILLS_COMMIT = "f17010c9bb483898c1d9c9f42dde2b3a98889434";
 const PPT_MASTER_COMMIT = "4343bd8bfc91e79dfb9680681a378476cc38a280";
 
@@ -240,7 +240,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "tiangong-auto-research",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "tiangong-auto-research",
-    expectedTreeSha256: "8ac005677e7c9ddf97ce1377686c97728ab89fedb1aa4e14fb96363cbc14a4c2",
+    expectedTreeSha256: "65c8acc41c8cc83575b433b8099528d72d1a99d4bb1178eb5568273516b9f065",
     tier: "orchestrator",
     role: "orchestrator",
     purpose:
@@ -366,7 +366,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "tiangong-kb-sci-search",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "tiangong-kb-sci-search",
-    expectedTreeSha256: "1e3fb6c92bf4e98c6d382e06c6e3bcec52bb8c051f630a2ca499bd63042292ce",
+    expectedTreeSha256: "7308e5d88e5dbae113da7e401b8ecaf4b8e798bfe52ad10b99d188b2bd408b30",
     tier: "enhanced",
     role: "evidence-capability",
     purpose: "Owner-authorized Tiangong SCI database discovery through a bounded JSON POST broker.",
@@ -387,7 +387,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "tiangong-kb-report-search",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "tiangong-kb-report-search",
-    expectedTreeSha256: "1cb09d26609511f39c4511cc117eb0f421c867dbe0d36cd0437d7aae38b7b836",
+    expectedTreeSha256: "d7f9eba27d965260edbe2760dc28352514d87d660b7a9f20bd6f44035f68f600",
     tier: "enhanced",
     role: "evidence-capability",
     purpose:
@@ -409,7 +409,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "tiangong-kb-patent-search",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "tiangong-kb-patent-search",
-    expectedTreeSha256: "7ea45cebf2c74c5f5b665a17abd1a439235b89beff97657235996aa2db58f770",
+    expectedTreeSha256: "3dfabe32d50709f728595e7f482da4f42a7f149cc7cfb239e9ae98de93bcbcd6",
     tier: "enhanced",
     role: "evidence-capability",
     purpose:

@@ -23,6 +23,7 @@ import {
   verifyCapabilities,
 } from "../src/research/workspace/capabilities.js";
 import { inspectResearchContext } from "../src/research/workspace/context.js";
+import { packageVersion } from "../src/research/workspace/constants.js";
 import { evaluateRequiredResearchCompanions } from "../src/research/workspace/companion-readiness.js";
 import {
   EXTERNAL_SKILL_CONTEXT_PROFILE,
@@ -47,6 +48,10 @@ import {
   runResearchSetupCompanion,
   setResearchSetupCredentialFromEnvironment,
 } from "../src/research/workspace/setup.js";
+import {
+  researchSetupApplyCommand,
+  researchSetupRetryCommand,
+} from "../src/research/workspace/setup-invocation.js";
 import {
   createResearchSetupWizardTheme,
   executeResearchSetupWizard,
@@ -87,7 +92,7 @@ describe("research setup catalog and immutable plans", () => {
       assert.ok(catalog.sources.every((source) => /^[0-9a-f]{40}$/.test(source.immutableRef)));
       assert.equal(
         catalog.sources.find((source) => source.id === "tiangong-ai-skills")?.immutableRef,
-        "24f2549968864c43dfb5a7f995a0e4fceb54d565",
+        "c9470b88f52d35629d3d9fb21ee7713048b44c3b",
       );
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-sci-search"));
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-report-search"));
@@ -281,6 +286,59 @@ describe("research setup catalog and immutable plans", () => {
       const context = await inspectResearchContext(root);
       assert.equal(context.role, "setup");
       assert.ok(context.allowedOperations.includes("research.setup.apply"));
+      assert.deepEqual(context.setup, {
+        status: "pending",
+        currentStep: null,
+        blocker: null,
+        runtime: {
+          packageName: "@tiangong-ai/cli",
+          packageVersion: plan.cli.version,
+          source: "setup-plan",
+        },
+        next: {
+          action: "apply",
+          retryCommand: researchSetupApplyCommand({
+            version: plan.cli.version,
+            planPath: workspacePaths(canonicalRoot).setupPlan,
+          }),
+        },
+      });
+      const status = await inspectResearchSetupStatus(root);
+      assert.equal(status.state.status, "pending");
+      assert.equal(status.next?.action, "apply");
+      assert.equal(status.next?.retryCommand, context.setup?.next?.retryCommand);
+      assert.deepEqual(status.credentialReadiness, {
+        valuesEmitted: false,
+        configuredIds: [],
+        missingRequiredIds: [],
+        scopes: [],
+      });
+      assert.equal(status.provenance.effectiveCli.packageName, "@tiangong-ai/cli");
+      assert.equal(status.provenance.effectiveCli.packageVersion, plan.cli.version);
+      assert.equal(status.provenance.effectiveCli.invocationMode, "exact-npx");
+      assert.equal(status.provenance.selectedOrchestrator, null);
+      const priorCwd = process.cwd();
+      try {
+        process.chdir(root);
+        const blockedSearch = await invoke(
+          [
+            "research",
+            "search",
+            "--query",
+            "must not reach ambient provider",
+            "--dry-run",
+            "--json",
+          ],
+          {},
+        );
+        assert.equal(blockedSearch.exitCode, 3);
+        assert.match(blockedSearch.stderr, /AUTO_RESEARCH_SETUP_INCOMPLETE/);
+        assert.match(blockedSearch.stderr, /"credentialScope":"broker"/);
+        assert.doesNotMatch(blockedSearch.stderr, /STANDALONE_AMBIENT_CREDENTIAL_MISSING/);
+        assert.match(blockedSearch.stderr, /research setup apply/);
+      } finally {
+        process.chdir(priorCwd);
+      }
       const loaded = await loadAndVerifyResearchSetupPlan(workspacePaths(root).setupPlan);
       assert.deepEqual(loaded, plan);
       if (platform() !== "win32") {
@@ -288,6 +346,66 @@ describe("research setup catalog and immutable plans", () => {
       }
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports ignored ambient CLI and Skill conflicts for project-scoped setup", async () => {
+    const root = await temporaryDirectory();
+    const operatorHome = await temporaryDirectory();
+    const bin = join(operatorHome, "bin");
+    const realCli = join(bin, "ambient-tiangong-ai");
+    const linkedCli = join(bin, "tiangong-ai");
+    const skill = RESEARCH_SETUP_SKILLS.find(
+      (candidate) => candidate.id === "tiangong.auto-research",
+    )!;
+    const ambientSkill = join(operatorHome, ".agents", "skills", skill.skillName);
+    try {
+      await mkdir(bin, { recursive: true });
+      await writeFile(realCli, "#!/bin/sh\nexit 0\n");
+      await chmod(realCli, 0o755);
+      await symlink(realCli, linkedCli);
+      await mkdir(ambientSkill, { recursive: true });
+      await writeFile(join(ambientSkill, "SKILL.md"), "# unrelated ambient copy\n");
+      await mkdir(join(ambientSkill, "scripts"));
+      await writeFile(
+        join(ambientSkill, "scripts", "legacy.sh"),
+        'CLI="${TIANGONG_AI_CLI:-tiangong-ai}"\n',
+      );
+      await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [skill.id],
+        acceptedLicenseIds: [skill.license.id],
+        confirmNetworkDownloads: true,
+      });
+
+      const status = await inspectResearchSetupStatus(root, {
+        HOME: operatorHome,
+        PATH: bin,
+      });
+      assert.deepEqual(status.provenance.ambientCli, {
+        path: await realpath(realCli),
+        ignoredByExactInvocation: true,
+      });
+      assert.deepEqual(status.provenance.ambientSkillConflicts, [
+        {
+          skillId: skill.id,
+          skillName: skill.skillName,
+          agent: "codex",
+          path: ambientSkill,
+          status: "drifted",
+          observedTreeSha256: await hashRegularTree(ambientSkill),
+          expectedTreeSha256: skill.expectedTreeSha256,
+          unmanagedPathCliFallback: true,
+          ignoredByProjectScope: true,
+        },
+      ]);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(operatorHome, { recursive: true, force: true }),
+      ]);
     }
   });
 
@@ -427,7 +545,7 @@ describe("research setup catalog and immutable plans", () => {
       await writeFile(planPath, `${JSON.stringify(plan, null, 2)}\n`);
       const update = await checkResearchSetupUpdates(root);
       assert.equal(update.updateAvailable, true);
-      assert.deepEqual(update.cliVersionDrift, { planned: "0.0.29", active: "0.0.33" });
+      assert.deepEqual(update.cliVersionDrift, { planned: "0.0.29", active: packageVersion() });
       assert.match(update.policy.minimumAction, /replacement immutable plan/i);
       await assert.rejects(
         loadAndVerifyResearchSetupPlan(planPath),
@@ -907,15 +1025,27 @@ describe("research setup execution and operator safety", () => {
     const secret = "opaque-fixture-owner-secret";
     const calls: string[] = [];
     try {
-      await createResearchSetupPlan({
+      const plan = await createResearchSetupPlan({
         workspace: root,
         mode: "production-research",
         evidenceProfile: EXTERNAL_SKILL_PROFILE,
-        skillIds: [],
-        acceptedLicenseIds: ["brave-search-skills:MIT"],
+        skillIds: ["tiangong.auto-research"],
+        acceptedLicenseIds: ["brave-search-skills:MIT", "tiangong-ai-skills:MIT"],
         credentialEnvironment: { "brave.search.api-key": "OWNER_VALUE" },
         confirmNetworkDownloads: true,
       });
+      const canonicalRoot = plan.workspace.path;
+      const recoverySkill = join(
+        canonicalRoot,
+        ".agents",
+        "skills",
+        "tiangong-auto-research-recovery",
+      );
+      assert.ok(
+        plan.mutations.some(
+          (mutation) => mutation.step === "recovery-shim" && mutation.target === recoverySkill,
+        ),
+      );
       await assert.rejects(
         applyResearchSetupPlan(workspacePaths(root).setupPlan, {
           skipDoctor: true,
@@ -947,13 +1077,24 @@ describe("research setup execution and operator safety", () => {
             environment: { OWNER_VALUE: secret },
             runner: async ({ command }) => {
               calls.push(command);
-              return { exitCode: 9, stdout: "", stderr: `registry failure ${secret}` };
+              if (command === "npm") {
+                return {
+                  exitCode: 0,
+                  stdout: JSON.stringify({
+                    version: RESEARCH_SETUP_INSTALLER.version,
+                    "dist.integrity": RESEARCH_SETUP_INSTALLER.npmIntegrity,
+                    gitHead: RESEARCH_SETUP_INSTALLER.gitHead,
+                  }),
+                  stderr: "",
+                };
+              }
+              return { exitCode: 9, stdout: "", stderr: `git failure ${secret}` };
             },
           },
         }),
         errorCode("RESEARCH_SETUP_COMMAND_FAILED"),
       );
-      assert.deepEqual(calls, ["npm"]);
+      assert.deepEqual(calls, ["npm", "git"]);
       const persisted = `${await readFile(workspacePaths(root).setupState, "utf8")}\n${await readFile(
         workspacePaths(root).journal,
         "utf8",
@@ -962,11 +1103,187 @@ describe("research setup execution and operator safety", () => {
       assert.match(persisted, /\[REDACTED\]/);
       const credentialStore = await readFile(workspacePaths(root).env, "utf8");
       assert.equal(credentialStore.includes(secret), true);
+      const status = await inspectResearchSetupStatus(root, {});
+      const braveSource = plan.sources.find((source) => source.id === "brave-search-skills")!;
+      assert.equal(status.state.lastError?.step, "source-checkout");
+      assert.deepEqual(status.state.lastError?.diagnostics, {
+        sourceId: "brave-search-skills",
+        repository: "brave/brave-search-skills",
+        immutableRef: braveSource.immutableRef,
+        cacheState: "absent",
+        safeToRetry: true,
+      });
+      assert.equal(
+        status.state.lastError?.retryCommand,
+        researchSetupRetryCommand({
+          version: status.plan.cliVersion,
+          workspace: canonicalRoot,
+          step: "source-checkout",
+        }),
+      );
+      assert.equal(status.next?.action, "retry");
+      assert.deepEqual(status.credentialReadiness, {
+        valuesEmitted: false,
+        configuredIds: ["brave.search.api-key"],
+        missingRequiredIds: [],
+        scopes: ["broker"],
+      });
+      assert.equal(status.provenance.selectedOrchestrator?.skillId, "tiangong.auto-research");
+      assert.equal(status.provenance.selectedOrchestrator?.preferredPath, null);
+      assert.equal(status.provenance.selectedOrchestrator?.installations[0]?.status, "missing");
+      assert.equal(status.provenance.recoveryShims[0]?.status, "installed");
+      assert.equal(status.provenance.recoveryShims[0]?.path, recoverySkill);
+      const recoveryInstructions = await readFile(join(recoverySkill, "SKILL.md"), "utf8");
+      assert.match(recoveryInstructions, /recovery-only/i);
+      assert.match(recoveryInstructions, new RegExp(`@tiangong-ai/cli@${plan.cli.version}`));
+      assert.match(recoveryInstructions, /research context inspect/);
+      assert.match(recoveryInstructions, /never run research or standalone evidence/i);
+      assert.equal(recoveryInstructions.includes(secret), false);
+
+      const retryCalls: string[] = [];
+      await assert.rejects(
+        retryResearchSetup({
+          workspace: root,
+          step: "source-checkout",
+          options: {
+            skipDoctor: true,
+            environment: {},
+            runner: async ({ command }) => {
+              retryCalls.push(command);
+              if (command === "npm") {
+                return {
+                  exitCode: 0,
+                  stdout: JSON.stringify({
+                    version: RESEARCH_SETUP_INSTALLER.version,
+                    "dist.integrity": RESEARCH_SETUP_INSTALLER.npmIntegrity,
+                    gitHead: RESEARCH_SETUP_INSTALLER.gitHead,
+                  }),
+                  stderr: "",
+                };
+              }
+              return { exitCode: 9, stdout: "", stderr: "repeatable clean failure" };
+            },
+          },
+        }),
+        errorCode("RESEARCH_SETUP_COMMAND_FAILED"),
+      );
+      assert.deepEqual(retryCalls, ["npm", "git"]);
+      const retriedStatus = await inspectResearchSetupStatus(root, {});
+      assert.equal(retriedStatus.state.attempts, 3);
+      assert.deepEqual(retriedStatus.credentialReadiness, status.credentialReadiness);
+      const priorCwd = process.cwd();
+      try {
+        process.chdir(root);
+        const blockedSearch = await invoke([
+          "research",
+          "search",
+          "--query",
+          "must remain managed",
+          "--sources",
+          "sci",
+          "--dry-run",
+          "--json",
+        ]);
+        assert.equal(blockedSearch.exitCode, 3);
+        const blockedError = JSON.parse(blockedSearch.stderr) as {
+          error: { code: string; details: Record<string, unknown> };
+        };
+        assert.equal(blockedError.error.code, "AUTO_RESEARCH_SETUP_BLOCKED");
+        assert.equal(blockedError.error.details.requestedExecutionMode, "standalone");
+        assert.equal(blockedError.error.details.recommendedExecutionMode, "managed-workspace");
+        assert.equal(blockedError.error.details.brokerCredentialStore, "present");
+        assert.equal(blockedError.error.details.standaloneCredential, "absent");
+        assert.equal(blockedError.error.details.setupStatus, "blocked");
+        assert.equal(blockedError.error.details.failedStep, "source-checkout");
+        assert.equal(blockedError.error.details.networkAttempted, false);
+        assert.deepEqual(blockedError.error.details.effectiveCli, status.provenance.effectiveCli);
+        assert.deepEqual(blockedError.error.details.recoveryShims, status.provenance.recoveryShims);
+        assert.equal(JSON.stringify(blockedError).includes(secret), false);
+      } finally {
+        process.chdir(priorCwd);
+      }
       if (platform() !== "win32") {
         assert.equal((await lstat(workspacePaths(root).env)).mode & 0o077, 0);
       }
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("removes only its verified recovery shim after the full orchestrator is available", async () => {
+    const root = await temporaryDirectory();
+    const canonicalRoot = await realpath(root);
+    const skill = RESEARCH_SETUP_SKILLS.find(
+      (candidate) => candidate.id === "tiangong.auto-research",
+    )!;
+    const originalTreeSha256 = skill.expectedTreeSha256;
+    const installedSkill = join(canonicalRoot, ".agents", "skills", skill.skillName);
+    const recoverySkill = join(
+      canonicalRoot,
+      ".agents",
+      "skills",
+      "tiangong-auto-research-recovery",
+    );
+    try {
+      await mkdir(installedSkill, { recursive: true });
+      await writeFile(join(installedSkill, "SKILL.md"), "# verified full orchestrator fixture\n");
+      skill.expectedTreeSha256 = await hashRegularTree(installedSkill);
+      await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [skill.id],
+        acceptedLicenseIds: [skill.license.id],
+        confirmNetworkDownloads: true,
+      });
+      const result = await applyResearchSetupPlan(workspacePaths(root).setupPlan, {
+        skipDoctor: true,
+        runner: async () => {
+          throw new Error("a verified installation requires no downloader");
+        },
+      });
+      assert.equal(result.state.status, "partially-ready");
+      assert.equal(await pathExistsSafe(recoverySkill), false);
+      const status = await inspectResearchSetupStatus(root, {});
+      assert.equal(status.provenance.selectedOrchestrator?.preferredPath, installedSkill);
+      assert.deepEqual(status.provenance.recoveryShims, []);
+    } finally {
+      skill.expectedTreeSha256 = originalTreeSha256;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a recovery shim parent symlink before creating anything outside the workspace", async () => {
+    const root = await temporaryDirectory();
+    const outside = await temporaryDirectory();
+    const skill = RESEARCH_SETUP_SKILLS.find(
+      (candidate) => candidate.id === "tiangong.auto-research",
+    )!;
+    try {
+      await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [skill.id],
+        acceptedLicenseIds: [skill.license.id],
+        confirmNetworkDownloads: true,
+      });
+      await symlink(outside, join(root, ".agents"));
+      await assert.rejects(
+        applyResearchSetupPlan(workspacePaths(root).setupPlan, {
+          skipDoctor: true,
+          runner: async () => {
+            throw new Error("symlink rejection must precede every network command");
+          },
+        }),
+        errorCode("RESEARCH_SETUP_SYMLINK_BLOCKED"),
+      );
+      assert.equal(await pathExistsSafe(join(outside, "skills")), false);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(outside, { recursive: true, force: true }),
+      ]);
     }
   });
 

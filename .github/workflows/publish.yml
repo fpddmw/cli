@@ -62,7 +62,12 @@ jobs:
             exit 1
           fi
 
+      - name: Run mandatory clean-container gate
+        run: npm run test:clean
+
       - name: Verify package
+        env:
+          TIANGONG_RESEARCH_REQUIRE_SKILLS_MAIN: "1"
         run: |
           npm run lint
           npm test

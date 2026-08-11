@@ -3,8 +3,15 @@ import { CliError } from "../errors.js";
 import type { CliIO } from "../io.js";
 import { readJsonInput, stringifyJson, write } from "../io.js";
 import { parseStrictArgs, strictBoolean, strictString } from "../strict-args.js";
-import { parseResearchSources, researchSourceConfig, resolveResearchConfig } from "./config.js";
+import {
+  parseResearchSources,
+  researchSourceConfig,
+  resolveResearchConfig,
+  type ResearchConfig,
+} from "./config.js";
 import { researchOrchestrationHelp, runResearchOrchestrationCommand } from "./orchestration.js";
+import type { ResearchSourceId } from "./types.js";
+import { inspectResearchContext } from "./workspace/context.js";
 
 const RESEARCH_SEARCH_OPTIONS = {
   help: "boolean",
@@ -93,6 +100,7 @@ async function runResearchSearchCommand(argv: string[], io: CliIO): Promise<numb
 
   const sourceIds = parseResearchSources(strictString(args, "sources"));
   const config = resolveResearchConfig(args, io.env);
+  await assertStandaloneSearchContext(io.env, sourceIds, config);
   const inputPath = strictString(args, "input");
   const body = researchRequestBody(args);
   const result = await runEdgeSearch({
@@ -107,6 +115,74 @@ async function runResearchSearchCommand(argv: string[], io: CliIO): Promise<numb
 
   writeSearchResult(io, result, strictBoolean(args, "json"));
   return 0;
+}
+
+async function assertStandaloneSearchContext(
+  environment: NodeJS.ProcessEnv,
+  sourceIds: ResearchSourceId[],
+  config: ResearchConfig,
+): Promise<void> {
+  const context = await inspectResearchContext(process.cwd());
+  if (context.role !== "setup" && context.role !== "workspace") return;
+  const setup = context.setup;
+  const ready = setup?.status === "ready";
+  const blocked = setup?.status === "blocked";
+  const setupStatus = context.root
+    ? await import("./workspace/setup.js")
+        .then(({ inspectResearchSetupStatus }) =>
+          inspectResearchSetupStatus(context.root!, environment),
+        )
+        .catch(() => null)
+    : null;
+  const configuredBrokerIds = setupStatus?.credentialReadiness.configuredIds ?? [];
+  const standaloneConfiguredSources = sourceIds.filter(
+    (sourceId) => config.sources[sourceId].apiKey.length > 0,
+  );
+  const standaloneCredential =
+    standaloneConfiguredSources.length === 0
+      ? "absent"
+      : standaloneConfiguredSources.length === sourceIds.length
+        ? "present"
+        : "partial";
+  throw new CliError(
+    ready
+      ? "Direct research search is disabled inside an Auto Research workspace."
+      : blocked
+        ? "Broker credentials may be stored, but Auto Research setup is blocked; standalone search cannot consume broker credentials."
+        : "Auto Research setup is incomplete; standalone search will not bypass it.",
+    {
+      code: ready
+        ? "AUTO_RESEARCH_BROKER_REQUIRED"
+        : blocked
+          ? "AUTO_RESEARCH_SETUP_BLOCKED"
+          : "AUTO_RESEARCH_SETUP_INCOMPLETE",
+      exitCode: 3,
+      details: {
+        executionMode: "managed-workspace",
+        requestedExecutionMode: "standalone",
+        recommendedExecutionMode: "managed-workspace",
+        credentialScope: "broker",
+        brokerCredentialStore: configuredBrokerIds.length > 0 ? "present" : "absent",
+        brokerConfiguredCredentialIds: configuredBrokerIds,
+        standaloneCredential,
+        standaloneConfiguredSources,
+        networkAttempted: false,
+        workspace: context.root,
+        setupStatus: setup?.status ?? "missing",
+        failedStep: setup?.blocker?.step ?? setup?.currentStep ?? null,
+        setupBlocker: setup?.blocker ?? null,
+        effectiveCli: setupStatus?.provenance.effectiveCli ?? setup?.runtime ?? null,
+        effectiveSkill: setupStatus?.provenance.selectedOrchestrator ?? null,
+        recoveryShims: setupStatus?.provenance.recoveryShims ?? [],
+        ambientCli: setupStatus?.provenance.ambientCli ?? null,
+        ambientSkillConflicts: setupStatus?.provenance.ambientSkillConflicts ?? [],
+        minimumAction:
+          setup?.next?.retryCommand ??
+          "Use the project evidence broker through tiangong-auto-research; do not provide ambient credentials.",
+        retryCommand: setup?.next?.retryCommand ?? null,
+      },
+    },
+  );
 }
 
 function researchRequestBody(args: ReturnType<typeof parseStrictArgs>): unknown {

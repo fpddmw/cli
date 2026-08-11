@@ -15,8 +15,8 @@ checkPaths:
   - .docpact/config.yaml
   - docs/agents/**
   - src/**
-lastReviewedAt: 2026-08-11
-lastReviewedCommit: 2ce7ad7cd36c1aeba577bc72e4095ed3a81debd6
+lastReviewedAt: 2026-08-12
+lastReviewedCommit: 7d692de934c51178df520ccdaa212acc7dc303f0
 ---
 
 # Tiangong AI CLI Contract
@@ -60,6 +60,7 @@ This repository owns the Tiangong AI command-line interface.
 Run before delivery:
 
 ```bash
+npm run test:clean
 npm run lint
 npm run build
 npm test
@@ -67,6 +68,10 @@ npm run test:coverage
 docpact validate-config --root . --strict
 docpact lint --root . --worktree --mode enforce
 ```
+
+For Auto Research changes, `npm run test:clean` is the authoritative TDD gate.
+Write the regression first, observe it fail in that clean container, then make
+it pass there. Host-only results are supplemental.
 
 Use `npm run typecheck` for a faster TypeScript-only check.
 Use `npm run prepush:gate` when `docpact` is installed and you want the

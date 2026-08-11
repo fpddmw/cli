@@ -390,6 +390,27 @@ export interface ContextInspection {
   root: string | null;
   allowedOperations: string[];
   violations: Array<{ code: string; message: string }>;
+  setup?: {
+    status: "pending" | "applying" | "partially-ready" | "ready" | "blocked";
+    currentStep: string | null;
+    blocker: {
+      code: string;
+      step: string;
+      reason: string;
+      minimumAction: string;
+      retryCommand: string;
+      diagnostics?: Record<string, unknown>;
+    } | null;
+    runtime: {
+      packageName: "@tiangong-ai/cli";
+      packageVersion: string;
+      source: "runtime-lock" | "setup-plan";
+    };
+    next: {
+      action: "apply" | "retry" | "doctor" | "inspect";
+      retryCommand: string;
+    } | null;
+  };
 }
 
 export interface DoctorCheck {

@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-10
-lastReviewedCommit: bef62f8d48c42eaff14fa2bd7eba1be83a46a58b
+lastReviewedAt: 2026-08-12
+lastReviewedCommit: ac34420a63cb02898f8c38b1c1af64f0439e862f
 ---
 
 # Tiangong AI CLI
@@ -235,6 +235,16 @@ the default; global writes, network downloads, live provider checks, synthetic
 document uploads, and paid agent smokes each require their applicable
 confirmation.
 
+If the full orchestrator was selected, accepted apply creates a separate
+project-local `tiangong-auto-research-recovery` Skill after credentials are
+stored and before source checkout. This CLI-generated, plan-bound shim can only
+inspect context/status and execute the exact-version retry returned by setup; it
+cannot perform research, call standalone evidence, or access credentials. A
+checkout or install failure therefore remains discoverable without falling back
+to a global Skill. After the full external orchestrator matches its reviewed
+tree hash, setup verifies the shim byte-for-byte and removes only that generated
+directory. Modified, symlinked, or ambiguous recovery bytes block cleanup.
+
 Production admission requires at least one locked external capability with
 `brokered-network` and `discoveryScopes: ["public-internet"]`; an input plan or
 local files alone cannot represent internet coverage. The machine-readable
@@ -258,6 +268,15 @@ workspace command goes through its bundled resolver, which accepts only the
 regular non-symlink `runtime-lock.json` exact stable CLI version. Setup and
 release CI reject a missing resolver or any stale exact CLI version in the
 orchestrator's `SKILL.md` or `references/*.md`.
+
+`research setup status --json` reports credential persistence separately from
+readiness. It also reports the effective exact-npx CLI package/version/root,
+the selected project orchestrator, any temporary recovery shim, ignored global
+same-name Skills, legacy wrappers that still contain an unmanaged PATH CLI
+fallback, and the real failed source/immutable ref/cache state when checkout is
+retryable. A direct `research search` inside a managed workspace stops before
+network access and returns the same broker-vs-standalone and setup provenance;
+it never converts a stored broker credential into an ambient credential.
 
 The default `internet-research` profile selects Brave Web Search and News
 Search. `internet-research-with-context` additionally selects the

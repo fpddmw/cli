@@ -1,6 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rm } from "node:fs/promises";
+import {
+  chmod,
+  link,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+} from "node:fs/promises";
 import { hostname, homedir, platform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -63,7 +74,13 @@ import {
   writeJsonAtomic,
   writeTextAtomic,
 } from "./storage.js";
-import { packageVersion } from "./constants.js";
+import { packageRoot, packageVersion, RESEARCH_PACKAGE_NAME } from "./constants.js";
+import {
+  exactResearchCliCommand,
+  pinResearchCliCommand,
+  researchSetupApplyCommand,
+  researchSetupRetryCommand,
+} from "./setup-invocation.js";
 import type { AgentKind, AgentPricing, AgentRoute, ResearchMode } from "./types.js";
 import {
   doctorResearchWorkspace,
@@ -77,6 +94,9 @@ export type ResearchSetupEvidenceProfile =
   | typeof EXTERNAL_SKILL_PROFILE
   | typeof EXTERNAL_SKILL_CONTEXT_PROFILE
   | typeof EXTERNAL_SKILL_MEDIA_PROFILE;
+
+const RECOVERY_SKILL_NAME = "tiangong-auto-research-recovery";
+const RECOVERY_SHIM_MARKER = ".tiangong-recovery-shim.json";
 
 export interface ResearchSetupAgentRoutePlan {
   producerAgent: AgentKind;
@@ -174,6 +194,7 @@ export interface ResearchSetupState {
     reason: string;
     minimumAction: string;
     retryCommand: string;
+    diagnostics?: Record<string, unknown>;
   } | null;
 }
 
@@ -605,6 +626,12 @@ export async function applyResearchSetupPlan(
     await configurePlanCredentials(plan, environment);
     state = await completeSetupStep(root, state, "credentials");
 
+    if (plan.selection.skillIds.includes("tiangong.auto-research")) {
+      state = await startSetupStep(root, state, "recovery-shim");
+      await installResearchSetupRecoveryShims(plan);
+      state = await completeSetupStep(root, state, "recovery-shim");
+    }
+
     state = await startSetupStep(root, state, "installation-preflight");
     const selected = plan.selection.skillIds.map(setupSkill);
     const installInspection = await inspectSelectedInstallations(plan, selected, environment);
@@ -635,15 +662,19 @@ export async function applyResearchSetupPlan(
       ].sort();
       const sourceDirectories = new Map<string, string>();
       for (const sourceId of requiredSourceIds) {
-        sourceDirectories.set(
-          sourceId,
-          await ensureSetupSourceCheckout(
-            plan,
+        try {
+          sourceDirectories.set(
             sourceId,
-            runner,
-            installerEnvironment(environment),
-          ),
-        );
+            await ensureSetupSourceCheckout(
+              plan,
+              sourceId,
+              runner,
+              installerEnvironment(environment),
+            ),
+          );
+        } catch (error) {
+          throw await annotateSetupSourceCheckoutFailure(error, plan, sourceId);
+        }
       }
       state = await completeSetupStep(root, state, "source-checkout");
 
@@ -684,6 +715,12 @@ export async function applyResearchSetupPlan(
       state = await completeSetupStep(root, state, "skill-install");
     } else {
       state = await completeSetupStep(root, state, "skill-install");
+    }
+
+    if (plan.selection.skillIds.includes("tiangong.auto-research")) {
+      state = await startSetupStep(root, state, "recovery-shim-cleanup");
+      await removeResearchSetupRecoveryShims(plan);
+      state = await completeSetupStep(root, state, "recovery-shim-cleanup");
     }
 
     state = await startSetupStep(root, state, "capability-configuration");
@@ -773,12 +810,31 @@ export async function inspectResearchSetupStatus(
   workspace: string,
   environment: NodeJS.ProcessEnv = process.env,
 ) {
-  const root = requireAbsoluteWorkspace(resolve(workspace));
+  const requestedRoot = requireAbsoluteWorkspace(resolve(workspace));
+  const requestedPaths = workspacePaths(requestedRoot);
+  const plan = await loadAndVerifyResearchSetupPlan(requestedPaths.setupPlan);
+  const canonicalRequestedRoot = await realpath(requestedRoot).catch(() => requestedRoot);
+  if (canonicalRequestedRoot !== plan.workspace.path) {
+    throw setupError({
+      code: "RESEARCH_SETUP_WORKSPACE_INVALID",
+      step: "workspace",
+      reason: "The setup plan is bound to a different canonical workspace path.",
+      minimumAction: "Run setup status against the exact workspace recorded in the setup plan.",
+      retryCommand: researchSetupApplyCommand({
+        version: plan.cli.version,
+        planPath: workspacePaths(plan.workspace.path).setupPlan,
+      }),
+      exitCode: 2,
+    });
+  }
+  const root = plan.workspace.path;
   const paths = workspacePaths(root);
-  const plan = await loadAndVerifyResearchSetupPlan(paths.setupPlan);
-  const state = await loadSetupState(root, plan.planSha256);
+  const storedState = await loadSetupState(root, plan.planSha256);
+  const state = setupStateForOutput(storedState, plan, root);
   const selected = plan.selection.skillIds.map(setupSkill);
   const installations = await inspectSelectedInstallations(plan, selected, environment);
+  const credentialReadiness = await inspectSetupCredentialReadiness(plan);
+  const provenance = await inspectSetupProvenance(plan, installations, environment);
   const report = (await pathExists(paths.setupReport))
     ? await readJsonFile<unknown>(paths.setupReport, "Research setup report")
     : null;
@@ -796,17 +852,504 @@ export async function inspectResearchSetupStatus(
     },
     state,
     installations,
+    credentialReadiness,
+    provenance,
     report,
-    next:
-      state.status === "blocked" && state.lastError
-        ? state.lastError
-        : state.status === "ready"
-          ? null
-          : {
-              minimumAction: "Run setup doctor and resolve every reported missing readiness item.",
-              retryCommand: `tiangong-ai research setup doctor --workspace ${root} --json`,
-            },
+    next: setupNextAction(plan, state, root),
   };
+}
+
+function setupStateForOutput(
+  state: ResearchSetupState,
+  plan: ResearchSetupPlan,
+  root: string,
+): ResearchSetupState {
+  if (!state.lastError) return state;
+  return {
+    ...state,
+    lastError: {
+      ...state.lastError,
+      retryCommand: researchSetupRetryCommand({
+        version: plan.cli.version,
+        workspace: root,
+        step: state.lastError.step,
+      }),
+    },
+  };
+}
+
+function setupNextAction(
+  plan: ResearchSetupPlan,
+  state: ResearchSetupState,
+  root: string,
+): {
+  action: "apply" | "retry" | "doctor" | "inspect";
+  minimumAction: string;
+  retryCommand: string;
+} | null {
+  if (state.status === "ready") return null;
+  if (state.status === "pending") {
+    return {
+      action: "apply",
+      minimumAction: "Apply the reviewed immutable setup plan.",
+      retryCommand: researchSetupApplyCommand({
+        version: plan.cli.version,
+        planPath: workspacePaths(root).setupPlan,
+      }),
+    };
+  }
+  if (state.status === "blocked" && state.lastError) {
+    return {
+      action: "retry",
+      minimumAction: state.lastError.minimumAction,
+      retryCommand: state.lastError.retryCommand,
+    };
+  }
+  if (state.status === "applying") {
+    return {
+      action: "inspect",
+      minimumAction: "Inspect the active setup attempt; do not start a competing apply.",
+      retryCommand: exactResearchCliCommand(
+        ["research", "setup", "status", "--workspace", root, "--json"],
+        plan.cli.version,
+      ),
+    };
+  }
+  return {
+    action: "doctor",
+    minimumAction: "Run setup doctor and resolve every reported missing readiness item.",
+    retryCommand: exactResearchCliCommand(
+      ["research", "setup", "doctor", "--workspace", root, "--json"],
+      plan.cli.version,
+    ),
+  };
+}
+
+async function inspectSetupCredentialReadiness(plan: ResearchSetupPlan): Promise<{
+  valuesEmitted: false;
+  configuredIds: string[];
+  missingRequiredIds: string[];
+  scopes: Array<"adapter" | "broker">;
+}> {
+  const definitions = selectedCredentialDefinitions(plan);
+  const brokerIds = definitions
+    .filter((definition) => definition.storage === "broker")
+    .map((definition) => definition.id);
+  const configuredBroker = new Set(
+    (
+      await loadCapabilityCredentialMapForIds(plan.workspace.path, brokerIds, {
+        ignoreUndeclared: true,
+      })
+    ).keys(),
+  );
+  const configuredAdapter = await loadAdapterCredentials(plan.workspace.path, definitions, {
+    ignoreUndeclared: true,
+  });
+  const configuredIds = definitions
+    .filter((definition) =>
+      definition.storage === "broker"
+        ? configuredBroker.has(definition.id)
+        : configuredAdapter.has(definition.id),
+    )
+    .map((definition) => definition.id)
+    .sort();
+  const configured = new Set(configuredIds);
+  return {
+    valuesEmitted: false,
+    configuredIds,
+    missingRequiredIds: definitions
+      .filter((definition) => definition.required && !configured.has(definition.id))
+      .map((definition) => definition.id)
+      .sort(),
+    scopes: [
+      ...new Set(
+        definitions
+          .filter((definition) => configured.has(definition.id))
+          .map((definition) => definition.storage),
+      ),
+    ].sort(),
+  };
+}
+
+async function inspectSetupProvenance(
+  plan: ResearchSetupPlan,
+  installations: Awaited<ReturnType<typeof inspectSelectedInstallations>>,
+  environment: NodeJS.ProcessEnv,
+) {
+  const orchestratorSelected = plan.selection.skillIds.includes("tiangong.auto-research");
+  const orchestratorInstallations = installations
+    .filter((installation) => installation.skillId === "tiangong.auto-research")
+    .map((installation) => ({
+      agent: installation.agent,
+      path: installation.path,
+      status: installation.status,
+      observedTreeSha256: installation.observedTreeSha256,
+    }));
+  return {
+    effectiveCli: {
+      packageName: RESEARCH_PACKAGE_NAME,
+      packageVersion: packageVersion(),
+      packageRoot: packageRoot(),
+      invocationMode: "exact-npx" as const,
+      commandPrefix: exactResearchCliCommand([], plan.cli.version),
+    },
+    ambientCli: await findAmbientExecutable(environment, "tiangong-ai"),
+    ambientSkillConflicts: await inspectAmbientProjectSkillConflicts(plan, environment),
+    recoveryShims: await inspectResearchSetupRecoveryShims(plan),
+    selectedOrchestrator: orchestratorSelected
+      ? {
+          skillId: "tiangong.auto-research" as const,
+          scope: plan.install.scope,
+          preferredPath:
+            orchestratorInstallations.find((installation) => installation.status === "installed")
+              ?.path ?? null,
+          installations: orchestratorInstallations,
+        }
+      : null,
+  };
+}
+
+interface RecoveryShimMarker {
+  schemaVersion: 1;
+  kind: "tiangong-auto-research-recovery-shim";
+  planSha256: string;
+  cliVersion: string;
+  workspace: string;
+  agent: ResearchSetupAgent;
+}
+
+function recoveryShimPath(plan: ResearchSetupPlan, agent: ResearchSetupAgent): string {
+  return join(
+    setupTargetRoot({
+      workspace: plan.workspace.path,
+      scope: "project",
+      agent,
+    }),
+    RECOVERY_SKILL_NAME,
+  );
+}
+
+function recoveryShimMarker(
+  plan: ResearchSetupPlan,
+  agent: ResearchSetupAgent,
+): RecoveryShimMarker {
+  return {
+    schemaVersion: 1,
+    kind: "tiangong-auto-research-recovery-shim",
+    planSha256: plan.planSha256,
+    cliVersion: plan.cli.version,
+    workspace: plan.workspace.path,
+    agent,
+  };
+}
+
+function recoveryShimInstructions(marker: RecoveryShimMarker): string {
+  const inspectCommand = exactResearchCliCommand(
+    ["research", "context", "inspect", "--path", marker.workspace, "--json"],
+    marker.cliVersion,
+  );
+  const statusCommand = exactResearchCliCommand(
+    ["research", "setup", "status", "--workspace", marker.workspace, "--json"],
+    marker.cliVersion,
+  );
+  return `---
+name: ${RECOVERY_SKILL_NAME}
+description: Recovery-only routing for an explicitly reviewed Tiangong Auto Research setup that is pending, applying, or blocked. Use when a research request occurs under this workspace before the full project orchestrator is installed. Never use for research execution or standalone evidence search.
+---
+
+# Tiangong Auto Research recovery-only shim
+
+This CLI-generated Skill is bound to setup plan \`${marker.planSha256}\`. It exists only
+until the full external \`tiangong-auto-research\` Skill matches its reviewed tree hash.
+
+Never run research or standalone evidence from this shim. Do not read, copy, print, or
+edit credentials, setup state, locks, manifests, or the immutable plan.
+
+First run the exact-version read-only preflight:
+
+\`\`\`bash
+${inspectCommand}
+\`\`\`
+
+If the context is managed, inspect the structured setup state:
+
+\`\`\`bash
+${statusCommand}
+\`\`\`
+
+For \`pending\` or \`blocked\`, execute only the returned \`setup.next.retryCommand\`.
+For \`applying\`, report the active step and do not start a competing apply. Stop after
+reporting any new blocker. Never fall through to a global Skill, ambient CLI, or
+standalone provider credential.
+`;
+}
+
+function serializedRecoveryShimMarker(marker: RecoveryShimMarker): string {
+  return `${JSON.stringify(marker, null, 2)}\n`;
+}
+
+async function inspectRecoveryShim(
+  path: string,
+  workspace: string,
+  agent: ResearchSetupAgent,
+  expectedPlanSha256: string,
+): Promise<{
+  status: "missing" | "installed" | "stale" | "drifted" | "blocked";
+  marker: RecoveryShimMarker | null;
+}> {
+  const info = await lstat(path).catch(() => undefined);
+  if (!info) return { status: "missing", marker: null };
+  if (!info.isDirectory() || info.isSymbolicLink()) return { status: "blocked", marker: null };
+  try {
+    const entries = (await readdir(path)).sort();
+    if (canonicalJson(entries) !== canonicalJson([RECOVERY_SHIM_MARKER, "SKILL.md"].sort())) {
+      return { status: "drifted", marker: null };
+    }
+    const markerPath = join(path, RECOVERY_SHIM_MARKER);
+    const skillPath = join(path, "SKILL.md");
+    const [markerInfo, skillInfo, markerText, skillText] = await Promise.all([
+      lstat(markerPath),
+      lstat(skillPath),
+      readFile(markerPath, "utf8"),
+      readFile(skillPath, "utf8"),
+    ]);
+    if (
+      !markerInfo.isFile() ||
+      markerInfo.isSymbolicLink() ||
+      !skillInfo.isFile() ||
+      skillInfo.isSymbolicLink()
+    ) {
+      return { status: "blocked", marker: null };
+    }
+    const value = JSON.parse(markerText) as unknown;
+    if (
+      !isObject(value) ||
+      value.schemaVersion !== 1 ||
+      value.kind !== "tiangong-auto-research-recovery-shim" ||
+      typeof value.planSha256 !== "string" ||
+      !/^[0-9a-f]{64}$/.test(value.planSha256) ||
+      typeof value.cliVersion !== "string" ||
+      !/^\d+\.\d+\.\d+$/.test(value.cliVersion) ||
+      value.workspace !== workspace ||
+      value.agent !== agent
+    ) {
+      return { status: "drifted", marker: null };
+    }
+    const marker = value as unknown as RecoveryShimMarker;
+    if (
+      markerText !== serializedRecoveryShimMarker(marker) ||
+      skillText !== recoveryShimInstructions(marker)
+    ) {
+      return { status: "drifted", marker: null };
+    }
+    return {
+      status: marker.planSha256 === expectedPlanSha256 ? "installed" : "stale",
+      marker,
+    };
+  } catch {
+    return { status: "blocked", marker: null };
+  }
+}
+
+async function writeRecoveryShimDirectory(
+  path: string,
+  marker: RecoveryShimMarker,
+): Promise<string> {
+  const temporary = join(
+    dirname(path),
+    `.${RECOVERY_SKILL_NAME}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  await mkdir(temporary, { mode: 0o700 });
+  try {
+    await writeTextAtomic(join(temporary, "SKILL.md"), recoveryShimInstructions(marker), 0o444);
+    await writeTextAtomic(
+      join(temporary, RECOVERY_SHIM_MARKER),
+      serializedRecoveryShimMarker(marker),
+      0o444,
+    );
+    return temporary;
+  } catch (error) {
+    await rm(temporary, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function installResearchSetupRecoveryShims(plan: ResearchSetupPlan): Promise<void> {
+  for (const agent of plan.install.agents) {
+    const path = recoveryShimPath(plan, agent);
+    const parent = dirname(path);
+    await assertNoSymlinkedExistingPath(parent, plan.workspace.path);
+    await ensureDirectory(parent);
+    await assertNoSymlinkedExistingPath(parent, plan.workspace.path);
+    const inspection = await inspectRecoveryShim(path, plan.workspace.path, agent, plan.planSha256);
+    if (inspection.status === "installed") continue;
+    if (inspection.status === "drifted" || inspection.status === "blocked") {
+      throw setupError({
+        code: "RESEARCH_SETUP_RECOVERY_SHIM_UNSAFE",
+        step: "recovery-shim",
+        reason: `The recovery Skill destination is not an exact CLI-owned shim for ${agent}.`,
+        minimumAction:
+          "Review the reported project Skill directory. Setup will not overwrite or delete ambiguous bytes.",
+        retryCommand: exactResearchCliCommand(
+          ["research", "setup", "status", "--workspace", plan.workspace.path, "--json"],
+          plan.cli.version,
+        ),
+        exitCode: 3,
+      });
+    }
+    const temporary = await writeRecoveryShimDirectory(path, recoveryShimMarker(plan, agent));
+    try {
+      if (inspection.status === "missing") {
+        await rename(temporary, path);
+      } else {
+        const backup = `${path}.${process.pid}.${randomUUID()}.previous`;
+        await rename(path, backup);
+        try {
+          await rename(temporary, path);
+          await rm(backup, { recursive: true, force: true });
+        } catch (error) {
+          if (!(await pathExists(path))) await rename(backup, path).catch(() => undefined);
+          throw error;
+        }
+      }
+    } catch (error) {
+      await rm(temporary, { recursive: true, force: true });
+      throw error;
+    }
+  }
+}
+
+async function removeResearchSetupRecoveryShims(plan: ResearchSetupPlan): Promise<void> {
+  for (const agent of plan.install.agents) {
+    const path = recoveryShimPath(plan, agent);
+    const inspection = await inspectRecoveryShim(path, plan.workspace.path, agent, plan.planSha256);
+    if (inspection.status === "missing") continue;
+    if (inspection.status !== "installed") {
+      throw setupError({
+        code: "RESEARCH_SETUP_RECOVERY_SHIM_UNSAFE",
+        step: "recovery-shim-cleanup",
+        reason: `The recovery Skill changed before verified cleanup for ${agent}.`,
+        minimumAction:
+          "Review the recovery Skill directory. Setup removes only its exact plan-bound generated bytes.",
+        retryCommand: exactResearchCliCommand(
+          ["research", "setup", "status", "--workspace", plan.workspace.path, "--json"],
+          plan.cli.version,
+        ),
+        exitCode: 3,
+      });
+    }
+    await rm(path, { recursive: true, force: false });
+  }
+}
+
+async function inspectResearchSetupRecoveryShims(plan: ResearchSetupPlan) {
+  if (!plan.selection.skillIds.includes("tiangong.auto-research")) return [];
+  const results = [];
+  for (const agent of plan.install.agents) {
+    const path = recoveryShimPath(plan, agent);
+    const inspection = await inspectRecoveryShim(path, plan.workspace.path, agent, plan.planSha256);
+    if (inspection.status === "missing") continue;
+    results.push({
+      agent,
+      path,
+      status: inspection.status === "stale" ? ("drifted" as const) : inspection.status,
+      planSha256: inspection.marker?.planSha256 ?? null,
+      cliVersion: inspection.marker?.cliVersion ?? null,
+      recoveryOnly: true as const,
+    });
+  }
+  return results;
+}
+
+async function inspectAmbientProjectSkillConflicts(
+  plan: ResearchSetupPlan,
+  environment: NodeJS.ProcessEnv,
+) {
+  if (plan.install.scope !== "project") return [];
+  const conflicts = [];
+  for (const agent of plan.install.agents) {
+    const globalRoot = setupTargetRoot({
+      workspace: plan.workspace.path,
+      scope: "global",
+      agent,
+      environment,
+    });
+    for (const skillId of plan.selection.skillIds) {
+      const skill = setupSkill(skillId);
+      const path = join(globalRoot, skill.skillName);
+      const info = await lstat(path).catch(() => undefined);
+      if (!info) continue;
+      let status: "matching" | "drifted" | "blocked" = "blocked";
+      let observedTreeSha256: string | null = null;
+      if (info.isDirectory() && !info.isSymbolicLink()) {
+        try {
+          observedTreeSha256 = await hashRegularTree(path);
+          status = observedTreeSha256 === skill.expectedTreeSha256 ? "matching" : "drifted";
+        } catch {
+          status = "blocked";
+        }
+      }
+      conflicts.push({
+        skillId: skill.id,
+        skillName: skill.skillName,
+        agent,
+        path,
+        status,
+        observedTreeSha256,
+        expectedTreeSha256: skill.expectedTreeSha256,
+        unmanagedPathCliFallback: await containsUnmanagedPathCliFallback(path),
+        ignoredByProjectScope: true as const,
+      });
+    }
+  }
+  return conflicts;
+}
+
+async function containsUnmanagedPathCliFallback(root: string): Promise<boolean> {
+  const state = { inspectedFiles: 0 };
+  const inspectDirectory = async (directory: string, depth: number): Promise<boolean> => {
+    if (depth > 4 || state.inspectedFiles >= 100) return false;
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (await inspectDirectory(path, depth + 1)) return true;
+        continue;
+      }
+      if (!entry.isFile() || !/\.(?:c?js|mjs|py|sh)$/.test(entry.name)) continue;
+      state.inspectedFiles += 1;
+      const info = await lstat(path).catch(() => undefined);
+      if (!info?.isFile() || info.isSymbolicLink() || info.size > 256 * 1024) continue;
+      const content = await readFile(path, "utf8").catch(() => "");
+      if (content.includes("TIANGONG_AI_CLI:-tiangong-ai")) return true;
+    }
+    return false;
+  };
+  return inspectDirectory(root, 0);
+}
+
+async function findAmbientExecutable(
+  environment: NodeJS.ProcessEnv,
+  executable: string,
+): Promise<{ path: string; ignoredByExactInvocation: true } | null> {
+  const pathValue = environment.PATH;
+  if (!pathValue) return null;
+  const suffixes = process.platform === "win32" ? [".cmd", ".exe", ""] : [""];
+  for (const directory of pathValue.split(process.platform === "win32" ? ";" : ":")) {
+    if (!directory) continue;
+    for (const suffix of suffixes) {
+      const candidate = join(directory, `${executable}${suffix}`);
+      const info = await lstat(candidate).catch(() => undefined);
+      if (!info || (!info.isFile() && !info.isSymbolicLink())) continue;
+      const resolved = await realpath(candidate).catch(() => undefined);
+      if (!resolved) continue;
+      const resolvedInfo = await lstat(resolved).catch(() => undefined);
+      if (resolvedInfo?.isFile() && !resolvedInfo.isSymbolicLink())
+        return { path: resolved, ignoredByExactInvocation: true };
+    }
+  }
+  return null;
 }
 
 export async function setResearchSetupCredentialFromEnvironment(input: {
@@ -1156,6 +1699,29 @@ export async function doctorResearchSetup(
         installation.status === "installed"
           ? null
           : "Restore the pinned Skill bytes; setup will not overwrite a drifted or symlinked directory.",
+    });
+  }
+  const provenance = await inspectSetupProvenance(plan, installations, environment);
+  for (const conflict of provenance.ambientSkillConflicts) {
+    const projectInstallation = installations.find(
+      (installation) =>
+        installation.agent === conflict.agent && installation.skillId === conflict.skillId,
+    );
+    const projectInstalled = projectInstallation?.status === "installed";
+    checks.push({
+      id: `skill-scope.${conflict.agent}.${conflict.skillId}`,
+      category: "skill-installation",
+      scope: "research-core",
+      componentIds: [conflict.skillId],
+      status: projectInstalled ? "warn" : "fail",
+      detail: projectInstalled
+        ? `A global same-name Skill exists at ${conflict.path}, but the verified project copy is authoritative and the global copy is ignored.`
+        : `SKILL_SCOPE_FALLBACK_UNSAFE: the project copy is not verified while a global same-name Skill exists at ${conflict.path}${conflict.unmanagedPathCliFallback ? " and contains an unmanaged PATH CLI fallback" : ""}.`,
+      minimumAction: projectInstalled
+        ? "Remove or update the ignored global copy during separate owner-approved maintenance if it is no longer needed."
+        : "Resume the exact setup plan until the project Skill matches its reviewed tree; do not use the global fallback.",
+      blocking: !projectInstalled,
+      requiredFor: projectInstalled ? [] : ["setup", "research-core"],
     });
   }
 
@@ -2308,10 +2874,7 @@ async function ensureSetupSourceCheckout(
 ): Promise<string> {
   const source = plan.sources.find((candidate) => candidate.id === sourceId);
   if (!source) throw planCatalogDrift(`missing source ${sourceId}`);
-  const checkout = join(
-    workspacePaths(plan.workspace.path).setupSources,
-    `${source.id}-${source.immutableRef.slice(0, 12)}`,
-  );
+  const checkout = setupSourceCheckoutPath(plan, sourceId);
   await assertNoSymlinkedExistingPath(dirname(checkout), plan.workspace.path);
   let createdCheckout = false;
   if (!(await pathExists(checkout))) {
@@ -2480,6 +3043,50 @@ async function ensureSetupSourceCheckout(
     await verifyResearchSetupRuntimeContract(sourcePath, setupSkill(skill.id));
   }
   return checkout;
+}
+
+function setupSourceCheckoutPath(plan: ResearchSetupPlan, sourceId: string): string {
+  const source = plan.sources.find((candidate) => candidate.id === sourceId);
+  if (!source) throw planCatalogDrift(`missing source ${sourceId}`);
+  return join(
+    workspacePaths(plan.workspace.path).setupSources,
+    `${source.id}-${source.immutableRef.slice(0, 12)}`,
+  );
+}
+
+async function annotateSetupSourceCheckoutFailure(
+  error: unknown,
+  plan: ResearchSetupPlan,
+  sourceId: string,
+): Promise<unknown> {
+  if (!(error instanceof CliError) || error.code !== "RESEARCH_SETUP_COMMAND_FAILED") return error;
+  const source = plan.sources.find((candidate) => candidate.id === sourceId);
+  if (!source) return error;
+  const details = isObject(error.details) ? error.details : {};
+  const checkout = setupSourceCheckoutPath(plan, sourceId);
+  return setupError({
+    code: error.code,
+    step: "source-checkout",
+    reason:
+      typeof details.reason === "string" ? details.reason : sanitizeResearchText(error.message),
+    minimumAction:
+      typeof details.minimumAction === "string"
+        ? details.minimumAction
+        : "Resolve the source transport failure, then retry only the recorded source-checkout step.",
+    retryCommand: researchSetupRetryCommand({
+      version: plan.cli.version,
+      workspace: plan.workspace.path,
+      step: "source-checkout",
+    }),
+    exitCode: error.exitCode,
+    diagnostics: {
+      sourceId: source.id,
+      repository: source.repository,
+      immutableRef: source.immutableRef,
+      cacheState: (await pathExists(checkout)) ? "partial" : "absent",
+      safeToRetry: true,
+    },
+  });
 }
 
 async function configureDeterministicSourceCheckout(
@@ -3433,7 +4040,16 @@ async function loadSetupState(root: string, planSha256: string): Promise<Researc
     typeof value.attempts !== "number" ||
     !Number.isInteger(value.attempts) ||
     typeof value.updatedAt !== "string" ||
-    !(value.lastError === null || isObject(value.lastError))
+    !(
+      value.lastError === null ||
+      (isObject(value.lastError) &&
+        typeof value.lastError.code === "string" &&
+        typeof value.lastError.step === "string" &&
+        typeof value.lastError.reason === "string" &&
+        typeof value.lastError.minimumAction === "string" &&
+        typeof value.lastError.retryCommand === "string" &&
+        (value.lastError.diagnostics === undefined || isObject(value.lastError.diagnostics)))
+    )
   ) {
     throw setupError({
       code: "RESEARCH_SETUP_STATE_INVALID",
@@ -3799,6 +4415,19 @@ function setupMutations(
       reason: "Initialize or verify the auditable research workspace control plane.",
     },
   ];
+  if (selected.some((skill) => skill.id === "tiangong.auto-research")) {
+    for (const target of targets) {
+      mutations.push({
+        step: "recovery-shim",
+        target: join(
+          setupTargetRoot({ workspace: root, scope: "project", agent: target.agent }),
+          RECOVERY_SKILL_NAME,
+        ),
+        reason:
+          "Create a plan-bound recovery-only routing Skill until the full external orchestrator is verified.",
+      });
+    }
+  }
   for (const target of targets) {
     for (const skill of selected) {
       mutations.push({
@@ -4481,19 +5110,22 @@ function setupFailure(
 ): NonNullable<ResearchSetupState["lastError"]> {
   if (error instanceof CliError && isObject(error.details)) {
     const details = sanitizeResearchRecord(error.details);
+    const step = typeof details.step === "string" ? details.step : fallbackStep;
     return {
       code: error.code,
-      step: typeof details.step === "string" ? details.step : fallbackStep,
+      step,
       reason:
         typeof details.reason === "string" ? details.reason : sanitizeResearchText(error.message),
       minimumAction:
         typeof details.minimumAction === "string"
           ? details.minimumAction
           : "Resolve the reported setup error and retry the exact recorded step.",
-      retryCommand:
-        typeof details.retryCommand === "string"
-          ? details.retryCommand
-          : `tiangong-ai research setup status --workspace ${root} --json`,
+      retryCommand: researchSetupRetryCommand({
+        version: packageVersion(),
+        workspace: root,
+        step,
+      }),
+      ...(isObject(details.diagnostics) ? { diagnostics: details.diagnostics } : {}),
     };
   }
   return {
@@ -4502,7 +5134,11 @@ function setupFailure(
     reason: sanitizeResearchText(error instanceof Error ? error.message : String(error)),
     minimumAction:
       "Inspect the sanitized setup status, correct the failure, and retry the exact recorded step.",
-    retryCommand: `tiangong-ai research setup status --workspace ${root} --json`,
+    retryCommand: researchSetupRetryCommand({
+      version: packageVersion(),
+      workspace: root,
+      step: fallbackStep,
+    }),
   };
 }
 
@@ -4519,7 +5155,7 @@ function setupError(input: {
     step: input.step,
     reason: input.reason,
     minimumAction: input.minimumAction,
-    retryCommand: input.retryCommand,
+    retryCommand: pinResearchCliCommand(input.retryCommand),
     ...(input.diagnostics === undefined ? {} : { diagnostics: input.diagnostics }),
   });
   return new CliError(sanitizeResearchText(input.reason), {

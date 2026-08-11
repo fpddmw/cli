@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-11
-lastReviewedCommit: 2ce7ad7cd36c1aeba577bc72e4095ed3a81debd6
+lastReviewedAt: 2026-08-12
+lastReviewedCommit: 7d692de934c51178df520ccdaa212acc7dc303f0
 ---
 
 # Repo Architecture
@@ -169,6 +169,15 @@ with a `workspace-lock` runtime contract and marks direct SCI/report/patent
 wrappers only with their separate `standaloneTestedCliVersion`. Setup verifies
 the bundled resolver and forbids stale exact CLI literals in orchestrator
 instructions before installation.
+
+The CLI may generate a separate project-local recovery-only Skill after an
+accepted apply has stored credentials but before external checkout. It contains
+only exact-version context/status recovery instructions bound to the immutable
+plan, never producer or evidence logic. It closes the partial-install routing
+gap and is removed only after byte verification once the selected external
+orchestrator is installed. Setup status/doctor also report the effective CLI,
+project Skill, temporary recovery Skill, ignored global conflicts, and legacy
+unmanaged PATH fallbacks.
 
 Brokered evidence Skills document allowlisted GET or bounded JSON POST APIs;
 credentials remain in an owner-only logical map and are injected only by the

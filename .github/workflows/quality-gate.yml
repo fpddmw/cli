@@ -7,6 +7,25 @@ on:
       - main
 
 jobs:
+  clean-container-tdd:
+    name: clean-container-tdd (linux / x64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Verify Docker
+        run: docker version
+
+      - name: Enable nested unprivileged namespace for Bubblewrap
+        run: |
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Run clean-container gate
+        run: npm run test:clean
+
   quality-gate:
     name: quality-gate (${{ matrix.os }} / ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}

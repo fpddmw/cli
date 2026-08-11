@@ -16,8 +16,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-11
-lastReviewedCommit: 2ce7ad7cd36c1aeba577bc72e4095ed3a81debd6
+lastReviewedAt: 2026-08-12
+lastReviewedCommit: 7d692de934c51178df520ccdaa212acc7dc303f0
 ---
 
 # Repo Validation
@@ -58,6 +58,7 @@ four rows.
 Run before delivery:
 
 ```bash
+npm run test:clean
 npm run lint
 npm test
 npm run test:coverage
@@ -65,6 +66,26 @@ npm run audit:research-setup-pins
 docpact validate-config --root . --strict
 docpact lint --root . --worktree --mode enforce
 ```
+
+`npm run test:clean` builds `Dockerfile.clean-test` with `--no-cache` from the
+digest-pinned Node 24 image, copies only the `.dockerignore`-filtered checkout,
+and runs the full lint/coverage gate as a non-root user in an ephemeral,
+runtime-offline container. It must be the red and green environment for Auto
+Research changes; host tests cannot replace it. Provider live checks and the
+networked immutable-pin audit run separately because they are explicit
+networked validations.
+
+The container has no host mounts, Docker socket, credentials, or runtime
+network. It enables Docker's privileged namespace mode solely so the non-root
+test process can exercise the real nested Bubblewrap capsule instead of skipping
+or mocking it; the isolation assertion still rejects root execution, host HOME,
+global Skills, and global CLI state.
+
+On a Linux test host where
+`/proc/sys/kernel/apparmor_restrict_unprivileged_userns` is `1`, the local gate
+stops before building and reports the exact prerequisite. The operator or CI
+runner must set that host policy to `0` for the test lifetime; the test script
+does not mutate host kernel policy itself.
 
 `npm run prepush:gate` aggregates the lint, coverage, and docpact checks when
 `docpact` is installed locally.
@@ -77,6 +98,19 @@ checkouts for every Catalog source, verifies every selected source path and
 whole-tree hash, validates exact stable versions, and enforces the
 orchestrator's workspace-lock resolver/no-stale-version contract. It is required
 locally for a pin change and in release CI.
+
+Release CI additionally sets `TIANGONG_RESEARCH_REQUIRE_SKILLS_MAIN=1`; the
+audit then requires the first-party `tiangong-ai/skills` pin to be reachable
+from remote `main`. This makes a merged Skills change a prerequisite for CLI
+release and prevents publishing a catalog from an unmerged branch while still
+allowing the catalog to retain the exact reviewed commit beneath a merge commit.
+
+`test/research-setup.test.ts` covers plan-only context, blocked source checkout,
+stored broker credentials without ambient credentials, exact retry commands,
+source-specific retry provenance, project/global Skill conflicts, symlinked
+ambient CLI resolution, legacy PATH-wrapper detection, the generated
+recovery-only Skill, and verified cleanup after the full orchestrator is
+available. These cases must remain network-free inside `npm run test:clean`.
 
 ## Release Flow
 
