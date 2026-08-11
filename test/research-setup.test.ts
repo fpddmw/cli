@@ -427,7 +427,7 @@ describe("research setup catalog and immutable plans", () => {
       await writeFile(planPath, `${JSON.stringify(plan, null, 2)}\n`);
       const update = await checkResearchSetupUpdates(root);
       assert.equal(update.updateAvailable, true);
-      assert.deepEqual(update.cliVersionDrift, { planned: "0.0.29", active: "0.0.32" });
+      assert.deepEqual(update.cliVersionDrift, { planned: "0.0.29", active: "0.0.33" });
       assert.match(update.policy.minimumAction, /replacement immutable plan/i);
       await assert.rejects(
         loadAndVerifyResearchSetupPlan(planPath),
