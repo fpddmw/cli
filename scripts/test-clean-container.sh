@@ -7,8 +7,9 @@ repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 image_tag="tiangong-ai-cli-clean-test:local-$$"
 
 if [ "$(uname -s)" = "Linux" ] && [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+    apparmor_restrict_unprivileged_userns=
     IFS= read -r apparmor_restrict_unprivileged_userns \
-        < /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+        < /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
     if [ "$apparmor_restrict_unprivileged_userns" = "1" ]; then
         echo "Clean-container tests require nested unprivileged user namespaces for Bubblewrap." >&2
         echo "Set kernel.apparmor_restrict_unprivileged_userns=0 for this test host, then retry." >&2
