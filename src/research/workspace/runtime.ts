@@ -31,6 +31,7 @@ import { executeAgent, type AgentExecutionRequest } from "./executor.js";
 import { requiredDiscoveryCapabilityIds } from "./external-skills.js";
 import { renderInputLineContext } from "./input-plan.js";
 import { appendJournalEvent, readJournal, verifyJournal } from "./journal.js";
+import { nativeActivityRecordSchema } from "./native-activity.js";
 import {
   calculateAgentCallTokenReservation,
   RESEARCH_BROKER_MAX_TURNS,
@@ -270,6 +271,7 @@ export interface NativeStagePacket {
   };
   commands: {
     fetchEvidence: { argv: string[]; requestSchema: Record<string, unknown> } | null;
+    recordActivity: { argv: string[]; recordSchema: Record<string, unknown> } | null;
     registerCandidate: { argv: string[]; recordSchema: Record<string, unknown> } | null;
     recordAssessment: { argv: string[]; recordSchema: Record<string, unknown> } | null;
     registerArtifact: {
@@ -478,9 +480,9 @@ export async function prepareNativeResearchStage(input: {
       const prompt = [
         "Perform this producer stage in the current interactive host session. Do not launch codex exec, claude -p, or any other nested reasoning agent.",
         input.stage === "discover" && hasBrokeredEvidence
-          ? "For every internet/database request, write one non-secret request JSON file and invoke the packet's fetchEvidence argv through the CLI control plane. Use only its returned bounded context and receipt. Assess candidates in bounded batches with recordAssessment as they arrive; the final output is only a small coverage closeout. Do not use standalone web search as evidence."
+          ? "Use native Web/Browser broadly for discovery when useful, but record every native search/navigation with recordActivity and register its candidates. Before admitting any native lead, formalize the same URL or DOI through fetchEvidence so it receives an immutable broker receipt. Assess candidates in bounded batches with recordAssessment as they arrive; the final output is only a small coverage closeout. Native results without broker/input provenance are discovery leads, never evidence."
           : input.stage === "acquire"
-            ? "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. Register each exact downloaded/decomposed file with registerArtifact before submitting the audit. Never scan a download directory or infer success from file existence."
+            ? "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. Record browser/download/file-inspection activity with recordActivity, then register each exact downloaded/decomposed file with registerArtifact before submitting the audit. Never scan a download directory or infer success from file existence."
             : "Do not acquire additional evidence in this stage.",
         basePrompt,
         "Save only the final schema-conforming JSON object to a new regular file, then submit it with the packet's submit command. The CLI remains the sole authority for validation and atomic promotion.",
@@ -515,6 +517,29 @@ export async function prepareNativeResearchStage(input: {
           maxWallSeconds: config.budget.packageMaxWallSeconds[input.stage],
         },
         commands: {
+          recordActivity:
+            input.stage === "discover" || input.stage === "acquire"
+              ? {
+                  argv: [
+                    "tiangong-ai",
+                    "research",
+                    "project",
+                    "evidence",
+                    "activity",
+                    "record",
+                    project.id,
+                    "--record",
+                    "<absolute-activity.json>",
+                    "--workspace",
+                    input.root,
+                    "--json",
+                  ],
+                  recordSchema: structuredClone(nativeActivityRecordSchema) as unknown as Record<
+                    string,
+                    unknown
+                  >,
+                }
+              : null,
           fetchEvidence:
             input.stage === "discover" && hasBrokeredEvidence
               ? {
@@ -678,6 +703,7 @@ export async function prepareNativeResearchStage(input: {
         },
         rules: [
           "Current native host performs producer reasoning; the CLI does not spawn a producer.",
+          "Native Web/Browser activity is visible in the evidence ledger but becomes admissible only after broker/input formalization and strict assessment.",
           "Only broker receipts or registered immutable inputs may support discover output.",
           "Only exact, structurally validated, content-addressed artifacts may support full-text acquisition claims.",
           "Do not place credentials, cookies, authorization data, or sensitive URL parameters in request/output files.",
@@ -3250,7 +3276,7 @@ function packagePrompt(
         ? "Use the installed external acquisition/document Skills in the current native host, but treat the CLI artifact registry and acquisition schema as the only authority for durable evidence."
         : "Capability files are provenance-bound but are not available as execution tools in this stage.",
     workPackage.stage === "discover"
-      ? `Follow the reviewed discovery plan: ${JSON.stringify(discovery)}. The plan's max broker-view count is a hard working ceiling, not a target to exhaust. Execute required first-pass channels before supplemental channels, prefer broad high-yield queries, assess registered candidates between batches, and use the next gap-fill batch only for explicit uncovered dimensions, source types, date ranges, full text, limitations, or counterevidence. Stop fetching as soon as the declared coverage minimums are supportable. Use the broker only. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. Invoke fetch_candidate_source with the manifest capability ID and obey its exact declared HTTP method. GET capabilities use only declared query parameters; POST capabilities require request_body containing only the documented non-secret request JSON. Never place API keys, tokens, authorization data, cookies, or other credential-like fields in request_body. The broker injects the sole declared logical credential, disables caching for credentialed requests, and never persists the POST body (only its hash). The tool result includes exact bounded context, registered candidate IDs, its receipt, whether a network call was avoided, and remaining view budget. Exercise every manifest capability with requiredForDiscovery=true, or the mechanical coverage gate will stop downstream work.`
+      ? `Follow the reviewed discovery plan: ${JSON.stringify(discovery)}. The plan's max broker-view count is a hard working ceiling, not a target to exhaust. Execute required first-pass channels before supplemental channels, prefer broad high-yield queries, assess registered candidates between batches, and use the next gap-fill batch only for explicit uncovered dimensions, source types, date ranges, full text, limitations, or counterevidence. Stop fetching as soon as the declared coverage minimums are supportable. Native Web/Browser may broaden lead discovery, but every such action must be recorded through recordActivity, every useful result must be registered as a candidate, and the same URL/DOI must then be formalized through the broker before admission. The broker or an immutable registered input is the sole admissible evidence path. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. Invoke fetch_candidate_source with the manifest capability ID and obey its exact declared HTTP method. GET capabilities use only declared query parameters; POST capabilities require request_body containing only the documented non-secret request JSON. Never place API keys, tokens, authorization data, cookies, or other credential-like fields in request_body. The broker injects the sole declared logical credential, disables caching for credentialed requests, and never persists the POST body (only its hash). The tool result includes exact bounded context, registered candidate IDs, its receipt, whether a network call was avoided, and remaining view budget. Exercise every manifest capability with requiredForDiscovery=true, or the mechanical coverage gate will stop downstream work.`
       : "Use only the complete embedded stage context; no tools or additional source reads are allowed.",
     stageInstructions[workPackage.stage],
     "Do not write stage output files directly. Your final response must be only the JSON object required by the supplied output schema; the CLI will validate and atomically materialize it.",

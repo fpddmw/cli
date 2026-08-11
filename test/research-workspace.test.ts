@@ -890,6 +890,7 @@ describe("research project execution", () => {
         if (stage === "discover") {
           assert.ok(packet.discovery);
           assert.ok(packet.commands.registerCandidate);
+          assert.ok(packet.commands.recordActivity);
           assert.ok(packet.commands.recordAssessment);
           assert.equal(
             (

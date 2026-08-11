@@ -29,6 +29,7 @@ import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
 import { inspectDiscoveryProgress } from "./workspace/discovery-status.js";
 import { recordDiscoveryAssessmentBatch } from "./workspace/discovery.js";
 import { registerNativeDiscoveryCandidate } from "./workspace/evidence-ledger.js";
+import { recordNativeResearchActivity } from "./workspace/native-activity.js";
 import { readAndVerifyProjectInputPlan } from "./workspace/input-plan.js";
 import {
   addProjectInput,
@@ -106,6 +107,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project stage submit <project-id> --session <id> --output <absolute-json> [--confirm-model <id>] [--workspace <path>] [--json]
   tiangong-ai research project stage abort <project-id> --session <id> [--workspace <path>] [--json]
   tiangong-ai research project evidence fetch <project-id> --request <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence activity record <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence candidate register <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence assessment record <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence artifact register <project-id> --candidate <id> --path <absolute-file> [--media-type <type>] [--source-url <https-url>] [--license <declared-license>] [--license-url <https-url>] [--host-type <type>] [--article-version <version>] [--workspace <path>] [--json]
@@ -437,6 +439,40 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   }
   if (action === "evidence") {
     const [evidenceAction, ...evidenceRest] = rest;
+    if (evidenceAction === "activity") {
+      const [activityAction, ...activityRest] = evidenceRest;
+      if (activityAction !== "record") {
+        throw unknownAction("research project evidence activity", activityAction ?? "");
+      }
+      const args = parseStrictArgs(
+        activityRest,
+        { ...WORKSPACE_OPTIONS, record: "string" },
+        "research project evidence activity record",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(
+        args.positionals,
+        "research project evidence activity record",
+      );
+      const recordPath = strictString(args, "record");
+      if (!recordPath) {
+        throw new CliError("activity record requires --record.", {
+          code: "RESEARCH_NATIVE_ACTIVITY_INVALID",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      const record = await readBoundedJsonRecord(
+        recordPath,
+        "--record",
+        "RESEARCH_NATIVE_ACTIVITY_INVALID",
+      );
+      const result = await withWorkspaceLock(root, "research.native-activity.record", () =>
+        recordNativeResearchActivity({ root, projectId, value: record }),
+      );
+      writeJson(io, result, args);
+      return 0;
+    }
     if (evidenceAction === "candidate") {
       const [candidateAction, ...candidateRest] = evidenceRest;
       if (candidateAction !== "register") {

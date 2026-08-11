@@ -67,6 +67,12 @@ export interface EvidenceSnapshot {
   }>;
   artifacts: EvidenceArtifactRecord[];
   sources: Array<Record<string, unknown>>;
+  activitySummary: {
+    total: number;
+    byKind: Record<string, number>;
+    blockedChallenges: number;
+    linkedCandidateIds: string[];
+  };
   coverage: Record<string, unknown>;
   limitations: string[];
   delta: {
@@ -248,6 +254,12 @@ export async function freezeEvidenceSnapshot(
     ? await loadImmutableEvidenceSnapshot(root, project.id, parentSnapshotSha256)
     : null;
   const delta = snapshotDelta(parentSnapshot, includedSources, artifacts);
+  const activityEvents = ledgerEvents.filter((event) => event.type === "activity.recorded");
+  const activityByKind: Record<string, number> = {};
+  for (const event of activityEvents) {
+    const kind = String(event.payload.kind);
+    activityByKind[kind] = (activityByKind[kind] ?? 0) + 1;
+  }
   const core = {
     schemaVersion: 1 as const,
     kind: "tiangong-evidence-snapshot" as const,
@@ -275,6 +287,24 @@ export async function freezeEvidenceSnapshot(
     })),
     artifacts,
     sources: includedSources,
+    activitySummary: {
+      total: activityEvents.length,
+      byKind: activityByKind,
+      blockedChallenges: activityEvents.filter(
+        (event) => event.payload.status === "blocked" && event.payload.challenge !== "none",
+      ).length,
+      linkedCandidateIds: [
+        ...new Set(
+          activityEvents.flatMap((event) =>
+            Array.isArray(event.payload.candidateIds)
+              ? event.payload.candidateIds.filter(
+                  (candidateId): candidateId is string => typeof candidateId === "string",
+                )
+              : [],
+          ),
+        ),
+      ].sort(),
+    },
     coverage,
     limitations: [
       ...(evidence.limitations as string[]),
@@ -579,6 +609,7 @@ function parseEvidenceSnapshot(value: unknown): EvidenceSnapshot {
     value.receipts.some((receipt) => !isSnapshotReceipt(receipt)) ||
     !Array.isArray(value.sources) ||
     !Array.isArray(value.artifacts) ||
+    !isActivitySummary(value.activitySummary) ||
     !isObject(value.coverage) ||
     !Array.isArray(value.limitations) ||
     value.limitations.some((limitation) => typeof limitation !== "string") ||
@@ -590,6 +621,20 @@ function parseEvidenceSnapshot(value: unknown): EvidenceSnapshot {
     throw snapshotError("Evidence snapshot is malformed.");
   }
   return value as unknown as EvidenceSnapshot;
+}
+
+function isActivitySummary(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    Number.isInteger(value.total) &&
+    Number(value.total) >= 0 &&
+    isObject(value.byKind) &&
+    Object.values(value.byKind).every((count) => Number.isInteger(count) && Number(count) >= 0) &&
+    Number.isInteger(value.blockedChallenges) &&
+    Number(value.blockedChallenges) >= 0 &&
+    Array.isArray(value.linkedCandidateIds) &&
+    value.linkedCandidateIds.every((candidateId) => typeof candidateId === "string")
+  );
 }
 
 function isSnapshotOutputRecord(value: unknown, path: string): boolean {

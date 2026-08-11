@@ -36,6 +36,14 @@ export interface DiscoveryProgress {
     rejected: number;
     unassessed: number;
   };
+  nativeActivities: {
+    total: number;
+    byKind: Record<string, number>;
+    blockedChallenges: number;
+    nativeCandidates: number;
+    formalizedNativeCandidates: number;
+    unformalizedNativeCandidates: number;
+  };
   providers: DiscoveryProviderProgress[];
   gaps: string[];
   nextBatch: { kind: string; capabilityIds: string[]; maxCalls: number } | null;
@@ -96,6 +104,18 @@ export async function inspectDiscoveryProgress(
   const duplicateOccurrences = ledgerEvents.filter(
     (event) => event.type === "candidate.duplicate",
   ).length;
+  const activityEvents = ledgerEvents.filter((event) => event.type === "activity.recorded");
+  const activityByKind: Record<string, number> = {};
+  for (const event of activityEvents) {
+    const kind = String(event.payload.kind);
+    activityByKind[kind] = (activityByKind[kind] ?? 0) + 1;
+  }
+  const nativeCandidates = candidates.filter((candidate) =>
+    candidate.occurrences.some((origin) => origin.kind === "native"),
+  );
+  const formalizedNativeCandidates = nativeCandidates.filter((candidate) =>
+    candidate.occurrences.some((origin) => origin.kind === "broker" || origin.kind === "input"),
+  );
   const providers = networkCapabilityIds.map((capabilityId) => {
     const uniqueCandidates = candidates.filter((candidate) =>
       candidate.occurrences.some((origin) => origin.capabilityId === capabilityId),
@@ -169,6 +189,16 @@ export async function inspectDiscoveryProgress(
       admitted: admitted.size,
       rejected: rejected.size,
       unassessed: Math.max(0, candidates.length - admitted.size - rejected.size),
+    },
+    nativeActivities: {
+      total: activityEvents.length,
+      byKind: activityByKind,
+      blockedChallenges: activityEvents.filter(
+        (event) => event.payload.status === "blocked" && event.payload.challenge !== "none",
+      ).length,
+      nativeCandidates: nativeCandidates.length,
+      formalizedNativeCandidates: formalizedNativeCandidates.length,
+      unformalizedNativeCandidates: nativeCandidates.length - formalizedNativeCandidates.length,
     },
     providers,
     gaps: [...new Set(gaps)],

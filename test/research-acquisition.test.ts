@@ -15,6 +15,7 @@ import { registerEvidenceArtifact } from "../src/research/workspace/artifacts.js
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import { persistBrokerEvidence } from "../src/research/workspace/evidence.js";
 import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
+import { inspectDiscoveryProgress } from "../src/research/workspace/discovery-status.js";
 import {
   evidenceLedgerPath,
   listEvidenceCandidates,
@@ -28,6 +29,7 @@ import {
   loadProject,
   saveProject,
 } from "../src/research/workspace/projects.js";
+import { recordNativeResearchActivity } from "../src/research/workspace/native-activity.js";
 import {
   abortNativeResearchStage,
   prepareNativeResearchStage,
@@ -467,6 +469,29 @@ describe("research acquisition and evidence snapshots", () => {
       });
       assert.equal(registered.admissionStatus, "supplemental-not-admitted");
       assert.equal(registered.candidate.url, "https://example.test/official");
+      const activity = await recordNativeResearchActivity({
+        root,
+        projectId: "native-candidate",
+        value: {
+          schemaVersion: 1,
+          kind: "web-search",
+          channel: "codex.web-search",
+          input: "official source https://example.test/?api_key=must-not-persist",
+          candidateIds: [registered.candidate.id],
+          resultCount: 10,
+          status: "completed",
+          challenge: "none",
+        },
+      });
+      assert.match(activity.inputSha256, /^[0-9a-f]{64}$/);
+      assert.equal("input" in activity, false);
+      const progress = await inspectDiscoveryProgress(
+        root,
+        await loadProject(root, "native-candidate"),
+      );
+      assert.equal(progress.nativeActivities.total, 1);
+      assert.equal(progress.nativeActivities.byKind["web-search"], 1);
+      assert.equal(progress.nativeActivities.unformalizedNativeCandidates, 1);
       await assert.rejects(
         registerNativeDiscoveryCandidate({
           root,
@@ -485,7 +510,7 @@ describe("research acquisition and evidence snapshots", () => {
           error instanceof CliError && error.code === "RESEARCH_STRUCTURED_OUTPUT_INVALID",
       );
       const ledger = await readFile(evidenceLedgerPath(root, "native-candidate"), "utf8");
-      assert.doesNotMatch(ledger, /must-not-persist|api_key/);
+      assert.doesNotMatch(ledger, /must-not-persist|api_key|official source/);
     } finally {
       await Promise.all([
         rm(root, { recursive: true, force: true }),
@@ -518,6 +543,20 @@ describe("research acquisition and evidence snapshots", () => {
           title: "Official native discovery",
           url: "https://example.test/formal-source?utm_source=native",
           publicationDate: "2026-08-11",
+        },
+      });
+      await recordNativeResearchActivity({
+        root,
+        projectId: "native-formalized",
+        value: {
+          schemaVersion: 1,
+          kind: "web-search",
+          channel: "codex.web-search",
+          input: "official native source",
+          candidateIds: [native.candidate.id],
+          resultCount: 1,
+          status: "completed",
+          challenge: "none",
         },
       });
       const contextBytes = Buffer.from(
@@ -628,6 +667,12 @@ describe("research acquisition and evidence snapshots", () => {
       assert.equal(source.reviewerBoundFullFile, true);
       assert.equal(source.locallyAcquired, true);
       assert.equal(snapshot.coverage.fullTextSources, 0);
+      assert.deepEqual(snapshot.activitySummary, {
+        total: 1,
+        byKind: { "web-search": 1 },
+        blockedChallenges: 0,
+        linkedCandidateIds: [native.candidate.id],
+      });
     } finally {
       await Promise.all([
         rm(root, { recursive: true, force: true }),

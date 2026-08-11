@@ -22,6 +22,7 @@ const MAX_TITLE_LENGTH = 500;
 const MAX_EXCERPT_LENGTH = 2_000;
 
 export type EvidenceLedgerEventType =
+  | "activity.recorded"
   | "candidate.discovered"
   | "candidate.duplicate"
   | "candidate.assessed"
@@ -88,6 +89,7 @@ export async function cloneEvidenceLedger(
   await verifyEvidenceLedger(root, sourceProjectId);
   const events = await readJournal(evidenceLedgerPath(root, sourceProjectId));
   const replayable = new Set<EvidenceLedgerEventType>([
+    "activity.recorded",
     "candidate.discovered",
     "candidate.duplicate",
     "candidate.assessed",
