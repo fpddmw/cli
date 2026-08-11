@@ -24,6 +24,8 @@ export interface DiscoveryPlan {
   constraintGaps: string[];
 }
 
+const DISCOVERY_CONTROL_PLANE_RESERVE_TOKENS = 64_000;
+
 export function deriveDiscoveryPlan(
   requirements: ProjectEvidenceRequirements,
   config: Pick<WorkspaceConfig, "budget">,
@@ -106,7 +108,8 @@ export function deriveDiscoveryPlan(
     outputTokenLimit +
       budget.maxRepairTokens +
       maxCalls * budget.maxBrokerContextTokens +
-      12_000 +
+      budget.maxInputContextTokens +
+      DISCOVERY_CONTROL_PLANE_RESERVE_TOKENS +
       requirements.minSources * 200,
   );
   const requiredFirstPassCalls = Math.min(requiredCapabilityIds.length, maxCalls);

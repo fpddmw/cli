@@ -1941,6 +1941,63 @@ describe("research workspace CLI", () => {
     }
   });
 
+  it("gives heterogeneous production discovery a high finite budget without a package deadlock", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined, "production-research");
+      await declareExternalPublicCapability(root, skillParent);
+      await lockCapabilities(root);
+      const preflight = await evaluateProjectPreflight(
+        root,
+        "How should local government govern productive and safe generative AI adoption?",
+        {
+          dimensions: [
+            "productivity",
+            "accuracy-risk",
+            "privacy-security",
+            "procurement-governance",
+            "adoption-evidence",
+            "counterevidence",
+          ],
+          sourceTypes: [
+            "peer-reviewed",
+            "government",
+            "official-data",
+            "news",
+            "vendor",
+            "independent-analysis",
+          ],
+          requiredCapabilityIds: ["method.external-public-search"],
+          requiredCompanionIds: [],
+          requiredDiscoveryScopes: ["public-internet"],
+          minSources: 8,
+          minFullTextSources: 0,
+          minDatedSources: 6,
+          publicationDateFrom: "2023-01-01",
+          publicationDateTo: "2026-08-11",
+        },
+        null,
+      );
+      assert.equal(preflight.budget.discoveryPlan?.maxCalls, 14);
+      assert.equal(preflight.budget.maxBrokerCalls, 256);
+      assert.equal(preflight.budget.maxTokens, 20_000_000);
+      assert.equal(preflight.budget.packageMaxTokens.discover, 12_000_000);
+      assert.ok(
+        preflight.budget.preCallTokenReservations.discover <=
+          preflight.budget.packageMaxTokens.discover,
+      );
+      assert.ok(
+        !preflight.gaps.some((gap) => gap.startsWith("package-precall-reservation-exceeds-")),
+        JSON.stringify(preflight.gaps),
+      );
+      assert.ok(preflight.budget.maxBrokerCalls < Number.MAX_SAFE_INTEGER);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(skillParent, { recursive: true, force: true });
+    }
+  });
+
   it("reports a compact discover-output reservation gap", async () => {
     const root = await temporaryDirectory();
     try {
@@ -2321,16 +2378,16 @@ describe("research workspace CLI", () => {
       );
       assert.deepEqual(preflightValue.budget.stageContextTokenReservations, {
         acquire: 1_024,
-        analyze: 12_000,
-        synthesize: 12_000,
-        review: 36_000,
+        analyze: 128_000,
+        synthesize: 128_000,
+        review: 256_000,
       });
       assert.deepEqual(preflightValue.budget.outputTokenLimitEnforcement, {
         producer: "reserved-native-host-on-submit",
         reviewer: "post-execution",
       });
       assert.deepEqual(preflightValue.budget.maxTurns, {
-        discover: 6,
+        discover: 1,
         acquire: 2,
         analyze: 2,
         synthesize: 2,

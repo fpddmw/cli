@@ -88,6 +88,8 @@ storage writes, queueing, and document status transitions.
   complete pre-call package and tool-context reservations,
   one shared preflight/runtime reservation formula with bounded capability
   documentation included at admission,
+  mode-specific budgets with low-cost smoke defaults and deliberately generous
+  but finite production runaway ceilings,
   tool-context-aware process capture, classified retries,
   project-scoped scheduling/exit status, durable user-action and
   external-response handoffs, JSONL progress, recovery events, exact

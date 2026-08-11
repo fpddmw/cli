@@ -442,12 +442,16 @@ repair with no research tools.
 Total, per-package, output, repair, broker-response bytes, estimated broker
 context tokens, context items, wall-time, output-count, output-size, and attempt
 limits live in `.tiangong-research/config.json`.
-New workspaces reserve 650,000 total tokens by default. Package ceilings are
-230,000 for discovery, 80,000 for acquisition, 70,000 for analysis, 70,000 for
-synthesis, and 190,000 for review. Primary output is bounded at 6,000 tokens
-and a separately invoked repair at 4,000. These are admission ceilings rather
-than a target spend and can be lowered only when the resulting pre-call
-reservations still fit.
+New production workspaces use generous but finite runaway ceilings: 20,000,000
+total tokens and package ceilings of 12,000,000 for discovery, 2,000,000 for
+acquisition, 1,500,000 each for analysis and synthesis, and 2,500,000 for
+review. Primary output is bounded at 32,000 tokens and a separately invoked
+repair at 16,000. The production broker hard ceiling is 256 bounded views with
+32,000 context tokens per view; input context is bounded at 128,000 tokens.
+These values are not a target spend. Coverage-derived working plans and early
+stop control ordinary use, while the finite ceilings, three attempts per
+package, and explicit confirmation above the cost threshold stop runaway work.
+Smoke-test workspaces retain their smaller low-cost defaults.
 Before project initialization and every executable package, the control plane
 requires the complete token and conservative price reservation to fit. Native
 producer stages reserve prompt, schema, admitted context, bounded broker
@@ -462,13 +466,16 @@ Independent review uses the pre-call reservation calculator and the reviewer's
 provider-side structured-output/turn controls where available. Review admission
 reserves three maximum-size generated artifacts plus one globally bounded
 evidence-excerpt bundle, and formatting repair remains one separately budgeted,
-tool-free JSON correction. New workspaces also enforce a six-call broker budget
-mechanically; every successful native evidence fetch reports the remaining
-calls and excess calls are rejected before another provider request or evidence
-promotion. Reviewer usage records separate input, cached-input, and output
-tokens; configured pricing fills cost when the provider omits it. Run records
-and JSONL progress preserve sanitized accounting mode, event/item counts,
-provider turns, tool calls, reasoning tokens, and bounded provider errors.
+tool-free JSON correction. Production workspaces enforce a finite 256-view
+broker ceiling mechanically, while each project derives a much smaller working
+budget from its reviewed coverage requirements and stops early when they are
+supportable. Every successful native evidence fetch reports the remaining
+working budget; excess calls are rejected before another provider request or
+evidence promotion. Reviewer usage records separate input, cached-input, and
+output tokens; configured pricing fills cost when the provider omits it. Run
+records and JSONL progress preserve sanitized accounting mode, event/item
+counts, provider turns, tool calls, reasoning tokens, and bounded provider
+errors.
 
 Every evidence source must resolve to an admitted input or a completed broker
 receipt. Successful broker bodies are immutable content-addressed objects under

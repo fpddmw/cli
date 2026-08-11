@@ -181,6 +181,7 @@ describe("research evidence ledger", () => {
         maxOutputTokens: 6_000,
         maxRepairTokens: 1_000,
         maxBrokerContextTokens: 24_000,
+        maxInputContextTokens: 24_000,
         packageMaxTokens: { discover: 300_000 },
       },
     } as unknown as WorkspaceConfig;
@@ -230,6 +231,7 @@ describe("research evidence ledger", () => {
         maxOutputTokens: 6_000,
         maxRepairTokens: 1_000,
         maxBrokerContextTokens: 12_000,
+        maxInputContextTokens: 12_000,
         packageMaxTokens: { discover: 300_000 },
       },
     } as unknown as WorkspaceConfig;

@@ -188,9 +188,11 @@ export async function evaluateProjectPreflight(
     );
   }
   const maxTurns = {
-    discover: networkCapabilities.length
-      ? RESEARCH_BROKER_MAX_TURNS
-      : producerStructuredOutputMaxTurns,
+    // The native producer receives one prepared packet and submits one closeout.
+    // Broker fetches are separately bounded CLI operations, not repeated nested
+    // agent turns; their complete context allowance is reserved below.
+    discover:
+      config.producer.executionMode === "native-host" ? 1 : producerStructuredOutputMaxTurns,
     acquire: producerStructuredOutputMaxTurns,
     analyze: producerStructuredOutputMaxTurns,
     synthesize: producerStructuredOutputMaxTurns,
