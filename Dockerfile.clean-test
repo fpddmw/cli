@@ -1,0 +1,19 @@
+FROM node:24.19.0-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+RUN chown node:node /app
+USER node
+
+COPY --chown=node:node package.json package-lock.json ./
+RUN npm ci
+COPY --chown=node:node . .
+
+ENV CI_CLEAN_CONTAINER=1
+ENV HOME=/home/node
+ENV NPM_CONFIG_CACHE=/home/node/.npm
+
+CMD ["npm", "run", "test:container"]

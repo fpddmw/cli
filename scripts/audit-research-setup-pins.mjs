@@ -39,6 +39,54 @@ try {
     }
   }
 
+  const firstPartySource = RESEARCH_SETUP_SOURCES.find(
+    (source) => source.id === "tiangong-ai-skills",
+  );
+  if (!firstPartySource) throw new Error("The first-party Skills source is missing.");
+  const requireFirstPartyMain = process.env.TIANGONG_RESEARCH_REQUIRE_SKILLS_MAIN === "1";
+  if (requireFirstPartyMain) {
+    const releaseCheckout = resolve(auditRoot, "first-party-release-lineage");
+    await mkdir(releaseCheckout);
+    await git(["init", "--quiet", releaseCheckout]);
+    await git(["-C", releaseCheckout, "remote", "add", "origin", firstPartySource.locator]);
+    await git([
+      "-C",
+      releaseCheckout,
+      "fetch",
+      "--quiet",
+      "--filter=blob:none",
+      "origin",
+      "refs/heads/main",
+    ]);
+    const { stdout } = await git(["-C", releaseCheckout, "rev-parse", "FETCH_HEAD"]);
+    const remoteMain = stdout.trim().toLowerCase();
+    await git([
+      "-C",
+      releaseCheckout,
+      "fetch",
+      "--quiet",
+      "--filter=blob:none",
+      "origin",
+      firstPartySource.immutableRef,
+    ]);
+    const onMain = await git([
+      "-C",
+      releaseCheckout,
+      "merge-base",
+      "--is-ancestor",
+      firstPartySource.immutableRef,
+      remoteMain,
+    ]).then(
+      () => true,
+      () => false,
+    );
+    if (!onMain) {
+      throw new Error(
+        `First-party Skills release drift: Catalog=${firstPartySource.immutableRef} is not reachable from main=${remoteMain}. Merge and review Skills before publishing the CLI.`,
+      );
+    }
+  }
+
   for (const source of RESEARCH_SETUP_SOURCES) {
     if (!/^[0-9a-f]{40}$/.test(source.immutableRef)) {
       throw new Error(`Setup source ${source.id} is not pinned to an exact Git commit.`);
@@ -78,6 +126,7 @@ try {
       installerVersion: RESEARCH_SETUP_INSTALLER.version,
       sources: RESEARCH_SETUP_SOURCES.length,
       skills: RESEARCH_SETUP_SKILLS.length,
+      firstPartyMainLineageVerified: requireFirstPartyMain,
     })}\n`,
   );
 } finally {

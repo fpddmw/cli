@@ -62,11 +62,14 @@ export const UNMANAGED_OPERATIONS = [
 export const INVALID_OPERATIONS = ["research.context.inspect"] as const;
 
 export function packageVersion(): string {
-  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
-  const packagePath = resolve(moduleDirectory, "../../../package.json");
+  const packagePath = resolve(packageRoot(), "package.json");
   const value = JSON.parse(readFileSync(packagePath, "utf8")) as { version?: unknown };
   if (typeof value.version !== "string" || !value.version.trim()) {
     throw new Error("Package version is unavailable.");
   }
   return value.version;
+}
+
+export function packageRoot(): string {
+  return resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 }

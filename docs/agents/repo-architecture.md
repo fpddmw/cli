@@ -170,6 +170,15 @@ wrappers only with their separate `standaloneTestedCliVersion`. Setup verifies
 the bundled resolver and forbids stale exact CLI literals in orchestrator
 instructions before installation.
 
+The CLI may generate a separate project-local recovery-only Skill after an
+accepted apply has stored credentials but before external checkout. It contains
+only exact-version context/status recovery instructions bound to the immutable
+plan, never producer or evidence logic. It closes the partial-install routing
+gap and is removed only after byte verification once the selected external
+orchestrator is installed. Setup status/doctor also report the effective CLI,
+project Skill, temporary recovery Skill, ignored global conflicts, and legacy
+unmanaged PATH fallbacks.
+
 Brokered evidence Skills document allowlisted GET or bounded JSON POST APIs;
 credentials remain in an owner-only logical map and are injected only by the
 broker. POST request bodies reject credential-like fields, persist only their
