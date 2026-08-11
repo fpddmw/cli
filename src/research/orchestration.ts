@@ -1,5 +1,5 @@
 import { lstat, readFile } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import { CliError } from "../errors.js";
 import type { CliIO } from "../io.js";
@@ -24,9 +24,14 @@ import {
 } from "./workspace/external-skills.js";
 import { appendJournalEvent } from "./workspace/journal.js";
 import { fetchNativeCandidateSource } from "./workspace/broker.js";
+import { registerEvidenceArtifact } from "./workspace/artifacts.js";
+import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
+import { inspectDiscoveryProgress } from "./workspace/discovery-status.js";
+import { registerNativeDiscoveryCandidate } from "./workspace/evidence-ledger.js";
 import { readAndVerifyProjectInputPlan } from "./workspace/input-plan.js";
 import {
   addProjectInput,
+  createProjectAddendum,
   initializeProject,
   forkProject,
   listProjects,
@@ -39,12 +44,13 @@ import {
 import { evaluateProjectPreflight } from "./workspace/preflight.js";
 import {
   abortNativeResearchStage,
+  inspectNativeResearchStage,
   prepareNativeResearchStage,
   runResearchWorkspace,
   submitNativeResearchStage,
 } from "./workspace/runtime.js";
 import { schemaForStage } from "./workspace/schemas.js";
-import { sha256Text, workspacePaths } from "./workspace/storage.js";
+import { pathExists, sha256Text, workspacePaths } from "./workspace/storage.js";
 import type { ProjectEvidenceRequirements, ProjectInput, ResearchMode } from "./workspace/types.js";
 import {
   doctorResearchWorkspace,
@@ -90,13 +96,16 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project preflight --question <question> [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--workspace <path>] [--json]
   tiangong-ai research project retry <project-id> [--package <package-id>] [--workspace <path>] [--json]
-  tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|analyze|synthesize] [--workspace <path>] [--json]
-  tiangong-ai research project stage prepare <project-id> --stage discover|analyze|synthesize --host-agent codex|claude [--workspace <path>] [--json]
+  tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|acquire|analyze|synthesize] [--workspace <path>] [--json]
+  tiangong-ai research project addendum <closed-project-id> --to <target-project-id> [--workspace <path>] [--json]
+  tiangong-ai research project stage prepare <project-id> --stage discover|acquire|analyze|synthesize --host-agent codex|claude [--workspace <path>] [--json]
   tiangong-ai research project stage submit <project-id> --session <id> --output <absolute-json> [--confirm-model <id>] [--workspace <path>] [--json]
   tiangong-ai research project stage abort <project-id> --session <id> [--workspace <path>] [--json]
   tiangong-ai research project evidence fetch <project-id> --request <absolute-json> [--workspace <path>] [--json]
-  tiangong-ai research schema show <discover|analyze|synthesize|review|doctor> [--json]
-  tiangong-ai research status [--project <project-id>] [--workspace <absolute-path>] [--json]
+  tiangong-ai research project evidence candidate register <project-id> --record <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence artifact register <project-id> --candidate <id> --path <absolute-file> [--media-type <type>] [--source-url <https-url>] [--license <declared-license>] [--license-url <https-url>] [--host-type <type>] [--article-version <version>] [--workspace <path>] [--json]
+  tiangong-ai research schema show <discover|acquire|analyze|synthesize|review|doctor> [--json]
+  tiangong-ai research status [--project <project-id>] [--all] [--workspace <absolute-path>] [--json]
   tiangong-ai research run [--project <project-id>] [--max-parallel <1-8>] [--max-cycles <1-100>] [--dry-run] [--progress-jsonl] [--workspace <absolute-path>] [--json]
 
 ${researchSetupHelp()}
@@ -112,6 +121,7 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
   const stage = onePositional(args.positionals, "research schema show");
   if (
     stage !== "discover" &&
+    stage !== "acquire" &&
     stage !== "analyze" &&
     stage !== "synthesize" &&
     stage !== "review" &&
@@ -422,6 +432,101 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   }
   if (action === "evidence") {
     const [evidenceAction, ...evidenceRest] = rest;
+    if (evidenceAction === "candidate") {
+      const [candidateAction, ...candidateRest] = evidenceRest;
+      if (candidateAction !== "register") {
+        throw unknownAction("research project evidence candidate", candidateAction ?? "");
+      }
+      const args = parseStrictArgs(
+        candidateRest,
+        { ...WORKSPACE_OPTIONS, record: "string" },
+        "research project evidence candidate register",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(
+        args.positionals,
+        "research project evidence candidate register",
+      );
+      const recordPath = strictString(args, "record");
+      if (!recordPath) {
+        throw new CliError("candidate register requires --record.", {
+          code: "RESEARCH_NATIVE_CANDIDATE_INVALID",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      const record = await readBoundedJsonRecord(
+        recordPath,
+        "--record",
+        "RESEARCH_NATIVE_CANDIDATE_INVALID",
+      );
+      const result = await withWorkspaceLock(root, "research.native-candidate.register", () =>
+        registerNativeDiscoveryCandidate({ root, projectId, value: record }),
+      );
+      writeJson(io, result, args);
+      return 0;
+    }
+    if (evidenceAction === "artifact") {
+      const [artifactAction, ...artifactRest] = evidenceRest;
+      if (artifactAction !== "register") {
+        throw unknownAction("research project evidence artifact", artifactAction ?? "");
+      }
+      const args = parseStrictArgs(
+        artifactRest,
+        {
+          ...WORKSPACE_OPTIONS,
+          candidate: "string",
+          path: "string",
+          "media-type": "string",
+          "source-url": "string",
+          license: "string",
+          "license-url": "string",
+          "host-type": "string",
+          "article-version": "string",
+        },
+        "research project evidence artifact register",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(
+        args.positionals,
+        "research project evidence artifact register",
+      );
+      const candidateId = strictString(args, "candidate");
+      const path = strictString(args, "path");
+      if (!candidateId || !path) {
+        throw new CliError("artifact register requires --candidate and --path.", {
+          code: "RESEARCH_ARTIFACT_PATH_INVALID",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      const result = await withWorkspaceLock(root, "research.artifact.register", () =>
+        registerEvidenceArtifact({
+          root,
+          projectId,
+          candidateId,
+          path,
+          ...(strictString(args, "media-type")
+            ? { mediaType: strictString(args, "media-type")! }
+            : {}),
+          ...(strictString(args, "source-url")
+            ? { sourceUrl: strictString(args, "source-url")! }
+            : {}),
+          ...(strictString(args, "license") ? { license: strictString(args, "license")! } : {}),
+          ...(strictString(args, "license-url")
+            ? { licenseUrl: strictString(args, "license-url")! }
+            : {}),
+          ...(strictString(args, "host-type")
+            ? { hostType: strictString(args, "host-type")! }
+            : {}),
+          ...(strictString(args, "article-version")
+            ? { articleVersion: strictString(args, "article-version")! }
+            : {}),
+        }),
+      );
+      writeJson(io, result, args);
+      return 0;
+    }
     if (evidenceAction !== "fetch") {
       throw unknownAction("research project evidence", evidenceAction ?? "");
     }
@@ -573,36 +678,138 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     writeJson(io, project, args);
     return 0;
   }
+  if (action === "addendum") {
+    const args = parseStrictArgs(
+      rest,
+      { ...WORKSPACE_OPTIONS, to: "string" },
+      "research project addendum",
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const sourceProjectId = onePositional(args.positionals, "research project addendum");
+    const targetProjectId = strictString(args, "to");
+    if (!targetProjectId) {
+      throw new CliError("research project addendum requires --to.", {
+        code: "RESEARCH_PROJECT_ADDENDUM_INVALID",
+        exitCode: 2,
+      });
+    }
+    const root = await workspaceFromArgs(args);
+    const project = await createProjectAddendum(root, sourceProjectId, targetProjectId);
+    writeJson(io, project, args);
+    return 0;
+  }
   throw unknownAction("research project", action);
 }
 
 async function runStatus(argv: string[], io: CliIO): Promise<number> {
   const args = parseStrictArgs(
     argv,
-    { ...WORKSPACE_OPTIONS, project: "string" },
+    { ...WORKSPACE_OPTIONS, project: "string", all: "boolean" },
     "research status",
   );
   if (strictBoolean(args, "help")) return writeHelp(io);
   rejectPositionals(args.positionals, "research status");
   const root = await workspaceFromArgs(args);
   const selectedProject = strictString(args, "project");
-  const projects = selectedProject
+  const allProjects = selectedProject
     ? [await loadProject(root, selectedProject)]
     : await listProjects(root);
+  const projects =
+    selectedProject || strictBoolean(args, "all")
+      ? allProjects
+      : allProjects.filter((project) => project.lineage.supersededBy === null);
   const result = {
     workspace: root,
-    projects: projects.map((project) => ({
-      id: project.id,
-      question: project.question,
-      status: refreshProject(project).status,
-      readyPackage: nextReadyPackage(project)?.id ?? null,
-      usage: project.usage,
-      inputs: project.inputs,
-      packages: project.packages,
-    })),
+    hiddenSupersededProjects: allProjects.length - projects.length,
+    projects: await Promise.all(
+      projects.map(async (project) => {
+        const current = refreshProject(project);
+        const nativeStage = await inspectNativeResearchStage(root, current);
+        const snapshot = await inspectSnapshotForStatus(root, current.id);
+        const readyPackage = nextReadyPackage(current)?.id ?? null;
+        return {
+          id: current.id,
+          question: current.question,
+          status: current.status,
+          lineage: current.lineage,
+          evidenceState: current.evidenceState,
+          snapshot,
+          nativeStage,
+          readyPackage,
+          recommendedAction: projectRecommendedAction(root, current, readyPackage, nativeStage),
+          usage: current.usage,
+          inputs: current.inputs,
+          packages: current.packages,
+          discovery: await inspectDiscoveryProgress(root, current),
+        };
+      }),
+    ),
   };
   writeJson(io, result, args);
   return 0;
+}
+
+async function inspectSnapshotForStatus(
+  root: string,
+  projectId: string,
+): Promise<Record<string, unknown>> {
+  const currentPath = join(
+    workspacePaths(root).projects,
+    projectId,
+    "outputs",
+    "evidence-snapshot.json",
+  );
+  if (!(await pathExists(currentPath))) return { status: "absent" };
+  try {
+    const snapshot = await loadCurrentEvidenceSnapshot(root, projectId);
+    return {
+      status: "verified",
+      snapshotId: snapshot.snapshotId,
+      snapshotSha256: snapshot.snapshotSha256,
+      parentSnapshotId: snapshot.parentSnapshotId,
+      sourceCount: snapshot.sources.length,
+      artifactCount: snapshot.artifacts.length,
+      delta: snapshot.delta,
+    };
+  } catch (error) {
+    const code = error instanceof CliError ? error.code : "RESEARCH_EVIDENCE_SNAPSHOT_INVALID";
+    return {
+      status: "invalid",
+      code,
+    };
+  }
+}
+
+function projectRecommendedAction(
+  root: string,
+  project: Awaited<ReturnType<typeof loadProject>>,
+  readyPackage: string | null,
+  nativeStage: Awaited<ReturnType<typeof inspectNativeResearchStage>>,
+): string {
+  if (project.lineage.supersededBy) {
+    return `Continue with superseding project ${project.lineage.supersededBy}.`;
+  }
+  if (nativeStage.status === "stale" || nativeStage.status === "invalid") {
+    return nativeStage.recommendedAction ?? "Recover the stale native session explicitly.";
+  }
+  if (nativeStage.status === "active") {
+    return nativeStage.recommendedAction ?? "Resume the active native stage.";
+  }
+  if (project.status === "complete") {
+    return `Create an immutable evidence addendum only when new evidence exists: tiangong-ai research project addendum ${project.id} --to <new-project-id> --workspace ${root}`;
+  }
+  if (project.status === "blocked") {
+    const failed = project.packages.find((workPackage) => workPackage.status === "failed");
+    return failed
+      ? `Review ${failed.lastFailureKind ?? "deterministic"} failure for ${failed.id}, then run the explicit project retry command if corrected.`
+      : "Inspect the blocking package and use explicit retry or fork recovery.";
+  }
+  if (readyPackage && ["discover", "acquire", "analyze", "synthesize"].includes(readyPackage)) {
+    return `Prepare native ${readyPackage}: tiangong-ai research project stage prepare ${project.id} --stage ${readyPackage} --host-agent <codex|claude> --workspace ${root}`;
+  }
+  return readyPackage === "review"
+    ? `Run the independent reviewer package: tiangong-ai research run --project ${project.id} --workspace ${root}`
+    : "Continue the next ready package.";
 }
 
 async function runWorkspaceExecution(argv: string[], io: CliIO): Promise<number> {
@@ -700,18 +907,24 @@ function researchMode(value: string | undefined): ResearchMode {
   });
 }
 
-function resumeStage(value: string | undefined): "discover" | "analyze" | "synthesize" | undefined {
+function resumeStage(
+  value: string | undefined,
+): "discover" | "acquire" | "analyze" | "synthesize" | undefined {
   if (!value) return undefined;
-  if (value === "discover" || value === "analyze" || value === "synthesize") return value;
+  if (value === "discover" || value === "acquire" || value === "analyze" || value === "synthesize")
+    return value;
   throw new CliError(`Unsupported --resume-through stage: ${value}`, {
     code: "RESEARCH_PROJECT_FORK_INVALID",
     exitCode: 2,
   });
 }
 
-function nativeProducerStage(value: string | undefined): "discover" | "analyze" | "synthesize" {
-  if (value === "discover" || value === "analyze" || value === "synthesize") return value;
-  throw new CliError("--stage must be discover, analyze, or synthesize.", {
+function nativeProducerStage(
+  value: string | undefined,
+): "discover" | "acquire" | "analyze" | "synthesize" {
+  if (value === "discover" || value === "acquire" || value === "analyze" || value === "synthesize")
+    return value;
+  throw new CliError("--stage must be discover, acquire, analyze, or synthesize.", {
     code: "RESEARCH_NATIVE_STAGE_INVALID",
     exitCode: 2,
   });
@@ -726,17 +939,25 @@ function nativeHostAgent(value: string | undefined): "codex" | "claude" {
 }
 
 async function readNativeEvidenceRequest(path: string): Promise<Record<string, unknown>> {
+  return readBoundedJsonRecord(path, "--request", "RESEARCH_BROKER_REQUEST_INVALID");
+}
+
+async function readBoundedJsonRecord(
+  path: string,
+  label: string,
+  code: string,
+): Promise<Record<string, unknown>> {
   if (!isAbsolute(path)) {
-    throw new CliError("--request must be an absolute JSON file path.", {
-      code: "RESEARCH_BROKER_REQUEST_INVALID",
+    throw new CliError(`${label} must be an absolute JSON file path.`, {
+      code,
       exitCode: 2,
     });
   }
   const selected = resolve(path);
   const info = await lstat(selected).catch(() => undefined);
   if (!info?.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) {
-    throw new CliError("--request must be a bounded regular non-symlink JSON file.", {
-      code: "RESEARCH_BROKER_REQUEST_INVALID",
+    throw new CliError(`${label} must be a bounded regular non-symlink JSON file.`, {
+      code,
       exitCode: 2,
     });
   }
@@ -744,14 +965,14 @@ async function readNativeEvidenceRequest(path: string): Promise<Record<string, u
   try {
     value = JSON.parse(await readFile(selected, "utf8")) as unknown;
   } catch {
-    throw new CliError("--request contains invalid JSON.", {
-      code: "RESEARCH_BROKER_REQUEST_INVALID",
+    throw new CliError(`${label} contains invalid JSON.`, {
+      code,
       exitCode: 2,
     });
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new CliError("--request must contain one JSON object.", {
-      code: "RESEARCH_BROKER_REQUEST_INVALID",
+    throw new CliError(`${label} must contain one JSON object.`, {
+      code,
       exitCode: 2,
     });
   }

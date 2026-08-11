@@ -34,6 +34,7 @@ export interface BrokerEvidenceReceipt {
   contextTotalItems?: number | null;
   contextNextOffset?: number | null;
   contextTruncated: boolean;
+  redactions: number;
   retrievedAt: string;
   servedAt: string;
   cacheHit: boolean;
@@ -273,6 +274,8 @@ function parseReceipt(value: unknown): BrokerEvidenceReceipt {
       (!Number.isInteger((value as BrokerEvidenceReceipt).contextNextOffset) ||
         (value as BrokerEvidenceReceipt).contextNextOffset! < 0)) ||
     typeof (value as BrokerEvidenceReceipt).contextTruncated !== "boolean" ||
+    !Number.isInteger((value as BrokerEvidenceReceipt).redactions) ||
+    (value as BrokerEvidenceReceipt).redactions < 0 ||
     typeof (value as BrokerEvidenceReceipt).retrievedAt !== "string" ||
     typeof (value as BrokerEvidenceReceipt).servedAt !== "string" ||
     typeof (value as BrokerEvidenceReceipt).cacheHit !== "boolean"

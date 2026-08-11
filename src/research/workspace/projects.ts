@@ -6,6 +6,17 @@ import { CliError } from "../../errors.js";
 import { RESEARCH_CONTROL_DIRECTORY } from "./constants.js";
 import { appendJournalEvent } from "./journal.js";
 import { cloneProjectEvidenceReceipts } from "./evidence.js";
+import {
+  appendEvidenceLedgerEvent,
+  cloneEvidenceLedger,
+  registerProjectInputCandidates,
+} from "./evidence-ledger.js";
+import { cloneProjectArtifactRecords } from "./artifacts.js";
+import {
+  freezeEvidenceSnapshot,
+  loadCurrentEvidenceSnapshot,
+  loadImmutableEvidenceSnapshotChain,
+} from "./acquisition.js";
 import { projectInputsFromPlan, reverifyProjectInputPlan } from "./input-plan.js";
 import { evaluateProjectPreflight } from "./preflight.js";
 import {
@@ -119,6 +130,8 @@ export async function initializeProject(
         costUsd: 0,
         wallSeconds: 0,
       },
+      lineage: initialLineage("primary"),
+      evidenceState: initialEvidenceState(),
     };
     await Promise.all([
       ensureDirectory(projectRoot),
@@ -126,6 +139,7 @@ export async function initializeProject(
       ensureDirectory(join(projectRoot, "runs")),
     ]);
     await writeJsonAtomic(projectPath, project);
+    await registerProjectInputCandidates(root, projectId, project.inputs);
     await appendJournalEvent(paths.journal, "project.initialized", projectId, {
       projectId,
       questionSha256: await hashQuestion(normalizedQuestion),
@@ -179,12 +193,17 @@ export async function addProjectInput(
       path: canonicalInput,
       sha256,
       bytes: await fileSize(canonicalInput),
+      sourceType: "primary",
+      dimensions: [],
+      fullText: true,
+      publicationDate: null,
       addedAt: new Date().toISOString(),
     };
     project.inputs.push(input);
     project.inputs.sort((left, right) => left.id.localeCompare(right.id));
     project.updatedAt = new Date().toISOString();
     await saveProject(root, project);
+    await registerProjectInputCandidates(root, projectId, [input]);
     await appendJournalEvent(workspacePaths(root).journal, "project.input.added", projectId, {
       projectId,
       inputId: input.id,
@@ -271,7 +290,7 @@ export async function forkProject(
   root: string,
   sourceProjectId: string,
   targetProjectId: string,
-  resumeThrough?: "discover" | "analyze" | "synthesize",
+  resumeThrough?: "discover" | "acquire" | "analyze" | "synthesize",
 ): Promise<ProjectState> {
   validateProjectId(sourceProjectId);
   validateProjectId(targetProjectId);
@@ -293,9 +312,9 @@ export async function forkProject(
     const config = await loadWorkspaceConfig(root);
     const packages = defaultWorkPackages(config);
     const inheritedStages = resumeThrough
-      ? ["discover", "analyze", "synthesize"].slice(
+      ? ["discover", "acquire", "analyze", "synthesize"].slice(
           0,
-          ["discover", "analyze", "synthesize"].indexOf(resumeThrough) + 1,
+          ["discover", "acquire", "analyze", "synthesize"].indexOf(resumeThrough) + 1,
         )
       : [];
     for (const stage of inheritedStages) {
@@ -340,6 +359,11 @@ export async function forkProject(
         costUsd: 0,
         wallSeconds: 0,
       },
+      lineage: {
+        ...initialLineage("fork"),
+        derivedFrom: sourceProjectId,
+      },
+      evidenceState: initialEvidenceState(),
     };
     await Promise.all([
       ensureDirectory(targetRoot),
@@ -349,6 +373,7 @@ export async function forkProject(
     const inheritedOutputs: Array<{ path: string; sha256: string; bytes: number }> = [];
     const stageOutput: Record<string, string> = {
       discover: "outputs/evidence.json",
+      acquire: "outputs/acquisition.json",
       analyze: "outputs/analysis.json",
       synthesize: "outputs/report.md",
     };
@@ -363,9 +388,23 @@ export async function forkProject(
     }
     if (inheritedStages.includes("discover")) {
       await cloneProjectEvidenceReceipts(root, sourceProjectId, targetProjectId);
+      await cloneEvidenceLedger(root, sourceProjectId, targetProjectId);
+    }
+    if (inheritedStages.includes("acquire")) {
+      await cloneProjectArtifactRecords(root, sourceProjectId, targetProjectId);
     }
     refreshProject(project);
     await writeJsonAtomic(join(targetRoot, "project.json"), project);
+    if (inheritedStages.includes("acquire")) {
+      await freezeEvidenceSnapshot(root, project);
+      inheritedOutputs.push(
+        await fileRecord(
+          join(targetRoot, "outputs", "evidence-snapshot.json"),
+          "outputs/evidence-snapshot.json",
+        ),
+      );
+      await saveProject(root, project);
+    }
     await appendJournalEvent(workspacePaths(root).journal, "project.forked", targetProjectId, {
       sourceProjectId,
       targetProjectId,
@@ -374,6 +413,192 @@ export async function forkProject(
       inheritedUsage: false,
     });
     return project;
+  });
+}
+
+export async function createProjectAddendum(
+  root: string,
+  sourceProjectId: string,
+  targetProjectId: string,
+): Promise<ProjectState> {
+  validateProjectId(sourceProjectId);
+  validateProjectId(targetProjectId);
+  if (sourceProjectId === targetProjectId) {
+    throw new CliError("Addendum target must use a different project ID.", {
+      code: "RESEARCH_PROJECT_ADDENDUM_INVALID",
+      exitCode: 2,
+    });
+  }
+  return withWorkspaceLock(root, "project.addendum", async () => {
+    const source = refreshProject(await loadProject(root, sourceProjectId));
+    if (source.status !== "complete" || source.packages.at(-1)?.stage !== "close") {
+      throw new CliError("An addendum requires a mechanically closed source project.", {
+        code: "RESEARCH_PROJECT_ADDENDUM_INVALID",
+        exitCode: 3,
+      });
+    }
+    if (source.lineage.supersededBy) {
+      throw new CliError(
+        `Project ${sourceProjectId} is already superseded by ${source.lineage.supersededBy}.`,
+        { code: "RESEARCH_PROJECT_ADDENDUM_INVALID", exitCode: 3 },
+      );
+    }
+    const snapshot = await loadCurrentEvidenceSnapshot(root, sourceProjectId);
+    const closurePath = join(
+      workspacePaths(root).projects,
+      sourceProjectId,
+      "outputs",
+      "closure.json",
+    );
+    const closure = await readJsonFile<Record<string, unknown>>(
+      closurePath,
+      `Research closure ${sourceProjectId}`,
+    ).catch(() => null);
+    const closureSnapshot =
+      closure?.evidenceSnapshot &&
+      typeof closure.evidenceSnapshot === "object" &&
+      !Array.isArray(closure.evidenceSnapshot)
+        ? (closure.evidenceSnapshot as Record<string, unknown>)
+        : null;
+    if (
+      closure?.projectId !== sourceProjectId ||
+      closure?.status !== "complete" ||
+      closureSnapshot?.snapshotId !== snapshot.snapshotId ||
+      closureSnapshot?.snapshotSha256 !== snapshot.snapshotSha256 ||
+      source.evidenceState.closureSnapshotId !== snapshot.snapshotId ||
+      source.evidenceState.currentSnapshotSha256 !== snapshot.snapshotSha256
+    ) {
+      throw new CliError("Source closure is not bound to its current evidence snapshot.", {
+        code: "RESEARCH_PROJECT_ADDENDUM_INVALID",
+        exitCode: 3,
+      });
+    }
+    const targetRoot = join(workspacePaths(root).projects, targetProjectId);
+    if (await lstat(targetRoot).catch(() => undefined)) {
+      throw new CliError(`Research project already exists: ${targetProjectId}`, {
+        code: "RESEARCH_PROJECT_EXISTS",
+        exitCode: 2,
+      });
+    }
+    const config = await loadWorkspaceConfig(root);
+    const now = new Date().toISOString();
+    const target: ProjectState = {
+      schemaVersion: 1,
+      id: targetProjectId,
+      question: source.question,
+      status: "ready",
+      createdAt: now,
+      updatedAt: now,
+      budgetConfirmedAt: source.budgetConfirmedAt,
+      inputs: source.inputs.map((input) => ({ ...input })),
+      evidenceRequirements: {
+        ...source.evidenceRequirements,
+        dimensions: [...source.evidenceRequirements.dimensions],
+        sourceTypes: [...source.evidenceRequirements.sourceTypes],
+        requiredCapabilityIds: [...(source.evidenceRequirements.requiredCapabilityIds ?? [])],
+        requiredCompanionIds: [...(source.evidenceRequirements.requiredCompanionIds ?? [])],
+        requiredDiscoveryScopes: [...(source.evidenceRequirements.requiredDiscoveryScopes ?? [])],
+      },
+      packages: defaultWorkPackages(config),
+      usage: {
+        tokens: 0,
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        costUsd: 0,
+        wallSeconds: 0,
+      },
+      lineage: {
+        kind: "addendum",
+        derivedFrom: sourceProjectId,
+        supersedes: sourceProjectId,
+        supersededBy: null,
+        baseSnapshotId: snapshot.snapshotId,
+        baseSnapshotSha256: snapshot.snapshotSha256,
+      },
+      evidenceState: initialEvidenceState(),
+    };
+    await Promise.all([
+      ensureDirectory(targetRoot),
+      ensureDirectory(join(targetRoot, "outputs")),
+      ensureDirectory(join(targetRoot, "runs")),
+      ensureDirectory(join(targetRoot, "evidence", "snapshots")),
+    ]);
+    const inheritedOutputs: Array<{ path: string; sha256: string; bytes: number }> = [];
+    for (const logicalPath of ["outputs/evidence.json", "outputs/acquisition.json"] as const) {
+      const sourcePath = join(workspacePaths(root).projects, sourceProjectId, logicalPath);
+      const destination = join(targetRoot, logicalPath);
+      await cp(sourcePath, destination, { errorOnExist: true, force: false });
+      inheritedOutputs.push(await fileRecord(destination, logicalPath));
+    }
+    const baseSnapshotLogicalPath = "outputs/base-evidence-snapshot.json";
+    const sourceSnapshotPath = join(
+      workspacePaths(root).projects,
+      sourceProjectId,
+      "evidence",
+      "snapshots",
+      `${snapshot.snapshotSha256}.json`,
+    );
+    const snapshotChain = await loadImmutableEvidenceSnapshotChain(
+      root,
+      sourceProjectId,
+      snapshot.snapshotSha256,
+    );
+    for (const chainSnapshot of snapshotChain) {
+      await cp(
+        join(
+          workspacePaths(root).projects,
+          sourceProjectId,
+          "evidence",
+          "snapshots",
+          `${chainSnapshot.snapshotSha256}.json`,
+        ),
+        join(targetRoot, "evidence", "snapshots", `${chainSnapshot.snapshotSha256}.json`),
+        { errorOnExist: true, force: false },
+      );
+    }
+    await cp(sourceSnapshotPath, join(targetRoot, baseSnapshotLogicalPath), {
+      errorOnExist: true,
+      force: false,
+    });
+    inheritedOutputs.push(
+      await fileRecord(join(targetRoot, baseSnapshotLogicalPath), baseSnapshotLogicalPath),
+    );
+    await cloneProjectEvidenceReceipts(root, sourceProjectId, targetProjectId);
+    await cloneEvidenceLedger(root, sourceProjectId, targetProjectId);
+    await cloneProjectArtifactRecords(root, sourceProjectId, targetProjectId);
+    await appendEvidenceLedgerEvent(root, targetProjectId, "addendum.created", {
+      sourceProjectId,
+      targetProjectId,
+      baseSnapshotId: snapshot.snapshotId,
+      baseSnapshotSha256: snapshot.snapshotSha256,
+    });
+    await writeJsonAtomic(join(targetRoot, "project.json"), target);
+
+    source.lineage.supersededBy = targetProjectId;
+    source.evidenceState.staleReason = `Superseded by evidence addendum ${targetProjectId}.`;
+    refreshProject(source);
+    await saveProject(root, source);
+    await appendEvidenceLedgerEvent(root, sourceProjectId, "project.superseded", {
+      sourceProjectId,
+      supersededBy: targetProjectId,
+      snapshotId: snapshot.snapshotId,
+      snapshotSha256: snapshot.snapshotSha256,
+    });
+    await appendJournalEvent(
+      workspacePaths(root).journal,
+      "project.addendum.created",
+      targetProjectId,
+      {
+        sourceProjectId,
+        targetProjectId,
+        baseSnapshotId: snapshot.snapshotId,
+        baseSnapshotSha256: snapshot.snapshotSha256,
+        inheritedOutputs,
+        originalClosurePreserved: true,
+      },
+    );
+    return target;
   });
 }
 
@@ -394,7 +619,8 @@ export function refreshProject(project: ProjectState): ProjectState {
     );
     if (dependenciesComplete) workPackage.status = "ready";
   }
-  if (project.packages.some((item) => item.status === "failed")) project.status = "blocked";
+  if (project.lineage.supersededBy || project.evidenceState.staleReason) project.status = "stale";
+  else if (project.packages.some((item) => item.status === "failed")) project.status = "blocked";
   else if (project.packages.every((item) => item.status === "complete"))
     project.status = "complete";
   else if (project.packages.some((item) => item.status === "running")) project.status = "running";
@@ -432,11 +658,20 @@ function defaultWorkPackages(config: WorkspaceConfig): WorkPackage[] {
       maxAttempts,
     ),
     workPackage(
+      "acquire",
+      "acquire",
+      "agent",
+      "producer",
+      ["discover"],
+      ["outputs/acquisition.json"],
+      maxAttempts,
+    ),
+    workPackage(
       "analyze",
       "analyze",
       "agent",
       "producer",
-      ["discover"],
+      ["acquire"],
       ["outputs/analysis.json"],
       maxAttempts,
     ),
@@ -505,7 +740,9 @@ function validateProjectShape(project: ProjectState, expectedId: string): void {
     typeof project.usage.cachedInputTokens !== "number" ||
     typeof project.usage.outputTokens !== "number" ||
     typeof project.usage.costUsd !== "number" ||
-    typeof project.usage.wallSeconds !== "number"
+    typeof project.usage.wallSeconds !== "number" ||
+    !isProjectLineage(project.lineage) ||
+    !isProjectEvidenceState(project.evidenceState)
   ) {
     throw new CliError(`Research project state is invalid: ${expectedId}`, {
       code: "RESEARCH_PROJECT_INVALID",
@@ -528,6 +765,58 @@ function validateProjectShape(project: ProjectState, expectedId: string): void {
       exitCode: 2,
     });
   }
+}
+
+function initialLineage(kind: ProjectState["lineage"]["kind"]): ProjectState["lineage"] {
+  return {
+    kind,
+    derivedFrom: null,
+    supersedes: null,
+    supersededBy: null,
+    baseSnapshotId: null,
+    baseSnapshotSha256: null,
+  };
+}
+
+function initialEvidenceState(): ProjectState["evidenceState"] {
+  return {
+    currentSnapshotId: null,
+    currentSnapshotSha256: null,
+    closureSnapshotId: null,
+    staleReason: null,
+  };
+}
+
+function isProjectLineage(value: unknown): value is ProjectState["lineage"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const lineage = value as Record<string, unknown>;
+  return (
+    ["primary", "fork", "addendum"].includes(String(lineage.kind)) &&
+    nullableString(lineage.derivedFrom) &&
+    nullableString(lineage.supersedes) &&
+    nullableString(lineage.supersededBy) &&
+    nullableString(lineage.baseSnapshotId) &&
+    nullableSha256(lineage.baseSnapshotSha256)
+  );
+}
+
+function isProjectEvidenceState(value: unknown): value is ProjectState["evidenceState"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const state = value as Record<string, unknown>;
+  return (
+    nullableString(state.currentSnapshotId) &&
+    nullableSha256(state.currentSnapshotSha256) &&
+    nullableString(state.closureSnapshotId) &&
+    nullableString(state.staleReason)
+  );
+}
+
+function nullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function nullableSha256(value: unknown): value is string | null {
+  return value === null || (typeof value === "string" && /^[0-9a-f]{64}$/.test(value));
 }
 
 function defaultEvidenceRequirements(config: WorkspaceConfig): ProjectEvidenceRequirements {

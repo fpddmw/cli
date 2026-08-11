@@ -173,6 +173,15 @@ public-internet plan and block downstream work when any capability marked
 capability that was never exercised from one that was attempted but yielded no
 admissible receipt, including only sanitized failure-kind metadata.
 
+`test/research-evidence-ledger.test.ts` covers append-only ledger integrity,
+cross-receipt canonical deduplication, compact discovery judgments, and dynamic
+coverage-derived discovery budgets. `test/research-acquisition.test.ts` covers
+native-lead formalization, exact-file and concurrent-download isolation,
+PDF/ZIP/OpenXML structure checks, binary-only versus producer-readable full
+text, artifact drift, immutable snapshot/delta lineage, and non-destructive
+addenda. Workspace/runtime tests additionally verify default superseded-project
+filtering and closure rejection when any bound snapshot-chain object drifts.
+
 Reviewer executor regression coverage verifies that a Codex reviewer receives
 exactly one external-sandbox bypass flag and no nested `--sandbox read-only`
 flag, while shell and unified-exec remain disabled. It also verifies the
@@ -191,6 +200,7 @@ prepare/fetch/submit protocol.
 Preflight/runtime parity coverage verifies that the full bounded capability
 documentation allowance is reserved for every possible broker turn and fits
 the default discovery package before project admission.
-Broker tests also prove that the configured call ceiling rejects an excess
-request before another provider fetch while retaining a sanitized journal
-event and the already admitted receipt.
+Broker tests also prove that the configured view ceiling rejects an excess
+request before another provider fetch while retaining a sanitized journal event
+and the already admitted receipt. Project-cache reuse avoids a second provider
+call but still consumes one bounded context-view reservation.

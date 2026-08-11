@@ -1,6 +1,6 @@
 export type ContextRole = "workspace" | "setup" | "unmanaged" | "invalid";
 
-export type ProjectStatus = "ready" | "running" | "blocked" | "complete";
+export type ProjectStatus = "ready" | "running" | "blocked" | "complete" | "stale";
 
 export type PackageStatus = "pending" | "ready" | "running" | "retry" | "failed" | "complete";
 
@@ -14,7 +14,7 @@ export type AgentVerbosity = "low" | "medium" | "high";
 
 export type ResearchMode = "smoke-test" | "production-research";
 
-export type AgentPackageStage = "discover" | "analyze" | "synthesize" | "review";
+export type AgentPackageStage = "discover" | "acquire" | "analyze" | "synthesize" | "review";
 
 export interface AgentPricing {
   inputUsdPerMillionTokens: number;
@@ -167,6 +167,10 @@ export interface ProjectInput {
   contextSha256?: string;
   contextBytes?: number;
   contextRanges?: ProjectInputLineRange[];
+  sourceType?: string;
+  dimensions?: string[];
+  fullText?: boolean;
+  publicationDate?: string | null;
   addedAt: string;
 }
 
@@ -220,7 +224,7 @@ export interface ProjectEvidenceRequirements {
 
 export interface WorkPackage {
   id: string;
-  stage: "discover" | "analyze" | "synthesize" | "review" | "close";
+  stage: "discover" | "acquire" | "analyze" | "synthesize" | "review" | "close";
   kind: PackageKind;
   executor: "producer" | "reviewer" | "mechanical";
   dependencies: string[];
@@ -256,6 +260,20 @@ export interface ProjectState {
   evidenceRequirements: ProjectEvidenceRequirements;
   packages: WorkPackage[];
   usage: ProjectUsage;
+  lineage: {
+    kind: "primary" | "fork" | "addendum";
+    derivedFrom: string | null;
+    supersedes: string | null;
+    supersededBy: string | null;
+    baseSnapshotId: string | null;
+    baseSnapshotSha256: string | null;
+  };
+  evidenceState: {
+    currentSnapshotId: string | null;
+    currentSnapshotSha256: string | null;
+    closureSnapshotId: string | null;
+    staleReason: string | null;
+  };
 }
 
 export interface OutputRecord {

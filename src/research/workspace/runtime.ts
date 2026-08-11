@@ -9,7 +9,24 @@ import {
   verifyCapabilities,
 } from "./capabilities.js";
 import { startCapabilityBroker, type CapabilityBroker } from "./broker.js";
+import {
+  commitAcquisitionAssessments,
+  freezeEvidenceSnapshot,
+  loadCurrentEvidenceSnapshot,
+  loadImmutableEvidenceSnapshotChain,
+  materializeAcquisitionAudit,
+  parseMaterializedAcquisitionAudit,
+} from "./acquisition.js";
+import { stageEvidenceArtifacts } from "./artifacts.js";
+import { commitDiscoveryDecisions, materializeDiscoveryEvidence } from "./discovery.js";
+import { inspectDiscoveryProgress, type DiscoveryProgress } from "./discovery-status.js";
 import { loadProjectEvidenceReceipts, stageProjectEvidence } from "./evidence.js";
+import {
+  appendEvidenceLedgerEvent,
+  evidenceLedgerPath,
+  listEvidenceCandidates,
+  registerProjectInputCandidates,
+} from "./evidence-ledger.js";
 import { executeAgent, type AgentExecutionRequest } from "./executor.js";
 import { requiredDiscoveryCapabilityIds } from "./external-skills.js";
 import { renderInputLineContext } from "./input-plan.js";
@@ -36,7 +53,12 @@ import {
   sanitizeResearchRecord,
   sanitizeResearchText,
 } from "./sanitization.js";
-import { parseStructuredStageOutput, schemaForStage, StructuredOutputError } from "./schemas.js";
+import {
+  parseEvidenceRecord,
+  parseStructuredStageOutput,
+  schemaForStage,
+  StructuredOutputError,
+} from "./schemas.js";
 import {
   canonicalJson,
   ensureDirectory,
@@ -230,13 +252,14 @@ export interface NativeStagePacket {
   sessionId: string;
   projectId: string;
   packageId: string;
-  stage: "discover" | "analyze" | "synthesize";
+  stage: "discover" | "acquire" | "analyze" | "synthesize";
   hostAgent: AgentRoute["agent"];
   expectedModel: string | null;
   preparedAt: string;
   bindingSha256: string;
   prompt: string;
   outputSchema: Record<string, unknown>;
+  discovery: DiscoveryProgress | null;
   limits: {
     maxOutputBytes: number;
     maxOutputTokens: number;
@@ -246,6 +269,12 @@ export interface NativeStagePacket {
   };
   commands: {
     fetchEvidence: { argv: string[]; requestSchema: Record<string, unknown> } | null;
+    registerCandidate: { argv: string[]; recordSchema: Record<string, unknown> } | null;
+    registerArtifact: {
+      argv: string[];
+      supportedMediaTypes: string[];
+      optionalMetadataFields: string[];
+    } | null;
     submit: { argv: string[] };
     abort: { argv: string[] };
   };
@@ -262,10 +291,74 @@ interface NativeStageSession {
   sessionSha256: string;
 }
 
+export interface NativeStageStatus {
+  status: "none" | "active" | "stale" | "invalid";
+  sessionId: string | null;
+  stage: string | null;
+  preparedAt: string | null;
+  reasonCode: string | null;
+  recommendedAction: string | null;
+}
+
+export async function inspectNativeResearchStage(
+  root: string,
+  project: ProjectState,
+): Promise<NativeStageStatus> {
+  const path = nativeStageSessionPath(root, project.id);
+  if (!(await pathExists(path))) {
+    return {
+      status: "none",
+      sessionId: null,
+      stage: null,
+      preparedAt: null,
+      reasonCode: null,
+      recommendedAction: null,
+    };
+  }
+  try {
+    const session = await readNativeStageSession(root, project.id);
+    const workPackage = packageById(project, session.packet.packageId);
+    const actualBinding = await nativeStageBinding(root, project, workPackage);
+    const config = await loadWorkspaceConfig(root);
+    const elapsedSeconds = Math.max(
+      0,
+      (Date.now() - Date.parse(session.packet.preparedAt)) / 1_000,
+    );
+    const reasonCode =
+      workPackage.status !== "running"
+        ? "package-not-running"
+        : actualBinding !== session.packet.bindingSha256
+          ? "binding-drift"
+          : elapsedSeconds > config.budget.packageMaxWallSeconds[session.packet.stage]
+            ? "wall-time-expired"
+            : null;
+    return {
+      status: reasonCode ? "stale" : "active",
+      sessionId: session.packet.sessionId,
+      stage: session.packet.stage,
+      preparedAt: session.packet.preparedAt,
+      reasonCode,
+      recommendedAction: reasonCode
+        ? `tiangong-ai research project stage abort ${project.id} --session ${session.packet.sessionId} --workspace ${root}`
+        : `Resume the current native ${session.packet.stage} stage and submit with the packet command.`,
+    };
+  } catch (error) {
+    return {
+      status: "invalid",
+      sessionId: null,
+      stage: null,
+      preparedAt: null,
+      reasonCode: error instanceof CliError ? error.code : "RESEARCH_NATIVE_STAGE_SESSION_INVALID",
+      recommendedAction:
+        "Inspect the invalid native session and use the explicit abort/retry recovery path; do not delete control files manually.",
+    };
+  }
+}
+
 export async function prepareNativeResearchStage(input: {
   root: string;
   projectId: string;
-  stage: "discover" | "analyze" | "synthesize";
+  stage: "discover" | "acquire" | "analyze" | "synthesize";
   hostAgent: AgentRoute["agent"];
 }): Promise<NativeStagePacket> {
   return withWorkspaceLock(input.root, "research.native-stage.prepare", async () => {
@@ -297,6 +390,12 @@ export async function prepareNativeResearchStage(input: {
       }
     }
     const project = await loadProject(input.root, input.projectId);
+    if (input.stage === "discover") {
+      await registerProjectInputCandidates(input.root, project.id, project.inputs);
+    }
+    if (input.stage === "analyze" || input.stage === "synthesize") {
+      await loadCurrentEvidenceSnapshot(input.root, project.id);
+    }
     if (
       config.mode === "production-research" &&
       config.budget.maxCostUsd > config.budget.confirmationCostUsd &&
@@ -338,7 +437,14 @@ export async function prepareNativeResearchStage(input: {
         exitCode: 3,
       });
     }
-    const reservation = reservePackageBudget(project, workPackage, config);
+    const discovery =
+      input.stage === "discover"
+        ? await inspectDiscoveryProgress(input.root, project, config)
+        : null;
+    const reservedPackageTokens =
+      discovery?.plan.reservedDiscoverTokens ?? config.budget.packageMaxTokens[input.stage];
+    const stageOutputTokens = discovery?.plan.outputTokenLimit ?? config.budget.maxOutputTokens;
+    const reservation = reservePackageBudget(project, workPackage, config, reservedPackageTokens);
     const sessionId = randomUUID();
     let capsule: Capsule | null = null;
     let preparedStatePersisted = false;
@@ -346,6 +452,7 @@ export async function prepareNativeResearchStage(input: {
       capsule = await createCapsule(input.root, project, workPackage, sessionId, config);
       const stageContextContent = await stageContextForPackage(
         capsule.projectRoot,
+        project,
         workPackage,
         config,
       );
@@ -363,13 +470,16 @@ export async function prepareNativeResearchStage(input: {
         capsule.contextBundle,
         capsule.contextBundleContent,
         stageContextContent,
-        config.budget.maxBrokerCalls,
+        discovery,
+        await listEvidenceCandidates(input.root, project.id),
       );
       const prompt = [
         "Perform this producer stage in the current interactive host session. Do not launch codex exec, claude -p, or any other nested reasoning agent.",
         input.stage === "discover" && hasBrokeredEvidence
           ? "For every internet/database request, write one non-secret request JSON file and invoke the packet's fetchEvidence argv through the CLI control plane. Use only its returned bounded context and receipt. Do not use standalone web search as evidence."
-          : "Do not acquire additional evidence in this stage.",
+          : input.stage === "acquire"
+            ? "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. Register each exact downloaded/decomposed file with registerArtifact before submitting the audit. Never scan a download directory or infer success from file existence."
+            : "Do not acquire additional evidence in this stage.",
         basePrompt,
         "Save only the final schema-conforming JSON object to a new regular file, then submit it with the packet's submit command. The CLI remains the sole authority for validation and atomic promotion.",
       ].join("\n\n");
@@ -394,10 +504,11 @@ export async function prepareNativeResearchStage(input: {
             ? { inputOnlyProvenanceIds: capsule.inputManifest.map((record) => record.id) }
             : {},
         ),
+        discovery,
         limits: {
           maxOutputBytes: config.budget.maxBytesPerPackage,
-          maxOutputTokens: config.budget.maxOutputTokens,
-          reservedPackageTokens: config.budget.packageMaxTokens[input.stage],
+          maxOutputTokens: stageOutputTokens,
+          reservedPackageTokens,
           reservedMaxCostUsd: reservation.costUsd,
           maxWallSeconds: config.budget.packageMaxWallSeconds[input.stage],
         },
@@ -431,6 +542,80 @@ export async function prepareNativeResearchStage(input: {
                       item_offset: { type: "integer", minimum: 0 },
                       max_items: { type: "integer", minimum: 1 },
                       cache_mode: { enum: ["prefer", "bypass"] },
+                    },
+                  },
+                }
+              : null,
+          registerArtifact:
+            input.stage === "acquire"
+              ? {
+                  argv: [
+                    "tiangong-ai",
+                    "research",
+                    "project",
+                    "evidence",
+                    "artifact",
+                    "register",
+                    project.id,
+                    "--candidate",
+                    "<candidate-id>",
+                    "--path",
+                    "<absolute-file>",
+                    "--media-type",
+                    "<media-type>",
+                    "--workspace",
+                    input.root,
+                    "--json",
+                  ],
+                  supportedMediaTypes: [
+                    "application/pdf",
+                    "application/json",
+                    "text/plain",
+                    "text/markdown",
+                    "text/csv",
+                    "text/html",
+                    "application/zip",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                  ],
+                  optionalMetadataFields: [
+                    "source-url",
+                    "license",
+                    "license-url",
+                    "host-type",
+                    "article-version",
+                  ],
+                }
+              : null,
+          registerCandidate:
+            input.stage === "discover"
+              ? {
+                  argv: [
+                    "tiangong-ai",
+                    "research",
+                    "project",
+                    "evidence",
+                    "candidate",
+                    "register",
+                    project.id,
+                    "--record",
+                    "<absolute-candidate.json>",
+                    "--workspace",
+                    input.root,
+                    "--json",
+                  ],
+                  recordSchema: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: ["title"],
+                    anyOf: [{ required: ["url"] }, { required: ["doi"] }],
+                    properties: {
+                      title: { type: "string" },
+                      url: { type: "string", format: "uri" },
+                      doi: { type: "string" },
+                      publicationDate: { type: "string" },
+                      excerpt: { type: "string" },
                     },
                   },
                 }
@@ -472,6 +657,7 @@ export async function prepareNativeResearchStage(input: {
         rules: [
           "Current native host performs producer reasoning; the CLI does not spawn a producer.",
           "Only broker receipts or registered immutable inputs may support discover output.",
+          "Only exact, structurally validated, content-addressed artifacts may support full-text acquisition claims.",
           "Do not place credentials, cookies, authorization data, or sensitive URL parameters in request/output files.",
           "A file's existence is not success; submit performs schema, provenance, budget, hash, and atomic-commit checks.",
         ],
@@ -599,7 +785,7 @@ export async function submitNativeResearchStage(input: {
       const outputTokens = Math.ceil(
         Buffer.byteLength(raw, "utf8") / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
       );
-      const reservedTokens = config.budget.packageMaxTokens[session.packet.stage];
+      const reservedTokens = session.packet.limits.reservedPackageTokens;
       const result: ExecutionResult = {
         exitCode: 0,
         stdout: raw,
@@ -618,11 +804,11 @@ export async function submitNativeResearchStage(input: {
         workPackage,
         config,
         result,
-        config.budget.maxOutputTokens,
+        session.packet.limits.maxOutputTokens,
       );
       assertProjectedBudget(project, config, result);
       if (workPackage.stage === "discover") {
-        await assertEvidenceCoverage(
+        await assertDiscoveryCoverage(
           input.root,
           project,
           resolveContained(session.capsuleProject, "outputs/evidence.json"),
@@ -636,6 +822,32 @@ export async function submitNativeResearchStage(input: {
         config,
         null,
       );
+      if (workPackage.stage === "discover") {
+        await commitDiscoveryDecisions(
+          input.root,
+          project.id,
+          parseStructuredStageOutput("discover", raw).value,
+        );
+      }
+      if (workPackage.stage === "acquire") {
+        const audit = parseMaterializedAcquisitionAudit(
+          JSON.parse(
+            await readFile(
+              join(projectRoot(input.root, project.id), "outputs", "acquisition.json"),
+              "utf8",
+            ),
+          ),
+        );
+        await commitAcquisitionAssessments(input.root, project.id, audit);
+        await freezeEvidenceSnapshot(input.root, project);
+        outputs.push(
+          await fileRecord(
+            join(projectRoot(input.root, project.id), "outputs", "evidence-snapshot.json"),
+            "outputs/evidence-snapshot.json",
+          ),
+        );
+      }
+      await commitStageEvidenceBindings(input.root, project, workPackage);
       applyUsage(project, result);
       workPackage.status = "complete";
       workPackage.completedAt = new Date().toISOString();
@@ -816,7 +1028,20 @@ async function executeWorkPackage(
       accountedResult = result;
       promotedOutputs = await outputRecords(root, project, workPackage.expectedOutputs);
     } else {
-      const reservation = reservePackageBudget(project, workPackage, config);
+      if (["analyze", "synthesize", "review"].includes(workPackage.stage)) {
+        await loadCurrentEvidenceSnapshot(root, project.id);
+      }
+      const discovery =
+        workPackage.stage === "discover"
+          ? await inspectDiscoveryProgress(root, project, config)
+          : null;
+      const stageOutputTokens = discovery?.plan.outputTokenLimit ?? config.budget.maxOutputTokens;
+      const reservation = reservePackageBudget(
+        project,
+        workPackage,
+        config,
+        discovery?.plan.reservedDiscoverTokens,
+      );
       const capsule = await createCapsule(root, project, workPackage, runId, config);
       capsuleRoot = capsule.capsuleRoot;
       if (capsule.reviewPacketRecord) {
@@ -835,6 +1060,7 @@ async function executeWorkPackage(
       }
       const stageContextContent = await stageContextForPackage(
         capsule.projectRoot,
+        project,
         workPackage,
         config,
       );
@@ -866,11 +1092,13 @@ async function executeWorkPackage(
           capsule.contextBundle,
           capsule.contextBundleContent,
           stageContextContent,
-          config.budget.maxBrokerCalls,
+          discovery,
+          await listEvidenceCandidates(root, project.id),
         ),
         brokerUrl: primaryBrokerUrl,
         inputOnlyProvenance,
-        maxOutputTokens: Math.min(config.budget.maxOutputTokens, reservation.tokens),
+        maxOutputTokens: Math.min(stageOutputTokens, reservation.tokens),
+        ...(discovery ? { brokerCallBudget: discovery.plan.maxCalls } : {}),
         maxCostUsd: reservation.costUsd,
         expectedRuntime: runtimeForRoute(doctorAttestation, route),
       });
@@ -885,13 +1113,8 @@ async function executeWorkPackage(
       );
       accountedResult = result;
       assertExecutorSucceeded(result);
-      assertActualPackageBudget(
-        project,
-        workPackage,
-        config,
-        result,
-        config.budget.maxOutputTokens,
-      );
+      assertActualPackageBudget(project, workPackage, config, result, stageOutputTokens);
+      let acceptedRaw = result.stdout;
       try {
         await materializeAndValidateStageOutput(
           root,
@@ -950,8 +1173,9 @@ async function executeWorkPackage(
           workPackage,
           config,
           accountedResult,
-          config.budget.maxOutputTokens + config.budget.maxRepairTokens,
+          stageOutputTokens + config.budget.maxRepairTokens,
         );
+        acceptedRaw = repair.stdout;
         await materializeAndValidateStageOutput(
           root,
           project,
@@ -971,8 +1195,32 @@ async function executeWorkPackage(
         capsule.reviewPacketSha256,
       );
       if (workPackage.stage === "discover") {
-        await assertEvidenceCoverage(root, project);
+        await assertDiscoveryCoverage(root, project);
+        await commitDiscoveryDecisions(
+          root,
+          project.id,
+          parseStructuredStageOutput("discover", acceptedRaw).value,
+        );
       }
+      if (workPackage.stage === "acquire") {
+        const audit = parseMaterializedAcquisitionAudit(
+          JSON.parse(
+            await readFile(
+              join(projectRoot(root, project.id), "outputs", "acquisition.json"),
+              "utf8",
+            ),
+          ),
+        );
+        await commitAcquisitionAssessments(root, project.id, audit);
+        await freezeEvidenceSnapshot(root, project);
+        promotedOutputs.push(
+          await fileRecord(
+            join(projectRoot(root, project.id), "outputs", "evidence-snapshot.json"),
+            "outputs/evidence-snapshot.json",
+          ),
+        );
+      }
+      await commitStageEvidenceBindings(root, project, workPackage);
     }
 
     const completedAt = new Date().toISOString();
@@ -1240,6 +1488,27 @@ async function createCapsule(
   await writeTextAtomic(contextBundlePath, contextBundleContent);
   const contextBundle = await fileRecord(contextBundlePath, "inputs/context-bundle.txt");
   const evidenceReceipts = await stageProjectEvidence(root, project.id, capsuleProject);
+  const frozenSnapshot = ["analyze", "synthesize", "review"].includes(workPackage.stage)
+    ? await loadCurrentEvidenceSnapshot(root, project.id)
+    : null;
+  const evidenceArtifacts = frozenSnapshot
+    ? await stageEvidenceArtifacts(
+        root,
+        project.id,
+        capsuleProject,
+        new Set(frozenSnapshot.artifacts.map((artifact) => artifact.artifactId)),
+      )
+    : [];
+  if (
+    (workPackage.stage === "analyze" || workPackage.stage === "synthesize") &&
+    evidenceArtifacts.length
+  ) {
+    await writeProducerArtifactContext(
+      capsuleProject,
+      evidenceArtifacts,
+      Math.floor((config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN) / 2),
+    );
+  }
   await writeJsonAtomic(
     join(capsuleProject, "inputs", "evidence-receipts.json"),
     evidenceReceipts.map(reviewSafeReceipt),
@@ -1266,6 +1535,7 @@ async function createCapsule(
           capsuleProject,
           contextBundleContent,
           evidenceReceipts,
+          evidenceArtifacts,
           config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
         )
       : null;
@@ -1276,6 +1546,7 @@ async function createCapsule(
         project,
         inputManifest,
         evidenceReceipts,
+        evidenceArtifacts,
         reviewEvidenceContext.persistent,
       )
     : null;
@@ -1353,9 +1624,29 @@ async function writeReviewPacket(
   project: ProjectState,
   inputManifest: CapsuleInputRecord[],
   evidenceReceipts: Awaited<ReturnType<typeof loadProjectEvidenceReceipts>>,
+  evidenceArtifacts: Awaited<ReturnType<typeof stageEvidenceArtifacts>>,
   reviewEvidenceContext: OutputRecord,
 ): Promise<{ sha256: string; record: OutputRecord }> {
-  const artifactPaths = ["outputs/evidence.json", "outputs/analysis.json", "outputs/report.md"];
+  const snapshot = await loadCurrentEvidenceSnapshot(root, project.id);
+  const immutableSnapshots = await loadImmutableEvidenceSnapshotChain(
+    root,
+    project.id,
+    snapshot.snapshotSha256,
+  );
+  const snapshotChain = await Promise.all(
+    immutableSnapshots.map((immutableSnapshot) => {
+      const sha256 = immutableSnapshot.snapshotSha256;
+      const logicalPath = `evidence/snapshots/${sha256}.json`;
+      return fileRecord(resolveContained(projectRoot(root, project.id), logicalPath), logicalPath);
+    }),
+  );
+  const artifactPaths = [
+    "outputs/evidence.json",
+    "outputs/acquisition.json",
+    "outputs/evidence-snapshot.json",
+    "outputs/analysis.json",
+    "outputs/report.md",
+  ];
   const evidenceFiles = new Map<string, OutputRecord>();
   for (const receipt of evidenceReceipts) {
     for (const locator of [receipt.locator, receipt.contextLocator]) {
@@ -1365,6 +1656,14 @@ async function writeReviewPacket(
           await fileRecord(resolveContained(capsuleProject, locator), locator),
         );
       }
+    }
+  }
+  for (const artifact of evidenceArtifacts) {
+    if (!evidenceFiles.has(artifact.locator)) {
+      evidenceFiles.set(
+        artifact.locator,
+        await fileRecord(resolveContained(capsuleProject, artifact.locator), artifact.locator),
+      );
     }
   }
   const environment = await reviewEnvironmentPacket(root, project.id);
@@ -1385,10 +1684,18 @@ async function writeReviewPacket(
     projectId: project.id,
     questionSha256: sha256Text(project.question),
     evidenceRequirements: project.evidenceRequirements,
+    evidenceSnapshot: {
+      snapshotId: snapshot.snapshotId,
+      snapshotSha256: snapshot.snapshotSha256,
+      parentSnapshotId: snapshot.parentSnapshotId,
+      parentSnapshotSha256: snapshot.parentSnapshotSha256,
+    },
+    snapshotChain,
     inputs: inputManifest,
     reviewEvidenceContext,
     inputFiles: [...inputFiles.values()].sort((left, right) => left.path.localeCompare(right.path)),
     evidenceReceipts: evidenceReceipts.map(reviewSafeReceipt),
+    evidenceArtifacts,
     evidenceFiles: [...evidenceFiles.values()].sort((left, right) =>
       left.path.localeCompare(right.path),
     ),
@@ -1419,6 +1726,7 @@ async function writeReviewEvidenceContext(
   capsuleProject: string,
   inputContextBundle: string,
   evidenceReceipts: Awaited<ReturnType<typeof loadProjectEvidenceReceipts>>,
+  evidenceArtifacts: Awaited<ReturnType<typeof stageEvidenceArtifacts>>,
   maxBytes: number,
 ): Promise<{ capsule: OutputRecord; persistent: OutputRecord }> {
   const header = [
@@ -1434,14 +1742,22 @@ async function writeReviewEvidenceContext(
       active: true,
     },
   ];
-  const seen = new Set<string>();
-  for (const receipt of [...evidenceReceipts].sort((left, right) =>
-    left.attemptId.localeCompare(right.attemptId),
-  )) {
-    if (seen.has(receipt.contextLocator)) continue;
-    seen.add(receipt.contextLocator);
+  const seenUnreferencedContexts = new Set<string>();
+  const orderedReceipts = [...evidenceReceipts].sort((left, right) => {
+    const leftReferenced = (brokerReferences.get(left.attemptId)?.length ?? 0) > 0;
+    const rightReferenced = (brokerReferences.get(right.attemptId)?.length ?? 0) > 0;
+    if (leftReferenced !== rightReferenced) return leftReferenced ? -1 : 1;
+    return left.attemptId.localeCompare(right.attemptId);
+  });
+  for (const receipt of orderedReceipts) {
     const metadata = reviewSafeReceipt(receipt);
     const references = brokerReferences.get(receipt.attemptId) ?? [];
+    // Every admitted receipt gets its own exact projection even when another
+    // request produced identical bounded bytes. Only uncited duplicate views
+    // may be collapsed; otherwise random receipt UUID ordering can hide the
+    // one receipt actually cited by evidence.json.
+    if (references.length === 0 && seenUnreferencedContexts.has(receipt.contextLocator)) continue;
+    if (references.length === 0) seenUnreferencedContexts.add(receipt.contextLocator);
     const content = references.length
       ? await citedBrokerReviewContent(capsuleProject, receipt, references)
       : "[No admitted evidence source cites this receipt; its raw object and bounded context remain hash-bound in the review packet.]";
@@ -1457,6 +1773,37 @@ async function writeReviewEvidenceContext(
       active: references.length > 0,
     });
   }
+  for (const artifact of [...evidenceArtifacts].sort((left, right) =>
+    left.artifactId.localeCompare(right.artifactId),
+  )) {
+    const textArtifact = reviewableTextContentType(artifact.mediaType);
+    const content = textArtifact
+      ? sanitizeResearchText(
+          (await readFile(resolveContained(capsuleProject, artifact.locator), "utf8")).trimEnd(),
+        )
+      : "[Binary artifact omitted from model context; the complete structurally validated file remains hash-bound in the persistent review packet.]";
+    const safeMetadata = {
+      artifactId: artifact.artifactId,
+      candidateId: artifact.candidateId,
+      sha256: artifact.sha256,
+      bytes: artifact.bytes,
+      mediaType: artifact.mediaType,
+      originalFilename: artifact.originalFilename,
+      locator: artifact.locator,
+      validation: artifact.validation,
+    };
+    views.push({
+      prefix: [
+        `--- FROZEN EVIDENCE ARTIFACT ${artifact.artifactId} ---`,
+        `metadata: ${JSON.stringify(safeMetadata)}`,
+        "--- BEGIN BOUNDED REVIEW EXCERPT ---",
+        "",
+      ].join("\n"),
+      content,
+      suffix: "\n--- END BOUNDED REVIEW EXCERPT ---",
+      active: textArtifact,
+    });
+  }
   const fixedContent = [
     header,
     ...views.map((view) => `${view.prefix}${view.active ? "" : view.content}${view.suffix}`),
@@ -1470,7 +1817,7 @@ async function writeReviewEvidenceContext(
     });
   }
   const activeViews = views.filter((view) => view.active).length;
-  const contentBudgetPerView = Math.floor((maxBytes - fixedBytes) / activeViews);
+  const contentBudgetPerView = activeViews ? Math.floor((maxBytes - fixedBytes) / activeViews) : 0;
   const sections = [
     header,
     ...views.map(
@@ -1511,6 +1858,68 @@ async function writeReviewEvidenceContext(
     capsule,
     persistent: await fileRecord(persistentPath, persistentLogicalPath),
   };
+}
+
+async function writeProducerArtifactContext(
+  capsuleProject: string,
+  evidenceArtifacts: Awaited<ReturnType<typeof stageEvidenceArtifacts>>,
+  maxBytes: number,
+): Promise<OutputRecord> {
+  const header = [
+    "TIANGONG PRODUCER ARTIFACT CONTEXT v1",
+    "Only deterministic sanitized excerpts from producer-visible text artifacts are included. Binary files remain hash-bound but are not treated as read full text.",
+  ].join("\n");
+  const views = await Promise.all(
+    [...evidenceArtifacts]
+      .sort((left, right) => left.artifactId.localeCompare(right.artifactId))
+      .map(async (artifact) => {
+        const active = reviewableTextContentType(artifact.mediaType);
+        return {
+          prefix: [
+            `--- FROZEN ARTIFACT ${artifact.artifactId} ---`,
+            `candidateId: ${artifact.candidateId}`,
+            `sha256: ${artifact.sha256}`,
+            `mediaType: ${artifact.mediaType}`,
+            "--- BEGIN BOUNDED ARTIFACT CONTEXT ---",
+            "",
+          ].join("\n"),
+          content: active
+            ? sanitizeResearchText(
+                (
+                  await readFile(resolveContained(capsuleProject, artifact.locator), "utf8")
+                ).trimEnd(),
+              )
+            : "[Binary artifact is hash-bound but omitted from producer context. It is not counted as producer-visible full text.]",
+          suffix: "\n--- END BOUNDED ARTIFACT CONTEXT ---",
+          active,
+        };
+      }),
+  );
+  const fixed = `${header}\n\n${views
+    .map((view) => `${view.prefix}${view.active ? "" : view.content}${view.suffix}`)
+    .join("\n\n")}\n`;
+  const fixedBytes = Buffer.byteLength(fixed, "utf8");
+  if (fixedBytes > maxBytes) {
+    throw new CliError("Producer artifact metadata exceeds the configured context budget.", {
+      code: "RESEARCH_INPUT_CONTEXT_BUDGET_EXCEEDED",
+      exitCode: 3,
+      details: { fixedBytes, maxBytes, artifacts: views.length },
+    });
+  }
+  const activeViews = views.filter((view) => view.active).length;
+  const perView = activeViews ? Math.floor((maxBytes - fixedBytes) / activeViews) : 0;
+  const content = `${header}\n\n${views
+    .map(
+      (view) =>
+        `${view.prefix}${
+          view.active ? boundedUtf8ReviewExcerpt(view.content, perView) : view.content
+        }${view.suffix}`,
+    )
+    .join("\n\n")}\n`;
+  const logicalPath = "inputs/evidence-artifact-context.txt";
+  const path = resolveContained(capsuleProject, logicalPath);
+  await writeTextAtomic(path, content);
+  return fileRecord(path, logicalPath);
 }
 
 interface BrokerReviewReference {
@@ -1624,7 +2033,7 @@ function resolveReviewJsonPointer(value: unknown, pointer: string): unknown {
 }
 
 function reviewableTextContentType(contentType: string): boolean {
-  return /^(?:text\/|application\/(?:[^;]+\+)?(?:json|xml|javascript|xhtml\+xml|csv))(?:;|$)/i.test(
+  return /^(?:text\/[^;]+|application\/(?:[^;]+\+)?(?:json|xml|javascript|xhtml\+xml|csv))(?:;|$)/i.test(
     contentType,
   );
 }
@@ -1715,6 +2124,45 @@ async function loadVerifiedReviewPacket(
       code: "RESEARCH_REVIEW_CONTEXT_DRIFT",
       exitCode: 3,
     });
+  }
+  const snapshotChain = packet.snapshotChain;
+  if (!Array.isArray(snapshotChain)) {
+    throw new CliError("Persistent review packet has no evidence snapshot chain.", {
+      code: "RESEARCH_REVIEW_PACKET_DRIFT",
+      exitCode: 3,
+    });
+  }
+  for (const record of snapshotChain) {
+    if (
+      !isObject(record) ||
+      typeof record.path !== "string" ||
+      typeof record.sha256 !== "string" ||
+      !Number.isInteger(record.bytes) ||
+      !/^evidence\/snapshots\/[0-9a-f]{64}\.json$/.test(record.path)
+    ) {
+      throw new CliError("Persistent review packet has an invalid snapshot-chain record.", {
+        code: "RESEARCH_REVIEW_PACKET_DRIFT",
+        exitCode: 3,
+      });
+    }
+    let actual: OutputRecord;
+    try {
+      actual = await fileRecord(
+        resolveContained(projectRoot(root, projectId), record.path),
+        record.path,
+      );
+    } catch {
+      throw new CliError("Persistent review snapshot chain is missing.", {
+        code: "RESEARCH_REVIEW_PACKET_DRIFT",
+        exitCode: 3,
+      });
+    }
+    if (actual.sha256 !== record.sha256 || actual.bytes !== record.bytes) {
+      throw new CliError("Persistent review snapshot chain failed hash verification.", {
+        code: "RESEARCH_REVIEW_PACKET_DRIFT",
+        exitCode: 3,
+      });
+    }
   }
   return fileRecord(path, logicalPath);
 }
@@ -1828,6 +2276,7 @@ function agentRequest(input: {
   brokerUrl: string | null;
   inputOnlyProvenance: boolean;
   maxOutputTokens: number;
+  brokerCallBudget?: number;
   maxCostUsd: number;
   maxWallSeconds?: number;
   expectedRuntime?: WorkspaceDoctorAttestation["runtimes"][number] | undefined;
@@ -1862,7 +2311,8 @@ function agentRequest(input: {
     maxTurns,
     maxOutputTokens: input.maxOutputTokens,
     maxToolContextTokens: input.brokerUrl
-      ? input.config.budget.maxBrokerContextTokens * input.config.budget.maxBrokerCalls
+      ? input.config.budget.maxBrokerContextTokens *
+        (input.brokerCallBudget ?? input.config.budget.maxBrokerCalls)
       : 0,
     maxCostUsd: input.maxCostUsd,
     expectedRuntime: input.expectedRuntime,
@@ -1907,8 +2357,21 @@ async function materializeAndValidateStageOutput(
   const destination = resolveContained(capsuleProject, workPackage.expectedOutputs[0]!);
   const fileContent =
     workPackage.stage === "discover"
-      ? `${JSON.stringify(normalizeEvidenceCoverage(project, parsed.value), null, 2)}\n`
-      : parsed.fileContent;
+      ? `${JSON.stringify(
+          normalizeEvidenceCoverage(
+            project,
+            await materializeDiscoveryEvidence(root, project, parsed.value),
+          ),
+          null,
+          2,
+        )}\n`
+      : workPackage.stage === "acquire"
+        ? `${JSON.stringify(
+            await materializeAcquisitionAudit(root, project, parsed.value),
+            null,
+            2,
+          )}\n`
+        : parsed.fileContent;
   await writeTextAtomic(destination, fileContent);
   await validateOutputShape(root, project, workPackage, destination, reviewPacketSha256);
   if (parsed.normalizations.length > 0) {
@@ -1966,15 +2429,24 @@ async function validateOutputShape(
 ): Promise<void> {
   const content = await readFile(path, "utf8");
   if (!content.trim()) throw deterministicError(`${workPackage.expectedOutputs[0]} is empty.`);
-  if (workPackage.stage === "synthesize") return;
+  if (workPackage.stage === "synthesize") {
+    await validateSynthesisDocument(path, content);
+    return;
+  }
+  if (workPackage.stage === "discover") {
+    const value = parseEvidenceRecord(content);
+    await validateEvidenceSources(root, project, value.sources as unknown[]);
+    return;
+  }
+  if (workPackage.stage === "acquire") {
+    parseMaterializedAcquisitionAudit(JSON.parse(content));
+    return;
+  }
   const { value } = parseStructuredStageOutput(
     workPackage.stage as AgentPackageStage,
     content,
     reviewPacketSha256,
   );
-  if (workPackage.stage === "discover") {
-    await validateEvidenceSources(root, project, value.sources as unknown[]);
-  }
   if (workPackage.stage === "analyze") {
     await validateFindings(path, value.findings as unknown[]);
   }
@@ -2067,10 +2539,10 @@ async function validateEvidenceSources(
 }
 
 async function validateFindings(path: string, findings: unknown[]): Promise<void> {
-  const evidencePath = join(dirname(path), "evidence.json");
+  const evidencePath = join(dirname(path), "evidence-snapshot.json");
   const evidence = JSON.parse(await readFile(evidencePath, "utf8")) as unknown;
   if (!isObject(evidence) || !Array.isArray(evidence.sources)) {
-    throw deterministicError("Analysis requires admitted evidence.json.");
+    throw deterministicError("Analysis requires a frozen evidence-snapshot.json.");
   }
   const sourceIds = new Set(
     evidence.sources
@@ -2099,6 +2571,108 @@ async function validateFindings(path: string, findings: unknown[]): Promise<void
     }
     findingIds.add(finding.id);
   }
+}
+
+async function validateSynthesisDocument(path: string, content: string): Promise<void> {
+  const validation: string[] = [];
+  if ([...content.matchAll(/`([^`\n]*)`/g)].some((match) => /https?:\/\//i.test(match[1] ?? ""))) {
+    validation.push("URLs must be real Markdown links or bare links, not inline-code literals");
+  }
+  if (/%(?:60|0a|0d)|\\u0060|https?:\/\/[^\s<>"'`)\]]*`/i.test(content)) {
+    validation.push("URLs contain encoded or literal backtick/newline contamination");
+  }
+  const markdownTargets: string[] = [];
+  for (const match of content.matchAll(/!?\[[^\]\n]*\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g)) {
+    if (match[1]) markdownTargets.push(stripMarkdownDestination(match[1]));
+  }
+  const referenceIds = new Set<string>();
+  for (const match of content.matchAll(/^\s*\[([^\]\n]+)\]:\s*(\S+)/gm)) {
+    const id = match[1]!.trim().toLowerCase().replace(/\s+/g, " ");
+    if (referenceIds.has(id)) validation.push(`duplicate Markdown reference ID: ${id}`);
+    referenceIds.add(id);
+    markdownTargets.push(stripMarkdownDestination(match[2]!));
+  }
+  for (const target of markdownTargets) {
+    await validateReportTarget(path, target, validation);
+  }
+  const urls = new Set(
+    [...content.matchAll(/https?:\/\/[^\s<>"'`)\]]+/gi)]
+      .map((match) => stripTrailingUrlPunctuation(match[0]))
+      .filter(Boolean),
+  );
+  for (const value of urls) validateReportHttpsUrl(value, validation);
+  if (validation.length) {
+    throw new StructuredOutputError("Synthesis output failed mechanical link QA.", {
+      validation: [...new Set(validation)].slice(0, 20),
+    });
+  }
+}
+
+async function validateReportTarget(
+  reportPath: string,
+  target: string,
+  validation: string[],
+): Promise<void> {
+  if (!target || target.startsWith("#")) return;
+  if (/^https?:\/\//i.test(target)) {
+    validateReportHttpsUrl(target, validation);
+    return;
+  }
+  if (/^mailto:/i.test(target)) return;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(target)) {
+    validation.push(`unsupported Markdown link scheme: ${target.split(":", 1)[0]}`);
+    return;
+  }
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(target.split(/[?#]/, 1)[0] ?? "");
+  } catch {
+    validation.push("Markdown link contains invalid percent encoding");
+    return;
+  }
+  if (!decoded || isAbsolute(decoded)) {
+    validation.push("Markdown local links must be relative files inside the research capsule");
+    return;
+  }
+  const capsuleProject = dirname(dirname(reportPath));
+  const selected = resolve(dirname(reportPath), decoded);
+  if (relative(capsuleProject, selected).startsWith("..")) {
+    validation.push("Markdown local link escapes the research capsule");
+    return;
+  }
+  const info = await lstat(selected).catch(() => undefined);
+  if (!info?.isFile() || info.isSymbolicLink()) {
+    validation.push(`Markdown local link does not resolve to a regular file: ${decoded}`);
+  }
+}
+
+function validateReportHttpsUrl(value: string, validation: string[]): void {
+  if (/%(?:60|0a|0d)|`/i.test(value)) {
+    validation.push("URL contains encoded or literal backtick/newline contamination");
+    return;
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    validation.push("report contains an invalid URL");
+    return;
+  }
+  if (url.protocol !== "https:") validation.push(`report URL must use HTTPS: ${url.host}`);
+  if (url.username || url.password) validation.push("report URL contains embedded credentials");
+  const sensitive =
+    /^(access_token|api[_-]?key|apikey|auth|authorization|code|cookie|key|password|secret|session|sig|signature|token)$/i;
+  if ([...url.searchParams.keys()].some((key) => sensitive.test(key))) {
+    validation.push("report URL contains sensitive query parameters");
+  }
+}
+
+function stripMarkdownDestination(value: string): string {
+  return value.startsWith("<") && value.endsWith(">") ? value.slice(1, -1) : value;
+}
+
+function stripTrailingUrlPunctuation(value: string): string {
+  return value.replace(/[),.;!?`]+$/g, "");
 }
 
 function normalizeEvidenceCoverage(
@@ -2224,7 +2798,7 @@ function computeEvidenceCoverage(
   };
 }
 
-async function assertEvidenceCoverage(
+async function assertDiscoveryCoverage(
   root: string,
   project: ProjectState,
   evidencePath?: string,
@@ -2235,7 +2809,10 @@ async function assertEvidenceCoverage(
   const sources = value.sources as Array<Record<string, unknown>>;
   const declared = value.coverage as Record<string, unknown>;
   const computed = computeEvidenceCoverage(project, sources, declared);
-  const gaps = [...computed.mechanicalGaps];
+  // Full-text acquisition is intentionally the next phase. Discovery must
+  // establish breadth, dates, source types and dimensions, but cannot claim
+  // that a search-result receipt is already acquired full text.
+  const gaps = computed.mechanicalGaps.filter((gap) => !/full-text source\(s\)/.test(gap));
   const requiredCapabilities = requiredDiscoveryCapabilityIds(
     await loadCapabilityDeclarations(root),
   );
@@ -2284,9 +2861,6 @@ async function assertEvidenceCoverage(
   ) {
     gaps.push("coverage summary does not match admitted sources");
   }
-  if (declared.decision !== computed.decision) {
-    gaps.push(`coverage decision must be ${computed.decision}`);
-  }
   if (gaps.length) {
     throw new CliError("Evidence coverage is insufficient; downstream packages were not started.", {
       code: "RESEARCH_EVIDENCE_INSUFFICIENT",
@@ -2326,9 +2900,14 @@ async function closeProjectMechanically(
   project: ProjectState,
   workPackage: WorkPackage,
 ): Promise<ExecutionResult> {
-  await assertEvidenceCoverage(root, project);
+  const snapshot = await loadCurrentEvidenceSnapshot(root, project.id);
+  project.evidenceState.currentSnapshotId = snapshot.snapshotId;
+  project.evidenceState.currentSnapshotSha256 = snapshot.snapshotSha256;
+  project.evidenceState.closureSnapshotId = snapshot.snapshotId;
   const required = [
     "outputs/evidence.json",
+    "outputs/acquisition.json",
+    "outputs/evidence-snapshot.json",
     "outputs/analysis.json",
     "outputs/report.md",
     "outputs/review.json",
@@ -2345,6 +2924,7 @@ async function closeProjectMechanically(
     throw deterministicError("Project review does not bind a valid review packet hash.");
   }
   const reviewPacket = await loadVerifiedReviewPacket(root, project.id, review.packetSha256);
+  await verifyReviewLedgerBinding(root, project.id, snapshot.snapshotId, review.packetSha256);
   const evidenceReceipts = await loadProjectEvidenceReceipts(root, project.id);
   const journal = await verifyJournal(workspacePaths(root).journal);
   const closure = {
@@ -2354,6 +2934,12 @@ async function closeProjectMechanically(
     closedAt: new Date().toISOString(),
     questionSha256: sha256Text(project.question),
     evidenceRequirements: project.evidenceRequirements,
+    evidenceSnapshot: {
+      snapshotId: snapshot.snapshotId,
+      snapshotSha256: snapshot.snapshotSha256,
+      parentSnapshotId: snapshot.parentSnapshotId,
+      parentSnapshotSha256: snapshot.parentSnapshotSha256,
+    },
     inputs: project.inputs.map((input) => ({
       id: input.id,
       role: input.role,
@@ -2379,6 +2965,97 @@ async function closeProjectMechanically(
   );
   await writeJsonAtomic(closurePath, closure);
   return zeroExecutionResult();
+}
+
+async function commitStageEvidenceBindings(
+  root: string,
+  project: ProjectState,
+  workPackage: WorkPackage,
+): Promise<void> {
+  if (workPackage.stage !== "analyze" && workPackage.stage !== "review") return;
+  const snapshot = await loadCurrentEvidenceSnapshot(root, project.id);
+  const events = await readJournal(evidenceLedgerPath(root, project.id));
+  if (workPackage.stage === "analyze") {
+    const path = join(projectRoot(root, project.id), "outputs", "analysis.json");
+    const value = JSON.parse(await readFile(path, "utf8")) as unknown;
+    if (!isObject(value) || !Array.isArray(value.findings)) {
+      throw deterministicError("Analysis claim bindings require a valid analysis output.");
+    }
+    const committed = new Set(
+      events
+        .filter((event) => event.type === "claim.used")
+        .map((event) => String(event.payload.bindingSha256)),
+    );
+    for (const finding of value.findings) {
+      if (
+        !isObject(finding) ||
+        typeof finding.id !== "string" ||
+        !Array.isArray(finding.evidence) ||
+        finding.evidence.some((sourceId) => typeof sourceId !== "string")
+      ) {
+        throw deterministicError("Analysis contains an invalid claim binding.");
+      }
+      const binding = {
+        claimId: finding.id,
+        snapshotId: snapshot.snapshotId,
+        sourceIds: [...finding.evidence].sort(),
+        claimSha256: sha256Text(canonicalJson(finding)),
+      };
+      const bindingSha256 = sha256Text(canonicalJson(binding));
+      if (committed.has(bindingSha256)) continue;
+      await appendEvidenceLedgerEvent(root, project.id, "claim.used", {
+        ...binding,
+        bindingSha256,
+      });
+    }
+    return;
+  }
+  const path = join(projectRoot(root, project.id), "outputs", "review.json");
+  const value = JSON.parse(await readFile(path, "utf8")) as unknown;
+  if (!isObject(value) || value.decision !== "pass" || typeof value.packetSha256 !== "string") {
+    throw deterministicError("Review binding requires a passing schema-valid review.");
+  }
+  const binding = {
+    snapshotId: snapshot.snapshotId,
+    packetSha256: value.packetSha256,
+    reviewSha256: await sha256File(path),
+    decision: value.decision,
+  };
+  const bindingSha256 = sha256Text(canonicalJson(binding));
+  if (
+    events.some(
+      (event) => event.type === "review.bound" && event.payload.bindingSha256 === bindingSha256,
+    )
+  ) {
+    return;
+  }
+  await appendEvidenceLedgerEvent(root, project.id, "review.bound", {
+    ...binding,
+    bindingSha256,
+  });
+}
+
+async function verifyReviewLedgerBinding(
+  root: string,
+  projectId: string,
+  snapshotId: string,
+  packetSha256: string,
+): Promise<void> {
+  const reviewPath = join(projectRoot(root, projectId), "outputs", "review.json");
+  const reviewSha256 = await sha256File(reviewPath);
+  const events = await readJournal(evidenceLedgerPath(root, projectId));
+  const bound = events.some(
+    (event) =>
+      event.type === "review.bound" &&
+      event.payload.snapshotId === snapshotId &&
+      event.payload.packetSha256 === packetSha256 &&
+      event.payload.reviewSha256 === reviewSha256,
+  );
+  if (!bound) {
+    throw deterministicError(
+      "Project review is not bound to the current evidence snapshot ledger.",
+    );
+  }
 }
 
 async function verifyProjectInputBindings(project: ProjectState): Promise<void> {
@@ -2434,22 +3111,45 @@ async function outputRecords(
 
 async function stageContextForPackage(
   capsuleProject: string,
+  project: ProjectState,
   workPackage: WorkPackage,
   config: WorkspaceConfig,
 ): Promise<string> {
   const logicalPaths =
-    workPackage.stage === "analyze"
-      ? ["outputs/evidence.json"]
-      : workPackage.stage === "synthesize"
-        ? ["outputs/evidence.json", "outputs/analysis.json"]
-        : workPackage.stage === "review"
+    workPackage.stage === "discover" && project.lineage.kind === "addendum"
+      ? ["outputs/base-evidence-snapshot.json"]
+      : workPackage.stage === "acquire"
+        ? [
+            "outputs/evidence.json",
+            ...(project.lineage.kind === "addendum" ? ["outputs/base-evidence-snapshot.json"] : []),
+          ]
+        : workPackage.stage === "analyze"
           ? [
-              "inputs/review-evidence-context.txt",
-              "outputs/evidence.json",
-              "outputs/analysis.json",
-              "outputs/report.md",
+              "outputs/evidence-snapshot.json",
+              ...((await pathExists(
+                resolveContained(capsuleProject, "inputs/evidence-artifact-context.txt"),
+              ))
+                ? ["inputs/evidence-artifact-context.txt"]
+                : []),
             ]
-          : [];
+          : workPackage.stage === "synthesize"
+            ? [
+                "outputs/evidence-snapshot.json",
+                "outputs/analysis.json",
+                ...((await pathExists(
+                  resolveContained(capsuleProject, "inputs/evidence-artifact-context.txt"),
+                ))
+                  ? ["inputs/evidence-artifact-context.txt"]
+                  : []),
+              ]
+            : workPackage.stage === "review"
+              ? [
+                  "inputs/review-evidence-context.txt",
+                  "outputs/evidence-snapshot.json",
+                  "outputs/analysis.json",
+                  "outputs/report.md",
+                ]
+              : [];
   const sections: string[] = [];
   for (const logicalPath of logicalPaths) {
     const content = await readFile(resolveContained(capsuleProject, logicalPath), "utf8");
@@ -2460,13 +3160,17 @@ async function stageContextForPackage(
     Buffer.byteLength(bundled, "utf8") / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
   );
   const maxStageContextTokens =
-    workPackage.stage === "review"
-      ? config.budget.maxInputContextTokens + config.budget.maxOutputTokens * 3
-      : workPackage.stage === "synthesize"
-        ? config.budget.maxOutputTokens * 2
-        : workPackage.stage === "analyze"
-          ? config.budget.maxOutputTokens
-          : 0;
+    workPackage.stage === "discover" && project.lineage.kind === "addendum"
+      ? config.budget.maxInputContextTokens
+      : workPackage.stage === "review"
+        ? config.budget.maxInputContextTokens + config.budget.maxOutputTokens * 4
+        : workPackage.stage === "synthesize"
+          ? config.budget.maxInputContextTokens
+          : workPackage.stage === "analyze"
+            ? config.budget.maxInputContextTokens
+            : workPackage.stage === "acquire"
+              ? config.budget.maxOutputTokens
+              : 0;
   if (estimatedTokens > maxStageContextTokens) {
     throw new CliError(
       `Admitted stage context exceeds the configured input context limit for ${workPackage.id}.`,
@@ -2494,13 +3198,16 @@ function packagePrompt(
   contextBundle: OutputRecord,
   contextBundleContent: string,
   stageContextContent: string,
-  maxBrokerCalls: number,
+  discovery: DiscoveryProgress | null,
+  evidenceCandidates: Awaited<ReturnType<typeof listEvidenceCandidates>>,
 ): string {
   const stageInstructions: Record<WorkPackage["stage"], string> = {
     discover:
-      "Return the evidence object defined by the supplied JSON Schema. Cite only declared inputs or broker receipts. Each source.id is your concise evidence label; it must not be reused as provenance.id. For declared inputs, provenance must use the exact id and path shown in the declared input manifest, with locator=path. Every declared input binds an exact registered full source, so fullTextAvailable=true even when fullTextStaged=false; that flag means the producer receives only its bounded context while independent review binds both the verified full-file hash and the exact bounded review view. For broker evidence, provenance.id must be the exact receipt attemptId and locator must be the receipt locator (not contextLocator); use contextLocator only to inspect the bounded view. Include source type, retrieval metadata, an excerpt or JSON Pointer when available, quality, applicability, coverage dimensions, limitations, and an honest coverage assessment. A partial dimension is usable but incomplete; missing means no admitted source covers it. coverage.gaps records qualitative limitations and does not alone force an insufficient decision. The CLI mechanically derives local-input full-text availability, sourceTypes, counts, date range, sourceIds, and the pass/insufficient decision from admitted sources and declared minimums. Never place credentials or sensitive URL parameters in any field.",
+      "Return only compact admission judgments defined by the supplied JSON Schema. The control plane has already assigned every immutable input and broker result a candidateId and retains its title, URL, DOI, dates, receipt, locator, JSON Pointer, hashes, and retrieval metadata. Reference candidateId; never repeat or invent those deterministic fields. Give each admitted candidate a concise sourceId plus source type, relevance, quality, applicability, coverage dimensions, and limitations. Record only meaningful explicit rejections; omitted candidates remain unassessed for later gap filling. Report one judgment for every reviewed dimension. Native Web or Browser discoveries are supplemental candidates only and cannot be admitted until an immutable broker receipt is attached to the same canonical URL or DOI. The CLI mechanically joins judgments to provenance, derives counts/date range/coverage, and rejects unknown or unformalized candidates.",
+    acquire:
+      "Audit every provisionally admitted source exactly once. For each source, bind its ledger candidateId, list only artifactIds returned by the exact artifact registration command, and choose accepted, limited, or rejected with a concise rationale and explicit limitations. A broker receipt is an immutable discovery record but is not full text. Use an empty artifactIds array only when intentionally retaining a source as metadata/abstract evidence or when the source is an already registered local input. Put unresolved blocking acquisition or coverage deficiencies in gaps; put honest non-blocking scope constraints in limitations. Do not invent file paths, hashes, URLs, artifact IDs, or successful downloads.",
     analyze:
-      "Use only the complete embedded admitted evidence below and return the schema-defined analysis object. Every finding must cite admitted evidence source IDs and state uncertainty and applicability.",
+      "Use only the complete embedded frozen evidence snapshot below and return the schema-defined analysis object. Every finding must cite source IDs present in that snapshot and state uncertainty and applicability. When the snapshot has a parent, use its mechanical delta to focus re-analysis on added, changed, and removed evidence while still returning one complete current analysis.",
     synthesize:
       "Use only the complete embedded admitted evidence and findings below. Return the schema-defined object whose reportMarkdown separates supported conclusions, uncertainty, limitations, and next actions. Use real Markdown line breaks encoded exactly once for JSON; never place literal /n or double-escaped \\n markers in reportMarkdown. When the admitted publication-date range is narrower than the requested range, state the exact admitted range and missing interval prominently in the opening summary.",
     review: `Independently inspect the complete embedded artifacts and globally bounded evidence excerpts. The CLI has already verified every bound full evidence object's size and SHA-256 and persistently stored the complete review packet; its hash is schema-bound even though the packet metadata is not duplicated in model context. Do not claim to have read beyond the embedded excerpts. Return the schema-defined review bound to packetSha256 ${reviewPacketSha256 ?? "unavailable"}. Use pass only when every material claim is traceable within the admitted evidence and clearly scoped to its limitations.`,
@@ -2517,9 +3224,11 @@ function packagePrompt(
     `Staged capability directories: ${JSON.stringify(stagedSkills.map((path) => `skills/${basename(path)}`))}`,
     workPackage.stage === "discover"
       ? "The exact capability manifest and each staged external SKILL.md are embedded below. Use this documentation directly; filesystem tools are disabled."
-      : "Capability files are provenance-bound but are not available as execution tools in this stage.",
+      : workPackage.stage === "acquire"
+        ? "Use the installed external acquisition/document Skills in the current native host, but treat the CLI artifact registry and acquisition schema as the only authority for durable evidence."
+        : "Capability files are provenance-bound but are not available as execution tools in this stage.",
     workPackage.stage === "discover"
-      ? `Use the broker only, with at most ${maxBrokerCalls} total fetch_candidate_source calls. Prefer broad, high-yield queries and stop querying once the declared coverage minimums are met. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. Invoke fetch_candidate_source with the manifest capability ID and obey its exact declared HTTP method. GET capabilities use only declared query parameters; POST capabilities require request_body containing only the documented non-secret request JSON. Never place API keys, tokens, authorization data, cookies, or other credential-like fields in request_body. The broker injects the sole declared logical credential, disables caching for credentialed requests, and never persists the POST body (only its hash). The tool result includes the exact bounded context together with its receipt and remaining call budget; use that inline context and its provenance fields. Exercise every manifest capability with requiredForDiscovery=true, or the mechanical coverage gate will stop downstream work.`
+      ? `Follow the reviewed discovery plan: ${JSON.stringify(discovery)}. The plan's max broker-view count is a hard working ceiling, not a target to exhaust. Execute required first-pass channels before supplemental channels, prefer broad high-yield queries, assess registered candidates between batches, and use the next gap-fill batch only for explicit uncovered dimensions, source types, date ranges, full text, limitations, or counterevidence. Stop fetching as soon as the declared coverage minimums are supportable. Use the broker only. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. Invoke fetch_candidate_source with the manifest capability ID and obey its exact declared HTTP method. GET capabilities use only declared query parameters; POST capabilities require request_body containing only the documented non-secret request JSON. Never place API keys, tokens, authorization data, cookies, or other credential-like fields in request_body. The broker injects the sole declared logical credential, disables caching for credentialed requests, and never persists the POST body (only its hash). The tool result includes exact bounded context, registered candidate IDs, its receipt, whether a network call was avoided, and remaining view budget. Exercise every manifest capability with requiredForDiscovery=true, or the mechanical coverage gate will stop downstream work.`
       : "Use only the complete embedded stage context; no tools or additional source reads are allowed.",
     stageInstructions[workPackage.stage],
     "Do not write stage output files directly. Your final response must be only the JSON object required by the supplied output schema; the CLI will validate and atomically materialize it.",
@@ -2527,11 +3236,19 @@ function packagePrompt(
   ];
   if (workPackage.stage === "discover") {
     prompt.push(
+      `Candidate index already registered at stage start: ${JSON.stringify(
+        evidenceCandidates.map((candidate) => ({
+          candidateId: candidate.id,
+          title: candidate.title,
+          url: candidate.url,
+          doi: candidate.doi,
+          publicationDate: candidate.publicationDate,
+          excerpt: candidate.excerpt,
+          originKind: candidate.origin.kind,
+        })),
+      )}`,
       "The complete external capability documentation bundle is embedded below:",
       capabilityDocumentation,
-      `Exact local-input provenance mappings: ${JSON.stringify(
-        inputs.map((input) => ({ kind: "input", id: input.id, locator: input.path })),
-      )}`,
       "The complete authorized local-input context is embedded below. Use it directly and do not re-read individual local input files. Full evidence files are intentionally withheld from producer packages when fullTextStaged=false.",
       contextBundleContent,
     );
@@ -2607,10 +3324,12 @@ function reservePackageBudget(
   project: ProjectState,
   workPackage: WorkPackage,
   config: WorkspaceConfig,
+  requestedTokens?: number,
 ): { tokens: number; costUsd: number } {
   if (workPackage.stage === "close") return { tokens: 0, costUsd: 0 };
   const route = workPackage.executor === "reviewer" ? config.reviewer : config.producer;
-  const tokens = config.budget.packageMaxTokens[workPackage.stage];
+  const packageMaximum = config.budget.packageMaxTokens[workPackage.stage];
+  const tokens = Math.min(packageMaximum, requestedTokens ?? packageMaximum);
   const costUsd = roundMoney(reservedAgentPackageCost(route, tokens, config));
   const wallSeconds = config.budget.packageMaxWallSeconds[workPackage.stage];
   const remaining = remainingBudget(project, config);
@@ -3127,6 +3846,9 @@ function assertPublicEvidenceUrl(value: string, sourceId: string): void {
     url = new URL(value);
   } catch {
     throw deterministicError(`Evidence source ${sourceId} contains an invalid URL.`);
+  }
+  if (url.protocol !== "https:") {
+    throw deterministicError(`Evidence source ${sourceId} URL must use HTTPS.`);
   }
   if (url.username || url.password) {
     throw deterministicError(`Evidence source ${sourceId} URL contains credentials.`);

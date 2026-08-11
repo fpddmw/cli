@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chmod, link, lstat, mkdir, open, readFile, readdir, rm } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { hostname, homedir, platform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -266,8 +266,7 @@ const MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
 export async function createResearchSetupPlan(
   input: ResearchSetupPlanInput,
 ): Promise<ResearchSetupPlan> {
-  const root = requireAbsoluteWorkspace(input.workspace);
-  await assertWorkspaceDirectory(root);
+  const root = await resolveResearchSetupWorkspacePath(input.workspace);
   const scope = input.scope ?? "project";
   const agents = normalizeAgents(input.agents ?? ["codex"]);
   const agentRoutes = normalizeAgentRoutes(input.agentRoutes);
@@ -3029,6 +3028,12 @@ async function runAcademicPaperCompanion(input: {
   }
   const result = results[0];
   if (execution.exitCode !== 0 || result.success !== true) {
+    const sourcesTried = Array.isArray(result.sources_tried)
+      ? result.sources_tried
+          .filter((source): source is string => typeof source === "string")
+          .map((source) => sanitizeResearchText(source).slice(0, 100))
+      : [];
+    const adapterError = sanitizeResearchRecord(isObject(result.error) ? result.error : {});
     if (
       result.success === false &&
       isObject(result.browser_handoff) &&
@@ -3044,7 +3049,7 @@ async function runAcademicPaperCompanion(input: {
           skillId: input.skill.id,
           skillTreeSha256: input.skill.expectedTreeSha256,
           querySha256: sha256Text(doi ?? title!),
-          sourcesTried: Array.isArray(result.sources_tried) ? result.sources_tried : [],
+          sourcesTried,
           artifactCommitted: false,
         },
       );
@@ -3056,21 +3061,35 @@ async function runAcademicPaperCompanion(input: {
         skillId: input.skill.id,
         role: input.skill.role,
         artifactCommitted: false,
-        sourcesTried: Array.isArray(result.sources_tried) ? result.sources_tried : [],
-        error: sanitizeResearchRecord(isObject(result.error) ? result.error : {}),
+        sourcesTried,
+        error: adapterError,
         provenance: companionProvenance(input.plan, input.skill),
         next: "Automatic legal OA sources were exhausted. Follow the installed academic-paper-download browser-handoff reference explicitly; no browser is launched or selected automatically.",
       };
     }
+    const adapterCode =
+      typeof adapterError.code === "string"
+        ? sanitizeResearchText(adapterError.code).trim().slice(0, 100)
+        : "unknown-adapter-error";
+    const adapterMessage =
+      typeof adapterError.message === "string"
+        ? sanitizeResearchText(adapterError.message).trim().slice(0, 500)
+        : "";
     throw setupError({
       code: "RESEARCH_SETUP_COMPANION_COMMAND_FAILED",
       step: "companion-paper-download",
-      reason: `The pinned paper adapter exited with status ${execution.exitCode}.`,
+      reason: `The pinned paper adapter failed (${adapterCode}; exit status ${execution.exitCode}).`,
       minimumAction:
+        adapterMessage ||
         sanitizeResearchText(execution.stderr).trim().slice(0, 500) ||
         "Inspect the structured adapter error and verify its pinned Python dependencies.",
       retryCommand: `tiangong-ai research setup doctor --workspace ${input.root} --json`,
       exitCode: 3,
+      diagnostics: {
+        adapterError,
+        sourcesTried,
+        artifactCommitted: false,
+      },
     });
   }
   const artifactPath = requireContainedArtifactPath(result.file, outputDirectory, "file");
@@ -3649,9 +3668,28 @@ function requireAbsoluteWorkspace(value: string): string {
   return resolve(value);
 }
 
-async function assertWorkspaceDirectory(root: string): Promise<void> {
+export async function resolveResearchSetupWorkspacePath(
+  value: string,
+  options: { allowMissingLeaf?: boolean } = {},
+): Promise<string> {
+  const root = requireAbsoluteWorkspace(value);
   const info = await lstat(root).catch(() => undefined);
-  if (!info?.isDirectory() || info.isSymbolicLink()) {
+  if (info) {
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw setupError({
+        code: "RESEARCH_SETUP_WORKSPACE_INVALID",
+        step: "workspace",
+        reason: "Setup workspace must exist as a regular non-symlink directory.",
+        minimumAction: `Create the directory explicitly, then retry with --workspace ${root}.`,
+        retryCommand: "tiangong-ai research setup --help",
+        exitCode: 2,
+      });
+    }
+    const canonicalRoot = await realpath(root);
+    await assertNoSymlinkedExistingPath(canonicalRoot);
+    return canonicalRoot;
+  }
+  if (!options.allowMissingLeaf) {
     throw setupError({
       code: "RESEARCH_SETUP_WORKSPACE_INVALID",
       step: "workspace",
@@ -3661,7 +3699,25 @@ async function assertWorkspaceDirectory(root: string): Promise<void> {
       exitCode: 2,
     });
   }
-  await assertNoSymlinkedExistingPath(root);
+
+  const requestedParent = dirname(root);
+  const canonicalParent = await realpath(requestedParent).catch(() => undefined);
+  const parentInfo = canonicalParent
+    ? await lstat(canonicalParent).catch(() => undefined)
+    : undefined;
+  if (!canonicalParent || !parentInfo?.isDirectory() || parentInfo.isSymbolicLink()) {
+    throw setupError({
+      code: "RESEARCH_SETUP_WORKSPACE_INVALID",
+      step: "workspace",
+      reason: "The parent of a new setup workspace must exist as a regular directory.",
+      minimumAction: `Create the parent directory explicitly, then retry with --workspace ${root}.`,
+      retryCommand: "tiangong-ai research setup --help",
+      exitCode: 2,
+    });
+  }
+  const canonicalRoot = join(canonicalParent, basename(root));
+  await assertNoSymlinkedExistingPath(canonicalRoot);
+  return canonicalRoot;
 }
 
 function normalizedWorkspaceName(value: string): string {

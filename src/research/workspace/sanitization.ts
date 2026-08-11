@@ -39,11 +39,11 @@ export function sanitizeResearchText(value: string, secrets: readonly string[] =
     )
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/-]+=*/gi, "$1 [REDACTED]")
     .replace(
-      /\b(access_token|api[_-]?key|apikey|auth|authorization|cookie|password|secret|session|token)\s*=\s*[^\s,;}&]+/gi,
+      /\b(access_token|api[_-]?key|apikey|auth|authorization|cookie|password|secret|session|token)\s*=\s*[^\s,;}&"'<>\\]+/gi,
       "$1=[REDACTED]",
     )
     .replace(
-      /\b(authorization|cookie|set-cookie|x-api-key|api-key)\s*:\s*[^\s,;}]+/gi,
+      /\b(authorization|cookie|set-cookie|x-api-key|api-key)\s*:\s*[^\s,;}"'<>\\]+/gi,
       "$1: [REDACTED]",
     );
   return sanitizeUrls(sanitized);
@@ -67,9 +67,10 @@ export function isSensitiveEnvironmentName(name: string): boolean {
 }
 
 function sanitizeUrls(value: string): string {
-  return value.replace(/https?:\/\/[^\s"'<>]+/gi, (candidate) => {
-    const trailing = candidate.match(/[),.;!?]+$/)?.[0] ?? "";
-    const source = trailing ? candidate.slice(0, -trailing.length) : candidate;
+  return value.replace(/https?:\/\/[^\s"'<>`]+/gi, (candidate) => {
+    const bounded = splitUrlCandidate(candidate);
+    const trailing = bounded.source.match(/[,.;!?]+$/)?.[0] ?? "";
+    const source = trailing ? bounded.source.slice(0, -trailing.length) : bounded.source;
     try {
       const url = new URL(source);
       if (url.username || url.password) {
@@ -80,11 +81,33 @@ function sanitizeUrls(value: string): string {
         if (SENSITIVE_QUERY_KEY.test(key)) url.searchParams.set(key, "[REDACTED]");
       }
       if (SENSITIVE_URL_FRAGMENT.test(url.hash)) url.hash = "REDACTED";
-      return `${url.toString()}${trailing}`;
+      return `${url.toString()}${trailing}${bounded.suffix}`;
     } catch {
       return candidate;
     }
   });
+}
+
+function splitUrlCandidate(candidate: string): { source: string; suffix: string } {
+  let parenthesisDepth = 0;
+  for (let index = 0; index < candidate.length; index += 1) {
+    const character = candidate[index]!;
+    if (character === "(") {
+      parenthesisDepth += 1;
+      continue;
+    }
+    if (character === ")") {
+      if (parenthesisDepth > 0) {
+        parenthesisDepth -= 1;
+        continue;
+      }
+      return { source: candidate.slice(0, index), suffix: candidate.slice(index) };
+    }
+    if ("，。；！？（）【】".includes(character)) {
+      return { source: candidate.slice(0, index), suffix: candidate.slice(index) };
+    }
+  }
+  return { source: candidate, suffix: "" };
 }
 
 function longestFirst(left: string, right: string): number {

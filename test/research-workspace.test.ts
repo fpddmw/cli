@@ -8,6 +8,7 @@ import { runCli } from "../src/cli.js";
 import { lockCapabilities, verifyCapabilities } from "../src/research/workspace/capabilities.js";
 import { startCapabilityBroker } from "../src/research/workspace/broker.js";
 import { inspectResearchContext } from "../src/research/workspace/context.js";
+import { listEvidenceCandidates } from "../src/research/workspace/evidence-ledger.js";
 import { executeAgent, fingerprintAgentRoute } from "../src/research/workspace/executor.js";
 import {
   readAndVerifyProjectInputPlan,
@@ -18,9 +19,11 @@ import {
   addProjectInput,
   initializeProject,
   loadProject,
+  saveProject,
 } from "../src/research/workspace/projects.js";
 import { evaluateProjectPreflight } from "../src/research/workspace/preflight.js";
 import {
+  abortNativeResearchStage,
   prepareNativeResearchStage,
   runResearchWorkspace as runNativeControlledWorkspace,
   runResearchWorkspaceWithInjectedProducerForTesting as runResearchWorkspace,
@@ -871,7 +874,8 @@ describe("research project execution", () => {
 
       const nativeAgents: string[] = [];
       const nativeExecutor = fakeExecutor(nativeAgents);
-      for (const stage of ["discover", "analyze", "synthesize"] as const) {
+      let nativeReservedTokens = 0;
+      for (const stage of ["discover", "acquire", "analyze", "synthesize"] as const) {
         const packet = await prepareNativeResearchStage({
           root,
           projectId: "native-host",
@@ -881,6 +885,43 @@ describe("research project execution", () => {
         assert.match(packet.prompt, /current interactive host session/i);
         assert.match(packet.prompt, /do not launch codex exec/i);
         assert.equal(packet.commands.submit.argv.includes("--confirm-model"), false);
+        nativeReservedTokens += packet.limits.reservedPackageTokens;
+        if (stage === "discover") {
+          assert.ok(packet.discovery);
+          assert.ok(packet.commands.registerCandidate);
+          assert.equal(packet.discovery.calls.max, 6);
+          assert.equal(packet.discovery.calls.hardLimit, 24);
+          assert.equal(packet.discovery.recommendedAction, "assess-unassessed-candidates");
+          assert.ok(
+            packet.limits.reservedPackageTokens < 230_000,
+            "compact discovery must reserve its derived budget rather than the package hard ceiling",
+          );
+          const status = await invoke([
+            "research",
+            "status",
+            "--workspace",
+            root,
+            "--project",
+            "native-host",
+            "--json",
+          ]);
+          assert.equal(status.exitCode, 0, status.stderr);
+          const statusValue = JSON.parse(status.stdout) as {
+            projects: Array<{
+              discovery: { calls: { max: number }; candidates: { unique: number } };
+              nativeStage: { status: string };
+              snapshot: { status: string };
+              recommendedAction: string;
+            }>;
+          };
+          assert.equal(statusValue.projects[0]?.discovery.calls.max, 6);
+          assert.equal(statusValue.projects[0]?.discovery.candidates.unique, 1);
+          assert.equal(statusValue.projects[0]?.nativeStage.status, "active");
+          assert.equal(statusValue.projects[0]?.snapshot.status, "absent");
+          assert.match(statusValue.projects[0]?.recommendedAction ?? "", /resume/i);
+        } else {
+          assert.equal(packet.discovery, null);
+        }
         const session = JSON.parse(
           await readFile(
             join(workspacePaths(root).projects, "native-host", "native", "active.json"),
@@ -927,11 +968,11 @@ describe("research project execution", () => {
         fakeExecutor(launched),
       );
       assert.equal(completed.status, "complete", JSON.stringify(completed));
-      assert.deepEqual(nativeAgents, ["codex", "codex", "codex"]);
+      assert.deepEqual(nativeAgents, ["codex", "codex", "codex", "codex"]);
       assert.deepEqual(launched, ["claude"]);
       const project = await loadProject(root, "native-host");
       assert.equal(project.status, "complete");
-      assert.equal(project.usage.tokens, 360_010);
+      assert.equal(project.usage.tokens, nativeReservedTokens + 10);
       const runFiles = await regularTreeFiles(
         join(workspacePaths(root).projects, "native-host", "runs"),
       );
@@ -946,9 +987,55 @@ describe("research project execution", () => {
       );
       assert.ok(
         runRecords
-          .filter((record) => ["discover", "analyze", "synthesize"].includes(record.packageId))
+          .filter((record) =>
+            ["discover", "acquire", "analyze", "synthesize"].includes(record.packageId),
+          )
           .every((record) => record.accountingMode === "reserved-native-host"),
       );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports binding drift as a stale native session with explicit recovery", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      await initializeProject(root, "stale-native", "Evaluate stale native session reporting.");
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "stale-native",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const added = join(root, "late-input.txt");
+      await writeFile(added, "late immutable evidence\n");
+      await addProjectInput(root, "stale-native", added, "primary");
+      const status = await invoke([
+        "research",
+        "status",
+        "--workspace",
+        root,
+        "--project",
+        "stale-native",
+        "--json",
+      ]);
+      assert.equal(status.exitCode, 0, status.stderr);
+      const value = JSON.parse(status.stdout) as {
+        projects: Array<{
+          nativeStage: { status: string; reasonCode: string; recommendedAction: string };
+          recommendedAction: string;
+        }>;
+      };
+      assert.equal(value.projects[0]?.nativeStage.status, "stale");
+      assert.equal(value.projects[0]?.nativeStage.reasonCode, "binding-drift");
+      assert.match(value.projects[0]?.recommendedAction ?? "", /stage abort/);
+      await abortNativeResearchStage({
+        root,
+        projectId: "stale-native",
+        sessionId: packet.sessionId,
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -987,8 +1074,8 @@ describe("research project execution", () => {
       );
       assert.equal(result.status, "complete", JSON.stringify(result));
       assert.equal(result.stopReason, "all-projects-complete");
-      assert.equal(result.cycles, 5);
-      assert.deepEqual(agents, ["codex", "codex", "codex", "claude"]);
+      assert.equal(result.cycles, 6);
+      assert.deepEqual(agents, ["codex", "codex", "codex", "codex", "claude"]);
 
       const project = await loadProject(root, "gpu-resource-impact");
       assert.equal(project.status, "complete");
@@ -1000,7 +1087,7 @@ describe("research project execution", () => {
         ),
       ) as Record<string, unknown>;
       assert.equal(closure.status, "complete");
-      assert.equal((closure.artifacts as unknown[]).length, 4);
+      assert.equal((closure.artifacts as unknown[]).length, 6);
     } finally {
       await Promise.all([
         rm(root, { recursive: true, force: true }),
@@ -1105,7 +1192,7 @@ describe("research project execution", () => {
       assert.equal(result.stopReason, "cycle-limit");
       assert.equal(
         result.projects.find((project) => project.id === "runnable-sibling")?.readyPackage,
-        "analyze",
+        "acquire",
       );
       assert.equal(
         result.projects.find((project) => project.id === "blocked-sibling")?.status,
@@ -1207,12 +1294,16 @@ describe("research project execution", () => {
       const config = JSON.parse(await readFile(paths.config, "utf8")) as {
         budget: {
           maxTokens: number;
-          packageMaxTokens: Record<"discover" | "analyze" | "synthesize" | "review", number>;
+          packageMaxTokens: Record<
+            "discover" | "acquire" | "analyze" | "synthesize" | "review",
+            number
+          >;
         };
       };
-      config.budget.maxTokens = 245_000;
+      config.budget.maxTokens = 295_000;
       config.budget.packageMaxTokens = {
         discover: 50_000,
+        acquire: 50_000,
         analyze: 50_000,
         synthesize: 45_000,
         review: 100_000,
@@ -1224,11 +1315,11 @@ describe("research project execution", () => {
       await addProjectInput(root, "exact-budget", inputPath, "primary");
 
       const normal = fakeExecutor([]);
-      const packageTokenUsage = [50_000, 50_000, 45_000, 100_000];
+      const packageTokenUsage = [50_000, 50_000, 50_000, 45_000, 100_000];
       let agentCall = 0;
       const result = await runResearchWorkspace(
         root,
-        { maxParallel: 1, maxCycles: 5, dryRun: false, environment: {} },
+        { maxParallel: 1, maxCycles: 6, dryRun: false, environment: {} },
         async (request) => {
           const value = await normal(request);
           const tokens = packageTokenUsage[agentCall++]!;
@@ -1246,7 +1337,7 @@ describe("research project execution", () => {
         JSON.stringify({ result, project: await loadProject(root, "exact-budget") }),
       );
       assert.equal(result.stopReason, "all-projects-complete");
-      assert.equal(result.projects[0]?.usage.tokens, 245_000);
+      assert.equal(result.projects[0]?.usage.tokens, 295_000);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1305,6 +1396,9 @@ describe("research workspace CLI", () => {
       ["research", "project", "input", "add", "--help"],
       ["research", "project", "retry", "--help"],
       ["research", "project", "fork", "--help"],
+      ["research", "project", "addendum", "--help"],
+      ["research", "project", "evidence", "candidate", "register", "--help"],
+      ["research", "project", "evidence", "artifact", "register", "--help"],
       ["research", "schema", "show", "--help"],
       ["research", "status", "--help"],
       ["research", "run", "--help"],
@@ -1416,14 +1510,70 @@ describe("research workspace CLI", () => {
     }
   });
 
+  it("hides superseded projects by default and exposes them only with --all", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const source = await initializeProject(
+        root,
+        "status-source",
+        "Evaluate superseded status filtering behavior.",
+      );
+      await initializeProject(root, "status-addendum", "Evaluate replacement status behavior.");
+      source.lineage.supersededBy = "status-addendum";
+      source.evidenceState.staleReason = "Superseded by evidence addendum status-addendum.";
+      await saveProject(root, source);
+
+      const visible = await invoke(["research", "status", "--workspace", root, "--json"]);
+      assert.equal(visible.exitCode, 0, visible.stderr);
+      const visibleValue = JSON.parse(visible.stdout) as {
+        hiddenSupersededProjects: number;
+        projects: Array<{ id: string }>;
+      };
+      assert.equal(visibleValue.hiddenSupersededProjects, 1);
+      assert.deepEqual(
+        visibleValue.projects.map((project) => project.id),
+        ["status-addendum"],
+      );
+
+      const all = await invoke(["research", "status", "--workspace", root, "--all", "--json"]);
+      assert.equal(all.exitCode, 0, all.stderr);
+      const allValue = JSON.parse(all.stdout) as {
+        hiddenSupersededProjects: number;
+        projects: Array<{ id: string; status: string }>;
+      };
+      assert.equal(allValue.hiddenSupersededProjects, 0);
+      assert.deepEqual(
+        allValue.projects.map((project) => project.id),
+        ["status-addendum", "status-source"],
+      );
+      assert.equal(
+        allValue.projects.find((project) => project.id === "status-source")?.status,
+        "stale",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("exposes authoritative schemas and a JSONL progress stream", async () => {
     const root = await temporaryDirectory();
     try {
       const schema = await invoke(["research", "schema", "show", "discover", "--json"]);
       assert.equal(schema.exitCode, 0, schema.stderr);
       const schemaValue = JSON.parse(schema.stdout) as Record<string, unknown>;
-      assert.equal(schemaValue.$id, "https://schemas.tiangong.ai/research/evidence-v1.json");
-      for (const stage of ["discover", "analyze", "synthesize", "review", "doctor"] as const) {
+      assert.equal(
+        schemaValue.$id,
+        "https://schemas.tiangong.ai/research/discovery-admission-v1.json",
+      );
+      for (const stage of [
+        "discover",
+        "acquire",
+        "analyze",
+        "synthesize",
+        "review",
+        "doctor",
+      ] as const) {
         assertProviderSchemaCompatibility(schemaForStage(stage, "a".repeat(64)));
       }
       assert.throws(
@@ -1543,7 +1693,7 @@ describe("research workspace CLI", () => {
     }
   });
 
-  it("reports discover-output and embedded-stage context reservation gaps", async () => {
+  it("reports a compact discover-output reservation gap", async () => {
     const root = await temporaryDirectory();
     try {
       await initializeResearchWorkspace(root, undefined, "production-research");
@@ -1602,9 +1752,8 @@ describe("research workspace CLI", () => {
         budget: { outputTokenLimitEnforcement: Record<string, string> };
       };
       assert.ok(
-        value.gaps.includes("discover-output-reservation-below-schema-recommendation:1000/2048"),
+        value.gaps.includes("discover-output-reservation-below-schema-recommendation:1000/1280"),
       );
-      assert.ok(value.gaps.includes("embedded-stage-context-reservation-exceeds-total:2000/1500"));
       assert.deepEqual(value.budget.outputTokenLimitEnforcement, {
         producer: "reserved-native-host-on-submit",
         reviewer: "post-execution",
@@ -1875,24 +2024,35 @@ describe("research workspace CLI", () => {
         inputPlanPath,
         "--json",
       ]);
-      assert.equal(preflight.exitCode, 0, preflight.stderr);
+      assert.equal(preflight.exitCode, 0, preflight.stderr || preflight.stdout);
       const preflightValue = JSON.parse(preflight.stdout) as {
         readyToInitialize: boolean;
         gaps: string[];
         inputPlan: { sha256: string; inputs: Array<{ id: string }> };
         doctorAttestation: { status: string; attestationSha256: string };
         budget: {
-          packageMaxTokens: Record<"discover" | "analyze" | "synthesize" | "review", number>;
+          packageMaxTokens: Record<
+            "discover" | "acquire" | "analyze" | "synthesize" | "review",
+            number
+          >;
           recommendedDiscoverOutputTokens: number;
+          plannedBrokerCalls: number;
+          maxBrokerContextTokens: number;
           embeddedStageContextReservation: number;
-          stageContextTokenReservations: Record<"analyze" | "synthesize" | "review", number>;
+          stageContextTokenReservations: Record<
+            "acquire" | "analyze" | "synthesize" | "review",
+            number
+          >;
           maxInputContextTokens: number;
           outputTokenLimitEnforcement: { producer: string; reviewer: string };
           preCallTokenReservations: Record<
-            "discover" | "analyze" | "synthesize" | "review",
+            "discover" | "acquire" | "analyze" | "synthesize" | "review",
             number
           >;
-          maxTurns: Record<"discover" | "analyze" | "synthesize" | "review" | "repair", number>;
+          maxTurns: Record<
+            "discover" | "acquire" | "analyze" | "synthesize" | "review" | "repair",
+            number
+          >;
         };
         executionPolicy: {
           producer: { turnLimitEnforcement: string };
@@ -1906,15 +2066,16 @@ describe("research workspace CLI", () => {
       assert.ok(preflightValue.inputPlan.inputs.every((input) => input.id.startsWith("input-")));
       assert.equal(preflightValue.doctorAttestation.status, "verified");
       assert.match(preflightValue.doctorAttestation.attestationSha256, /^[a-f0-9]{64}$/);
-      assert.equal(preflightValue.budget.recommendedDiscoverOutputTokens, 1_408);
+      assert.equal(preflightValue.budget.recommendedDiscoverOutputTokens, 1_152);
       assert.ok(
         preflightValue.budget.embeddedStageContextReservation <=
           preflightValue.budget.maxInputContextTokens,
       );
       assert.deepEqual(preflightValue.budget.stageContextTokenReservations, {
-        analyze: 6_000,
+        acquire: 1_152,
+        analyze: 12_000,
         synthesize: 12_000,
-        review: 30_000,
+        review: 36_000,
       });
       assert.deepEqual(preflightValue.budget.outputTokenLimitEnforcement, {
         producer: "reserved-native-host-on-submit",
@@ -1922,6 +2083,7 @@ describe("research workspace CLI", () => {
       });
       assert.deepEqual(preflightValue.budget.maxTurns, {
         discover: 6,
+        acquire: 2,
         analyze: 2,
         synthesize: 2,
         review: 3,
@@ -1936,7 +2098,7 @@ describe("research workspace CLI", () => {
         preflightValue.budget.preCallTokenReservations.review >
           preflightValue.budget.preCallTokenReservations.synthesize,
       );
-      for (const stage of ["discover", "analyze", "synthesize", "review"] as const) {
+      for (const stage of ["discover", "acquire", "analyze", "synthesize", "review"] as const) {
         assert.ok(
           preflightValue.budget.preCallTokenReservations[stage] <=
             preflightValue.budget.packageMaxTokens[stage],
@@ -1944,8 +2106,9 @@ describe("research workspace CLI", () => {
         );
       }
       assert.ok(
-        preflightValue.budget.preCallTokenReservations.discover >= 220_000,
-        "discover preflight must reserve the bounded capability documentation on every broker turn",
+        preflightValue.budget.preCallTokenReservations.discover >=
+          preflightValue.budget.plannedBrokerCalls * preflightValue.budget.maxBrokerContextTokens,
+        "discover preflight must reserve every planned bounded broker context",
       );
       assert.equal(preflight.stdout.includes(corporateSource), false);
       assert.equal(preflight.stdout.includes(peerReviewedSource), false);
@@ -2056,48 +2219,70 @@ function fakeExecutor(agentLog: string[]): PackageExecutor {
     if (stage === "discover") {
       const capsuleState = JSON.parse(
         await readFile(join(request.projectRoot, "project.json"), "utf8"),
-      ) as { inputs: Array<{ id: string; path: string }> };
+      ) as { id: string; inputs: Array<{ id: string; path: string }> };
       const admittedInput = capsuleState.inputs[0];
+      const candidate = admittedInput
+        ? (await listEvidenceCandidates(request.workspaceRoot, capsuleState.id)).find(
+            (item) => item.origin.inputId === admittedInput.id,
+          )
+        : undefined;
       structured = {
         schemaVersion: 1,
-        sources: admittedInput
-          ? [
-              {
-                id: "source-1",
-                title: "Measured inventory",
-                locator: admittedInput.path,
-                relevance: "Directly measures the declared comparison.",
-                provenance: { kind: "input", id: admittedInput.id },
-                sourceType: "primary",
-                retrievedAt: "2026-08-06T00:00:00.000Z",
-                fullTextAvailable: true,
-                url: null,
-                doi: null,
-                publicationDate: null,
-                excerpt: "Measured manufacturing inventory.",
-                jsonPointer: null,
-                quality: { level: "primary", rationale: "Direct measurement." },
-                applicability: "Applies to the declared bounded comparison.",
-                coverageDimensions: ["research-question"],
-              },
-            ]
-          : [],
+        admissions:
+          admittedInput && candidate
+            ? [
+                {
+                  candidateId: candidate.id,
+                  sourceId: "source-1",
+                  sourceType: "primary",
+                  relevance: "Directly measures the declared comparison.",
+                  quality: { level: "primary", rationale: "Direct measurement." },
+                  applicability: "Applies to the declared bounded comparison.",
+                  coverageDimensions: ["research-question"],
+                  limitations: [],
+                },
+              ]
+            : [],
+        rejections: [],
         limitations: [],
-        coverage: {
-          dimensions: [
-            {
-              id: "research-question",
-              status: admittedInput ? "covered" : "missing",
-              sourceIds: admittedInput ? ["source-1"] : [],
-            },
-          ],
-          sourceTypes: admittedInput ? ["primary"] : [],
-          fullTextSources: admittedInput ? 1 : 0,
-          datedSources: 0,
-          publicationDateRange: { earliest: null, latest: null },
-          decision: admittedInput ? "pass" : "insufficient",
-          gaps: admittedInput ? [] : ["No admitted source."],
-        },
+        dimensionJudgments: [
+          {
+            id: "research-question",
+            status: admittedInput ? "covered" : "missing",
+          },
+        ],
+        gaps: admittedInput ? [] : ["No admitted source."],
+      };
+    } else if (stage === "acquire") {
+      const capsuleState = JSON.parse(
+        await readFile(join(request.projectRoot, "project.json"), "utf8"),
+      ) as { id: string };
+      const evidence = JSON.parse(
+        await readFile(join(request.projectRoot, "outputs", "evidence.json"), "utf8"),
+      ) as {
+        sources: Array<{ id: string; provenance: { kind: "input" | "broker"; id: string } }>;
+      };
+      const candidates = await listEvidenceCandidates(request.workspaceRoot, capsuleState.id);
+      structured = {
+        schemaVersion: 1,
+        decisions: evidence.sources.map((source) => {
+          const candidate = candidates.find((item) =>
+            source.provenance.kind === "input"
+              ? item.origin.inputId === source.provenance.id
+              : item.origin.receiptId === source.provenance.id,
+          );
+          assert.ok(candidate);
+          return {
+            sourceId: source.id,
+            candidateId: candidate.id,
+            artifactIds: [],
+            status: "accepted",
+            rationale: "The registered immutable source is usable within scope.",
+            limitations: [],
+          };
+        }),
+        limitations: [],
+        gaps: [],
       };
     } else if (stage === "analyze") {
       structured = {

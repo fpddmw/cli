@@ -43,7 +43,7 @@ import type {
 const DOCTOR_ATTESTATION_TTL_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_BUDGET = {
-  maxTokens: 550_000,
+  maxTokens: 650_000,
   maxCostUsd: 60,
   maxWallSeconds: 72 * 60 * 60,
   maxFilesPerPackage: 20,
@@ -52,12 +52,14 @@ const DEFAULT_BUDGET = {
   confirmationCostUsd: 10,
   packageMaxTokens: {
     discover: 230_000,
-    analyze: 60_000,
+    acquire: 80_000,
+    analyze: 70_000,
     synthesize: 70_000,
-    review: 175_000,
+    review: 190_000,
   },
   packageMaxWallSeconds: {
     discover: 2 * 60 * 60,
+    acquire: 2 * 60 * 60,
     analyze: 2 * 60 * 60,
     synthesize: 60 * 60,
     review: 60 * 60,
@@ -66,7 +68,9 @@ const DEFAULT_BUDGET = {
   maxRepairTokens: 4_000,
   maxBrokerResponseBytes: 512 * 1024,
   maxBrokerContextTokens: 12_000,
-  maxBrokerCalls: 6,
+  // This is a reviewed hard ceiling. Each project derives a smaller working
+  // budget from its evidence requirements and stops as soon as coverage is met.
+  maxBrokerCalls: 24,
   maxBrokerItems: 100,
   maxInputContextTokens: 12_000,
 } as const;
@@ -989,11 +993,13 @@ function isWorkspaceConfig(value: unknown): value is WorkspaceConfig {
     positiveNumber(budget.confirmationCostUsd) &&
     isObject(budget.packageMaxTokens) &&
     positiveInteger(budget.packageMaxTokens.discover) &&
+    positiveInteger(budget.packageMaxTokens.acquire) &&
     positiveInteger(budget.packageMaxTokens.analyze) &&
     positiveInteger(budget.packageMaxTokens.synthesize) &&
     positiveInteger(budget.packageMaxTokens.review) &&
     isObject(budget.packageMaxWallSeconds) &&
     positiveInteger(budget.packageMaxWallSeconds.discover) &&
+    positiveInteger(budget.packageMaxWallSeconds.acquire) &&
     positiveInteger(budget.packageMaxWallSeconds.analyze) &&
     positiveInteger(budget.packageMaxWallSeconds.synthesize) &&
     positiveInteger(budget.packageMaxWallSeconds.review) &&

@@ -1,5 +1,15 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -257,15 +267,16 @@ describe("research setup catalog and immutable plans", () => {
     const root = await temporaryDirectory();
     try {
       const plan = await createEmptyPlan(root);
-      assert.equal(plan.workspace.path, root);
+      const canonicalRoot = await realpath(root);
+      assert.equal(plan.workspace.path, canonicalRoot);
       assert.equal(plan.install.scope, "project");
       assert.deepEqual(plan.install.targets, [
-        { agent: "codex", root: join(root, ".agents", "skills") },
+        { agent: "codex", root: join(canonicalRoot, ".agents", "skills") },
       ]);
       assert.match(plan.planSha256, /^[0-9a-f]{64}$/);
       assert.equal(
         plan.mutations.find((mutation) => mutation.step === "workspace")?.target,
-        workspacePaths(root).control,
+        workspacePaths(canonicalRoot).control,
       );
       const context = await inspectResearchContext(root);
       assert.equal(context.role, "setup");
@@ -277,6 +288,36 @@ describe("research setup catalog and immutable plans", () => {
       }
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("canonicalizes a symlinked parent before review but rejects a symlinked workspace leaf", async () => {
+    const fixture = await temporaryDirectory();
+    const realParent = join(fixture, "real-parent");
+    const linkedParent = join(fixture, "linked-parent");
+    const realWorkspace = join(realParent, "workspace");
+    const linkedWorkspace = join(linkedParent, "workspace");
+    const linkedLeaf = join(fixture, "linked-leaf");
+    try {
+      await mkdir(realParent);
+      await mkdir(realWorkspace);
+      await symlink(realParent, linkedParent);
+      await symlink(realWorkspace, linkedLeaf);
+
+      const plan = await createEmptyPlan(linkedWorkspace);
+      const canonicalWorkspace = await realpath(realWorkspace);
+      assert.equal(plan.workspace.path, canonicalWorkspace);
+      assert.deepEqual(plan.install.targets, [
+        { agent: "codex", root: join(canonicalWorkspace, ".agents", "skills") },
+      ]);
+      assert.equal(await pathExistsSafe(workspacePaths(canonicalWorkspace).setupPlan), true);
+
+      await assert.rejects(
+        createEmptyPlan(linkedLeaf),
+        errorCode("RESEARCH_SETUP_WORKSPACE_INVALID"),
+      );
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
     }
   });
 
@@ -1429,6 +1470,69 @@ describe("research setup execution and operator safety", () => {
       );
       assert.equal(handoff.status, "browser-handoff-required");
       assert.equal(handoff.artifactCommitted, false);
+
+      await assert.rejects(
+        runResearchSetupCompanion(
+          {
+            workspace: root,
+            skillId: "tiangong.academic-paper-download",
+            outputDirectory,
+            title: "Ambiguous paper title",
+          },
+          {
+            environment: { PATH: process.env.PATH },
+            runner: async () => ({
+              exitCode: 3,
+              stdout: JSON.stringify({
+                ok: false,
+                data: {
+                  results: [
+                    {
+                      success: false,
+                      file: null,
+                      manifest: null,
+                      sources_tried: ["semantic_scholar", "crossref"],
+                      error: {
+                        code: "title_low_confidence",
+                        message: "No confident match; adapter credential was rejected.",
+                        token: secret,
+                        diagnostic_url: `https://resolver.example.test/result?api_key=${secret}`,
+                      },
+                    },
+                  ],
+                },
+              }),
+              stderr: `Authorization: Bearer ${secret}`,
+            }),
+          },
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof Error && "code" in error && "details" in error);
+          assert.equal(
+            (error as Error & { code: string }).code,
+            "RESEARCH_SETUP_COMPANION_COMMAND_FAILED",
+          );
+          const serialized = JSON.stringify(error);
+          assert.equal(serialized.includes(secret), false);
+          const details = (error as Error & { details: Record<string, unknown> }).details;
+          assert.match(String(details.reason), /title_low_confidence/);
+          assert.equal(
+            details.minimumAction,
+            "No confident match; adapter credential was rejected.",
+          );
+          assert.deepEqual(details.diagnostics, {
+            adapterError: {
+              code: "title_low_confidence",
+              message: "No confident match; adapter credential was rejected.",
+              token: "[REDACTED]",
+              diagnostic_url: "https://resolver.example.test/result?api_key=%5BREDACTED%5D",
+            },
+            sourcesTried: ["semantic_scholar", "crossref"],
+            artifactCommitted: false,
+          });
+          return true;
+        },
+      );
       const journal = await readFile(workspacePaths(root).journal, "utf8");
       assert.equal(journal.includes(secret), false);
       assert.match(journal, /research\.setup\.companion\.paper\.completed/);
@@ -1481,6 +1585,38 @@ describe("research setup execution and operator safety", () => {
       ]);
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("binds a Wizard plan to the canonical target behind a symlinked parent", async () => {
+    const fixture = await temporaryDirectory();
+    const realParent = join(fixture, "real-parent");
+    const linkedParent = join(fixture, "linked-parent");
+    const realWorkspace = join(realParent, "workspace");
+    const linkedWorkspace = join(linkedParent, "workspace");
+    try {
+      await mkdir(realParent);
+      await mkdir(realWorkspace);
+      await symlink(realParent, linkedParent);
+      const prompt = new ScriptedWizardPrompt(linkedWorkspace);
+      const result = await executeResearchSetupWizard({
+        workspace: linkedWorkspace,
+        environment: { BRAVE_API_KEY: "wizard-owner-secret-value" },
+        prompt,
+      });
+      assert.equal(result.exitCode, 0);
+      const canonicalWorkspace = await realpath(realWorkspace);
+      const plan = await loadAndVerifyResearchSetupPlan(
+        workspacePaths(canonicalWorkspace).setupPlan,
+      );
+      assert.equal(plan.workspace.path, canonicalWorkspace);
+      assert.ok(
+        prompt.notes.some(
+          (note) => note.includes(linkedWorkspace) && note.includes(canonicalWorkspace),
+        ),
+      );
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
     }
   });
 

@@ -64,8 +64,13 @@ storage writes, queueing, and document status transitions.
   diagnostics, bounded local-input plans, a scoped HTTPS GET/JSON-POST MCP
   broker with inline bounded result contexts,
   one bounded short-delay 429 retry with sanitized journal provenance,
-  a mechanically enforced per-run broker-call budget,
-  content-addressed permanent evidence, paged broker views/cache,
+  a coverage-derived working broker-view budget under a reviewed workspace
+  ceiling, content-addressed permanent evidence, paged broker views/cache,
+  a hash-chained candidate/admission/artifact/claim/review ledger,
+  deterministic candidate deduplication and a supplemental native Web bridge,
+  explicit exact-file artifact registration with PDF/ZIP/OpenXML validation,
+  acquisition audits, immutable parent/delta evidence snapshots, addendum
+  supersession, and stale-project status filtering,
   hash-bound native-host producer stage prepare/submit/abort, one-shot native
   broker fetches, schema-driven reviewer output and isolated repair, dedicated
   reviewer capsule homes,
@@ -188,8 +193,10 @@ execution and expose only sanitized, non-secret identifiers and digests.
 
 The current interactive host is the producer boundary: the CLI prepares an
 ephemeral hash-bound packet but does not start Codex or Claude for discover,
-analyze, or synthesize. Discovery uses explicit one-shot broker commands whose
-request files contain logical IDs only. Later producer packets contain bounded,
+acquire, analyze, or synthesize. Discovery uses explicit one-shot broker
+commands whose request files contain logical IDs only. Acquisition registers
+exact files and produces a complete source audit; analysis starts only after a
+verified immutable snapshot. Later producer packets contain bounded,
 hash-verified prior artifacts. The platform `sandbox-exec`/Bubblewrap capsule
 is used for the independently launched reviewer CLI; that adapter disables
 shell, unified-exec, filesystem, and undeclared integrations.
