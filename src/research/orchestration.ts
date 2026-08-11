@@ -41,6 +41,7 @@ import {
   normalizeEvidenceRequirements,
   refreshProject,
   retryProjectPackage,
+  setProjectDisposition,
 } from "./workspace/projects.js";
 import { evaluateProjectPreflight } from "./workspace/preflight.js";
 import {
@@ -99,6 +100,8 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project retry <project-id> [--package <package-id>] [--workspace <path>] [--json]
   tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|acquire|analyze|synthesize] [--workspace <path>] [--json]
   tiangong-ai research project addendum <closed-project-id> --to <target-project-id> [--workspace <path>] [--json]
+  tiangong-ai research project archive <project-id> --reason <text> [--workspace <path>] [--json]
+  tiangong-ai research project abandon <project-id> --reason <text> [--workspace <path>] [--json]
   tiangong-ai research project stage prepare <project-id> --stage discover|acquire|analyze|synthesize --host-agent codex|claude [--workspace <path>] [--json]
   tiangong-ai research project stage submit <project-id> --session <id> --output <absolute-json> [--confirm-model <id>] [--workspace <path>] [--json]
   tiangong-ai research project stage abort <project-id> --session <id> [--workspace <path>] [--json]
@@ -734,6 +737,31 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     writeJson(io, project, args);
     return 0;
   }
+  if (action === "archive" || action === "abandon") {
+    const args = parseStrictArgs(
+      rest,
+      { ...WORKSPACE_OPTIONS, reason: "string" },
+      `research project ${action}`,
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(args.positionals, `research project ${action}`);
+    const reason = strictString(args, "reason");
+    if (!reason) {
+      throw new CliError(`research project ${action} requires --reason.`, {
+        code: "RESEARCH_PROJECT_DISPOSITION_INVALID",
+        exitCode: 2,
+      });
+    }
+    const root = await workspaceFromArgs(args);
+    const project = await setProjectDisposition(
+      root,
+      projectId,
+      action === "archive" ? "archived" : "abandoned",
+      reason,
+    );
+    writeJson(io, project, args);
+    return 0;
+  }
   throw unknownAction("research project", action);
 }
 
@@ -747,16 +775,36 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
   rejectPositionals(args.positionals, "research status");
   const root = await workspaceFromArgs(args);
   const selectedProject = strictString(args, "project");
+  const workspaceProjects = await listProjects(root);
   const allProjects = selectedProject
-    ? [await loadProject(root, selectedProject)]
-    : await listProjects(root);
+    ? [
+        workspaceProjects.find((project) => project.id === selectedProject) ??
+          (await loadProject(root, selectedProject)),
+      ]
+    : workspaceProjects;
   const projects =
     selectedProject || strictBoolean(args, "all")
       ? allProjects
-      : allProjects.filter((project) => project.lineage.supersededBy === null);
+      : allProjects.filter(
+          (project) =>
+            project.lineage.supersededBy === null &&
+            project.status !== "archived" &&
+            project.status !== "abandoned",
+        );
   const result = {
     workspace: root,
-    hiddenSupersededProjects: allProjects.length - projects.length,
+    hiddenSupersededProjects:
+      selectedProject || strictBoolean(args, "all")
+        ? 0
+        : workspaceProjects.filter((project) => project.lineage.supersededBy !== null).length,
+    hiddenArchivedProjects:
+      selectedProject || strictBoolean(args, "all")
+        ? 0
+        : workspaceProjects.filter((project) => project.status === "archived").length,
+    hiddenAbandonedProjects:
+      selectedProject || strictBoolean(args, "all")
+        ? 0
+        : workspaceProjects.filter((project) => project.status === "abandoned").length,
     projects: await Promise.all(
       projects.map(async (project) => {
         const current = refreshProject(project);
@@ -767,6 +815,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
           id: current.id,
           question: current.question,
           status: current.status,
+          authority: projectAuthority(current, workspaceProjects),
           lineage: current.lineage,
           evidenceState: current.evidenceState,
           snapshot,
@@ -783,6 +832,28 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
   };
   writeJson(io, result, args);
   return 0;
+}
+
+function projectAuthority(
+  project: Awaited<ReturnType<typeof loadProject>>,
+  projects: Awaited<ReturnType<typeof listProjects>>,
+): { state: "authoritative" | "superseded" | "archived" | "abandoned"; projectId: string } {
+  const byId = new Map(projects.map((candidate) => [candidate.id, candidate]));
+  const visited = new Set([project.id]);
+  let current = project;
+  while (current.lineage.supersededBy) {
+    if (visited.has(current.lineage.supersededBy)) break;
+    visited.add(current.lineage.supersededBy);
+    const next = byId.get(current.lineage.supersededBy);
+    if (!next) return { state: "superseded", projectId: current.lineage.supersededBy };
+    current = next;
+  }
+  if (project.status === "archived") return { state: "archived", projectId: current.id };
+  if (project.status === "abandoned") return { state: "abandoned", projectId: current.id };
+  return {
+    state: project.id === current.id ? "authoritative" : "superseded",
+    projectId: current.id,
+  };
 }
 
 async function inspectSnapshotForStatus(
@@ -824,6 +895,9 @@ function projectRecommendedAction(
 ): string {
   if (project.lineage.supersededBy) {
     return `Continue with superseding project ${project.lineage.supersededBy}.`;
+  }
+  if (project.status === "archived" || project.status === "abandoned") {
+    return `Project is ${project.status}; inspect with research status --all and continue only from an authoritative project.`;
   }
   if (nativeStage.status === "stale" || nativeStage.status === "invalid") {
     return nativeStage.recommendedAction ?? "Recover the stale native session explicitly.";

@@ -1566,6 +1566,114 @@ describe("research workspace CLI", () => {
     }
   });
 
+  it("makes recovery forks authoritative and records explicit historical dispositions", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, "authority-v1", "Evaluate authoritative project lineage.");
+      const firstFork = await invoke([
+        "research",
+        "project",
+        "fork",
+        "authority-v1",
+        "--to",
+        "authority-v2",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(firstFork.exitCode, 0, firstFork.stderr);
+      assert.equal((await loadProject(root, "authority-v1")).lineage.supersededBy, "authority-v2");
+      assert.equal((await loadProject(root, "authority-v1")).status, "stale");
+
+      const staleFork = await invoke([
+        "research",
+        "project",
+        "fork",
+        "authority-v1",
+        "--to",
+        "wrong-branch",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(staleFork.exitCode, 3);
+      assert.match(staleFork.stderr, /authority-v2/);
+
+      const secondFork = await invoke([
+        "research",
+        "project",
+        "fork",
+        "authority-v2",
+        "--to",
+        "authority-v3",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(secondFork.exitCode, 0, secondFork.stderr);
+      const visible = JSON.parse(
+        (await invoke(["research", "status", "--workspace", root, "--json"])).stdout,
+      ) as { projects: Array<{ id: string; authority: { state: string; projectId: string } }> };
+      assert.deepEqual(visible.projects, [
+        {
+          ...visible.projects[0]!,
+          id: "authority-v3",
+          authority: { state: "authoritative", projectId: "authority-v3" },
+        },
+      ]);
+
+      const all = JSON.parse(
+        (await invoke(["research", "status", "--workspace", root, "--all", "--json"])).stdout,
+      ) as { projects: Array<{ id: string; authority: { state: string; projectId: string } }> };
+      assert.deepEqual(
+        all.projects.map((project) => [project.id, project.authority]),
+        [
+          ["authority-v1", { state: "superseded", projectId: "authority-v3" }],
+          ["authority-v2", { state: "superseded", projectId: "authority-v3" }],
+          ["authority-v3", { state: "authoritative", projectId: "authority-v3" }],
+        ],
+      );
+
+      const archived = await invoke([
+        "research",
+        "project",
+        "archive",
+        "authority-v1",
+        "--reason",
+        "Retain the superseded baseline for audit.",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(archived.exitCode, 0, archived.stderr);
+      const abandoned = await invoke([
+        "research",
+        "project",
+        "abandon",
+        "authority-v3",
+        "--reason",
+        "The user no longer wants this unfinished branch.",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(abandoned.exitCode, 0, abandoned.stderr);
+      const finalStatus = JSON.parse(
+        (await invoke(["research", "status", "--workspace", root, "--json"])).stdout,
+      ) as {
+        hiddenArchivedProjects: number;
+        hiddenAbandonedProjects: number;
+        projects: unknown[];
+      };
+      assert.equal(finalStatus.hiddenArchivedProjects, 1);
+      assert.equal(finalStatus.hiddenAbandonedProjects, 1);
+      assert.deepEqual(finalStatus.projects, []);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("exposes authoritative schemas and a JSONL progress stream", async () => {
     const root = await temporaryDirectory();
     try {

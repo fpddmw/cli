@@ -3859,7 +3859,31 @@ async function summarizeRun(
 }
 
 async function projectsForRun(root: string, projectId?: string): Promise<ProjectState[]> {
-  return projectId ? [await loadProject(root, projectId)] : listProjects(root);
+  if (projectId) {
+    const project = await loadProject(root, projectId);
+    if (
+      project.lineage.supersededBy ||
+      project.status === "archived" ||
+      project.status === "abandoned"
+    ) {
+      throw new CliError(`Research project ${projectId} is historical and cannot be executed.`, {
+        code: "RESEARCH_PROJECT_NOT_AUTHORITATIVE",
+        exitCode: 3,
+        details: {
+          projectId,
+          status: project.status,
+          authoritativeProjectId: project.lineage.supersededBy ?? null,
+        },
+      });
+    }
+    return [project];
+  }
+  return (await listProjects(root)).filter(
+    (project) =>
+      project.lineage.supersededBy === null &&
+      project.status !== "archived" &&
+      project.status !== "abandoned",
+  );
 }
 
 function assertPublicEvidenceUrl(value: string, sourceId: string): void {

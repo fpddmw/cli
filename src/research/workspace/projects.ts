@@ -248,6 +248,24 @@ export async function retryProjectPackage(
   validateProjectId(projectId);
   return withWorkspaceLock(root, "project.retry", async () => {
     const project = await loadProject(root, projectId);
+    if (
+      project.status === "archived" ||
+      project.status === "abandoned" ||
+      project.lineage.supersededBy
+    ) {
+      throw new CliError(
+        "Historical projects cannot be retried; continue from the authoritative project.",
+        {
+          code: "RESEARCH_PROJECT_NOT_AUTHORITATIVE",
+          exitCode: 3,
+          details: {
+            projectId,
+            status: project.status,
+            supersededBy: project.lineage.supersededBy,
+          },
+        },
+      );
+    }
     const selected = packageId
       ? packageById(project, packageId)
       : project.packages.find((item) => item.status === "failed" || item.status === "retry");
@@ -302,6 +320,18 @@ export async function forkProject(
   }
   return withWorkspaceLock(root, "project.fork", async () => {
     const source = await loadProject(root, sourceProjectId);
+    if (source.lineage.supersededBy) {
+      throw new CliError(
+        `Project ${sourceProjectId} is historical; fork the authoritative project ${source.lineage.supersededBy}.`,
+        { code: "RESEARCH_PROJECT_NOT_AUTHORITATIVE", exitCode: 3 },
+      );
+    }
+    if (source.status === "archived" || source.status === "abandoned") {
+      throw new CliError(`Project ${sourceProjectId} is ${source.status} and cannot be forked.`, {
+        code: "RESEARCH_PROJECT_NOT_AUTHORITATIVE",
+        exitCode: 3,
+      });
+    }
     const targetRoot = join(workspacePaths(root).projects, targetProjectId);
     if (await lstat(targetRoot).catch(() => undefined)) {
       throw new CliError(`Research project already exists: ${targetProjectId}`, {
@@ -362,6 +392,7 @@ export async function forkProject(
       lineage: {
         ...initialLineage("fork"),
         derivedFrom: sourceProjectId,
+        supersedes: sourceProjectId,
       },
       evidenceState: initialEvidenceState(),
     };
@@ -405,12 +436,82 @@ export async function forkProject(
       );
       await saveProject(root, project);
     }
+    source.lineage.supersededBy = targetProjectId;
+    source.evidenceState.staleReason = `Superseded by recovery fork ${targetProjectId}.`;
+    refreshProject(source);
+    await saveProject(root, source);
+    await appendEvidenceLedgerEvent(root, sourceProjectId, "project.superseded", {
+      sourceProjectId,
+      supersededBy: targetProjectId,
+      reason: "recovery-fork",
+    });
     await appendJournalEvent(workspacePaths(root).journal, "project.forked", targetProjectId, {
       sourceProjectId,
       targetProjectId,
       resumeThrough: resumeThrough ?? null,
       inheritedOutputs,
       inheritedUsage: false,
+      sourceSuperseded: true,
+    });
+    return project;
+  });
+}
+
+export async function setProjectDisposition(
+  root: string,
+  projectId: string,
+  disposition: "archived" | "abandoned",
+  reason: string,
+): Promise<ProjectState> {
+  validateProjectId(projectId);
+  const normalizedReason = reason.trim();
+  if (normalizedReason.length < 8 || normalizedReason.length > 500) {
+    throw new CliError("Project disposition reason must contain 8-500 characters.", {
+      code: "RESEARCH_PROJECT_DISPOSITION_INVALID",
+      exitCode: 2,
+    });
+  }
+  return withWorkspaceLock(root, `project.${disposition}`, async () => {
+    const project = refreshProject(await loadProject(root, projectId));
+    if (
+      project.status === "running" ||
+      project.packages.some((item) => item.status === "running")
+    ) {
+      throw new CliError(
+        "Abort the active native stage before archiving or abandoning this project.",
+        { code: "RESEARCH_PROJECT_DISPOSITION_INVALID", exitCode: 3 },
+      );
+    }
+    if (project.status === "archived" || project.status === "abandoned") {
+      if (project.status === disposition) return project;
+      throw new CliError(`Project is already ${project.status}.`, {
+        code: "RESEARCH_PROJECT_DISPOSITION_INVALID",
+        exitCode: 3,
+      });
+    }
+    if (disposition === "archived" && project.status !== "complete" && project.status !== "stale") {
+      throw new CliError(
+        "Archive is for complete or superseded history; use abandon for unfinished work.",
+        { code: "RESEARCH_PROJECT_DISPOSITION_INVALID", exitCode: 3 },
+      );
+    }
+    if (
+      disposition === "abandoned" &&
+      (project.status === "complete" || project.status === "stale")
+    ) {
+      throw new CliError(
+        "Abandon is for unfinished work; archive complete or superseded history instead.",
+        { code: "RESEARCH_PROJECT_DISPOSITION_INVALID", exitCode: 3 },
+      );
+    }
+    project.status = disposition;
+    project.updatedAt = new Date().toISOString();
+    await saveProject(root, project);
+    await appendJournalEvent(workspacePaths(root).journal, `project.${disposition}`, projectId, {
+      projectId,
+      disposition,
+      reason: normalizedReason,
+      supersededBy: project.lineage.supersededBy,
     });
     return project;
   });
@@ -603,6 +704,7 @@ export async function createProjectAddendum(
 }
 
 export function refreshProject(project: ProjectState): ProjectState {
+  if (project.status === "archived" || project.status === "abandoned") return project;
   const now = Date.now();
   for (const workPackage of project.packages) {
     if (workPackage.status !== "pending" && workPackage.status !== "retry") continue;
@@ -729,6 +831,9 @@ function validateProjectShape(project: ProjectState, expectedId: string): void {
     project.schemaVersion !== 1 ||
     project.id !== expectedId ||
     !PROJECT_ID_PATTERN.test(project.id) ||
+    !["ready", "running", "blocked", "complete", "stale", "archived", "abandoned"].includes(
+      project.status,
+    ) ||
     typeof project.question !== "string" ||
     (project.budgetConfirmedAt !== null && typeof project.budgetConfirmedAt !== "string") ||
     !Array.isArray(project.inputs) ||

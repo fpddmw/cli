@@ -1,6 +1,13 @@
 export type ContextRole = "workspace" | "setup" | "unmanaged" | "invalid";
 
-export type ProjectStatus = "ready" | "running" | "blocked" | "complete" | "stale";
+export type ProjectStatus =
+  | "ready"
+  | "running"
+  | "blocked"
+  | "complete"
+  | "stale"
+  | "archived"
+  | "abandoned";
 
 export type PackageStatus = "pending" | "ready" | "running" | "retry" | "failed" | "complete";
 
