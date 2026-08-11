@@ -5,6 +5,7 @@ import { basename, join } from "node:path";
 import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
+import { CliError } from "../src/errors.js";
 import { lockCapabilities, verifyCapabilities } from "../src/research/workspace/capabilities.js";
 import { startCapabilityBroker } from "../src/research/workspace/broker.js";
 import { inspectResearchContext } from "../src/research/workspace/context.js";
@@ -26,11 +27,14 @@ import { evaluateProjectPreflight } from "../src/research/workspace/preflight.js
 import {
   abortNativeResearchStage,
   prepareNativeResearchStage,
+  requestResearchHandoff,
+  resolveResearchHandoff,
   runResearchWorkspace as runNativeControlledWorkspace,
   runResearchWorkspaceWithInjectedProducerForTesting as runResearchWorkspace,
   submitNativeResearchStage,
   type PackageExecutor,
 } from "../src/research/workspace/runtime.js";
+import { recordNativeResearchActivity } from "../src/research/workspace/native-activity.js";
 import {
   hashRegularTree,
   regularTreeFiles,
@@ -932,6 +936,7 @@ describe("research project execution", () => {
           assert.match(statusValue.projects[0]?.recommendedAction ?? "", /resume/i);
         } else {
           assert.equal(packet.discovery, null);
+          if (stage === "acquire") assert.ok(packet.commands.bindDownload);
         }
         const session = JSON.parse(
           await readFile(
@@ -1670,6 +1675,130 @@ describe("research workspace CLI", () => {
       assert.equal(finalStatus.hiddenArchivedProjects, 1);
       assert.equal(finalStatus.hiddenAbandonedProjects, 1);
       assert.deepEqual(finalStatus.projects, []);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("durably separates agent work, user action, and external-response waiting", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, "handoff-state", "Evaluate durable research handoff states.");
+      const input = join(root, "handoff-input.txt");
+      await writeFile(input, "bounded evidence\n");
+      await addProjectInput(root, "handoff-state", input, "primary");
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "handoff-state",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      assert.ok(packet.commands.requestHandoff);
+      await recordNativeResearchActivity({
+        root,
+        projectId: "handoff-state",
+        value: {
+          schemaVersion: 1,
+          kind: "browser-navigation",
+          channel: "codex.browser",
+          input: "publisher access page",
+          candidateIds: [],
+          resultCount: 0,
+          status: "blocked",
+          challenge: "captcha",
+        },
+      });
+      const output = join(root, "blocked-closeout.json");
+      await writeFile(
+        output,
+        JSON.stringify({
+          schemaVersion: 2,
+          limitations: [],
+          dimensionJudgments: [{ id: "research-question", status: "missing" }],
+          gaps: ["Publisher challenge unresolved."],
+        }),
+      );
+      await assert.rejects(
+        submitNativeResearchStage({
+          root,
+          projectId: "handoff-state",
+          sessionId: packet.sessionId,
+          outputPath: output,
+          confirmedModel: packet.expectedModel,
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_PROJECT_HANDOFF_REQUIRED",
+      );
+
+      const userHandoff = await requestResearchHandoff({
+        root,
+        projectId: "handoff-state",
+        value: {
+          schemaVersion: 1,
+          state: "user-action-required",
+          reasonCode: "human-challenge",
+          summary: "A human must complete the publisher challenge without automation.",
+          requestedActions: ["Complete the visible challenge and confirm authorized access."],
+          evidenceGaps: ["Publisher full text remains unavailable."],
+        },
+      });
+      assert.equal(userHandoff.status, "waiting-user");
+      assert.equal((await loadProject(root, "handoff-state")).packages[0]?.attempts, 0);
+      const waiting = await runNativeControlledWorkspace(
+        root,
+        {
+          projectId: "handoff-state",
+          maxParallel: 1,
+          maxCycles: 2,
+          dryRun: false,
+          environment: {},
+        },
+        fakeExecutor([]),
+      );
+      assert.equal(waiting.status, "waiting");
+      assert.equal(waiting.stopReason, "handoff-required");
+
+      const resumed = await resolveResearchHandoff({
+        root,
+        projectId: "handoff-state",
+        note: "The authorized user completed the challenge successfully.",
+      });
+      assert.equal(resumed.status, "ready");
+      await prepareNativeResearchStage({
+        root,
+        projectId: "handoff-state",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const external = await requestResearchHandoff({
+        root,
+        projectId: "handoff-state",
+        value: {
+          schemaVersion: 1,
+          state: "external-response-required",
+          reasonCode: "official-data-request-pending",
+          summary: "The public evidence ceiling is reached and an official response is pending.",
+          requestedActions: ["Wait for the authorized agency data response."],
+          evidenceGaps: ["The requested non-public official dataset is not yet available."],
+        },
+      });
+      assert.equal(external.status, "waiting-external");
+      const status = await invoke([
+        "research",
+        "status",
+        "--workspace",
+        root,
+        "--project",
+        "handoff-state",
+        "--json",
+      ]);
+      assert.equal(status.exitCode, 0, status.stderr);
+      const statusValue = JSON.parse(status.stdout) as {
+        projects: Array<{ status: string; recommendedAction: string }>;
+      };
+      assert.equal(statusValue.projects[0]?.status, "waiting-external");
+      assert.match(statusValue.projects[0]?.recommendedAction ?? "", /Do not continue/i);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

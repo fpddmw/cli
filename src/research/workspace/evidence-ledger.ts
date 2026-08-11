@@ -28,6 +28,10 @@ export type EvidenceLedgerEventType =
   | "candidate.assessed"
   | "candidate.admitted"
   | "candidate.rejected"
+  | "download.bound"
+  | "download.failed"
+  | "handoff.requested"
+  | "handoff.resolved"
   | "artifact.registered"
   | "artifact.assessed"
   | "snapshot.frozen"
@@ -95,6 +99,10 @@ export async function cloneEvidenceLedger(
     "candidate.assessed",
     "candidate.admitted",
     "candidate.rejected",
+    "download.bound",
+    "download.failed",
+    "handoff.requested",
+    "handoff.resolved",
     "artifact.registered",
     "artifact.assessed",
   ]);

@@ -6,7 +6,17 @@ import { inflateRawSync } from "node:zlib";
 import { PDFDocument } from "pdf-lib";
 
 import { CliError } from "../../errors.js";
-import { appendEvidenceLedgerEvent, listEvidenceCandidates } from "./evidence-ledger.js";
+import {
+  loadAndVerifyDownloadBinding,
+  parseEvidenceDownloadBinding,
+  type EvidenceDownloadBinding,
+} from "./downloads.js";
+import {
+  appendEvidenceLedgerEvent,
+  evidenceLedgerPath,
+  listEvidenceCandidates,
+} from "./evidence-ledger.js";
+import { readJournal } from "./journal.js";
 import { sanitizeResearchText } from "./sanitization.js";
 import {
   canonicalJson,
@@ -42,6 +52,8 @@ export interface EvidenceArtifactRecord {
   licenseUrl: string | null;
   hostType: string | null;
   articleVersion: string | null;
+  downloadBinding: EvidenceDownloadBinding | null;
+  derivedFromArtifactId: string | null;
   locator: string;
   registeredAt: string;
   validation: {
@@ -62,6 +74,8 @@ export async function registerEvidenceArtifact(input: {
   licenseUrl?: string;
   hostType?: string;
   articleVersion?: string;
+  downloadBindingId?: string;
+  derivedFromArtifactId?: string;
 }): Promise<EvidenceArtifactRecord> {
   if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(input.projectId)) {
     throw artifactError("Artifact project ID is invalid.", "RESEARCH_ARTIFACT_PATH_INVALID");
@@ -113,6 +127,48 @@ export async function registerEvidenceArtifact(input: {
       "RESEARCH_ARTIFACT_SIZE_INVALID",
     );
   }
+  const downloadBinding = input.downloadBindingId
+    ? await loadAndVerifyDownloadBinding({
+        root: input.root,
+        projectId: input.projectId,
+        candidateId: input.candidateId,
+        bindingId: input.downloadBindingId,
+        path: sourcePath,
+      })
+    : null;
+  if (downloadBinding && input.derivedFromArtifactId) {
+    throw artifactError(
+      "An artifact cannot be both an exact download and a derived file.",
+      "RESEARCH_ARTIFACT_BINDING_INVALID",
+    );
+  }
+  let derivedFromArtifactId: string | null = null;
+  if (input.derivedFromArtifactId) {
+    const registered = await loadEvidenceArtifactRecords(input.root, input.projectId);
+    const parent = registered.find(
+      (artifact) => artifact.artifactId === input.derivedFromArtifactId,
+    );
+    if (!parent || parent.candidateId !== input.candidateId) {
+      throw artifactError(
+        "Derived artifact parent is missing or bound to a different candidate.",
+        "RESEARCH_ARTIFACT_BINDING_INVALID",
+      );
+    }
+    derivedFromArtifactId = parent.artifactId;
+  }
+  if (input.sourceUrl && !downloadBinding) {
+    throw artifactError(
+      "Network-derived artifacts require an exact completed download binding.",
+      "RESEARCH_DOWNLOAD_BINDING_REQUIRED",
+    );
+  }
+  const declaredSourceUrl = canonicalSourceUrl(input.sourceUrl);
+  if (downloadBinding && declaredSourceUrl && declaredSourceUrl !== downloadBinding.downloadUrl) {
+    throw artifactError(
+      "Artifact source URL does not match its exact download binding.",
+      "RESEARCH_DOWNLOAD_BINDING_INVALID",
+    );
+  }
   const bytes = await readFile(sourcePath);
   const mediaType = normalizeMediaType(input.mediaType ?? inferMediaType(sourcePath));
   const validation = await validateArtifactBytes(bytes, mediaType);
@@ -130,11 +186,13 @@ export async function registerEvidenceArtifact(input: {
     bytes: bytes.byteLength,
     mediaType,
     originalFilename: sanitizeFilename(basename(sourcePath)),
-    sourceUrl: canonicalSourceUrl(input.sourceUrl),
+    sourceUrl: downloadBinding?.downloadUrl ?? declaredSourceUrl,
     license: boundedOptionalMetadata(input.license, "license"),
     licenseUrl: canonicalSourceUrl(input.licenseUrl),
     hostType: boundedOptionalMetadata(input.hostType, "host type"),
     articleVersion: boundedOptionalMetadata(input.articleVersion, "article version"),
+    downloadBinding,
+    derivedFromArtifactId,
     locator,
     registeredAt: new Date().toISOString(),
     validation,
@@ -161,6 +219,8 @@ export async function registerEvidenceArtifact(input: {
     mediaType,
     locator,
     sourceUrl: record.sourceUrl,
+    downloadBindingId: downloadBinding?.bindingId ?? null,
+    derivedFromArtifactId,
     validation,
   });
   return record;
@@ -214,6 +274,23 @@ export async function verifyEvidenceArtifact(
     );
   }
   await validateArtifactBytes(await readFile(path), record.mediaType);
+  if (record.downloadBinding) {
+    const events = await readJournal(evidenceLedgerPath(root, record.projectId));
+    const bound = events.some(
+      (event) =>
+        event.type === "download.bound" &&
+        event.payload.bindingId === record.downloadBinding?.bindingId &&
+        event.payload.bindingSha256 === record.downloadBinding?.bindingSha256 &&
+        event.payload.fileSha256 === record.sha256 &&
+        event.payload.candidateId === record.candidateId,
+    );
+    if (!bound) {
+      throw artifactError(
+        `Artifact download binding is absent from the evidence ledger: ${record.artifactId}.`,
+        "RESEARCH_ARTIFACT_DRIFT",
+      );
+    }
+  }
 }
 
 export async function stageEvidenceArtifacts(
@@ -426,6 +503,10 @@ function parseArtifactRecord(value: unknown): EvidenceArtifactRecord {
     (value.licenseUrl !== null && typeof value.licenseUrl !== "string") ||
     (value.hostType !== null && typeof value.hostType !== "string") ||
     (value.articleVersion !== null && typeof value.articleVersion !== "string") ||
+    (value.downloadBinding !== null && !isObject(value.downloadBinding)) ||
+    (value.derivedFromArtifactId !== null &&
+      (typeof value.derivedFromArtifactId !== "string" ||
+        !/^artifact-[0-9a-f]{24}$/.test(value.derivedFromArtifactId))) ||
     typeof value.locator !== "string" ||
     typeof value.registeredAt !== "string" ||
     !Number.isFinite(Date.parse(value.registeredAt)) ||
@@ -445,6 +526,7 @@ function parseArtifactRecord(value: unknown): EvidenceArtifactRecord {
       "RESEARCH_ARTIFACT_STORE_INVALID",
     );
   }
+  if (value.downloadBinding !== null) parseEvidenceDownloadBinding(value.downloadBinding);
   return value as unknown as EvidenceArtifactRecord;
 }
 

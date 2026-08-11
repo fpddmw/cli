@@ -6,6 +6,8 @@ export type ProjectStatus =
   | "blocked"
   | "complete"
   | "stale"
+  | "waiting-user"
+  | "waiting-external"
   | "archived"
   | "abandoned";
 
@@ -274,6 +276,16 @@ export interface ProjectState {
     supersededBy: string | null;
     baseSnapshotId: string | null;
     baseSnapshotSha256: string | null;
+  };
+  handoff: {
+    state: "agent-actionable" | "user-action-required" | "external-response-required";
+    reasonCode: string | null;
+    summary: string | null;
+    requestedActions: string[];
+    evidenceGaps: string[];
+    requestedAt: string | null;
+    resolvedAt: string | null;
+    resolutionNote: string | null;
   };
   evidenceState: {
     currentSnapshotId: string | null;

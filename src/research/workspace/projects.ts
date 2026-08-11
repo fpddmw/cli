@@ -23,6 +23,7 @@ import {
   ensureDirectory,
   fileRecord,
   fileSize,
+  isObject,
   readJsonFile,
   sha256File,
   workspacePaths,
@@ -131,6 +132,7 @@ export async function initializeProject(
         wallSeconds: 0,
       },
       lineage: initialLineage("primary"),
+      handoff: initialHandoffState(),
       evidenceState: initialEvidenceState(),
     };
     await Promise.all([
@@ -332,6 +334,12 @@ export async function forkProject(
         exitCode: 3,
       });
     }
+    if (source.handoff.state !== "agent-actionable") {
+      throw new CliError(
+        `Project ${sourceProjectId} has an unresolved ${source.handoff.state} handoff.`,
+        { code: "RESEARCH_PROJECT_HANDOFF_REQUIRED", exitCode: 3 },
+      );
+    }
     const targetRoot = join(workspacePaths(root).projects, targetProjectId);
     if (await lstat(targetRoot).catch(() => undefined)) {
       throw new CliError(`Research project already exists: ${targetProjectId}`, {
@@ -394,6 +402,7 @@ export async function forkProject(
         derivedFrom: sourceProjectId,
         supersedes: sourceProjectId,
       },
+      handoff: initialHandoffState(),
       evidenceState: initialEvidenceState(),
     };
     await Promise.all([
@@ -617,6 +626,7 @@ export async function createProjectAddendum(
         baseSnapshotId: snapshot.snapshotId,
         baseSnapshotSha256: snapshot.snapshotSha256,
       },
+      handoff: initialHandoffState(),
       evidenceState: initialEvidenceState(),
     };
     await Promise.all([
@@ -722,6 +732,9 @@ export function refreshProject(project: ProjectState): ProjectState {
     if (dependenciesComplete) workPackage.status = "ready";
   }
   if (project.lineage.supersededBy || project.evidenceState.staleReason) project.status = "stale";
+  else if (project.handoff.state === "user-action-required") project.status = "waiting-user";
+  else if (project.handoff.state === "external-response-required")
+    project.status = "waiting-external";
   else if (project.packages.some((item) => item.status === "failed")) project.status = "blocked";
   else if (project.packages.every((item) => item.status === "complete"))
     project.status = "complete";
@@ -733,6 +746,7 @@ export function refreshProject(project: ProjectState): ProjectState {
 
 export function nextReadyPackage(project: ProjectState): WorkPackage | undefined {
   refreshProject(project);
+  if (project.handoff.state !== "agent-actionable") return undefined;
   return project.packages.find((workPackage) => workPackage.status === "ready");
 }
 
@@ -831,9 +845,17 @@ function validateProjectShape(project: ProjectState, expectedId: string): void {
     project.schemaVersion !== 1 ||
     project.id !== expectedId ||
     !PROJECT_ID_PATTERN.test(project.id) ||
-    !["ready", "running", "blocked", "complete", "stale", "archived", "abandoned"].includes(
-      project.status,
-    ) ||
+    ![
+      "ready",
+      "running",
+      "blocked",
+      "complete",
+      "stale",
+      "waiting-user",
+      "waiting-external",
+      "archived",
+      "abandoned",
+    ].includes(project.status) ||
     typeof project.question !== "string" ||
     (project.budgetConfirmedAt !== null && typeof project.budgetConfirmedAt !== "string") ||
     !Array.isArray(project.inputs) ||
@@ -847,6 +869,7 @@ function validateProjectShape(project: ProjectState, expectedId: string): void {
     typeof project.usage.costUsd !== "number" ||
     typeof project.usage.wallSeconds !== "number" ||
     !isProjectLineage(project.lineage) ||
+    !isProjectHandoff(project.handoff) ||
     !isProjectEvidenceState(project.evidenceState)
   ) {
     throw new CliError(`Research project state is invalid: ${expectedId}`, {
@@ -892,6 +915,19 @@ function initialEvidenceState(): ProjectState["evidenceState"] {
   };
 }
 
+function initialHandoffState(): ProjectState["handoff"] {
+  return {
+    state: "agent-actionable",
+    reasonCode: null,
+    summary: null,
+    requestedActions: [],
+    evidenceGaps: [],
+    requestedAt: null,
+    resolvedAt: null,
+    resolutionNote: null,
+  };
+}
+
 function isProjectLineage(value: unknown): value is ProjectState["lineage"] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const lineage = value as Record<string, unknown>;
@@ -913,6 +949,24 @@ function isProjectEvidenceState(value: unknown): value is ProjectState["evidence
     nullableSha256(state.currentSnapshotSha256) &&
     nullableString(state.closureSnapshotId) &&
     nullableString(state.staleReason)
+  );
+}
+
+function isProjectHandoff(value: unknown): value is ProjectState["handoff"] {
+  if (!isObject(value)) return false;
+  return (
+    ["agent-actionable", "user-action-required", "external-response-required"].includes(
+      String(value.state),
+    ) &&
+    nullableString(value.reasonCode) &&
+    nullableString(value.summary) &&
+    Array.isArray(value.requestedActions) &&
+    value.requestedActions.every((item) => typeof item === "string") &&
+    Array.isArray(value.evidenceGaps) &&
+    value.evidenceGaps.every((item) => typeof item === "string") &&
+    nullableString(value.requestedAt) &&
+    nullableString(value.resolvedAt) &&
+    nullableString(value.resolutionNote)
   );
 }
 

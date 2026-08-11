@@ -28,6 +28,7 @@ import { registerEvidenceArtifact } from "./workspace/artifacts.js";
 import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
 import { inspectDiscoveryProgress } from "./workspace/discovery-status.js";
 import { recordDiscoveryAssessmentBatch } from "./workspace/discovery.js";
+import { bindEvidenceDownload } from "./workspace/downloads.js";
 import { registerNativeDiscoveryCandidate } from "./workspace/evidence-ledger.js";
 import { recordNativeResearchActivity } from "./workspace/native-activity.js";
 import { readAndVerifyProjectInputPlan } from "./workspace/input-plan.js";
@@ -49,6 +50,8 @@ import {
   abortNativeResearchStage,
   inspectNativeResearchStage,
   prepareNativeResearchStage,
+  requestResearchHandoff,
+  resolveResearchHandoff,
   runResearchWorkspace,
   submitNativeResearchStage,
 } from "./workspace/runtime.js";
@@ -103,6 +106,8 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project addendum <closed-project-id> --to <target-project-id> [--workspace <path>] [--json]
   tiangong-ai research project archive <project-id> --reason <text> [--workspace <path>] [--json]
   tiangong-ai research project abandon <project-id> --reason <text> [--workspace <path>] [--json]
+  tiangong-ai research project handoff request <project-id> --record <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project handoff resolve <project-id> --note <text> [--workspace <path>] [--json]
   tiangong-ai research project stage prepare <project-id> --stage discover|acquire|analyze|synthesize --host-agent codex|claude [--workspace <path>] [--json]
   tiangong-ai research project stage submit <project-id> --session <id> --output <absolute-json> [--confirm-model <id>] [--workspace <path>] [--json]
   tiangong-ai research project stage abort <project-id> --session <id> [--workspace <path>] [--json]
@@ -110,7 +115,8 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project evidence activity record <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence candidate register <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence assessment record <project-id> --record <absolute-json> [--workspace <path>] [--json]
-  tiangong-ai research project evidence artifact register <project-id> --candidate <id> --path <absolute-file> [--media-type <type>] [--source-url <https-url>] [--license <declared-license>] [--license-url <https-url>] [--host-type <type>] [--article-version <version>] [--workspace <path>] [--json]
+  tiangong-ai research project evidence download bind <project-id> --candidate <id> --record <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence artifact register <project-id> --candidate <id> --path <absolute-file> [--download-binding <id> | --derived-from-artifact <id>] [--media-type <type>] [--source-url <https-url>] [--license <declared-license>] [--license-url <https-url>] [--host-type <type>] [--article-version <version>] [--workspace <path>] [--json]
   tiangong-ai research schema show <discover|acquire|analyze|synthesize|review|doctor> [--json]
   tiangong-ai research status [--project <project-id>] [--all] [--workspace <absolute-path>] [--json]
   tiangong-ai research run [--project <project-id>] [--max-parallel <1-8>] [--max-cycles <1-100>] [--dry-run] [--progress-jsonl] [--workspace <absolute-path>] [--json]
@@ -366,6 +372,55 @@ async function runCapability(argv: string[], io: CliIO): Promise<number> {
 async function runProject(argv: string[], io: CliIO): Promise<number> {
   const [action, ...rest] = argv;
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action === "handoff") {
+    const [handoffAction, ...handoffRest] = rest;
+    if (handoffAction === "request") {
+      const args = parseStrictArgs(
+        handoffRest,
+        { ...WORKSPACE_OPTIONS, record: "string" },
+        "research project handoff request",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project handoff request");
+      const recordPath = strictString(args, "record");
+      if (!recordPath) {
+        throw new CliError("handoff request requires --record.", {
+          code: "RESEARCH_PROJECT_HANDOFF_INVALID",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      const record = await readBoundedJsonRecord(
+        recordPath,
+        "--record",
+        "RESEARCH_PROJECT_HANDOFF_INVALID",
+      );
+      const result = await requestResearchHandoff({ root, projectId, value: record });
+      writeJson(io, result, args);
+      return 0;
+    }
+    if (handoffAction === "resolve") {
+      const args = parseStrictArgs(
+        handoffRest,
+        { ...WORKSPACE_OPTIONS, note: "string" },
+        "research project handoff resolve",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project handoff resolve");
+      const note = strictString(args, "note");
+      if (!note) {
+        throw new CliError("handoff resolve requires --note.", {
+          code: "RESEARCH_PROJECT_HANDOFF_INVALID",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      const result = await resolveResearchHandoff({ root, projectId, note });
+      writeJson(io, result, args);
+      return 0;
+    }
+    throw unknownAction("research project handoff", handoffAction ?? "");
+  }
   if (action === "stage") {
     const [stageAction, ...stageRest] = rest;
     if (stageAction === "prepare") {
@@ -541,6 +596,38 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       writeJson(io, result, args);
       return 0;
     }
+    if (evidenceAction === "download") {
+      const [downloadAction, ...downloadRest] = evidenceRest;
+      if (downloadAction !== "bind") {
+        throw unknownAction("research project evidence download", downloadAction ?? "");
+      }
+      const args = parseStrictArgs(
+        downloadRest,
+        { ...WORKSPACE_OPTIONS, candidate: "string", record: "string" },
+        "research project evidence download bind",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project evidence download bind");
+      const candidateId = strictString(args, "candidate");
+      const recordPath = strictString(args, "record");
+      if (!candidateId || !recordPath) {
+        throw new CliError("download bind requires --candidate and --record.", {
+          code: "RESEARCH_DOWNLOAD_BINDING_INVALID",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      const record = await readBoundedJsonRecord(
+        recordPath,
+        "--record",
+        "RESEARCH_DOWNLOAD_BINDING_INVALID",
+      );
+      const result = await withWorkspaceLock(root, "research.download.bind", () =>
+        bindEvidenceDownload({ root, projectId, candidateId, value: record }),
+      );
+      writeJson(io, result, args);
+      return result.status === "completed" ? 0 : 3;
+    }
     if (evidenceAction === "artifact") {
       const [artifactAction, ...artifactRest] = evidenceRest;
       if (artifactAction !== "register") {
@@ -558,6 +645,8 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
           "license-url": "string",
           "host-type": "string",
           "article-version": "string",
+          "download-binding": "string",
+          "derived-from-artifact": "string",
         },
         "research project evidence artifact register",
       );
@@ -596,6 +685,12 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
             : {}),
           ...(strictString(args, "article-version")
             ? { articleVersion: strictString(args, "article-version")! }
+            : {}),
+          ...(strictString(args, "download-binding")
+            ? { downloadBindingId: strictString(args, "download-binding")! }
+            : {}),
+          ...(strictString(args, "derived-from-artifact")
+            ? { derivedFromArtifactId: strictString(args, "derived-from-artifact")! }
             : {}),
         }),
       );
@@ -853,6 +948,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
           status: current.status,
           authority: projectAuthority(current, workspaceProjects),
           lineage: current.lineage,
+          handoff: current.handoff,
           evidenceState: current.evidenceState,
           snapshot,
           nativeStage,
@@ -934,6 +1030,12 @@ function projectRecommendedAction(
   }
   if (project.status === "archived" || project.status === "abandoned") {
     return `Project is ${project.status}; inspect with research status --all and continue only from an authoritative project.`;
+  }
+  if (project.handoff.state === "user-action-required") {
+    return `User action required: ${project.handoff.summary ?? "review the requested action"} Resolve only after completion: tiangong-ai research project handoff resolve ${project.id} --note <resolution-note> --workspace ${root}`;
+  }
+  if (project.handoff.state === "external-response-required") {
+    return `Waiting for an external response: ${project.handoff.summary ?? "external evidence is pending"} Do not continue substitute searching; resolve after the response is registered.`;
   }
   if (nativeStage.status === "stale" || nativeStage.status === "invalid") {
     return nativeStage.recommendedAction ?? "Recover the stale native session explicitly.";

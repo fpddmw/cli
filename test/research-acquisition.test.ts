@@ -16,6 +16,7 @@ import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import { persistBrokerEvidence } from "../src/research/workspace/evidence.js";
 import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
 import { inspectDiscoveryProgress } from "../src/research/workspace/discovery-status.js";
+import { bindEvidenceDownload } from "../src/research/workspace/downloads.js";
 import {
   evidenceLedgerPath,
   listEvidenceCandidates,
@@ -92,12 +93,20 @@ describe("research acquisition and evidence snapshots", () => {
       await writeFile(selected, selectedBytes);
       await writeFile(selectedText, "selected exact text derivative\n");
       await writeFile(concurrent, concurrentBytes);
+      const selectedDownload = await completedDownload(
+        root,
+        "artifact-project",
+        candidate.id,
+        selected,
+        "https://example.test/paper?utm_source=browser&token=must-not-persist",
+      );
       const artifact = await registerEvidenceArtifact({
         root,
         projectId: "artifact-project",
         candidateId: candidate.id,
         path: selected,
         sourceUrl: "https://example.test/paper?utm_source=search",
+        downloadBindingId: selectedDownload.binding.bindingId,
         license: "CC-BY-4.0",
         licenseUrl: "https://creativecommons.org/licenses/by/4.0/",
         hostType: "publisher",
@@ -108,7 +117,7 @@ describe("research acquisition and evidence snapshots", () => {
         projectId: "artifact-project",
         candidateId: candidate.id,
         path: selectedText,
-        sourceUrl: "https://example.test/paper",
+        derivedFromArtifactId: artifact.artifactId,
       });
       const workbookPath = join(staging, "supporting.xlsx");
       const workbookBytes = storedZip([
@@ -143,7 +152,29 @@ describe("research acquisition and evidence snapshots", () => {
         (error: unknown) =>
           error instanceof CliError && error.code === "RESEARCH_ARTIFACT_FORMAT_INVALID",
       );
+      const masqueradingPdf = join(staging, "publisher-error.pdf");
+      await writeFile(masqueradingPdf, "<!doctype html><html><body>Access denied</body></html>");
+      const masqueradingDownload = await completedDownload(
+        root,
+        "artifact-project",
+        candidate.id,
+        masqueradingPdf,
+        "https://example.test/publisher-error.pdf",
+      );
+      await assert.rejects(
+        registerEvidenceArtifact({
+          root,
+          projectId: "artifact-project",
+          candidateId: candidate.id,
+          path: masqueradingPdf,
+          sourceUrl: "https://example.test/publisher-error.pdf",
+          downloadBindingId: masqueradingDownload.binding.bindingId,
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_ARTIFACT_FORMAT_INVALID",
+      );
       assert.equal(artifact.sourceUrl, "https://example.test/paper");
+      assert.equal(artifact.downloadBinding?.bindingId, selectedDownload.binding.bindingId);
       assert.equal(artifact.license, "CC-BY-4.0");
       assert.equal(artifact.validation.details.pageCount, 1);
       assert.deepEqual(
@@ -285,6 +316,38 @@ describe("research acquisition and evidence snapshots", () => {
         (error: unknown) =>
           error instanceof CliError && error.code === "RESEARCH_ARTIFACT_PATH_INVALID",
       );
+      const download = await completedDownload(
+        root,
+        "artifact-safety",
+        candidate.id,
+        pdf,
+        "https://example.test/paper",
+      );
+      const cancelled = await bindEvidenceDownload({
+        root,
+        projectId: "artifact-safety",
+        candidateId: candidate.id,
+        value: {
+          schemaVersion: 1,
+          backend: "native-browser",
+          status: "cancelled",
+          downloadUrl: "https://example.test/cancelled?token=must-not-persist",
+          failureCode: "user-cancelled",
+        },
+      });
+      assert.equal(cancelled.status, "cancelled");
+      assert.equal(cancelled.binding, null);
+      await assert.rejects(
+        registerEvidenceArtifact({
+          root,
+          projectId: "artifact-safety",
+          candidateId: candidate.id,
+          path: pdf,
+          sourceUrl: "https://example.test/paper",
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_DOWNLOAD_BINDING_REQUIRED",
+      );
       await assert.rejects(
         registerEvidenceArtifact({
           root,
@@ -292,6 +355,7 @@ describe("research acquisition and evidence snapshots", () => {
           candidateId: candidate.id,
           path: pdf,
           sourceUrl: "https://example.test/paper?token=must-not-persist",
+          downloadBindingId: download.binding.bindingId,
         }),
         (error: unknown) =>
           error instanceof CliError && error.code === "RESEARCH_ARTIFACT_SOURCE_INVALID",
@@ -623,14 +687,48 @@ describe("research acquisition and evidence snapshots", () => {
         stage: "acquire",
         hostAgent: "codex",
       });
+      const unboundPath = join(staging, "unbound-network.txt");
+      await writeFile(unboundPath, "network-looking content without a download event\n");
+      const unbound = await registerEvidenceArtifact({
+        root,
+        projectId: "native-formalized",
+        candidateId: native.candidate.id,
+        path: unboundPath,
+      });
+      const unboundAudit = join(staging, "unbound-acquisition.json");
+      await writeFile(
+        unboundAudit,
+        JSON.stringify(
+          acquisitionValue(native.candidate.id, "formal-source", [unbound.artifactId]),
+        ),
+      );
+      await assert.rejects(
+        submitNativeResearchStage({
+          root,
+          projectId: "native-formalized",
+          sessionId: acquire.sessionId,
+          outputPath: unboundAudit,
+          confirmedModel: acquire.expectedModel,
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_STRUCTURED_OUTPUT_INVALID",
+      );
       const pdfPath = join(staging, "formal-source.pdf");
       await writeFile(pdfPath, await validPdf("binary-only source"));
+      const formalDownload = await completedDownload(
+        root,
+        "native-formalized",
+        native.candidate.id,
+        pdfPath,
+        "https://example.test/formal-source",
+      );
       const pdf = await registerEvidenceArtifact({
         root,
         projectId: "native-formalized",
         candidateId: native.candidate.id,
         path: pdfPath,
         sourceUrl: "https://example.test/formal-source",
+        downloadBindingId: formalDownload.binding.bindingId,
       });
       const acquisitionOutput = join(staging, "formalized-acquisition.json");
       await writeFile(
@@ -766,14 +864,43 @@ async function recordAdmission(
   });
 }
 
-function acquisitionValue(candidateId: string, sourceId: string): Record<string, unknown> {
+async function completedDownload(
+  root: string,
+  projectId: string,
+  candidateId: string,
+  path: string,
+  downloadUrl: string,
+): Promise<Extract<Awaited<ReturnType<typeof bindEvidenceDownload>>, { status: "completed" }>> {
+  const result = await bindEvidenceDownload({
+    root,
+    projectId,
+    candidateId,
+    value: {
+      schemaVersion: 1,
+      backend: "native-browser",
+      status: "completed",
+      path,
+      downloadUrl,
+      suggestedFilename: path,
+      downloadIdentifier: `event-${candidateId}`,
+    },
+  });
+  assert.equal(result.status, "completed");
+  return result as Extract<typeof result, { status: "completed" }>;
+}
+
+function acquisitionValue(
+  candidateId: string,
+  sourceId: string,
+  artifactIds: string[] = [],
+): Record<string, unknown> {
   return {
     schemaVersion: 1,
     decisions: [
       {
         sourceId,
         candidateId,
-        artifactIds: [],
+        artifactIds,
         status: "accepted",
         rationale: "Immutable local input is already available in full.",
         limitations: [],

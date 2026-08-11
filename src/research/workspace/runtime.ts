@@ -20,6 +20,7 @@ import {
 import { stageEvidenceArtifacts } from "./artifacts.js";
 import { commitDiscoveryDecisions, materializeDiscoveryEvidence } from "./discovery.js";
 import { inspectDiscoveryProgress, type DiscoveryProgress } from "./discovery-status.js";
+import { downloadBindingRecordSchema } from "./downloads.js";
 import { loadProjectEvidenceReceipts, stageProjectEvidence } from "./evidence.js";
 import {
   appendEvidenceLedgerEvent,
@@ -107,11 +108,12 @@ export interface WorkspaceRunResult {
   workspace: string;
   requestId: string;
   projectId: string | null;
-  status: "complete" | "blocked" | "ready" | "dry-run";
+  status: "complete" | "blocked" | "waiting" | "ready" | "dry-run";
   stopReason:
     | "dry-run"
     | "all-projects-complete"
     | "project-blocked"
+    | "handoff-required"
     | "native-stage-required"
     | "cycle-limit"
     | "no-ready-work"
@@ -125,6 +127,36 @@ export interface WorkspaceRunResult {
     usage: ProjectState["usage"];
   }>;
 }
+
+export const researchHandoffRecordSchema = {
+  $id: "https://schemas.tiangong.ai/research/handoff-request-v1.json",
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "state", "reasonCode", "summary", "requestedActions", "evidenceGaps"],
+  properties: {
+    schemaVersion: { type: "integer", const: 1 },
+    state: {
+      type: "string",
+      enum: ["user-action-required", "external-response-required"],
+    },
+    reasonCode: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    summary: { type: "string", minLength: 8, maxLength: 1_000 },
+    requestedActions: {
+      type: "array",
+      minItems: 1,
+      maxItems: 10,
+      uniqueItems: true,
+      items: { type: "string", minLength: 1, maxLength: 500 },
+    },
+    evidenceGaps: {
+      type: "array",
+      minItems: 1,
+      maxItems: 50,
+      uniqueItems: true,
+      items: { type: "string", minLength: 1, maxLength: 500 },
+    },
+  },
+} as const;
 
 export async function runResearchWorkspace(
   root: string,
@@ -274,6 +306,8 @@ export interface NativeStagePacket {
     recordActivity: { argv: string[]; recordSchema: Record<string, unknown> } | null;
     registerCandidate: { argv: string[]; recordSchema: Record<string, unknown> } | null;
     recordAssessment: { argv: string[]; recordSchema: Record<string, unknown> } | null;
+    bindDownload: { argv: string[]; recordSchema: Record<string, unknown> } | null;
+    requestHandoff: { argv: string[]; recordSchema: Record<string, unknown> };
     registerArtifact: {
       argv: string[];
       supportedMediaTypes: string[];
@@ -482,7 +516,7 @@ export async function prepareNativeResearchStage(input: {
         input.stage === "discover" && hasBrokeredEvidence
           ? "Use native Web/Browser broadly for discovery when useful, but record every native search/navigation with recordActivity and register its candidates. Before admitting any native lead, formalize the same URL or DOI through fetchEvidence so it receives an immutable broker receipt. Assess candidates in bounded batches with recordAssessment as they arrive; the final output is only a small coverage closeout. Native results without broker/input provenance are discovery leads, never evidence."
           : input.stage === "acquire"
-            ? "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. Record browser/download/file-inspection activity with recordActivity, then register each exact downloaded/decomposed file with registerArtifact before submitting the audit. Never scan a download directory or infer success from file existence."
+            ? "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. Capture the exact browser/adapter Download object, save it to the planned unique staging path, and call bindDownload before registerArtifact. Record browser/download/file-inspection activity with recordActivity. Failed or cancelled downloads cannot create bindings or artifacts. Never scan a download directory or infer success from file existence."
             : "Do not acquire additional evidence in this stage.",
         basePrompt,
         "Save only the final schema-conforming JSON object to a new regular file, then submit it with the packet's submit command. The CLI remains the sole authority for validation and atomic promotion.",
@@ -517,6 +551,25 @@ export async function prepareNativeResearchStage(input: {
           maxWallSeconds: config.budget.packageMaxWallSeconds[input.stage],
         },
         commands: {
+          requestHandoff: {
+            argv: [
+              "tiangong-ai",
+              "research",
+              "project",
+              "handoff",
+              "request",
+              project.id,
+              "--record",
+              "<absolute-handoff-record.json>",
+              "--workspace",
+              input.root,
+              "--json",
+            ],
+            recordSchema: structuredClone(researchHandoffRecordSchema) as unknown as Record<
+              string,
+              unknown
+            >,
+          },
           recordActivity:
             input.stage === "discover" || input.stage === "acquire"
               ? {
@@ -588,6 +641,8 @@ export async function prepareNativeResearchStage(input: {
                     "<candidate-id>",
                     "--path",
                     "<absolute-file>",
+                    "--download-binding",
+                    "<binding-id-for-network-file>",
                     "--media-type",
                     "<media-type>",
                     "--workspace",
@@ -607,12 +662,39 @@ export async function prepareNativeResearchStage(input: {
                     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
                   ],
                   optionalMetadataFields: [
+                    "download-binding",
+                    "derived-from-artifact",
                     "source-url",
                     "license",
                     "license-url",
                     "host-type",
                     "article-version",
                   ],
+                }
+              : null,
+          bindDownload:
+            input.stage === "acquire"
+              ? {
+                  argv: [
+                    "tiangong-ai",
+                    "research",
+                    "project",
+                    "evidence",
+                    "download",
+                    "bind",
+                    project.id,
+                    "--candidate",
+                    "<candidate-id>",
+                    "--record",
+                    "<absolute-download-record.json>",
+                    "--workspace",
+                    input.root,
+                    "--json",
+                  ],
+                  recordSchema: structuredClone(downloadBindingRecordSchema) as unknown as Record<
+                    string,
+                    unknown
+                  >,
                 }
               : null,
           recordAssessment:
@@ -704,6 +786,7 @@ export async function prepareNativeResearchStage(input: {
         rules: [
           "Current native host performs producer reasoning; the CLI does not spawn a producer.",
           "Native Web/Browser activity is visible in the evidence ledger but becomes admissible only after broker/input formalization and strict assessment.",
+          "When the next material step requires user authorization or an external response, request a durable handoff and stop; do not keep searching low-yield substitutes.",
           "Only broker receipts or registered immutable inputs may support discover output.",
           "Only exact, structurally validated, content-addressed artifacts may support full-text acquisition claims.",
           "Do not place credentials, cookies, authorization data, or sensitive URL parameters in request/output files.",
@@ -812,6 +895,14 @@ export async function submitNativeResearchStage(input: {
       });
     }
     const project = await loadProject(input.root, input.projectId);
+    if (project.handoff.state !== "agent-actionable") {
+      throw new CliError("Native stage is paused for an unresolved project handoff.", {
+        code: "RESEARCH_PROJECT_HANDOFF_REQUIRED",
+        exitCode: 3,
+        details: { state: project.handoff.state, reasonCode: project.handoff.reasonCode },
+      });
+    }
+    await assertNoUnresolvedNativeChallenge(input.root, project.id);
     const workPackage = packageById(project, session.packet.packageId);
     if (workPackage.status !== "running" || workPackage.executor !== "producer") {
       throw new CliError("The bound native producer package is no longer running.", {
@@ -971,6 +1062,28 @@ export async function submitNativeResearchStage(input: {
   });
 }
 
+async function assertNoUnresolvedNativeChallenge(root: string, projectId: string): Promise<void> {
+  const events = await readJournal(evidenceLedgerPath(root, projectId));
+  const lastChallengeIndex = events.findLastIndex(
+    (event) =>
+      event.type === "activity.recorded" &&
+      event.payload.status === "blocked" &&
+      event.payload.challenge !== "none",
+  );
+  if (lastChallengeIndex < 0) return;
+  const lastResolutionIndex = events.findLastIndex((event) => event.type === "handoff.resolved");
+  if (lastResolutionIndex < lastChallengeIndex) {
+    throw new CliError(
+      "A login, MFA, CAPTCHA, paywall, security, or authorization challenge requires a durable user handoff before stage submission.",
+      {
+        code: "RESEARCH_PROJECT_HANDOFF_REQUIRED",
+        exitCode: 3,
+        details: { challenge: events[lastChallengeIndex]?.payload.challenge ?? "unknown" },
+      },
+    );
+  }
+}
+
 export async function abortNativeResearchStage(input: {
   root: string;
   projectId: string;
@@ -1019,6 +1132,204 @@ export async function abortNativeResearchStage(input: {
       status: project.status === "blocked" ? "blocked" : "ready",
     };
   });
+}
+
+export async function requestResearchHandoff(input: {
+  root: string;
+  projectId: string;
+  value: Record<string, unknown>;
+}): Promise<{
+  projectId: string;
+  status: "waiting-user" | "waiting-external";
+  handoff: ProjectState["handoff"];
+  resolveCommand: string;
+}> {
+  return withWorkspaceLock(input.root, "research.handoff.request", async () => {
+    const value = parseHandoffRequest(input.value);
+    const project = refreshProject(await loadProject(input.root, input.projectId));
+    if (
+      project.lineage.supersededBy ||
+      ["complete", "stale", "archived", "abandoned"].includes(project.status)
+    ) {
+      throw new CliError(
+        "Historical or closed projects require an immutable addendum, not an in-place handoff.",
+        { code: "RESEARCH_PROJECT_HANDOFF_INVALID", exitCode: 3 },
+      );
+    }
+    if (project.handoff.state !== "agent-actionable") {
+      throw new CliError("This project already has an unresolved handoff.", {
+        code: "RESEARCH_PROJECT_HANDOFF_REQUIRED",
+        exitCode: 3,
+        details: { state: project.handoff.state },
+      });
+    }
+    const activePath = nativeStageSessionPath(input.root, input.projectId);
+    const session = (await pathExists(activePath))
+      ? await readNativeStageSession(input.root, input.projectId)
+      : null;
+    if (session) {
+      const workPackage = packageById(project, session.packet.packageId);
+      if (workPackage.status !== "running") {
+        throw new CliError("Active native session is not bound to a running package.", {
+          code: "RESEARCH_NATIVE_STAGE_SESSION_MISMATCH",
+          exitCode: 3,
+        });
+      }
+      workPackage.status = "ready";
+      workPackage.attempts = Math.max(0, workPackage.attempts - 1);
+      workPackage.startedAt = null;
+      workPackage.completedAt = null;
+      workPackage.lastError = null;
+      workPackage.lastFailureKind = null;
+      workPackage.retryNotBefore = null;
+    }
+    const requestedAt = new Date().toISOString();
+    project.handoff = {
+      state: value.state,
+      reasonCode: value.reasonCode,
+      summary: value.summary,
+      requestedActions: value.requestedActions,
+      evidenceGaps: value.evidenceGaps,
+      requestedAt,
+      resolvedAt: null,
+      resolutionNote: null,
+    };
+    refreshProject(project);
+    await saveProject(input.root, project);
+    const eventPayload = {
+      state: value.state,
+      reasonCode: value.reasonCode,
+      summary: value.summary,
+      requestedActions: value.requestedActions,
+      evidenceGaps: value.evidenceGaps,
+      requestedAt,
+      interruptedSessionId: session?.packet.sessionId ?? null,
+      interruptedPackageId: session?.packet.packageId ?? null,
+    };
+    await appendEvidenceLedgerEvent(input.root, project.id, "handoff.requested", eventPayload);
+    await appendJournalEvent(
+      workspacePaths(input.root).journal,
+      "project.handoff.requested",
+      project.id,
+      { projectId: project.id, ...eventPayload },
+    );
+    if (session) {
+      await rm(activePath, { force: true });
+      await rm(session.capsuleRoot, { recursive: true, force: true });
+    }
+    return {
+      projectId: project.id,
+      status: project.status === "waiting-external" ? "waiting-external" : "waiting-user",
+      handoff: project.handoff,
+      resolveCommand: `tiangong-ai research project handoff resolve ${project.id} --note <resolution-note> --workspace ${input.root}`,
+    };
+  });
+}
+
+export async function resolveResearchHandoff(input: {
+  root: string;
+  projectId: string;
+  note: string;
+}): Promise<{
+  projectId: string;
+  status: ProjectState["status"];
+  handoff: ProjectState["handoff"];
+}> {
+  return withWorkspaceLock(input.root, "research.handoff.resolve", async () => {
+    const project = await loadProject(input.root, input.projectId);
+    if (project.handoff.state === "agent-actionable" || !project.handoff.requestedAt) {
+      throw new CliError("Project has no unresolved handoff.", {
+        code: "RESEARCH_PROJECT_HANDOFF_INVALID",
+        exitCode: 2,
+      });
+    }
+    const note = sanitizeResearchText(input.note, configuredResearchSecrets(process.env)).trim();
+    if (note.length < 8 || note.length > 1_000) {
+      throw new CliError("Handoff resolution note must contain 8-1000 safe characters.", {
+        code: "RESEARCH_PROJECT_HANDOFF_INVALID",
+        exitCode: 2,
+      });
+    }
+    const previousState = project.handoff.state;
+    const resolvedAt = new Date().toISOString();
+    project.handoff = {
+      ...project.handoff,
+      state: "agent-actionable",
+      resolvedAt,
+      resolutionNote: note,
+    };
+    refreshProject(project);
+    await saveProject(input.root, project);
+    const eventPayload = {
+      previousState,
+      reasonCode: project.handoff.reasonCode,
+      requestedAt: project.handoff.requestedAt,
+      resolvedAt,
+      resolutionNote: note,
+    };
+    await appendEvidenceLedgerEvent(input.root, project.id, "handoff.resolved", eventPayload);
+    await appendJournalEvent(
+      workspacePaths(input.root).journal,
+      "project.handoff.resolved",
+      project.id,
+      { projectId: project.id, ...eventPayload },
+    );
+    return { projectId: project.id, status: project.status, handoff: project.handoff };
+  });
+}
+
+function parseHandoffRequest(value: Record<string, unknown>): {
+  state: "user-action-required" | "external-response-required";
+  reasonCode: string;
+  summary: string;
+  requestedActions: string[];
+  evidenceGaps: string[];
+} {
+  const sanitized = sanitizeResearchRecord(value, configuredResearchSecrets(process.env));
+  const allowed = new Set([
+    "schemaVersion",
+    "state",
+    "reasonCode",
+    "summary",
+    "requestedActions",
+    "evidenceGaps",
+  ]);
+  const requestedActions = Array.isArray(sanitized.requestedActions)
+    ? sanitized.requestedActions
+    : [];
+  const evidenceGaps = Array.isArray(sanitized.evidenceGaps) ? sanitized.evidenceGaps : [];
+  if (
+    Object.keys(sanitized).some((key) => !allowed.has(key)) ||
+    sanitized.schemaVersion !== 1 ||
+    !["user-action-required", "external-response-required"].includes(String(sanitized.state)) ||
+    typeof sanitized.reasonCode !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(sanitized.reasonCode) ||
+    typeof sanitized.summary !== "string" ||
+    sanitized.summary.trim().length < 8 ||
+    sanitized.summary.length > 1_000 ||
+    requestedActions.length < 1 ||
+    requestedActions.length > 10 ||
+    requestedActions.some(
+      (item) => typeof item !== "string" || item.length < 1 || item.length > 500,
+    ) ||
+    new Set(requestedActions).size !== requestedActions.length ||
+    evidenceGaps.length < 1 ||
+    evidenceGaps.length > 50 ||
+    evidenceGaps.some((item) => typeof item !== "string" || item.length < 1 || item.length > 500) ||
+    new Set(evidenceGaps).size !== evidenceGaps.length
+  ) {
+    throw new CliError("Handoff request failed validation.", {
+      code: "RESEARCH_PROJECT_HANDOFF_INVALID",
+      exitCode: 2,
+    });
+  }
+  return {
+    state: sanitized.state as "user-action-required" | "external-response-required",
+    reasonCode: sanitized.reasonCode,
+    summary: sanitized.summary.trim(),
+    requestedActions: requestedActions as string[],
+    evidenceGaps: evidenceGaps as string[],
+  };
 }
 
 async function executeWorkPackage(
@@ -3846,6 +4157,9 @@ async function summarizeRun(
     usage: project.usage,
   }));
   const unfinished = summaries.filter((project) => project.status !== "complete");
+  const waiting = unfinished.filter(
+    (project) => project.status === "waiting-user" || project.status === "waiting-external",
+  );
   const hasReadyPackage = summaries.some((project) => project.readyPackage !== null);
   const nativeStageRequired = projects.some((project) =>
     project.packages.some(
@@ -3857,21 +4171,31 @@ async function summarizeRun(
   const status =
     summaries.length > 0 && summaries.every((project) => project.status === "complete")
       ? "complete"
-      : unfinished.length > 0 && unfinished.every((project) => project.status === "blocked")
-        ? "blocked"
-        : "ready";
+      : waiting.length > 0 &&
+          unfinished.every(
+            (project) =>
+              project.status === "blocked" ||
+              project.status === "waiting-user" ||
+              project.status === "waiting-external",
+          )
+        ? "waiting"
+        : unfinished.length > 0 && unfinished.every((project) => project.status === "blocked")
+          ? "blocked"
+          : "ready";
   const stopReason =
     summaries.length === 0
       ? "no-projects"
       : status === "complete"
         ? "all-projects-complete"
-        : hasReadyPackage && cycles >= maxCycles
-          ? "cycle-limit"
-          : nativeStageRequired
-            ? "native-stage-required"
-            : status === "blocked"
-              ? "project-blocked"
-              : "no-ready-work";
+        : status === "waiting"
+          ? "handoff-required"
+          : hasReadyPackage && cycles >= maxCycles
+            ? "cycle-limit"
+            : nativeStageRequired
+              ? "native-stage-required"
+              : status === "blocked"
+                ? "project-blocked"
+                : "no-ready-work";
   return {
     workspace: root,
     requestId,

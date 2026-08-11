@@ -95,6 +95,7 @@ export async function materializeAcquisitionAudit(
   const evidence = parseEvidenceRecord(await readFile(evidencePath, "utf8"));
   const sources = evidence.sources as Array<Record<string, unknown>>;
   const sourceIds = new Set(sources.map((source) => String(source.id)));
+  const sourceById = new Map(sources.map((source) => [String(source.id), source]));
   const sourceCandidates = await admittedSourceCandidateMap(root, project.id);
   if (
     parsed.decisions.length !== sourceIds.size ||
@@ -129,6 +130,16 @@ export async function materializeAcquisitionAudit(
       }
       return artifact;
     });
+    const source = sourceById.get(decision.sourceId);
+    const provenance = source && isObject(source.provenance) ? source.provenance : {};
+    if (
+      provenance.kind === "broker" &&
+      boundArtifacts.some((artifact) => !artifactHasDownloadProvenance(artifact, artifacts))
+    ) {
+      throw acquisitionOutputError(
+        `Network source ${decision.sourceId} includes an artifact without an exact download or derived-file binding.`,
+      );
+    }
     return { ...decision, artifacts: boundArtifacts };
   });
   return {
@@ -137,6 +148,18 @@ export async function materializeAcquisitionAudit(
     limitations: parsed.limitations,
     gaps: parsed.gaps,
   };
+}
+
+function artifactHasDownloadProvenance(
+  artifact: EvidenceArtifactRecord,
+  artifacts: Map<string, EvidenceArtifactRecord>,
+  visited: Set<string> = new Set(),
+): boolean {
+  if (artifact.downloadBinding) return true;
+  if (!artifact.derivedFromArtifactId || visited.has(artifact.artifactId)) return false;
+  visited.add(artifact.artifactId);
+  const parent = artifacts.get(artifact.derivedFromArtifactId);
+  return parent ? artifactHasDownloadProvenance(parent, artifacts, visited) : false;
 }
 
 export async function commitAcquisitionAssessments(
@@ -348,9 +371,10 @@ export async function freezeEvidenceSnapshot(
 }
 
 function producerVisibleMediaType(mediaType: string): boolean {
-  return ["application/json", "text/plain", "text/markdown", "text/csv", "text/html"].includes(
-    mediaType,
-  );
+  // HTML is frequently a login, paywall, challenge, or error page returned in
+  // place of the requested file. Keep it auditable as an artifact, but never
+  // let it mechanically satisfy producer-visible/full-text coverage.
+  return ["application/json", "text/plain", "text/markdown", "text/csv"].includes(mediaType);
 }
 
 export async function loadCurrentEvidenceSnapshot(
