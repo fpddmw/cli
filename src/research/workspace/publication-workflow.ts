@@ -70,7 +70,7 @@ interface PublicationGeneration {
   frozenAt: string;
   producer: {
     agent: AgentKind;
-    sessionId: string;
+    sessionSha256: string;
   };
   policy: {
     projectId: string;
@@ -124,7 +124,7 @@ export interface PublicationReviewPacket {
   role: PublicationReviewRole;
   reviewer: {
     agent: AgentKind;
-    sessionId: string;
+    sessionSha256: string;
   };
   preparedAt: string;
   policy: PublicationGeneration["policy"] & {
@@ -150,7 +150,7 @@ interface PublicationReviewRecord {
   schemaVersion: 1;
   role: PublicationReviewRole;
   packetSha256: string;
-  reviewerSessionId: string;
+  reviewerSessionSha256: string;
   decision: string;
   findings: Array<{
     code: string;
@@ -166,7 +166,7 @@ export interface PublicationStatus {
   projectId: string;
   generationSha256: string | null;
   manuscriptSha256: string | null;
-  generationStatus: "not-started" | "manuscript-frozen" | "invalid";
+  generationStatus: "waiting-for-base-research" | "not-started" | "manuscript-frozen" | "invalid";
   reviewState: "not-started" | "partial" | "complete";
   requiredReviewRoles: PublicationReviewRole[];
   completedReviewRoles: PublicationReviewRole[];
@@ -194,7 +194,7 @@ export interface PublicationClosure {
     role: PublicationReviewRole;
     packetSha256: string;
     reviewSha256: string;
-    reviewerSessionId: string;
+    reviewerSessionSha256: string;
     decision: string;
   }>;
   mechanicalIssues: string[];
@@ -367,7 +367,7 @@ export function publicationReviewSchema(role: PublicationReviewRole): Record<str
       "schemaVersion",
       "role",
       "packetSha256",
-      "reviewerSessionId",
+      "reviewerSessionSha256",
       "decision",
       "findings",
       "boundedRecommendation",
@@ -376,7 +376,7 @@ export function publicationReviewSchema(role: PublicationReviewRole): Record<str
       schemaVersion: { const: 1 },
       role: { const: role },
       packetSha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
-      reviewerSessionId: { type: "string", minLength: 8, maxLength: 128 },
+      reviewerSessionSha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
       decision: {
         enum: role === "journal-editor" ? [...EDITOR_DECISIONS] : [...SPECIALIST_DECISIONS],
       },
@@ -411,9 +411,8 @@ export async function freezePublicationManuscript(input: {
   return withWorkspaceLock(input.root, "research.publication.freeze", async () => {
     const project = await requireClosedTopJournalProject(input.root, input.projectId);
     const producerSessionId = requireSessionId(input.producerSessionId, "producer");
-    if (
-      (await usedReviewerSessionHashes(input.root, project.id)).has(sha256Text(producerSessionId))
-    ) {
+    const producerSessionSha256 = sha256Text(producerSessionId);
+    if ((await usedReviewerSessionHashes(input.root, project.id)).has(producerSessionSha256)) {
       throw publicationError(
         "RESEARCH_PUBLICATION_REVIEW_NOT_INDEPENDENT",
         "A native producer session must not reuse any prior independent reviewer session.",
@@ -495,7 +494,7 @@ export async function freezePublicationManuscript(input: {
       kind: "tiangong-publication-generation" as const,
       projectId: project.id,
       frozenAt,
-      producer: { agent: input.producerAgent, sessionId: producerSessionId },
+      producer: { agent: input.producerAgent, sessionSha256: producerSessionSha256 },
       policy: policySummary(project.publicationPolicy!),
       evidenceSnapshot: {
         id: String(snapshotValue.snapshotId),
@@ -563,14 +562,14 @@ export async function preparePublicationReview(input: {
         2,
       );
     }
-    if (sessionId === generation.producer.sessionId) {
+    const sessionSha256 = sha256Text(sessionId);
+    if (sessionSha256 === generation.producer.sessionSha256) {
       throw publicationError(
         "RESEARCH_PUBLICATION_REVIEW_NOT_INDEPENDENT",
         "A reviewer session must differ from the native producer session.",
       );
     }
     const registry = await loadReviewerRegistry(input.root, project.id);
-    const sessionSha256 = sha256Text(sessionId);
     const usedSessions = await usedReviewerSessionHashes(input.root, project.id);
     if (
       usedSessions.has(sessionSha256) ||
@@ -600,7 +599,7 @@ export async function preparePublicationReview(input: {
       projectId: project.id,
       generationSha256: generation.generationSha256,
       role: input.role,
-      reviewer: { agent: input.reviewerAgent, sessionId },
+      reviewer: { agent: input.reviewerAgent, sessionSha256 },
       preparedAt,
       policy: {
         ...generation.policy,
@@ -668,7 +667,7 @@ export async function submitPublicationReview(input: {
     );
     if (
       review.packetSha256 !== packet.packetSha256 ||
-      review.reviewerSessionId !== packet.reviewer.sessionId
+      review.reviewerSessionSha256 !== packet.reviewer.sessionSha256
     ) {
       throw publicationError(
         "RESEARCH_PUBLICATION_REVIEW_BINDING_INVALID",
@@ -710,7 +709,29 @@ export async function inspectPublicationStatus(
   root: string,
   projectId: string,
 ): Promise<PublicationStatus> {
-  await requireClosedTopJournalProject(root, projectId);
+  const project = await requireTopJournalProject(root, projectId);
+  if (
+    project.status !== "complete" ||
+    project.packages.some((item) => item.status !== "complete")
+  ) {
+    return {
+      schemaVersion: 1,
+      projectId,
+      generationSha256: null,
+      manuscriptSha256: null,
+      generationStatus: "waiting-for-base-research",
+      reviewState: "not-started",
+      requiredReviewRoles: requiredReviewRoles(project.publicationPolicy!),
+      completedReviewRoles: [],
+      missingReviewRoles: requiredReviewRoles(project.publicationPolicy!),
+      mechanicalIssues: [],
+      pivotOptions: [],
+      readinessVerdict: "independent-review-incomplete",
+      boundedStatement:
+        "The final manuscript cannot be frozen until base research closes mechanically.",
+      closureSha256: null,
+    };
+  }
   if (!(await pathExists(publicationCurrentPath(root, projectId)))) {
     return {
       schemaVersion: 1,
@@ -804,7 +825,7 @@ export async function closePublication(
         role: entry.role,
         packetSha256: entry.packet.packetSha256,
         reviewSha256: entry.reviewSha256,
-        reviewerSessionId: entry.review.reviewerSessionId,
+        reviewerSessionSha256: entry.review.reviewerSessionSha256,
         decision: entry.review.decision,
       })),
       mechanicalIssues: generation.assessmentResult.issueCodes,
@@ -834,14 +855,7 @@ async function requireClosedTopJournalProject(
   root: string,
   projectId: string,
 ): Promise<ProjectState> {
-  const project = await loadProject(root, projectId);
-  if (!project.publicationPolicy) {
-    throw publicationError(
-      "RESEARCH_PUBLICATION_POLICY_REQUIRED",
-      "The publication workflow requires an approved top-journal policy binding.",
-      3,
-    );
-  }
+  const project = await requireTopJournalProject(root, projectId);
   if (
     project.status !== "complete" ||
     project.packages.some((item) => item.status !== "complete")
@@ -849,6 +863,18 @@ async function requireClosedTopJournalProject(
     throw publicationError(
       "RESEARCH_PUBLICATION_BASE_RESEARCH_INCOMPLETE",
       "Freeze the final manuscript only after the evidence-report research project is mechanically closed.",
+      3,
+    );
+  }
+  return project;
+}
+
+async function requireTopJournalProject(root: string, projectId: string): Promise<ProjectState> {
+  const project = await loadProject(root, projectId);
+  if (!project.publicationPolicy) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_POLICY_REQUIRED",
+      "The publication workflow requires an approved top-journal policy binding.",
       3,
     );
   }
@@ -998,6 +1024,10 @@ async function loadCurrentGeneration(
   if (
     generation.kind !== "tiangong-publication-generation" ||
     generation.projectId !== projectId ||
+    !isObject(generation.producer) ||
+    !["codex", "claude"].includes(String(generation.producer.agent)) ||
+    typeof generation.producer.sessionSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(generation.producer.sessionSha256) ||
     generationSha256 !== pointer.generationSha256 ||
     sha256Text(canonicalJson(withoutHash)) !== generationSha256
   ) {
@@ -1110,6 +1140,10 @@ async function loadReviewPacket(
     packet.projectId !== projectId ||
     packet.generationSha256 !== generation.generationSha256 ||
     packet.role !== role ||
+    !isObject(packet.reviewer) ||
+    !["codex", "claude"].includes(String(packet.reviewer.agent)) ||
+    typeof packet.reviewer.sessionSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(packet.reviewer.sessionSha256) ||
     sha256Text(canonicalJson(withoutHash)) !== packetSha256
   ) {
     throw publicationError(
@@ -1141,7 +1175,7 @@ async function loadSubmittedReviews(
     const review = parsePublicationReview(raw, role);
     if (
       review.packetSha256 !== packet.packetSha256 ||
-      review.reviewerSessionId !== packet.reviewer.sessionId
+      review.reviewerSessionSha256 !== packet.reviewer.sessionSha256
     ) {
       throw publicationError(
         "RESEARCH_PUBLICATION_REVIEW_BINDING_INVALID",
@@ -1164,7 +1198,8 @@ function parsePublicationReview(
     value.role !== expectedRole ||
     typeof value.packetSha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(value.packetSha256) ||
-    typeof value.reviewerSessionId !== "string" ||
+    typeof value.reviewerSessionSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.reviewerSessionSha256) ||
     !decisionSet.has(String(value.decision)) ||
     !Array.isArray(value.findings) ||
     value.findings.some((finding) => !isReviewFinding(finding)) ||

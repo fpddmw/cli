@@ -311,7 +311,10 @@ evidence snapshot, base outputs, manuscript, assessment, and supplements.
 Exactly four fresh independent sessions review that frozen generation:
 evidence, methods/reproducibility, domain/novelty, and journal-editor. A revised
 manuscript invalidates prior reviews; reviewer-session reuse is rejected from
-the append-only journal even if mutable cache state is removed.
+the append-only journal even if mutable cache state is removed. The raw opaque
+producer/reviewer session identifiers are accepted only at the command boundary;
+generation, packet, review, journal, and closure objects persist only their
+SHA-256 bindings.
 
 ```bash
 tiangong-ai research schema show publication-assessment --json

@@ -39,6 +39,40 @@ const REVIEW_ROLES: PublicationReviewRole[] = [
 ];
 
 describe("top-journal publication workflow", () => {
+  it("reports active base research as pending publication rather than invalid", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-publication-pending-"));
+    const projectId = "pending-publication";
+    try {
+      await initializeResearchWorkspace(root, "Pending publication workflow");
+      const policy = await createApprovedPublicationPolicy(root, projectId);
+      await initializeProject(
+        root,
+        projectId,
+        "Does the active study produce its declared central outcome?",
+        undefined,
+        false,
+        undefined,
+        policy,
+      );
+      const status = await invokeCli([
+        "research",
+        "status",
+        "--project",
+        projectId,
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(status.exitCode, 0);
+      const projectStatus = JSON.parse(status.stdout).projects[0];
+      assert.equal(projectStatus.publication.generationStatus, "waiting-for-base-research");
+      assert.equal("code" in projectStatus.publication, false);
+      assert.doesNotMatch(projectStatus.recommendedAction, /publication state is invalid/i);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("exposes publication freeze/status and authoritative assessment/review schemas", async () => {
     const fixture = await publicationFixture("publication-cli");
     try {
@@ -152,6 +186,68 @@ describe("top-journal publication workflow", () => {
       assert.equal(closure.manuscript.sha256, frozen.manuscript.sha256);
       assert.equal(closure.reviews.length, 4);
       assert.match(closure.closureSha256, /^[a-f0-9]{64}$/);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("persists only hashes of producer and reviewer session identifiers", async () => {
+    const fixture = await publicationFixture("session-hash-binding");
+    const producerSessionId = "native-sensitive-producer-session";
+    const reviewerSessionId = "sensitive-reviewer-session";
+    try {
+      const frozen = await freezePublicationManuscript({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        supplementPaths: [],
+        producerAgent: "codex",
+        producerSessionId,
+      });
+      assert.doesNotMatch(JSON.stringify(frozen), new RegExp(producerSessionId));
+      assert.equal(
+        (frozen.producer as unknown as { sessionSha256?: string }).sessionSha256,
+        sha256Text(producerSessionId),
+      );
+
+      const packet = await preparePublicationReview({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        role: "evidence",
+        reviewerAgent: "claude",
+        reviewerSessionId,
+      });
+      assert.doesNotMatch(JSON.stringify(packet), new RegExp(reviewerSessionId));
+      assert.equal(
+        (packet.reviewer as unknown as { sessionSha256?: string }).sessionSha256,
+        sha256Text(reviewerSessionId),
+      );
+      const reviewPath = join(fixture.root, "session-hash-review.json");
+      await writeJsonAtomic(
+        reviewPath,
+        reviewRecord("evidence", packet.packetSha256, reviewerSessionId),
+      );
+      await submitPublicationReview({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        role: "evidence",
+        reviewPath,
+      });
+      const persistedReview = await readFile(
+        join(
+          workspacePaths(fixture.root).projects,
+          fixture.projectId,
+          "publication",
+          "generations",
+          frozen.generationSha256,
+          "reviews",
+          "evidence.json",
+        ),
+        "utf8",
+      );
+      assert.doesNotMatch(persistedReview, new RegExp(reviewerSessionId));
+      assert.match(persistedReview, new RegExp(sha256Text(reviewerSessionId)));
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }
@@ -599,7 +695,7 @@ function reviewRecord(
     schemaVersion: 1,
     role,
     packetSha256,
-    reviewerSessionId,
+    reviewerSessionSha256: sha256Text(reviewerSessionId),
     decision: role === "journal-editor" ? "submission-ready" : "pass",
     findings: [],
     boundedRecommendation: "The exact frozen manuscript satisfies this review role.",

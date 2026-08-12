@@ -209,7 +209,8 @@ binding. `test/research-publication-workflow.test.ts` covers mechanical
 top-journal assessment, owner-input trust ceilings, immutable manuscript
 generations, Policy/evidence/base-output hashes, four role-specific review
 schemas, producer/reviewer separation, append-only reviewer-session reuse
-rejection, revision invalidation, and publication closure language ceilings.
+rejection, raw-session non-persistence, active-base-research status, revision
+invalidation, and publication closure language ceilings.
 Production tests additionally require an external
 public-internet plan and block downstream work when any capability marked
 `requiredForDiscovery` lacks a broker receipt. The failure distinguishes a

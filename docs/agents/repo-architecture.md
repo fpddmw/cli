@@ -101,8 +101,10 @@ storage writes, queueing, and document status transitions.
   guided human completion, content/manifest approval hashes and expiry gates,
   mechanical publication assessment, immutable final-manuscript generations,
   append-only fresh-session enforcement across four independent reviewer
-  roles, and a separate publication closure whose language cannot exceed the
-  approved Policy ceiling.
+  roles, hash-only persistence for producer/reviewer session identifiers, and a
+  separate publication closure whose language cannot exceed the approved Policy
+  ceiling. Top-level status distinguishes active base research from invalid
+  publication state.
 - `src/education/**`: education search command handling and source specs for
   course, education, and textbook edge-search functions.
 - `src/edge-search.ts`: shared edge-search forwarding helper. It derives
