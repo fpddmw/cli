@@ -256,6 +256,7 @@ export interface ResearchPolicyBinding {
     objectLocator: string;
   }>;
   resolvedRules: string[];
+  resolvedConstraints?: Record<string, boolean | number | string | string[]>;
   requiredReviewers: string[];
   approvedAt: string;
   expiresAt: string;
