@@ -2114,6 +2114,70 @@ describe("research workspace CLI", () => {
     }
   });
 
+  it("records explicit owner-input trust and safe role-based defaults", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await invoke(["research", "workspace", "init", root, "--json"]);
+      const uncertain = join(root, "uncertain-owner-model.txt");
+      const reproduced = join(root, "reproduced-owner-model.txt");
+      await writeFile(uncertain, "Owner says this model may be incorrect.\n");
+      await writeFile(reproduced, "Independently reproduced owner-provided values.\n");
+
+      const defaulted = await invoke([
+        "research",
+        "project",
+        "init",
+        "input-trust",
+        "--workspace",
+        root,
+        "--question",
+        "How should owner-provided inputs be trusted?",
+        "--json",
+      ]);
+      assert.equal(defaulted.exitCode, 0, defaulted.stderr);
+      const reference = await invoke([
+        "research",
+        "project",
+        "input",
+        "add",
+        "input-trust",
+        "--path",
+        uncertain,
+        "--role",
+        "reference",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(reference.exitCode, 0, reference.stderr);
+      assert.equal(JSON.parse(reference.stdout).trustStatus, "reference-only");
+      assert.equal(JSON.parse(reference.stdout).independentlyReproduced, false);
+
+      const verified = await invoke([
+        "research",
+        "project",
+        "input",
+        "add",
+        "input-trust",
+        "--path",
+        reproduced,
+        "--role",
+        "primary",
+        "--trust-status",
+        "verified-owner-input",
+        "--independently-reproduced",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(verified.exitCode, 0, verified.stderr);
+      assert.equal(JSON.parse(verified.stdout).trustStatus, "verified-owner-input");
+      assert.equal(JSON.parse(verified.stdout).independentlyReproduced, true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects symlinked and duplicate-content project input plans", async () => {
     const root = await temporaryDirectory();
     try {

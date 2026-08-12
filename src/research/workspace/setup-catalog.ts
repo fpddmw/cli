@@ -114,7 +114,7 @@ export const RESEARCH_SETUP_SELECTION_GUIDANCE = {
 } as const;
 
 const BRAVE_COMMIT = "3e088af66eb61f1c207c22b2be0278ca8744d1d1";
-const TIANGONG_SKILLS_COMMIT = "c9470b88f52d35629d3d9fb21ee7713048b44c3b";
+const TIANGONG_SKILLS_COMMIT = "bef99e85e7e91871a0598f0b4a6ff0c3fc4cdefa";
 const ANTHROPIC_SKILLS_COMMIT = "f17010c9bb483898c1d9c9f42dde2b3a98889434";
 const PPT_MASTER_COMMIT = "4343bd8bfc91e79dfb9680681a378476cc38a280";
 
@@ -240,7 +240,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "tiangong-auto-research",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "tiangong-auto-research",
-    expectedTreeSha256: "65c8acc41c8cc83575b433b8099528d72d1a99d4bb1178eb5568273516b9f065",
+    expectedTreeSha256: "58fa0ec7de0172be9f23d108dd28b8bcbecc7a98070cc6a321b6225b8fe1b29e",
     tier: "orchestrator",
     role: "orchestrator",
     purpose:

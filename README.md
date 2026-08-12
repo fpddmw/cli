@@ -269,6 +269,69 @@ regular non-symlink `runtime-lock.json` exact stable CLI version. Setup and
 release CI reject a missing resolver or any stale exact CLI version in the
 orchestrator's `SKILL.md` or `references/*.md`.
 
+### Top-journal Research Policy and final publication gate
+
+A `top-journal` project starts with a human-reviewed Markdown Policy, not with
+model execution. After project-scoped setup reaches `READY`, use the guided
+Wizard:
+
+```bash
+tiangong-ai research policy wizard top-journal-paper \
+  --workspace /absolute/path/to/workspace
+tiangong-ai research policy status top-journal-paper \
+  --workspace /absolute/path/to/workspace --json
+```
+
+The Wizard resolves only the verified project-installed
+`tiangong-auto-research` tree. It copies a baseline plus one article type,
+field, journal class, project brief, and four reviewer rubrics. Generic defaults
+are clearly reported and require a separate acknowledgement. An exact-journal
+Policy additionally requires a current official HTTPS guideline URL, retrieval
+date, and substantive human content for all journal-specific sections. Approval
+binds the manifest and every document by SHA-256; edits, manifest tampering, or
+expiry block preflight and all later stages until the Policy is reviewed and
+approved again.
+
+Use the Policy project ID when admitting the research project:
+
+```bash
+tiangong-ai research project preflight \
+  --question "A specific, testable research question" \
+  --goal top-journal --policy-project top-journal-paper \
+  --requirements /absolute/path/to/evidence-requirements.json \
+  --workspace /absolute/path/to/workspace --json
+```
+
+The base evidence lifecycle remains
+`discover -> acquire -> analyze -> synthesize -> review -> close`, authored in
+the current interactive Codex or Claude Code host. After base closure, the
+current native host writes a final manuscript and schema-valid publication
+assessment. `research publication freeze` then content-addresses the Policy,
+evidence snapshot, base outputs, manuscript, assessment, and supplements.
+Exactly four fresh independent sessions review that frozen generation:
+evidence, methods/reproducibility, domain/novelty, and journal-editor. A revised
+manuscript invalidates prior reviews; reviewer-session reuse is rejected from
+the append-only journal even if mutable cache state is removed. The raw opaque
+producer/reviewer session identifiers are accepted only at the command boundary;
+generation, packet, review, journal, and closure objects persist only their
+SHA-256 bindings.
+
+```bash
+tiangong-ai research schema show publication-assessment --json
+tiangong-ai research publication freeze top-journal-paper \
+  --manuscript /absolute/path/to/final-manuscript.md \
+  --assessment /absolute/path/to/publication-assessment.json \
+  --producer-agent codex --producer-session OPAQUE_NATIVE_SESSION \
+  --workspace /absolute/path/to/workspace --json
+tiangong-ai research publication status top-journal-paper \
+  --workspace /absolute/path/to/workspace --json
+```
+
+The CLI returns a mechanically bounded ceiling:
+`top-journal-candidate`, `top-journal-class-ready`, or
+`target-journal-submission-ready`. Evidence and review failures can only lower
+it. None of these states predicts or guarantees editorial acceptance.
+
 `research setup status --json` reports credential persistence separately from
 readiness. It also reports the effective exact-npx CLI package/version/root,
 the selected project orchestrator, any temporary recovery shim, ignored global

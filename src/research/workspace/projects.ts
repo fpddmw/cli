@@ -32,6 +32,8 @@ import {
 import type {
   ProjectEvidenceRequirements,
   ProjectInput,
+  ProjectInputTrustStatus,
+  ResearchPolicyBinding,
   ProjectState,
   WorkPackage,
   WorkspaceConfig,
@@ -48,6 +50,7 @@ export async function initializeProject(
   evidenceRequirements?: ProjectEvidenceRequirements,
   budgetConfirmed = false,
   inputPlan?: VerifiedProjectInputPlan,
+  publicationPolicy?: ResearchPolicyBinding,
 ): Promise<ProjectState> {
   validateProjectId(projectId);
   const normalizedQuestion = question.trim();
@@ -122,6 +125,7 @@ export async function initializeProject(
       budgetConfirmedAt: budgetConfirmed ? now : null,
       inputs: admittedInputPlan ? projectInputsFromPlan(admittedInputPlan, now) : [],
       evidenceRequirements: requirements,
+      publicationPolicy: publicationPolicy ?? null,
       packages: defaultWorkPackages(config),
       usage: {
         tokens: 0,
@@ -146,6 +150,7 @@ export async function initializeProject(
       projectId,
       questionSha256: await hashQuestion(normalizedQuestion),
       inputPlanSha256: admittedInputPlan?.sha256 ?? null,
+      publicationPolicySha256: publicationPolicy?.resolvedPolicySha256 ?? null,
       inputs: project.inputs.map((input) => ({
         id: input.id,
         role: input.role,
@@ -162,6 +167,10 @@ export async function addProjectInput(
   projectId: string,
   inputPath: string,
   role: ProjectInput["role"],
+  options: {
+    trustStatus?: ProjectInputTrustStatus;
+    independentlyReproduced?: boolean;
+  } = {},
 ): Promise<ProjectInput> {
   validateProjectId(projectId);
   const canonicalInput = resolve(inputPath);
@@ -199,6 +208,8 @@ export async function addProjectInput(
       dimensions: [],
       fullText: true,
       publicationDate: null,
+      trustStatus: options.trustStatus ?? defaultInputTrustStatus(role),
+      independentlyReproduced: options.independentlyReproduced ?? false,
       addedAt: new Date().toISOString(),
     };
     project.inputs.push(input);
@@ -212,9 +223,17 @@ export async function addProjectInput(
       role,
       sha256,
       bytes: input.bytes,
+      trustStatus: input.trustStatus,
+      independentlyReproduced: input.independentlyReproduced,
     });
     return input;
   });
+}
+
+function defaultInputTrustStatus(role: ProjectInput["role"]): ProjectInputTrustStatus {
+  if (role === "reference") return "reference-only";
+  if (role === "replication") return "replication-candidate";
+  return "unverified-owner-input";
 }
 
 export async function loadProject(root: string, projectId: string): Promise<ProjectState> {
@@ -388,6 +407,9 @@ export async function forkProject(
         requiredCompanionIds: [...(source.evidenceRequirements.requiredCompanionIds ?? [])],
         requiredDiscoveryScopes: [...(source.evidenceRequirements.requiredDiscoveryScopes ?? [])],
       },
+      publicationPolicy: source.publicationPolicy
+        ? structuredClone(source.publicationPolicy)
+        : null,
       packages,
       usage: {
         tokens: 0,
@@ -609,6 +631,9 @@ export async function createProjectAddendum(
         requiredCompanionIds: [...(source.evidenceRequirements.requiredCompanionIds ?? [])],
         requiredDiscoveryScopes: [...(source.evidenceRequirements.requiredDiscoveryScopes ?? [])],
       },
+      publicationPolicy: source.publicationPolicy
+        ? structuredClone(source.publicationPolicy)
+        : null,
       packages: defaultWorkPackages(config),
       usage: {
         tokens: 0,

@@ -180,8 +180,16 @@ export interface ProjectInput {
   dimensions?: string[];
   fullText?: boolean;
   publicationDate?: string | null;
+  trustStatus?: ProjectInputTrustStatus;
+  independentlyReproduced?: boolean;
   addedAt: string;
 }
+
+export type ProjectInputTrustStatus =
+  | "verified-owner-input"
+  | "unverified-owner-input"
+  | "reference-only"
+  | "replication-candidate";
 
 export interface ProjectInputLineRange {
   startLine: number;
@@ -197,6 +205,8 @@ export interface ProjectInputPlanEntry {
   sourceType: string;
   fullText: boolean;
   publicationDate: string | null;
+  trustStatus?: ProjectInputTrustStatus;
+  independentlyReproduced?: boolean;
 }
 
 export interface ProjectInputPlan {
@@ -229,6 +239,37 @@ export interface ProjectEvidenceRequirements {
   minDatedSources: number;
   publicationDateFrom: string | null;
   publicationDateTo: string | null;
+}
+
+export type ResearchVerdictCeiling =
+  | "top-journal-feasibility-complete"
+  | "top-journal-candidate"
+  | "top-journal-class-ready"
+  | "target-journal-submission-ready";
+
+export interface ResearchPolicyBinding {
+  goal: "top-journal";
+  projectId: string;
+  articleType: string;
+  field: string;
+  journalClass: string;
+  targetJournal: string | null;
+  resolvedPolicySha256: string;
+  approvalSha256: string;
+  verdictCeiling: ResearchVerdictCeiling;
+  documents: Array<{
+    id: string;
+    kind: string;
+    logicalPath: string;
+    sha256: string;
+    sourceClass: "bundled-default" | "human-customized";
+    objectLocator: string;
+  }>;
+  resolvedRules: string[];
+  resolvedConstraints?: Record<string, boolean | number | string | string[]>;
+  requiredReviewers: string[];
+  approvedAt: string;
+  expiresAt: string;
 }
 
 export interface WorkPackage {
@@ -267,6 +308,7 @@ export interface ProjectState {
   budgetConfirmedAt: string | null;
   inputs: ProjectInput[];
   evidenceRequirements: ProjectEvidenceRequirements;
+  publicationPolicy?: ResearchPolicyBinding | null;
   packages: WorkPackage[];
   usage: ProjectUsage;
   lineage: {

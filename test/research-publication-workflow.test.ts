@@ -1,0 +1,724 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, it } from "node:test";
+
+import { runCli } from "../src/cli.js";
+import {
+  closePublication,
+  freezePublicationManuscript,
+  inspectPublicationStatus,
+  preparePublicationReview,
+  submitPublicationReview,
+  type PublicationReviewRole,
+} from "../src/research/workspace/publication-workflow.js";
+import type { PublicationAssessment } from "../src/research/workspace/publication.js";
+import { initializeProject, loadProject, saveProject } from "../src/research/workspace/projects.js";
+import {
+  approveResearchPolicy,
+  completeResearchExactJournalPolicy,
+  completeResearchPublicationBrief,
+  initializeResearchPolicy,
+  loadApprovedResearchPolicy,
+} from "../src/research/workspace/research-policy.js";
+import {
+  canonicalJson,
+  sha256Text,
+  workspacePaths,
+  writeJsonAtomic,
+} from "../src/research/workspace/storage.js";
+import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
+import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
+
+const REVIEW_ROLES: PublicationReviewRole[] = [
+  "evidence",
+  "methods-reproducibility",
+  "domain-novelty",
+  "journal-editor",
+];
+
+describe("top-journal publication workflow", () => {
+  it("reports active base research as pending publication rather than invalid", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-publication-pending-"));
+    const projectId = "pending-publication";
+    try {
+      await initializeResearchWorkspace(root, "Pending publication workflow");
+      const policy = await createApprovedPublicationPolicy(root, projectId);
+      await initializeProject(
+        root,
+        projectId,
+        "Does the active study produce its declared central outcome?",
+        undefined,
+        false,
+        undefined,
+        policy,
+      );
+      const status = await invokeCli([
+        "research",
+        "status",
+        "--project",
+        projectId,
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(status.exitCode, 0);
+      const projectStatus = JSON.parse(status.stdout).projects[0];
+      assert.equal(projectStatus.publication.generationStatus, "waiting-for-base-research");
+      assert.equal("code" in projectStatus.publication, false);
+      assert.doesNotMatch(projectStatus.recommendedAction, /publication state is invalid/i);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("exposes publication freeze/status and authoritative assessment/review schemas", async () => {
+    const fixture = await publicationFixture("publication-cli");
+    try {
+      const frozen = await invokeCli([
+        "research",
+        "publication",
+        "freeze",
+        fixture.projectId,
+        "--manuscript",
+        fixture.manuscript,
+        "--assessment",
+        fixture.assessment,
+        "--producer-agent",
+        "codex",
+        "--producer-session",
+        "native-cli-session",
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(frozen.exitCode, 0);
+      assert.equal(JSON.parse(frozen.stdout).status, "manuscript-frozen");
+
+      const status = await invokeCli([
+        "research",
+        "publication",
+        "status",
+        fixture.projectId,
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(status.exitCode, 0);
+      assert.equal(JSON.parse(status.stdout).reviewState, "not-started");
+
+      const workspaceStatus = await invokeCli([
+        "research",
+        "status",
+        "--project",
+        fixture.projectId,
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(workspaceStatus.exitCode, 0);
+      assert.match(
+        JSON.parse(workspaceStatus.stdout).projects[0].recommendedAction,
+        /publication status|final manuscript/i,
+      );
+
+      for (const schemaName of [
+        "publication-assessment",
+        "publication-review-evidence",
+        "publication-review-journal-editor",
+      ]) {
+        const schema = await invokeCli(["research", "schema", "show", schemaName, "--json"]);
+        assert.equal(schema.exitCode, 0);
+        assert.equal(JSON.parse(schema.stdout).additionalProperties, false);
+      }
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("freezes the final manuscript and requires four fresh hash-bound reviews", async () => {
+    const fixture = await publicationFixture("review-complete");
+    try {
+      const frozen = await freezePublicationManuscript({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        supplementPaths: [fixture.supplement],
+        producerAgent: "codex",
+        producerSessionId: "native-codex-session-1",
+      });
+      assert.match(frozen.generationSha256, /^[a-f0-9]{64}$/);
+      assert.equal(frozen.status, "manuscript-frozen");
+
+      for (const role of REVIEW_ROLES) {
+        const reviewerSessionId = `independent-${role}-session`;
+        const packet = await preparePublicationReview({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          role,
+          reviewerAgent: role === "journal-editor" ? "claude" : "codex",
+          reviewerSessionId,
+        });
+        assert.equal(packet.manuscript.sha256, frozen.manuscript.sha256);
+        assert.equal(packet.policy.resolvedPolicySha256, fixture.policy.resolvedPolicySha256);
+        assert.equal(packet.evidenceSnapshot.sha256, fixture.snapshotSha256);
+        assert.match(packet.packetSha256, /^[a-f0-9]{64}$/);
+        const reviewPath = join(fixture.root, `${role}-review.json`);
+        await writeJsonAtomic(
+          reviewPath,
+          reviewRecord(role, packet.packetSha256, reviewerSessionId),
+        );
+        await submitPublicationReview({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          role,
+          reviewPath,
+        });
+      }
+
+      const status = await inspectPublicationStatus(fixture.root, fixture.projectId);
+      assert.equal(status.reviewState, "complete");
+      assert.equal(status.readinessVerdict, "target-journal-submission-ready");
+      const closure = await closePublication(fixture.root, fixture.projectId);
+      assert.equal(closure.readinessVerdict, "target-journal-submission-ready");
+      assert.equal(closure.manuscript.sha256, frozen.manuscript.sha256);
+      assert.equal(closure.reviews.length, 4);
+      assert.match(closure.closureSha256, /^[a-f0-9]{64}$/);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("persists only hashes of producer and reviewer session identifiers", async () => {
+    const fixture = await publicationFixture("session-hash-binding");
+    const producerSessionId = "native-sensitive-producer-session";
+    const reviewerSessionId = "sensitive-reviewer-session";
+    try {
+      const frozen = await freezePublicationManuscript({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        supplementPaths: [],
+        producerAgent: "codex",
+        producerSessionId,
+      });
+      assert.doesNotMatch(JSON.stringify(frozen), new RegExp(producerSessionId));
+      assert.equal(
+        (frozen.producer as unknown as { sessionSha256?: string }).sessionSha256,
+        sha256Text(producerSessionId),
+      );
+
+      const packet = await preparePublicationReview({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        role: "evidence",
+        reviewerAgent: "claude",
+        reviewerSessionId,
+      });
+      assert.doesNotMatch(JSON.stringify(packet), new RegExp(reviewerSessionId));
+      assert.equal(
+        (packet.reviewer as unknown as { sessionSha256?: string }).sessionSha256,
+        sha256Text(reviewerSessionId),
+      );
+      const reviewPath = join(fixture.root, "session-hash-review.json");
+      await writeJsonAtomic(
+        reviewPath,
+        reviewRecord("evidence", packet.packetSha256, reviewerSessionId),
+      );
+      await submitPublicationReview({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        role: "evidence",
+        reviewPath,
+      });
+      const persistedReview = await readFile(
+        join(
+          workspacePaths(fixture.root).projects,
+          fixture.projectId,
+          "publication",
+          "generations",
+          frozen.generationSha256,
+          "reviews",
+          "evidence.json",
+        ),
+        "utf8",
+      );
+      assert.doesNotMatch(persistedReview, new RegExp(reviewerSessionId));
+      assert.match(persistedReview, new RegExp(sha256Text(reviewerSessionId)));
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects producer/reviewer identity reuse and reviewer session reuse", async () => {
+    const fixture = await publicationFixture("review-independence");
+    try {
+      await freezePublicationManuscript({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        supplementPaths: [],
+        producerAgent: "codex",
+        producerSessionId: "native-producer-session",
+      });
+      await assert.rejects(
+        preparePublicationReview({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          role: "evidence",
+          reviewerAgent: "claude",
+          reviewerSessionId: "native-producer-session",
+        }),
+        (error: unknown) => errorCode(error) === "RESEARCH_PUBLICATION_REVIEW_NOT_INDEPENDENT",
+      );
+      await preparePublicationReview({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        role: "evidence",
+        reviewerAgent: "claude",
+        reviewerSessionId: "fresh-reviewer-session",
+      });
+      await rm(
+        join(
+          workspacePaths(fixture.root).projects,
+          fixture.projectId,
+          "publication",
+          "reviewer-sessions.json",
+        ),
+        { force: true },
+      );
+      await assert.rejects(
+        preparePublicationReview({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          role: "methods-reproducibility",
+          reviewerAgent: "claude",
+          reviewerSessionId: "fresh-reviewer-session",
+        }),
+        (error: unknown) => errorCode(error) === "RESEARCH_PUBLICATION_REVIEW_NOT_INDEPENDENT",
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("invalidates publication work when the approved Research Policy changes", async () => {
+    const fixture = await publicationFixture("policy-drift");
+    try {
+      await freezePublicationManuscript({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        supplementPaths: [],
+        producerAgent: "codex",
+        producerSessionId: "native-policy-bound-producer",
+      });
+      const briefPath = join(
+        fixture.root,
+        "research-policy",
+        fixture.projectId,
+        "publication-brief.md",
+      );
+      await writeFile(briefPath, `${await readFile(briefPath, "utf8")}\nChanged scope.\n`);
+      await assert.rejects(
+        preparePublicationReview({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          role: "evidence",
+          reviewerAgent: "claude",
+          reviewerSessionId: "fresh-after-policy-drift",
+        }),
+        (error: unknown) => errorCode(error) === "RESEARCH_POLICY_CHANGED",
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("starts a new generation and invalidates every review after the manuscript changes", async () => {
+    const fixture = await publicationFixture("review-invalidation");
+    try {
+      const first = await freezePublicationManuscript({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        supplementPaths: [],
+        producerAgent: "codex",
+        producerSessionId: "native-generation-one",
+      });
+      const packet = await preparePublicationReview({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        role: "evidence",
+        reviewerAgent: "claude",
+        reviewerSessionId: "generation-one-reviewer",
+      });
+      const reviewPath = join(fixture.root, "first-review.json");
+      await writeJsonAtomic(
+        reviewPath,
+        reviewRecord("evidence", packet.packetSha256, "generation-one-reviewer"),
+      );
+      await submitPublicationReview({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        role: "evidence",
+        reviewPath,
+      });
+
+      await writeFile(fixture.manuscript, "# Revised final manuscript\n\nMaterial revision.\n");
+      const second = await freezePublicationManuscript({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        supplementPaths: [],
+        producerAgent: "codex",
+        producerSessionId: "native-generation-two",
+      });
+      assert.notEqual(second.generationSha256, first.generationSha256);
+      const status = await inspectPublicationStatus(fixture.root, fixture.projectId);
+      assert.equal(status.completedReviewRoles.length, 0);
+      assert.equal(status.reviewState, "not-started");
+      await assert.rejects(
+        closePublication(fixture.root, fixture.projectId),
+        (error: unknown) => errorCode(error) === "RESEARCH_PUBLICATION_REVIEW_INCOMPLETE",
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not let an editor upgrade a mechanically blocked assessment", async () => {
+    const fixture = await publicationFixture("bounded-editor", {
+      outcomes: [
+        {
+          id: "outcome-central",
+          role: "central",
+          label: "Unobserved promised outcome",
+          supportStatus: "unobserved",
+          claimIds: ["claim-central"],
+          resultIds: ["result-central"],
+        },
+      ],
+    });
+    try {
+      await freezePublicationManuscript({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        supplementPaths: [],
+        producerAgent: "codex",
+        producerSessionId: "native-blocked-assessment",
+      });
+      for (const role of REVIEW_ROLES) {
+        const reviewerSessionId = `blocked-${role}`;
+        const packet = await preparePublicationReview({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          role,
+          reviewerAgent: "claude",
+          reviewerSessionId,
+        });
+        const reviewPath = join(fixture.root, `blocked-${role}.json`);
+        await writeJsonAtomic(
+          reviewPath,
+          reviewRecord(role, packet.packetSha256, reviewerSessionId),
+        );
+        await submitPublicationReview({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          role,
+          reviewPath,
+        });
+      }
+      const status = await inspectPublicationStatus(fixture.root, fixture.projectId);
+      assert.equal(status.mechanicalIssues.includes("CENTRAL_OUTCOME_UNOBSERVED"), true);
+      assert.notEqual(status.readinessVerdict, "target-journal-submission-ready");
+      const closure = await closePublication(fixture.root, fixture.projectId);
+      assert.equal(closure.readinessVerdict, "revision-required");
+      assert.match(closure.boundedStatement, /not submission-ready/i);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+});
+
+async function publicationFixture(
+  projectId: string,
+  assessmentOverride: Partial<PublicationAssessment> = {},
+) {
+  const root = await mkdtemp(join(tmpdir(), "tiangong-publication-workflow-"));
+  await initializeResearchWorkspace(root, "Publication workflow");
+  const policy = await createApprovedPublicationPolicy(root, projectId);
+  await initializeProject(
+    root,
+    projectId,
+    "Does the studied intervention produce the observed central outcome?",
+    undefined,
+    false,
+    undefined,
+    policy,
+  );
+  const project = await loadProject(root, projectId);
+  const outputRoot = join(workspacePaths(root).projects, projectId, "outputs");
+  const snapshotCore = {
+    schemaVersion: 1,
+    kind: "tiangong-evidence-snapshot",
+    snapshotId: "snapshot-final",
+    parentSnapshotId: null,
+    parentSnapshotSha256: null,
+    projectId,
+    questionSha256: sha256Text(project.question),
+    createdAt: "2026-08-12T00:00:00.000Z",
+    ledgerHead: "1".repeat(64),
+    evidenceRecord: { path: "outputs/evidence.json", sha256: "2".repeat(64) },
+    acquisitionRecord: { path: "outputs/acquisition.json", sha256: "3".repeat(64) },
+    receipts: [],
+    artifacts: [],
+    sources: [{ id: "peer-1", fullTextAvailable: true }],
+    activitySummary: {
+      total: 1,
+      byKind: { web: 1 },
+      blockedChallenges: 0,
+      linkedCandidateIds: ["peer-1"],
+    },
+    coverage: {
+      dimensions: [{ id: "central-outcome", status: "covered", sourceIds: ["peer-1"] }],
+    },
+    limitations: [],
+    delta: {
+      addedSourceIds: ["peer-1"],
+      changedSourceIds: [],
+      removedSourceIds: [],
+      unchangedSourceIds: [],
+      addedArtifactIds: [],
+      removedArtifactIds: [],
+    },
+  };
+  const snapshotSha256 = sha256Text(canonicalJson(snapshotCore));
+  const snapshot = { ...snapshotCore, snapshotSha256 };
+  await writeJsonAtomic(join(outputRoot, "evidence-snapshot.json"), snapshot);
+  await writeJsonAtomic(join(outputRoot, "analysis.json"), {
+    schemaVersion: 1,
+    findings: [],
+    limitations: [],
+  });
+  await writeFile(join(outputRoot, "report.md"), "# Frozen research report\n");
+  await writeJsonAtomic(join(outputRoot, "closure.json"), {
+    schemaVersion: 1,
+    projectId,
+    status: "complete",
+    publicationPolicy: {
+      resolvedPolicySha256: policy.resolvedPolicySha256,
+      approvalSha256: policy.approvalSha256,
+    },
+    evidenceSnapshot: { snapshotId: snapshot.snapshotId, snapshotSha256 },
+  });
+  for (const workPackage of project.packages) {
+    workPackage.status = "complete";
+    workPackage.completedAt = "2026-08-12T00:00:00.000Z";
+  }
+  project.status = "complete";
+  project.evidenceState.currentSnapshotId = snapshot.snapshotId;
+  project.evidenceState.currentSnapshotSha256 = snapshotSha256;
+  project.evidenceState.closureSnapshotId = snapshot.snapshotId;
+  await saveProject(root, project);
+
+  const manuscript = join(root, "final-manuscript.md");
+  const supplement = join(root, "supplement.csv");
+  const assessment = join(root, "publication-assessment.json");
+  await writeFile(manuscript, "# Final manuscript\n\nObserved central outcome.\n");
+  await writeFile(supplement, "measure,value\noutcome,1\n");
+  await writeJsonAtomic(assessment, publicationAssessment(assessmentOverride));
+  return { root, projectId, policy, manuscript, supplement, assessment, snapshotSha256 };
+}
+
+async function createApprovedPublicationPolicy(
+  root: string,
+  projectId: string,
+): Promise<ResearchPolicyBinding> {
+  const source = join(root, "policy-source");
+  await writePublicationPolicyPack(source);
+  await initializeResearchPolicy({
+    root,
+    projectId,
+    sourceRoot: source,
+    articleType: "original-empirical",
+    field: "engineering-computing",
+    journalClass: "discipline-flagship",
+    includeExactJournalTemplate: true,
+  });
+  await completeResearchPublicationBrief(root, projectId, {
+    centralQuestion: "Does the studied intervention produce the observed central outcome?",
+    centralClaim: "The studied intervention changes the observed central outcome.",
+    centralOutcome: "Observed central outcome",
+    contributionType: "new-empirical-estimate",
+    targetJournal: "Example Journal",
+  });
+  await completeResearchExactJournalPolicy(root, projectId, {
+    journalName: "Example Journal",
+    officialGuidelinesUrl: "https://example.org/journal/guidelines",
+    officialGuidelinesRetrievedAt: "2026-08-12",
+    scope: "Original empirical studies with broad engineering significance.",
+    editorialSignificance: "Results must change understanding or a material engineering decision.",
+    evidenceExpectations: "Direct full-text empirical evidence must support each central claim.",
+    methodsAndValidation: "Methods require uncertainty, robustness, and independent validation.",
+    reproducibility: "All material results must be independently reproduced from frozen inputs.",
+    deskRejectTriggers:
+      "Unobserved outcomes, unsupported novelty, or unreproduced results block review.",
+    requiredReviewerQuestions:
+      "Do evidence, methods, novelty, and journal fit support the exact claim?",
+    permittedPivots:
+      "Narrow the claim, collect evidence, redesign the study, or change journal class.",
+  });
+  for (const file of ["article-type.md", "field.md", "journal-class.md"]) {
+    const path = join(root, "research-policy", projectId, file);
+    await writeFile(path, `${await readFile(path, "utf8")}\nHuman-reviewed requirement.\n`);
+  }
+  await approveResearchPolicy(root, projectId, {
+    confirm: true,
+    acknowledgeDefaults: true,
+  });
+  return loadApprovedResearchPolicy(root, projectId);
+}
+
+async function writePublicationPolicyPack(root: string): Promise<void> {
+  const policyRoot = join(root, "assets", "research-policy", "defaults");
+  const documents: Array<[string, string, string, string]> = [
+    ["baseline/top-journal.md", "baseline.top-journal", "baseline", "bundled-default"],
+    ["article-types/original-empirical.md", "article.original", "article-type", "bundled-default"],
+    ["fields/engineering-computing.md", "field.engineering", "field", "bundled-default"],
+    [
+      "journal-classes/discipline-flagship.md",
+      "journal.flagship",
+      "journal-class",
+      "bundled-default",
+    ],
+    ["reviewer-rubrics/evidence.md", "reviewer.evidence", "reviewer-rubric", "bundled-default"],
+    [
+      "reviewer-rubrics/methods-reproducibility.md",
+      "reviewer.methods",
+      "reviewer-rubric",
+      "bundled-default",
+    ],
+    ["reviewer-rubrics/domain-novelty.md", "reviewer.domain", "reviewer-rubric", "bundled-default"],
+    ["reviewer-rubrics/journal-editor.md", "reviewer.editor", "reviewer-rubric", "bundled-default"],
+    ["project/publication-brief.md", "project.brief", "publication-brief", "project-template"],
+    [
+      "journals/exact-journal-template.md",
+      "journal.exact",
+      "exact-journal",
+      "exact-journal-template",
+    ],
+  ];
+  for (const [relative, id, kind, templateClass] of documents) {
+    const path = join(policyRoot, relative);
+    await mkdir(join(path, ".."), { recursive: true });
+    const isBrief = kind === "publication-brief";
+    const isJournal = kind === "exact-journal";
+    await writeFile(
+      path,
+      `---\nschemaVersion: 1\nid: ${id}\nkind: ${kind}\ntemplateClass: ${templateClass}\npolicyVersion: 1\ntargetTier: top\narticleType: original-empirical\nfield: engineering-computing\njournalClass: discipline-flagship\ntargetJournal: ${isBrief ? "__SELECT_EXACT_JOURNAL_OR_NONE__" : "none"}\njournalName: ${isJournal ? "__REPLACE_JOURNAL_NAME__" : "none"}\nofficialGuidelinesUrl: ${isJournal ? "__REPLACE_OFFICIAL_HTTPS_URL__" : "https://example.org"}\nofficialGuidelinesRetrievedAt: ${isJournal ? "__REPLACE_YYYY-MM-DD__" : "2026-08-12"}\ncentralQuestion: ${isBrief ? "__DEFINE_CENTRAL_QUESTION__" : "defined"}\ncentralClaim: ${isBrief ? "__DEFINE_CENTRAL_CLAIM__" : "defined"}\ncentralOutcome: ${isBrief ? "__DEFINE_CENTRAL_OUTCOME__" : "defined"}\ncontributionType: ${isBrief ? "__DEFINE_CONTRIBUTION_TYPE__" : "defined"}\nrules:\n  - central-claim-directly-supported\nconstraints:\n  minDirectPeerReviewedFullText: 1\nrequiredReviewers:\n  - evidence\n  - methods-reproducibility\n  - domain-novelty\n  - journal-editor\nreviewAfterDays: 365\n---\n\n# ${id}\n\nGeneric policy content requiring substantive human review.\n`,
+    );
+  }
+}
+
+function publicationAssessment(override: Partial<PublicationAssessment>): PublicationAssessment {
+  return {
+    schemaVersion: 1,
+    title: "Observed central outcome in a validated study",
+    claims: [
+      {
+        id: "claim-central",
+        role: "central",
+        statement: "The studied intervention changes the central outcome.",
+        evidenceSourceIds: ["peer-1"],
+        dimensionIds: ["central-outcome"],
+        resultIds: ["result-central"],
+      },
+    ],
+    outcomes: [
+      {
+        id: "outcome-central",
+        role: "central",
+        label: "Observed central outcome",
+        supportStatus: "field-observation",
+        claimIds: ["claim-central"],
+        resultIds: ["result-central"],
+      },
+    ],
+    titleOutcomeIds: ["outcome-central"],
+    results: [
+      {
+        id: "result-central",
+        role: "central",
+        resultClass: "field-observation",
+        statement: "The central outcome was observed.",
+        evidenceSourceIds: ["peer-1"],
+        independentlyReproduced: true,
+      },
+    ],
+    sourceClassifications: [
+      {
+        sourceId: "peer-1",
+        relationship: "direct",
+        evidenceKind: "peer-reviewed-empirical",
+      },
+    ],
+    recallAudit: {
+      status: "pass",
+      candidateDispositionComplete: true,
+      databaseCoverageComplete: true,
+      backwardCitationChasing: true,
+      forwardCitationChasing: true,
+      adversarialSearch: true,
+      closestPriorWorkCompared: true,
+      missingCoreWorkIds: [],
+    },
+    ...override,
+  };
+}
+
+function reviewRecord(
+  role: PublicationReviewRole,
+  packetSha256: string,
+  reviewerSessionId: string,
+) {
+  return {
+    schemaVersion: 1,
+    role,
+    packetSha256,
+    reviewerSessionSha256: sha256Text(reviewerSessionId),
+    decision: role === "journal-editor" ? "submission-ready" : "pass",
+    findings: [],
+    boundedRecommendation: "The exact frozen manuscript satisfies this review role.",
+  };
+}
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code: unknown }).code)
+    : undefined;
+}
+
+async function invokeCli(argv: string[]): Promise<{
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}> {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const exitCode = await runCli(argv, {
+    env: {},
+    stdout: { write: (value: string) => void stdout.push(value) },
+    stderr: { write: (value: string) => void stderr.push(value) },
+  });
+  return { exitCode, stdout: stdout.join(""), stderr: stderr.join("") };
+}

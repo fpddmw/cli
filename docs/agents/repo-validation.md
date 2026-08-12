@@ -201,6 +201,16 @@ invokes the producer executor, prepare/submit advances discover through
 synthesize with hash-bound sessions and reserved accounting, native broker
 fetches remain call-bounded and sanitized, and only the other-family reviewer
 CLI is launched before mechanical closure.
+`test/research-policy.test.ts` and `test/research-policy-wizard.test.ts` cover
+verified project-installed Policy source resolution, default selection and
+human completion, exact-journal requirements, explicit default acknowledgement,
+content/manifest tamper detection, expiry, conflict resolution, and stage
+binding. `test/research-publication-workflow.test.ts` covers mechanical
+top-journal assessment, owner-input trust ceilings, immutable manuscript
+generations, Policy/evidence/base-output hashes, four role-specific review
+schemas, producer/reviewer separation, append-only reviewer-session reuse
+rejection, raw-session non-persistence, active-base-research status, revision
+invalidation, and publication closure language ceilings.
 Production tests additionally require an external
 public-internet plan and block downstream work when any capability marked
 `requiredForDiscovery` lacks a broker receipt. The failure distinguishes a

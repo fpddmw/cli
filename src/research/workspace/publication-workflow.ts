@@ -1,0 +1,1580 @@
+import { randomUUID } from "node:crypto";
+import { chmod, lstat, readFile, rename, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
+
+import { CliError } from "../../errors.js";
+import { RESEARCH_CONTROL_DIRECTORY } from "./constants.js";
+import { appendJournalEvent, readJournal, verifyJournal } from "./journal.js";
+import {
+  evaluateTopJournalAssessment,
+  type PublicationAssessment,
+  type TopJournalAssessmentResult,
+} from "./publication.js";
+import { loadProject } from "./projects.js";
+import { assertResearchPolicyBinding } from "./research-policy.js";
+import {
+  canonicalJson,
+  ensureDirectory,
+  isObject,
+  pathExists,
+  readJsonFile,
+  sha256File,
+  sha256Text,
+  workspacePaths,
+  writeJsonAtomic,
+} from "./storage.js";
+import type { AgentKind, ProjectState, ResearchPolicyBinding } from "./types.js";
+import { withWorkspaceLock } from "./workspace.js";
+
+export type PublicationReviewRole =
+  | "evidence"
+  | "methods-reproducibility"
+  | "domain-novelty"
+  | "journal-editor";
+
+export type PublicationReadinessVerdict =
+  | "independent-review-incomplete"
+  | "revision-required"
+  | "top-journal-candidate"
+  | "top-journal-class-ready"
+  | "target-journal-submission-ready";
+
+const REQUIRED_REVIEW_ROLES: PublicationReviewRole[] = [
+  "evidence",
+  "methods-reproducibility",
+  "domain-novelty",
+  "journal-editor",
+];
+
+const SPECIALIST_DECISIONS = new Set(["pass", "revise", "reject"]);
+const EDITOR_DECISIONS = new Set([
+  "submission-ready",
+  "minor-revision",
+  "major-revision",
+  "reject-and-redesign",
+  "desk-reject",
+]);
+
+interface FrozenFile {
+  logicalName: string;
+  sha256: string;
+  bytes: number;
+  objectLocator: string;
+}
+
+interface PublicationGeneration {
+  schemaVersion: 1;
+  kind: "tiangong-publication-generation";
+  projectId: string;
+  generationSha256: string;
+  frozenAt: string;
+  producer: {
+    agent: AgentKind;
+    sessionSha256: string;
+  };
+  policy: {
+    projectId: string;
+    resolvedPolicySha256: string;
+    approvalSha256: string;
+    verdictCeiling: ResearchPolicyBinding["verdictCeiling"];
+    targetJournal: string | null;
+  };
+  evidenceSnapshot: {
+    id: string;
+    sha256: string;
+    object: FrozenFile;
+  };
+  baseResearch: {
+    closure: FrozenFile;
+    analysis: FrozenFile;
+    report: FrozenFile;
+  };
+  manuscript: FrozenFile;
+  assessment: FrozenFile;
+  supplements: FrozenFile[];
+  assessmentResult: TopJournalAssessmentResult;
+  requiredReviewRoles: PublicationReviewRole[];
+}
+
+interface PublicationCurrentPointer {
+  schemaVersion: 1;
+  projectId: string;
+  generationSha256: string;
+  manifestLocator: string;
+  updatedAt: string;
+}
+
+interface ReviewerSessionRegistry {
+  schemaVersion: 1;
+  sessions: Array<{
+    sessionSha256: string;
+    projectId: string;
+    generationSha256: string;
+    role: PublicationReviewRole;
+    agent: AgentKind;
+    registeredAt: string;
+  }>;
+}
+
+export interface PublicationReviewPacket {
+  schemaVersion: 1;
+  kind: "tiangong-publication-review-packet";
+  projectId: string;
+  generationSha256: string;
+  role: PublicationReviewRole;
+  reviewer: {
+    agent: AgentKind;
+    sessionSha256: string;
+  };
+  preparedAt: string;
+  policy: PublicationGeneration["policy"] & {
+    documents: ResearchPolicyBinding["documents"];
+    resolvedRules: string[];
+    resolvedConstraints: ResearchPolicyBinding["resolvedConstraints"];
+  };
+  evidenceSnapshot: {
+    id: string;
+    sha256: string;
+    objectLocator: string;
+  };
+  baseResearch: PublicationGeneration["baseResearch"];
+  manuscript: FrozenFile;
+  assessment: FrozenFile;
+  supplements: FrozenFile[];
+  mechanicalAssessment: TopJournalAssessmentResult;
+  instructions: string[];
+  packetSha256: string;
+}
+
+interface PublicationReviewRecord {
+  schemaVersion: 1;
+  role: PublicationReviewRole;
+  packetSha256: string;
+  reviewerSessionSha256: string;
+  decision: string;
+  findings: Array<{
+    code: string;
+    severity: "blocking" | "major" | "minor";
+    message: string;
+    evidenceIds: string[];
+  }>;
+  boundedRecommendation: string;
+}
+
+export interface PublicationStatus {
+  schemaVersion: 1;
+  projectId: string;
+  generationSha256: string | null;
+  manuscriptSha256: string | null;
+  generationStatus: "waiting-for-base-research" | "not-started" | "manuscript-frozen" | "invalid";
+  reviewState: "not-started" | "partial" | "complete";
+  requiredReviewRoles: PublicationReviewRole[];
+  completedReviewRoles: PublicationReviewRole[];
+  missingReviewRoles: PublicationReviewRole[];
+  mechanicalIssues: string[];
+  pivotOptions: string[];
+  readinessVerdict: PublicationReadinessVerdict;
+  boundedStatement: string;
+  closureSha256: string | null;
+}
+
+export interface PublicationClosure {
+  schemaVersion: 1;
+  kind: "tiangong-publication-closure";
+  projectId: string;
+  generationSha256: string;
+  closedAt: string;
+  policy: PublicationGeneration["policy"];
+  evidenceSnapshot: PublicationGeneration["evidenceSnapshot"];
+  baseResearch: PublicationGeneration["baseResearch"];
+  manuscript: FrozenFile;
+  assessment: FrozenFile;
+  supplements: FrozenFile[];
+  reviews: Array<{
+    role: PublicationReviewRole;
+    packetSha256: string;
+    reviewSha256: string;
+    reviewerSessionSha256: string;
+    decision: string;
+  }>;
+  mechanicalIssues: string[];
+  pivotOptions: string[];
+  readinessVerdict: PublicationReadinessVerdict;
+  boundedStatement: string;
+  closureSha256: string;
+}
+
+export function publicationAssessmentSchema(): Record<string, unknown> {
+  const stringArraySchema = { type: "array", items: { type: "string", minLength: 1 } };
+  return {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    title: "Tiangong top-journal publication assessment",
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "schemaVersion",
+      "title",
+      "claims",
+      "outcomes",
+      "titleOutcomeIds",
+      "results",
+      "sourceClassifications",
+      "recallAudit",
+    ],
+    properties: {
+      schemaVersion: { const: 1 },
+      title: { type: "string", minLength: 8 },
+      claims: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["id", "role", "statement", "evidenceSourceIds", "dimensionIds", "resultIds"],
+          properties: {
+            id: { type: "string", minLength: 1 },
+            role: { enum: ["central", "supporting", "contextual", "future-research"] },
+            statement: { type: "string", minLength: 1 },
+            evidenceSourceIds: stringArraySchema,
+            dimensionIds: stringArraySchema,
+            resultIds: stringArraySchema,
+          },
+        },
+      },
+      outcomes: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["id", "role", "label", "supportStatus", "claimIds", "resultIds"],
+          properties: {
+            id: { type: "string", minLength: 1 },
+            role: { enum: ["central", "supporting", "contextual"] },
+            label: { type: "string", minLength: 1 },
+            supportStatus: {
+              enum: [
+                "unobserved",
+                "future-work",
+                "conceptual-proposition",
+                "calibrated-model",
+                "causal-estimate",
+                "field-observation",
+                "validated-forecast",
+                "systematic-synthesis",
+              ],
+            },
+            claimIds: stringArraySchema,
+            resultIds: stringArraySchema,
+          },
+        },
+      },
+      titleOutcomeIds: stringArraySchema,
+      results: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "id",
+            "role",
+            "resultClass",
+            "statement",
+            "evidenceSourceIds",
+            "independentlyReproduced",
+          ],
+          properties: {
+            id: { type: "string", minLength: 1 },
+            role: { enum: ["central", "supporting", "contextual"] },
+            resultClass: {
+              enum: [
+                "definition",
+                "accounting-identity",
+                "illustrative-sensitivity",
+                "calibrated-model",
+                "causal-estimate",
+                "field-observation",
+                "validated-forecast",
+                "systematic-synthesis",
+                "conceptual-proposition",
+              ],
+            },
+            statement: { type: "string", minLength: 1 },
+            evidenceSourceIds: stringArraySchema,
+            independentlyReproduced: { type: "boolean" },
+          },
+        },
+      },
+      sourceClassifications: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["sourceId", "relationship", "evidenceKind"],
+          properties: {
+            sourceId: { type: "string", minLength: 1 },
+            relationship: { enum: ["direct", "adjacent", "contextual"] },
+            evidenceKind: {
+              enum: [
+                "peer-reviewed-empirical",
+                "peer-reviewed-model",
+                "peer-reviewed-review",
+                "official-data",
+                "administrative-record",
+                "patent",
+                "news",
+                "owner-provided-input",
+                "internal-model",
+                "other",
+              ],
+            },
+          },
+        },
+      },
+      recallAudit: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "status",
+          "candidateDispositionComplete",
+          "databaseCoverageComplete",
+          "backwardCitationChasing",
+          "forwardCitationChasing",
+          "adversarialSearch",
+          "closestPriorWorkCompared",
+          "missingCoreWorkIds",
+        ],
+        properties: {
+          status: { enum: ["pass", "fail", "incomplete"] },
+          candidateDispositionComplete: { type: "boolean" },
+          databaseCoverageComplete: { type: "boolean" },
+          backwardCitationChasing: { type: "boolean" },
+          forwardCitationChasing: { type: "boolean" },
+          adversarialSearch: { type: "boolean" },
+          closestPriorWorkCompared: { type: "boolean" },
+          missingCoreWorkIds: stringArraySchema,
+        },
+      },
+    },
+  };
+}
+
+export function publicationReviewSchema(role: PublicationReviewRole): Record<string, unknown> {
+  return {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    title: `Tiangong ${role} publication review`,
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "schemaVersion",
+      "role",
+      "packetSha256",
+      "reviewerSessionSha256",
+      "decision",
+      "findings",
+      "boundedRecommendation",
+    ],
+    properties: {
+      schemaVersion: { const: 1 },
+      role: { const: role },
+      packetSha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
+      reviewerSessionSha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
+      decision: {
+        enum: role === "journal-editor" ? [...EDITOR_DECISIONS] : [...SPECIALIST_DECISIONS],
+      },
+      findings: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["code", "severity", "message", "evidenceIds"],
+          properties: {
+            code: { type: "string", pattern: "^[A-Z][A-Z0-9_]{2,63}$" },
+            severity: { enum: ["blocking", "major", "minor"] },
+            message: { type: "string", minLength: 1 },
+            evidenceIds: { type: "array", items: { type: "string", minLength: 1 } },
+          },
+        },
+      },
+      boundedRecommendation: { type: "string", minLength: 8, maxLength: 4_000 },
+    },
+  };
+}
+
+export async function freezePublicationManuscript(input: {
+  root: string;
+  projectId: string;
+  manuscriptPath: string;
+  assessmentPath: string;
+  supplementPaths: string[];
+  producerAgent: AgentKind;
+  producerSessionId: string;
+}): Promise<PublicationGeneration & { status: "manuscript-frozen" }> {
+  return withWorkspaceLock(input.root, "research.publication.freeze", async () => {
+    const project = await requireClosedTopJournalProject(input.root, input.projectId);
+    const producerSessionId = requireSessionId(input.producerSessionId, "producer");
+    const producerSessionSha256 = sha256Text(producerSessionId);
+    if ((await usedReviewerSessionHashes(input.root, project.id)).has(producerSessionSha256)) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_REVIEW_NOT_INDEPENDENT",
+        "A native producer session must not reuse any prior independent reviewer session.",
+      );
+    }
+    const assessmentValue = parsePublicationAssessment(
+      JSON.parse(await readRegularTextFile(input.assessmentPath, "publication assessment")),
+    );
+    const projectRoot = projectDirectory(input.root, project.id);
+    const outputRoot = join(projectRoot, "outputs");
+    const snapshotValue = await readJsonFile<Record<string, unknown>>(
+      join(outputRoot, "evidence-snapshot.json"),
+      "Frozen evidence snapshot",
+    );
+    const snapshotSha256 = verifiedSnapshotSha256(project, snapshotValue);
+    const closureValue = await readJsonFile<Record<string, unknown>>(
+      join(outputRoot, "closure.json"),
+      "Base research closure",
+    );
+    assertBaseClosure(project, closureValue, snapshotSha256);
+
+    const manuscript = await storePublicationObject(
+      input.root,
+      project.id,
+      input.manuscriptPath,
+      "manuscript",
+    );
+    const assessment = await storePublicationObject(
+      input.root,
+      project.id,
+      input.assessmentPath,
+      "publication-assessment",
+    );
+    const supplements: FrozenFile[] = [];
+    for (const [index, path] of [...new Set(input.supplementPaths)].entries()) {
+      supplements.push(
+        await storePublicationObject(input.root, project.id, path, `supplement-${index + 1}`),
+      );
+    }
+    const evidenceSnapshot = await storePublicationObject(
+      input.root,
+      project.id,
+      join(outputRoot, "evidence-snapshot.json"),
+      "evidence-snapshot",
+      true,
+    );
+    const baseResearch = {
+      closure: await storePublicationObject(
+        input.root,
+        project.id,
+        join(outputRoot, "closure.json"),
+        "base-closure",
+        true,
+      ),
+      analysis: await storePublicationObject(
+        input.root,
+        project.id,
+        join(outputRoot, "analysis.json"),
+        "analysis",
+        true,
+      ),
+      report: await storePublicationObject(
+        input.root,
+        project.id,
+        join(outputRoot, "report.md"),
+        "research-report",
+        true,
+      ),
+    };
+    const assessmentResult = evaluateTopJournalAssessment({
+      policy: project.publicationPolicy!,
+      evidenceSnapshot: snapshotValue as never,
+      inputs: project.inputs,
+      assessment: assessmentValue,
+    });
+    const frozenAt = new Date().toISOString();
+    const generationCore = {
+      schemaVersion: 1 as const,
+      kind: "tiangong-publication-generation" as const,
+      projectId: project.id,
+      frozenAt,
+      producer: { agent: input.producerAgent, sessionSha256: producerSessionSha256 },
+      policy: policySummary(project.publicationPolicy!),
+      evidenceSnapshot: {
+        id: String(snapshotValue.snapshotId),
+        sha256: snapshotSha256,
+        object: evidenceSnapshot,
+      },
+      baseResearch,
+      manuscript,
+      assessment,
+      supplements,
+      assessmentResult,
+      requiredReviewRoles: requiredReviewRoles(project.publicationPolicy!),
+    };
+    const generationSha256 = sha256Text(canonicalJson(generationCore));
+    const generation: PublicationGeneration = { ...generationCore, generationSha256 };
+    const manifestLocator = generationManifestLocator(generationSha256);
+    await writeImmutableJson(
+      join(projectRoot, manifestLocator),
+      generation,
+      generationSha256,
+      "publication generation",
+    );
+    const pointer: PublicationCurrentPointer = {
+      schemaVersion: 1,
+      projectId: project.id,
+      generationSha256,
+      manifestLocator,
+      updatedAt: frozenAt,
+    };
+    await writeJsonAtomic(publicationCurrentPath(input.root, project.id), pointer);
+    await appendJournalEvent(
+      workspacePaths(input.root).journal,
+      "publication.manuscript.frozen",
+      project.id,
+      {
+        projectId: project.id,
+        generationSha256,
+        manuscriptSha256: manuscript.sha256,
+        assessmentSha256: assessment.sha256,
+        evidenceSnapshotSha256: snapshotSha256,
+        policySha256: project.publicationPolicy!.resolvedPolicySha256,
+        producerAgent: input.producerAgent,
+        mechanicalIssueCodes: assessmentResult.issueCodes,
+      },
+    );
+    return { ...generation, status: "manuscript-frozen" };
+  });
+}
+
+export async function preparePublicationReview(input: {
+  root: string;
+  projectId: string;
+  role: PublicationReviewRole;
+  reviewerAgent: AgentKind;
+  reviewerSessionId: string;
+}): Promise<PublicationReviewPacket> {
+  return withWorkspaceLock(input.root, "research.publication.review.prepare", async () => {
+    const project = await requireClosedTopJournalProject(input.root, input.projectId);
+    const generation = await loadCurrentGeneration(input.root, project.id);
+    const sessionId = requireSessionId(input.reviewerSessionId, "reviewer");
+    if (!generation.requiredReviewRoles.includes(input.role)) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_REVIEW_ROLE_INVALID",
+        `The ${input.role} review is not declared by the approved policy.`,
+        2,
+      );
+    }
+    const sessionSha256 = sha256Text(sessionId);
+    if (sessionSha256 === generation.producer.sessionSha256) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_REVIEW_NOT_INDEPENDENT",
+        "A reviewer session must differ from the native producer session.",
+      );
+    }
+    const registry = await loadReviewerRegistry(input.root, project.id);
+    const usedSessions = await usedReviewerSessionHashes(input.root, project.id);
+    if (
+      usedSessions.has(sessionSha256) ||
+      registry.sessions.some((entry) => entry.sessionSha256 === sessionSha256)
+    ) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_REVIEW_NOT_INDEPENDENT",
+        "Each required review must use a fresh independent reviewer session.",
+      );
+    }
+    const packetPath = reviewPacketPath(
+      input.root,
+      project.id,
+      generation.generationSha256,
+      input.role,
+    );
+    if (await pathExists(packetPath)) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_REVIEW_ALREADY_PREPARED",
+        `The ${input.role} review packet is already prepared for this frozen generation.`,
+      );
+    }
+    const preparedAt = new Date().toISOString();
+    const packetCore = {
+      schemaVersion: 1 as const,
+      kind: "tiangong-publication-review-packet" as const,
+      projectId: project.id,
+      generationSha256: generation.generationSha256,
+      role: input.role,
+      reviewer: { agent: input.reviewerAgent, sessionSha256 },
+      preparedAt,
+      policy: {
+        ...generation.policy,
+        documents: project.publicationPolicy!.documents,
+        resolvedRules: project.publicationPolicy!.resolvedRules,
+        resolvedConstraints: project.publicationPolicy!.resolvedConstraints,
+      },
+      evidenceSnapshot: {
+        id: generation.evidenceSnapshot.id,
+        sha256: generation.evidenceSnapshot.sha256,
+        objectLocator: generation.evidenceSnapshot.object.objectLocator,
+      },
+      baseResearch: generation.baseResearch,
+      manuscript: generation.manuscript,
+      assessment: generation.assessment,
+      supplements: generation.supplements,
+      mechanicalAssessment: generation.assessmentResult,
+      instructions: reviewInstructions(input.role),
+    };
+    const packet: PublicationReviewPacket = {
+      ...packetCore,
+      packetSha256: sha256Text(canonicalJson(packetCore)),
+    };
+    await writeImmutableJson(packetPath, packet, packet.packetSha256, "publication review packet");
+    registry.sessions.push({
+      sessionSha256,
+      projectId: project.id,
+      generationSha256: generation.generationSha256,
+      role: input.role,
+      agent: input.reviewerAgent,
+      registeredAt: preparedAt,
+    });
+    registry.sessions.sort((left, right) => left.sessionSha256.localeCompare(right.sessionSha256));
+    await writeJsonAtomic(reviewerRegistryPath(input.root, project.id), registry);
+    await appendJournalEvent(
+      workspacePaths(input.root).journal,
+      "publication.review.prepared",
+      project.id,
+      {
+        projectId: project.id,
+        generationSha256: generation.generationSha256,
+        role: input.role,
+        reviewerAgent: input.reviewerAgent,
+        reviewerSessionSha256: sessionSha256,
+        packetSha256: packet.packetSha256,
+      },
+    );
+    return packet;
+  });
+}
+
+export async function submitPublicationReview(input: {
+  root: string;
+  projectId: string;
+  role: PublicationReviewRole;
+  reviewPath: string;
+}): Promise<{ role: PublicationReviewRole; reviewSha256: string; decision: string }> {
+  return withWorkspaceLock(input.root, "research.publication.review.submit", async () => {
+    await requireClosedTopJournalProject(input.root, input.projectId);
+    const generation = await loadCurrentGeneration(input.root, input.projectId);
+    const packet = await loadReviewPacket(input.root, input.projectId, generation, input.role);
+    const review = parsePublicationReview(
+      JSON.parse(await readRegularTextFile(input.reviewPath, "publication review")),
+      input.role,
+    );
+    if (
+      review.packetSha256 !== packet.packetSha256 ||
+      review.reviewerSessionSha256 !== packet.reviewer.sessionSha256
+    ) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_REVIEW_BINDING_INVALID",
+        "The submitted review does not bind the prepared packet and reviewer session.",
+      );
+    }
+    const path = submittedReviewPath(
+      input.root,
+      input.projectId,
+      generation.generationSha256,
+      input.role,
+    );
+    if (await pathExists(path)) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_REVIEW_ALREADY_SUBMITTED",
+        `The ${input.role} review is already submitted for this frozen generation.`,
+      );
+    }
+    const reviewSha256 = sha256Text(canonicalJson(review));
+    await writeImmutableJson(path, review, reviewSha256, "publication review");
+    await appendJournalEvent(
+      workspacePaths(input.root).journal,
+      "publication.review.submitted",
+      input.projectId,
+      {
+        projectId: input.projectId,
+        generationSha256: generation.generationSha256,
+        role: input.role,
+        packetSha256: packet.packetSha256,
+        reviewSha256,
+        decision: review.decision,
+      },
+    );
+    return { role: input.role, reviewSha256, decision: review.decision };
+  });
+}
+
+export async function inspectPublicationStatus(
+  root: string,
+  projectId: string,
+): Promise<PublicationStatus> {
+  const project = await requireTopJournalProject(root, projectId);
+  if (
+    project.status !== "complete" ||
+    project.packages.some((item) => item.status !== "complete")
+  ) {
+    return {
+      schemaVersion: 1,
+      projectId,
+      generationSha256: null,
+      manuscriptSha256: null,
+      generationStatus: "waiting-for-base-research",
+      reviewState: "not-started",
+      requiredReviewRoles: requiredReviewRoles(project.publicationPolicy!),
+      completedReviewRoles: [],
+      missingReviewRoles: requiredReviewRoles(project.publicationPolicy!),
+      mechanicalIssues: [],
+      pivotOptions: [],
+      readinessVerdict: "independent-review-incomplete",
+      boundedStatement:
+        "The final manuscript cannot be frozen until base research closes mechanically.",
+      closureSha256: null,
+    };
+  }
+  if (!(await pathExists(publicationCurrentPath(root, projectId)))) {
+    return {
+      schemaVersion: 1,
+      projectId,
+      generationSha256: null,
+      manuscriptSha256: null,
+      generationStatus: "not-started",
+      reviewState: "not-started",
+      requiredReviewRoles: REQUIRED_REVIEW_ROLES,
+      completedReviewRoles: [],
+      missingReviewRoles: REQUIRED_REVIEW_ROLES,
+      mechanicalIssues: [],
+      pivotOptions: [],
+      readinessVerdict: "independent-review-incomplete",
+      boundedStatement: "No final manuscript has been frozen for independent review.",
+      closureSha256: null,
+    };
+  }
+  const generation = await loadCurrentGeneration(root, projectId);
+  const reviews = await loadSubmittedReviews(root, projectId, generation);
+  const completedReviewRoles = reviews.map((entry) => entry.role);
+  const missingReviewRoles = generation.requiredReviewRoles.filter(
+    (role) => !completedReviewRoles.includes(role),
+  );
+  const reviewState = !completedReviewRoles.length
+    ? "not-started"
+    : missingReviewRoles.length
+      ? "partial"
+      : "complete";
+  const readinessVerdict = computeReadinessVerdict(generation, reviews, missingReviewRoles);
+  const closurePath = publicationClosurePath(root, projectId, generation.generationSha256);
+  const closureSha256 = (await pathExists(closurePath))
+    ? (await loadPublicationClosure(closurePath, generation.generationSha256)).closureSha256
+    : null;
+  return {
+    schemaVersion: 1,
+    projectId,
+    generationSha256: generation.generationSha256,
+    manuscriptSha256: generation.manuscript.sha256,
+    generationStatus: "manuscript-frozen",
+    reviewState,
+    requiredReviewRoles: generation.requiredReviewRoles,
+    completedReviewRoles,
+    missingReviewRoles,
+    mechanicalIssues: generation.assessmentResult.issueCodes,
+    pivotOptions: generation.assessmentResult.pivotOptions,
+    readinessVerdict,
+    boundedStatement: boundedStatement(readinessVerdict),
+    closureSha256,
+  };
+}
+
+export async function closePublication(
+  root: string,
+  projectId: string,
+): Promise<PublicationClosure> {
+  return withWorkspaceLock(root, "research.publication.close", async () => {
+    await requireClosedTopJournalProject(root, projectId);
+    const generation = await loadCurrentGeneration(root, projectId);
+    const reviews = await loadSubmittedReviews(root, projectId, generation);
+    const missing = generation.requiredReviewRoles.filter(
+      (role) => !reviews.some((entry) => entry.role === role),
+    );
+    if (missing.length) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_REVIEW_INCOMPLETE",
+        "Publication closure requires every policy-mandated independent review.",
+        3,
+        { missingReviewRoles: missing },
+      );
+    }
+    const existingPath = publicationClosurePath(root, projectId, generation.generationSha256);
+    if (await pathExists(existingPath)) {
+      return loadPublicationClosure(existingPath, generation.generationSha256);
+    }
+    const readinessVerdict = computeReadinessVerdict(generation, reviews, []);
+    const closedAt = new Date().toISOString();
+    const closureCore = {
+      schemaVersion: 1 as const,
+      kind: "tiangong-publication-closure" as const,
+      projectId,
+      generationSha256: generation.generationSha256,
+      closedAt,
+      policy: generation.policy,
+      evidenceSnapshot: generation.evidenceSnapshot,
+      baseResearch: generation.baseResearch,
+      manuscript: generation.manuscript,
+      assessment: generation.assessment,
+      supplements: generation.supplements,
+      reviews: reviews.map((entry) => ({
+        role: entry.role,
+        packetSha256: entry.packet.packetSha256,
+        reviewSha256: entry.reviewSha256,
+        reviewerSessionSha256: entry.review.reviewerSessionSha256,
+        decision: entry.review.decision,
+      })),
+      mechanicalIssues: generation.assessmentResult.issueCodes,
+      pivotOptions: generation.assessmentResult.pivotOptions,
+      readinessVerdict,
+      boundedStatement: boundedStatement(readinessVerdict),
+    };
+    const closure: PublicationClosure = {
+      ...closureCore,
+      closureSha256: sha256Text(canonicalJson(closureCore)),
+    };
+    await writeImmutableJson(existingPath, closure, closure.closureSha256, "publication closure");
+    await appendJournalEvent(workspacePaths(root).journal, "publication.closed", projectId, {
+      projectId,
+      generationSha256: generation.generationSha256,
+      closureSha256: closure.closureSha256,
+      readinessVerdict,
+      policySha256: generation.policy.resolvedPolicySha256,
+      evidenceSnapshotSha256: generation.evidenceSnapshot.sha256,
+      manuscriptSha256: generation.manuscript.sha256,
+    });
+    return closure;
+  });
+}
+
+async function requireClosedTopJournalProject(
+  root: string,
+  projectId: string,
+): Promise<ProjectState> {
+  const project = await requireTopJournalProject(root, projectId);
+  if (
+    project.status !== "complete" ||
+    project.packages.some((item) => item.status !== "complete")
+  ) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_BASE_RESEARCH_INCOMPLETE",
+      "Freeze the final manuscript only after the evidence-report research project is mechanically closed.",
+      3,
+    );
+  }
+  return project;
+}
+
+async function requireTopJournalProject(root: string, projectId: string): Promise<ProjectState> {
+  const project = await loadProject(root, projectId);
+  if (!project.publicationPolicy) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_POLICY_REQUIRED",
+      "The publication workflow requires an approved top-journal policy binding.",
+      3,
+    );
+  }
+  await assertResearchPolicyBinding(root, project.publicationPolicy);
+  return project;
+}
+
+function verifiedSnapshotSha256(project: ProjectState, snapshot: Record<string, unknown>): string {
+  const recorded = snapshot.snapshotSha256;
+  if (typeof recorded !== "string" || !/^[a-f0-9]{64}$/.test(recorded)) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_BINDING_INVALID",
+      "The evidence snapshot hash is invalid.",
+    );
+  }
+  const { snapshotSha256: _ignored, ...withoutHash } = snapshot;
+  if (
+    sha256Text(canonicalJson(withoutHash)) !== recorded ||
+    snapshot.snapshotId !== project.evidenceState.currentSnapshotId ||
+    recorded !== project.evidenceState.currentSnapshotSha256 ||
+    snapshot.snapshotId !== project.evidenceState.closureSnapshotId
+  ) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_BINDING_INVALID",
+      "The final manuscript must bind the current mechanically closed evidence snapshot.",
+    );
+  }
+  return recorded;
+}
+
+function assertBaseClosure(
+  project: ProjectState,
+  closure: Record<string, unknown>,
+  snapshotSha256: string,
+): void {
+  const evidenceSnapshot = isObject(closure.evidenceSnapshot) ? closure.evidenceSnapshot : {};
+  const policy = isObject(closure.publicationPolicy) ? closure.publicationPolicy : {};
+  if (
+    closure.projectId !== project.id ||
+    closure.status !== "complete" ||
+    evidenceSnapshot.snapshotSha256 !== snapshotSha256 ||
+    evidenceSnapshot.snapshotId !== project.evidenceState.closureSnapshotId ||
+    policy.resolvedPolicySha256 !== project.publicationPolicy!.resolvedPolicySha256 ||
+    policy.approvalSha256 !== project.publicationPolicy!.approvalSha256
+  ) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_BINDING_INVALID",
+      "The base research closure does not bind the current evidence snapshot and approved policy.",
+    );
+  }
+}
+
+function policySummary(policy: ResearchPolicyBinding): PublicationGeneration["policy"] {
+  return {
+    projectId: policy.projectId,
+    resolvedPolicySha256: policy.resolvedPolicySha256,
+    approvalSha256: policy.approvalSha256,
+    verdictCeiling: policy.verdictCeiling,
+    targetJournal: policy.targetJournal,
+  };
+}
+
+function requiredReviewRoles(policy: ResearchPolicyBinding): PublicationReviewRole[] {
+  const declared = policy.requiredReviewers.filter(isPublicationReviewRole);
+  return [...new Set([...REQUIRED_REVIEW_ROLES, ...declared])].sort() as PublicationReviewRole[];
+}
+
+function isPublicationReviewRole(value: string): value is PublicationReviewRole {
+  return REQUIRED_REVIEW_ROLES.includes(value as PublicationReviewRole);
+}
+
+async function storePublicationObject(
+  root: string,
+  projectId: string,
+  sourcePath: string,
+  logicalName: string,
+  allowControlPath = false,
+): Promise<FrozenFile> {
+  const canonical = requireAbsolutePath(sourcePath, logicalName);
+  if (!allowControlPath && canonical.split(sep).includes(RESEARCH_CONTROL_DIRECTORY)) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_FILE_INVALID",
+      "Publication source files cannot be read from a research control directory.",
+      2,
+    );
+  }
+  const info = await lstat(canonical).catch(() => undefined);
+  if (!info?.isFile() || info.isSymbolicLink()) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_FILE_INVALID",
+      `The ${logicalName} must be a regular non-symlink file.`,
+      2,
+    );
+  }
+  const sha256 = await sha256File(canonical);
+  const extension = safeExtension(extname(basename(canonical)));
+  const objectLocator = `publication/objects/${sha256}/content${extension}`;
+  const destination = join(projectDirectory(root, projectId), objectLocator);
+  if (await pathExists(destination)) {
+    if ((await sha256File(destination)) !== sha256) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_OBJECT_INVALID",
+        "A content-addressed publication object failed hash verification.",
+      );
+    }
+  } else {
+    await ensureDirectory(dirname(destination));
+    const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(temporary, await readFile(canonical), { mode: 0o600 });
+    if ((await sha256File(temporary)) !== sha256) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_OBJECT_INVALID",
+        "A publication object changed while it was being frozen.",
+      );
+    }
+    await rename(temporary, destination);
+    await chmod(destination, 0o444);
+  }
+  return { logicalName, sha256, bytes: info.size, objectLocator };
+}
+
+async function loadCurrentGeneration(
+  root: string,
+  projectId: string,
+): Promise<PublicationGeneration> {
+  const pointer = await readJsonFile<PublicationCurrentPointer>(
+    publicationCurrentPath(root, projectId),
+    "Current publication generation",
+  );
+  if (
+    pointer.schemaVersion !== 1 ||
+    pointer.projectId !== projectId ||
+    !/^[a-f0-9]{64}$/.test(pointer.generationSha256) ||
+    pointer.manifestLocator !== generationManifestLocator(pointer.generationSha256)
+  ) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_STATE_INVALID",
+      "The publication pointer is invalid.",
+    );
+  }
+  const manifestPath = join(projectDirectory(root, projectId), pointer.manifestLocator);
+  const generation = await readJsonFile<PublicationGeneration>(
+    manifestPath,
+    "Publication generation",
+  );
+  const { generationSha256, ...withoutHash } = generation;
+  if (
+    generation.kind !== "tiangong-publication-generation" ||
+    generation.projectId !== projectId ||
+    !isObject(generation.producer) ||
+    !["codex", "claude"].includes(String(generation.producer.agent)) ||
+    typeof generation.producer.sessionSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(generation.producer.sessionSha256) ||
+    generationSha256 !== pointer.generationSha256 ||
+    sha256Text(canonicalJson(withoutHash)) !== generationSha256
+  ) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_STATE_INVALID",
+      "The publication generation failed its content hash binding.",
+    );
+  }
+  await verifyFrozenFiles(root, projectId, [
+    generation.manuscript,
+    generation.assessment,
+    generation.evidenceSnapshot.object,
+    generation.baseResearch.closure,
+    generation.baseResearch.analysis,
+    generation.baseResearch.report,
+    ...generation.supplements,
+  ]);
+  return generation;
+}
+
+async function verifyFrozenFiles(
+  root: string,
+  projectId: string,
+  files: FrozenFile[],
+): Promise<void> {
+  for (const file of files) {
+    const path = join(projectDirectory(root, projectId), file.objectLocator);
+    const info = await lstat(path).catch(() => undefined);
+    if (
+      !info?.isFile() ||
+      info.isSymbolicLink() ||
+      info.size !== file.bytes ||
+      (await sha256File(path)) !== file.sha256
+    ) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_OBJECT_INVALID",
+        "A frozen publication object is missing or failed hash verification.",
+      );
+    }
+  }
+}
+
+async function loadReviewerRegistry(
+  root: string,
+  projectId: string,
+): Promise<ReviewerSessionRegistry> {
+  const path = reviewerRegistryPath(root, projectId);
+  if (!(await pathExists(path))) return { schemaVersion: 1, sessions: [] };
+  const value = await readJsonFile<ReviewerSessionRegistry>(path, "Publication reviewer registry");
+  if (
+    value.schemaVersion !== 1 ||
+    !Array.isArray(value.sessions) ||
+    value.sessions.some(
+      (entry) =>
+        typeof entry.sessionSha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(entry.sessionSha256) ||
+        entry.projectId !== projectId ||
+        typeof entry.generationSha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(entry.generationSha256) ||
+        !isPublicationReviewRole(entry.role) ||
+        !["codex", "claude"].includes(entry.agent) ||
+        typeof entry.registeredAt !== "string",
+    )
+  ) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_STATE_INVALID",
+      "The publication reviewer registry is invalid.",
+    );
+  }
+  return value;
+}
+
+async function usedReviewerSessionHashes(root: string, projectId: string): Promise<Set<string>> {
+  const journalPath = workspacePaths(root).journal;
+  await verifyJournal(journalPath);
+  const hashes = new Set<string>();
+  for (const event of await readJournal(journalPath)) {
+    if (
+      event.type !== "publication.review.prepared" ||
+      event.scope !== projectId ||
+      event.payload.projectId !== projectId
+    ) {
+      continue;
+    }
+    const value = event.payload.reviewerSessionSha256;
+    if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_STATE_INVALID",
+        "A publication review journal event is missing its session hash binding.",
+      );
+    }
+    hashes.add(value);
+  }
+  return hashes;
+}
+
+async function loadReviewPacket(
+  root: string,
+  projectId: string,
+  generation: PublicationGeneration,
+  role: PublicationReviewRole,
+): Promise<PublicationReviewPacket> {
+  const packet = await readJsonFile<PublicationReviewPacket>(
+    reviewPacketPath(root, projectId, generation.generationSha256, role),
+    `Publication ${role} review packet`,
+  );
+  const { packetSha256, ...withoutHash } = packet;
+  if (
+    packet.kind !== "tiangong-publication-review-packet" ||
+    packet.projectId !== projectId ||
+    packet.generationSha256 !== generation.generationSha256 ||
+    packet.role !== role ||
+    !isObject(packet.reviewer) ||
+    !["codex", "claude"].includes(String(packet.reviewer.agent)) ||
+    typeof packet.reviewer.sessionSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(packet.reviewer.sessionSha256) ||
+    sha256Text(canonicalJson(withoutHash)) !== packetSha256
+  ) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_REVIEW_BINDING_INVALID",
+      "The publication review packet failed its content hash binding.",
+    );
+  }
+  return packet;
+}
+
+async function loadSubmittedReviews(
+  root: string,
+  projectId: string,
+  generation: PublicationGeneration,
+): Promise<
+  Array<{
+    role: PublicationReviewRole;
+    review: PublicationReviewRecord;
+    reviewSha256: string;
+    packet: PublicationReviewPacket;
+  }>
+> {
+  const reviews = [];
+  for (const role of generation.requiredReviewRoles) {
+    const path = submittedReviewPath(root, projectId, generation.generationSha256, role);
+    if (!(await pathExists(path))) continue;
+    const packet = await loadReviewPacket(root, projectId, generation, role);
+    const raw = await readJsonFile<unknown>(path, `Publication ${role} review`);
+    const review = parsePublicationReview(raw, role);
+    if (
+      review.packetSha256 !== packet.packetSha256 ||
+      review.reviewerSessionSha256 !== packet.reviewer.sessionSha256
+    ) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_REVIEW_BINDING_INVALID",
+        "A submitted publication review failed its packet binding.",
+      );
+    }
+    reviews.push({ role, review, reviewSha256: sha256Text(canonicalJson(review)), packet });
+  }
+  return reviews;
+}
+
+function parsePublicationReview(
+  value: unknown,
+  expectedRole: PublicationReviewRole,
+): PublicationReviewRecord {
+  if (!isObject(value)) throw malformedReview();
+  const decisionSet = expectedRole === "journal-editor" ? EDITOR_DECISIONS : SPECIALIST_DECISIONS;
+  if (
+    value.schemaVersion !== 1 ||
+    value.role !== expectedRole ||
+    typeof value.packetSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.packetSha256) ||
+    typeof value.reviewerSessionSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.reviewerSessionSha256) ||
+    !decisionSet.has(String(value.decision)) ||
+    !Array.isArray(value.findings) ||
+    value.findings.some((finding) => !isReviewFinding(finding)) ||
+    typeof value.boundedRecommendation !== "string" ||
+    value.boundedRecommendation.trim().length < 8 ||
+    value.boundedRecommendation.length > 4_000
+  ) {
+    throw malformedReview();
+  }
+  return value as unknown as PublicationReviewRecord;
+}
+
+function isReviewFinding(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    typeof value.code === "string" &&
+    /^[A-Z][A-Z0-9_]{2,63}$/.test(value.code) &&
+    ["blocking", "major", "minor"].includes(String(value.severity)) &&
+    typeof value.message === "string" &&
+    Array.isArray(value.evidenceIds) &&
+    value.evidenceIds.every((id) => typeof id === "string")
+  );
+}
+
+function malformedReview(): CliError {
+  return publicationError(
+    "RESEARCH_PUBLICATION_REVIEW_INVALID",
+    "The publication review does not match the role-specific structured schema.",
+    2,
+  );
+}
+
+function parsePublicationAssessment(value: unknown): PublicationAssessment {
+  if (!isObject(value)) throw malformedAssessment();
+  if (
+    value.schemaVersion !== 1 ||
+    typeof value.title !== "string" ||
+    value.title.trim().length < 8 ||
+    !Array.isArray(value.claims) ||
+    value.claims.some((claim) => !isAssessmentClaim(claim)) ||
+    !Array.isArray(value.outcomes) ||
+    value.outcomes.some((outcome) => !isAssessmentOutcome(outcome)) ||
+    !Array.isArray(value.titleOutcomeIds) ||
+    value.titleOutcomeIds.some((id) => typeof id !== "string") ||
+    !Array.isArray(value.results) ||
+    value.results.some((result) => !isAssessmentResult(result)) ||
+    !Array.isArray(value.sourceClassifications) ||
+    value.sourceClassifications.some((item) => !isSourceClassification(item)) ||
+    !isRecallAudit(value.recallAudit)
+  ) {
+    throw malformedAssessment();
+  }
+  return value as unknown as PublicationAssessment;
+}
+
+function isAssessmentClaim(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    nonEmptyString(value.id) &&
+    ["central", "supporting", "contextual", "future-research"].includes(String(value.role)) &&
+    nonEmptyString(value.statement) &&
+    stringArray(value.evidenceSourceIds) &&
+    stringArray(value.dimensionIds) &&
+    stringArray(value.resultIds)
+  );
+}
+
+function isAssessmentOutcome(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    nonEmptyString(value.id) &&
+    ["central", "supporting", "contextual"].includes(String(value.role)) &&
+    nonEmptyString(value.label) &&
+    [
+      "unobserved",
+      "future-work",
+      "conceptual-proposition",
+      "calibrated-model",
+      "causal-estimate",
+      "field-observation",
+      "validated-forecast",
+      "systematic-synthesis",
+    ].includes(String(value.supportStatus)) &&
+    stringArray(value.claimIds) &&
+    stringArray(value.resultIds)
+  );
+}
+
+function isAssessmentResult(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    nonEmptyString(value.id) &&
+    ["central", "supporting", "contextual"].includes(String(value.role)) &&
+    [
+      "definition",
+      "accounting-identity",
+      "illustrative-sensitivity",
+      "calibrated-model",
+      "causal-estimate",
+      "field-observation",
+      "validated-forecast",
+      "systematic-synthesis",
+      "conceptual-proposition",
+    ].includes(String(value.resultClass)) &&
+    nonEmptyString(value.statement) &&
+    stringArray(value.evidenceSourceIds) &&
+    typeof value.independentlyReproduced === "boolean"
+  );
+}
+
+function isSourceClassification(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    nonEmptyString(value.sourceId) &&
+    ["direct", "adjacent", "contextual"].includes(String(value.relationship)) &&
+    [
+      "peer-reviewed-empirical",
+      "peer-reviewed-model",
+      "peer-reviewed-review",
+      "official-data",
+      "administrative-record",
+      "patent",
+      "news",
+      "owner-provided-input",
+      "internal-model",
+      "other",
+    ].includes(String(value.evidenceKind))
+  );
+}
+
+function isRecallAudit(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    ["pass", "fail", "incomplete"].includes(String(value.status)) &&
+    typeof value.candidateDispositionComplete === "boolean" &&
+    typeof value.databaseCoverageComplete === "boolean" &&
+    typeof value.backwardCitationChasing === "boolean" &&
+    typeof value.forwardCitationChasing === "boolean" &&
+    typeof value.adversarialSearch === "boolean" &&
+    typeof value.closestPriorWorkCompared === "boolean" &&
+    stringArray(value.missingCoreWorkIds)
+  );
+}
+
+function malformedAssessment(): CliError {
+  return publicationError(
+    "RESEARCH_PUBLICATION_ASSESSMENT_INVALID",
+    "The publication assessment does not match the authoritative structured schema.",
+    2,
+  );
+}
+
+function computeReadinessVerdict(
+  generation: PublicationGeneration,
+  reviews: Awaited<ReturnType<typeof loadSubmittedReviews>>,
+  missing: PublicationReviewRole[],
+): PublicationReadinessVerdict {
+  if (missing.length) return "independent-review-incomplete";
+  const specialistPass = reviews
+    .filter((entry) => entry.role !== "journal-editor")
+    .every((entry) => entry.review.decision === "pass");
+  const editorReady = reviews.some(
+    (entry) => entry.role === "journal-editor" && entry.review.decision === "submission-ready",
+  );
+  if (!specialistPass || !editorReady || generation.assessmentResult.issueCodes.length > 0) {
+    return "revision-required";
+  }
+  if (!generation.assessmentResult.canClaimSubmissionReady) {
+    return generation.policy.verdictCeiling === "top-journal-class-ready"
+      ? "top-journal-class-ready"
+      : "top-journal-candidate";
+  }
+  return "target-journal-submission-ready";
+}
+
+function boundedStatement(verdict: PublicationReadinessVerdict): string {
+  if (verdict === "target-journal-submission-ready") {
+    return "The exact frozen manuscript passed all required independent reviews and is mechanically bounded as target-journal submission-ready; acceptance is not guaranteed.";
+  }
+  if (verdict === "top-journal-class-ready") {
+    return "The exact frozen manuscript is bounded as top-journal-class-ready, not target-journal submission-ready.";
+  }
+  if (verdict === "top-journal-candidate") {
+    return "The exact frozen manuscript remains a top-journal candidate, not submission-ready.";
+  }
+  if (verdict === "revision-required") {
+    return "The exact frozen manuscript is not submission-ready; revision or a policy-declared research pivot is required.";
+  }
+  return "The exact frozen manuscript is not submission-ready because required independent reviews are incomplete.";
+}
+
+function reviewInstructions(role: PublicationReviewRole): string[] {
+  return [
+    "Review only the exact content-addressed manuscript, supplements, evidence snapshot, base research outputs, and policy in this packet.",
+    "Use a fresh independent reviewer session; do not inherit producer reasoning or an earlier manuscript review.",
+    "Do not upgrade the mechanical assessment or policy verdict ceiling.",
+    role === "journal-editor"
+      ? "Act as a skeptical target-journal editor and return one allowed editorial decision."
+      : `Apply the ${role} rubric and return pass, revise, or reject with structured findings.`,
+  ];
+}
+
+async function writeImmutableJson(
+  path: string,
+  value: unknown,
+  expectedSha256: string,
+  label: string,
+): Promise<void> {
+  if (await pathExists(path)) {
+    const existing = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+    const actual = sha256Text(canonicalJson(withoutBindingHash(existing)));
+    if (actual !== expectedSha256) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_OBJECT_INVALID",
+        `The immutable ${label} already exists with different content.`,
+      );
+    }
+    return;
+  }
+  await writeJsonAtomic(path, value, 0o444);
+}
+
+function withoutBindingHash(value: Record<string, unknown>): Record<string, unknown> {
+  if (typeof value.generationSha256 === "string") {
+    const { generationSha256: _ignored, ...rest } = value;
+    return rest;
+  }
+  if (typeof value.packetSha256 === "string") {
+    const { packetSha256: _ignored, ...rest } = value;
+    return rest;
+  }
+  if (typeof value.closureSha256 === "string") {
+    const { closureSha256: _ignored, ...rest } = value;
+    return rest;
+  }
+  return value;
+}
+
+async function loadPublicationClosure(
+  path: string,
+  generationSha256: string,
+): Promise<PublicationClosure> {
+  const closure = await readJsonFile<PublicationClosure>(path, "Publication closure");
+  const { closureSha256, ...withoutHash } = closure;
+  if (
+    closure.kind !== "tiangong-publication-closure" ||
+    closure.generationSha256 !== generationSha256 ||
+    sha256Text(canonicalJson(withoutHash)) !== closureSha256
+  ) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_STATE_INVALID",
+      "The publication closure failed its content hash binding.",
+    );
+  }
+  return closure;
+}
+
+async function readRegularTextFile(path: string, label: string): Promise<string> {
+  const canonical = requireAbsolutePath(path, label);
+  const info = await lstat(canonical).catch(() => undefined);
+  if (!info?.isFile() || info.isSymbolicLink()) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_FILE_INVALID",
+      `The ${label} must be a regular non-symlink file.`,
+      2,
+    );
+  }
+  if (info.size > 16 * 1024 * 1024) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_FILE_INVALID",
+      `The ${label} exceeds the 16 MiB structured-input limit.`,
+      2,
+    );
+  }
+  return readFile(canonical, "utf8");
+}
+
+function requireAbsolutePath(path: string, label: string): string {
+  if (!isAbsolute(path) || resolve(path) !== path) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_FILE_INVALID",
+      `The ${label} path must be absolute and canonical.`,
+      2,
+    );
+  }
+  return path;
+}
+
+function requireSessionId(value: string, label: string): string {
+  const normalized = value.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(normalized)) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_SESSION_INVALID",
+      `The ${label} session ID must contain 8-128 safe opaque characters.`,
+      2,
+    );
+  }
+  return normalized;
+}
+
+function safeExtension(value: string): string {
+  return /^\.[A-Za-z0-9]{1,10}$/.test(value) ? value.toLowerCase() : ".bin";
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function stringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => nonEmptyString(item));
+}
+
+function projectDirectory(root: string, projectId: string): string {
+  return join(workspacePaths(root).projects, projectId);
+}
+
+function generationManifestLocator(generationSha256: string): string {
+  return `publication/generations/${generationSha256}/manifest.json`;
+}
+
+function publicationCurrentPath(root: string, projectId: string): string {
+  return join(projectDirectory(root, projectId), "publication", "current.json");
+}
+
+function reviewerRegistryPath(root: string, projectId: string): string {
+  return join(projectDirectory(root, projectId), "publication", "reviewer-sessions.json");
+}
+
+function reviewPacketPath(
+  root: string,
+  projectId: string,
+  generationSha256: string,
+  role: PublicationReviewRole,
+): string {
+  return join(
+    projectDirectory(root, projectId),
+    "publication",
+    "generations",
+    generationSha256,
+    "review-packets",
+    `${role}.json`,
+  );
+}
+
+function submittedReviewPath(
+  root: string,
+  projectId: string,
+  generationSha256: string,
+  role: PublicationReviewRole,
+): string {
+  return join(
+    projectDirectory(root, projectId),
+    "publication",
+    "generations",
+    generationSha256,
+    "reviews",
+    `${role}.json`,
+  );
+}
+
+function publicationClosurePath(root: string, projectId: string, generationSha256: string): string {
+  return join(
+    projectDirectory(root, projectId),
+    "publication",
+    "generations",
+    generationSha256,
+    "closure.json",
+  );
+}
+
+function publicationError(
+  code: string,
+  message: string,
+  exitCode = 3,
+  details?: Record<string, unknown>,
+): CliError {
+  return new CliError(message, { code, exitCode, details });
+}

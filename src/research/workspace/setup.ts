@@ -859,6 +859,66 @@ export async function inspectResearchSetupStatus(
   };
 }
 
+export async function resolveVerifiedResearchSetupSkillDirectory(
+  workspace: string,
+  skillId: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
+  const root = requireAbsoluteWorkspace(resolve(workspace));
+  const status = await inspectResearchSetupStatus(root, environment);
+  if (status.plan.scope !== "project") {
+    throw setupError({
+      code: "RESEARCH_SETUP_PROJECT_INSTALL_REQUIRED",
+      step: "skill-resolution",
+      reason: "This workflow requires a project-scoped Skill installation.",
+      minimumAction: "Create and apply a reviewed project-scoped setup plan for this workspace.",
+      retryCommand: `tiangong-ai research setup --workspace ${root}`,
+      exitCode: 3,
+    });
+  }
+  if (!status.plan.selectedSkillIds.includes(skillId)) {
+    throw setupError({
+      code: "RESEARCH_SETUP_SKILL_NOT_SELECTED",
+      step: "skill-resolution",
+      reason: `The reviewed setup plan did not select ${skillId}.`,
+      minimumAction:
+        "Create and apply a replacement setup plan that explicitly selects the required Skill.",
+      retryCommand: `tiangong-ai research setup --workspace ${root}`,
+      exitCode: 3,
+    });
+  }
+  if (status.state.status !== "ready") {
+    throw setupError({
+      code: "RESEARCH_SETUP_NOT_READY",
+      step: "skill-resolution",
+      reason: `Research setup is ${status.state.status}, not ready.`,
+      minimumAction: "Complete setup apply and all required doctor checks before using the Skill.",
+      retryCommand: `tiangong-ai research setup status --workspace ${root} --json`,
+      exitCode: 3,
+    });
+  }
+  const installations = status.installations
+    .filter((installation) => installation.skillId === skillId)
+    .sort((left, right) => {
+      if (left.agent === "codex" && right.agent !== "codex") return -1;
+      if (right.agent === "codex" && left.agent !== "codex") return 1;
+      return left.agent.localeCompare(right.agent);
+    });
+  const verified = installations.find((installation) => installation.status === "installed");
+  if (!verified) {
+    throw setupError({
+      code: "RESEARCH_SETUP_SKILL_INSTALL_INVALID",
+      step: "skill-resolution",
+      reason: `${skillId} is missing, blocked, or differs from the reviewed tree hash.`,
+      minimumAction:
+        "Inspect setup status and re-apply the immutable plan; do not use an unverified Skill tree.",
+      retryCommand: `tiangong-ai research setup status --workspace ${root} --json`,
+      exitCode: 3,
+    });
+  }
+  return verified.path;
+}
+
 function setupStateForOutput(
   state: ResearchSetupState,
   plan: ResearchSetupPlan,
