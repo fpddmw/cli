@@ -32,6 +32,7 @@ import {
 import type {
   ProjectEvidenceRequirements,
   ProjectInput,
+  ResearchPolicyBinding,
   ProjectState,
   WorkPackage,
   WorkspaceConfig,
@@ -48,6 +49,7 @@ export async function initializeProject(
   evidenceRequirements?: ProjectEvidenceRequirements,
   budgetConfirmed = false,
   inputPlan?: VerifiedProjectInputPlan,
+  publicationPolicy?: ResearchPolicyBinding,
 ): Promise<ProjectState> {
   validateProjectId(projectId);
   const normalizedQuestion = question.trim();
@@ -122,6 +124,7 @@ export async function initializeProject(
       budgetConfirmedAt: budgetConfirmed ? now : null,
       inputs: admittedInputPlan ? projectInputsFromPlan(admittedInputPlan, now) : [],
       evidenceRequirements: requirements,
+      publicationPolicy: publicationPolicy ?? null,
       packages: defaultWorkPackages(config),
       usage: {
         tokens: 0,
@@ -146,6 +149,7 @@ export async function initializeProject(
       projectId,
       questionSha256: await hashQuestion(normalizedQuestion),
       inputPlanSha256: admittedInputPlan?.sha256 ?? null,
+      publicationPolicySha256: publicationPolicy?.resolvedPolicySha256 ?? null,
       inputs: project.inputs.map((input) => ({
         id: input.id,
         role: input.role,
@@ -388,6 +392,9 @@ export async function forkProject(
         requiredCompanionIds: [...(source.evidenceRequirements.requiredCompanionIds ?? [])],
         requiredDiscoveryScopes: [...(source.evidenceRequirements.requiredDiscoveryScopes ?? [])],
       },
+      publicationPolicy: source.publicationPolicy
+        ? structuredClone(source.publicationPolicy)
+        : null,
       packages,
       usage: {
         tokens: 0,
@@ -609,6 +616,9 @@ export async function createProjectAddendum(
         requiredCompanionIds: [...(source.evidenceRequirements.requiredCompanionIds ?? [])],
         requiredDiscoveryScopes: [...(source.evidenceRequirements.requiredDiscoveryScopes ?? [])],
       },
+      publicationPolicy: source.publicationPolicy
+        ? structuredClone(source.publicationPolicy)
+        : null,
       packages: defaultWorkPackages(config),
       usage: {
         tokens: 0,

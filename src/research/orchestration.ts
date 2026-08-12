@@ -47,6 +47,13 @@ import {
 } from "./workspace/projects.js";
 import { evaluateProjectPreflight } from "./workspace/preflight.js";
 import {
+  approveResearchPolicy,
+  initializeResearchPolicy,
+  inspectResearchPolicyCatalog,
+  inspectResearchPolicyStatus,
+  loadApprovedResearchPolicy,
+} from "./workspace/research-policy.js";
+import {
   abortNativeResearchStage,
   inspectNativeResearchStage,
   prepareNativeResearchStage,
@@ -77,6 +84,7 @@ export async function runResearchOrchestrationCommand(
   if (subcommand === "setup") return runResearchSetupCommand(argv, io);
   if (subcommand === "workspace") return runWorkspace(argv, io);
   if (subcommand === "capability") return runCapability(argv, io);
+  if (subcommand === "policy") return runPolicy(argv, io);
   if (subcommand === "project") return runProject(argv, io);
   if (subcommand === "schema") return runSchema(argv, io);
   if (subcommand === "status") return runStatus(argv, io);
@@ -98,8 +106,14 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research capability credential set --id <logical-id> --from-env <name> [--workspace <absolute-path>] [--json]
   tiangong-ai research capability lock [--workspace <absolute-path>] [--json]
   tiangong-ai research capability verify [--workspace <absolute-path>] [--json]
-  tiangong-ai research project init <project-id> --question <question> [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
-  tiangong-ai research project preflight --question <question> [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
+  tiangong-ai research policy catalog --source-root <absolute-installed-skill-root> [--json]
+  tiangong-ai research policy init <project-id> --source-root <absolute-installed-skill-root> --article-type <id> --field <id> --journal-class <id> [--include-exact-journal-template] [--workspace <path>] [--json]
+  tiangong-ai research policy status <project-id> [--workspace <path>] [--json]
+  tiangong-ai research policy validate <project-id> [--workspace <path>] [--json]
+  tiangong-ai research policy approve <project-id> --confirm [--acknowledge-defaults] [--workspace <path>] [--json]
+  tiangong-ai research policy resolve <project-id> [--workspace <path>] [--json]
+  tiangong-ai research project init <project-id> --question <question> [--goal evidence-report|top-journal] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
+  tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--workspace <path>] [--json]
   tiangong-ai research project retry <project-id> [--package <package-id>] [--workspace <path>] [--json]
   tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|acquire|analyze|synthesize] [--workspace <path>] [--json]
@@ -123,6 +137,103 @@ export function researchOrchestrationHelp(): string {
 
 ${researchSetupHelp()}
 `;
+}
+
+async function runPolicy(argv: string[], io: CliIO): Promise<number> {
+  const [action, ...rest] = argv;
+  if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action === "catalog") {
+    const args = parseStrictArgs(
+      rest,
+      { ...COMMON_OPTIONS, "source-root": "string" },
+      "research policy catalog",
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    rejectPositionals(args.positionals, "research policy catalog");
+    const sourceRoot = strictString(args, "source-root");
+    if (!sourceRoot) {
+      throw new CliError("research policy catalog requires --source-root.", {
+        code: "RESEARCH_POLICY_SOURCE_REQUIRED",
+        exitCode: 2,
+      });
+    }
+    writeJson(io, await inspectResearchPolicyCatalog(sourceRoot), args);
+    return 0;
+  }
+  if (action === "init") {
+    const args = parseStrictArgs(
+      rest,
+      {
+        ...WORKSPACE_OPTIONS,
+        "source-root": "string",
+        "article-type": "string",
+        field: "string",
+        "journal-class": "string",
+        "include-exact-journal-template": "boolean",
+      },
+      "research policy init",
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(args.positionals, "research policy init");
+    const sourceRoot = strictString(args, "source-root");
+    const articleType = strictString(args, "article-type");
+    const field = strictString(args, "field");
+    const journalClass = strictString(args, "journal-class");
+    if (!sourceRoot || !articleType || !field || !journalClass) {
+      throw new CliError(
+        "research policy init requires --source-root, --article-type, --field, and --journal-class.",
+        { code: "RESEARCH_POLICY_INVALID", exitCode: 2 },
+      );
+    }
+    const root = await workspaceFromArgs(args);
+    writeJson(
+      io,
+      await initializeResearchPolicy({
+        root,
+        projectId,
+        sourceRoot,
+        articleType,
+        field,
+        journalClass,
+        includeExactJournalTemplate: strictBoolean(args, "include-exact-journal-template"),
+      }),
+      args,
+    );
+    return 0;
+  }
+  if (["status", "validate", "approve", "resolve"].includes(action)) {
+    const args = parseStrictArgs(
+      rest,
+      {
+        ...WORKSPACE_OPTIONS,
+        confirm: "boolean",
+        "acknowledge-defaults": "boolean",
+      },
+      `research policy ${action}`,
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(args.positionals, `research policy ${action}`);
+    const root = await workspaceFromArgs(args);
+    if (action === "approve") {
+      const result = await approveResearchPolicy(root, projectId, {
+        confirm: strictBoolean(args, "confirm"),
+        acknowledgeDefaults: strictBoolean(args, "acknowledge-defaults"),
+      });
+      writeJson(io, result, args);
+      return 0;
+    }
+    if (action === "resolve") {
+      writeJson(io, await loadApprovedResearchPolicy(root, projectId), args);
+      return 0;
+    }
+    const result = await inspectResearchPolicyStatus(root, projectId);
+    writeJson(io, result, args);
+    return action === "validate" &&
+      ["missing", "invalid", "changed", "stale"].includes(result.status)
+      ? 3
+      : 0;
+  }
+  throw unknownAction("research policy", action);
 }
 
 async function runSchema(argv: string[], io: CliIO): Promise<number> {
@@ -728,6 +839,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       {
         ...WORKSPACE_OPTIONS,
         question: "string",
+        goal: "string",
         requirements: "string",
         "input-plan": "string",
         "confirm-budget": "boolean",
@@ -744,6 +856,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       });
     }
     const root = await workspaceFromArgs(args);
+    const goal = researchGoal(strictString(args, "goal"));
     const requirementsPath = strictString(args, "requirements");
     const inputPlanPath = strictString(args, "input-plan");
     const project = await initializeProject(
@@ -753,6 +866,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       requirementsPath ? await readEvidenceRequirements(requirementsPath) : undefined,
       strictBoolean(args, "confirm-budget"),
       inputPlanPath ? await readAndVerifyProjectInputPlan(inputPlanPath) : undefined,
+      goal === "top-journal" ? await loadApprovedResearchPolicy(root, projectId) : undefined,
     );
     writeJson(io, project, args);
     return 0;
@@ -763,6 +877,8 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       {
         ...WORKSPACE_OPTIONS,
         question: "string",
+        goal: "string",
+        "policy-project": "string",
         requirements: "string",
         "input-plan": "string",
       },
@@ -778,6 +894,22 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       });
     }
     const root = await workspaceFromArgs(args);
+    const goal = researchGoal(strictString(args, "goal"));
+    const policyProject = strictString(args, "policy-project");
+    if (goal === "top-journal") {
+      if (!policyProject) {
+        throw new CliError("Top-journal preflight requires --policy-project.", {
+          code: "RESEARCH_POLICY_REQUIRED",
+          exitCode: 2,
+        });
+      }
+      await loadApprovedResearchPolicy(root, policyProject);
+    } else if (policyProject) {
+      throw new CliError("--policy-project is only valid with --goal top-journal.", {
+        code: "RESEARCH_POLICY_INVALID",
+        exitCode: 2,
+      });
+    }
     const requirementsPath = strictString(args, "requirements");
     const requirements = requirementsPath ? await readEvidenceRequirements(requirementsPath) : null;
     const inputPlanPath = strictString(args, "input-plan");
@@ -1151,6 +1283,15 @@ function researchMode(value: string | undefined): ResearchMode {
   if (value === "production-research") return value;
   throw new CliError(`Unsupported research mode: ${value}`, {
     code: "RESEARCH_MODE_INVALID",
+    exitCode: 2,
+  });
+}
+
+function researchGoal(value: string | undefined): "evidence-report" | "top-journal" {
+  if (!value || value === "evidence-report") return "evidence-report";
+  if (value === "top-journal") return value;
+  throw new CliError(`Unsupported research goal: ${value}`, {
+    code: "RESEARCH_GOAL_INVALID",
     exitCode: 2,
   });
 }

@@ -231,6 +231,36 @@ export interface ProjectEvidenceRequirements {
   publicationDateTo: string | null;
 }
 
+export type ResearchVerdictCeiling =
+  | "top-journal-feasibility-complete"
+  | "top-journal-candidate"
+  | "top-journal-class-ready"
+  | "target-journal-submission-ready";
+
+export interface ResearchPolicyBinding {
+  goal: "top-journal";
+  projectId: string;
+  articleType: string;
+  field: string;
+  journalClass: string;
+  targetJournal: string | null;
+  resolvedPolicySha256: string;
+  approvalSha256: string;
+  verdictCeiling: ResearchVerdictCeiling;
+  documents: Array<{
+    id: string;
+    kind: string;
+    logicalPath: string;
+    sha256: string;
+    sourceClass: "bundled-default" | "human-customized";
+    objectLocator: string;
+  }>;
+  resolvedRules: string[];
+  requiredReviewers: string[];
+  approvedAt: string;
+  expiresAt: string;
+}
+
 export interface WorkPackage {
   id: string;
   stage: "discover" | "acquire" | "analyze" | "synthesize" | "review" | "close";
@@ -267,6 +297,7 @@ export interface ProjectState {
   budgetConfirmedAt: string | null;
   inputs: ProjectInput[];
   evidenceRequirements: ProjectEvidenceRequirements;
+  publicationPolicy?: ResearchPolicyBinding | null;
   packages: WorkPackage[];
   usage: ProjectUsage;
   lineage: {
