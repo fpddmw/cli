@@ -15,6 +15,7 @@ import {
   loadApprovedResearchPolicy,
 } from "../src/research/workspace/research-policy.js";
 import { prepareNativeResearchStage } from "../src/research/workspace/runtime.js";
+import { sha256File } from "../src/research/workspace/storage.js";
 import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
 
 describe("top-journal Research Policy", () => {
@@ -81,6 +82,23 @@ describe("top-journal Research Policy", () => {
         undefined,
         binding,
       );
+
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "top-journal-paper",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      assert.ok(packet.publicationPolicy);
+      assert.equal(packet.publicationPolicy?.documents.length, binding.documents.length);
+      assert.match(packet.prompt, /approved Research Policy/i);
+      for (const document of packet.publicationPolicy?.documents ?? []) {
+        assert.equal(
+          await sha256File(document.path),
+          document.sha256,
+          `staged policy hash must match for ${document.id}`,
+        );
+      }
 
       const stale = await inspectResearchPolicyStatus(root, "top-journal-paper", {
         now: new Date("2030-01-01T00:00:00.000Z"),

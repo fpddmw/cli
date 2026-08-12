@@ -88,6 +88,44 @@ describe("top-journal publication assessment", () => {
     assert.equal(result.canClaimSubmissionReady, false);
   });
 
+  it("resolves owner-input trust through source provenance instead of source display IDs", () => {
+    const ownerSource = {
+      ...source("source-owner-model", true, "direct", "owner-provided-input"),
+      provenance: { kind: "input", id: "owner-input-record" },
+    };
+    const result = evaluateTopJournalAssessment({
+      policy: policy("original-empirical"),
+      evidenceSnapshot: evidence({ sources: [ownerSource] }),
+      inputs: [
+        {
+          id: "owner-input-record",
+          trustStatus: "reference-only",
+          independentlyReproduced: false,
+        },
+      ],
+      assessment: assessment({
+        claims: [
+          {
+            id: "claim-central",
+            role: "central",
+            statement: "The owner model uniquely supports the central result.",
+            evidenceSourceIds: ["source-owner-model"],
+            dimensionIds: ["central-outcome"],
+            resultIds: ["result-central"],
+          },
+        ],
+        sourceClassifications: [
+          {
+            sourceId: "source-owner-model",
+            relationship: "direct",
+            evidenceKind: "owner-provided-input",
+          },
+        ],
+      }),
+    });
+    assert.ok(result.issueCodes.includes("OWNER_INPUT_UNVERIFIED"));
+  });
+
   it("classifies identities and illustrative sensitivities as insufficient original results", () => {
     const result = evaluateTopJournalAssessment({
       policy: policy("original-empirical"),
@@ -184,7 +222,7 @@ function policy(
 function evidence(
   override: {
     dimensionStatus?: "covered" | "partial" | "missing";
-    sources?: ReturnType<typeof source>[];
+    sources?: Array<ReturnType<typeof source> & { provenance?: Record<string, string> }>;
   } = {},
 ) {
   const sources = override.sources ?? [source("peer-1", true, "direct", "peer-reviewed-empirical")];

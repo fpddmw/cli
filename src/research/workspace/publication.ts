@@ -116,7 +116,7 @@ export interface TopJournalAssessmentResult {
 interface AssessmentEvidenceSnapshot {
   snapshotId: string;
   snapshotSha256: string;
-  sources: Array<{ id?: unknown; fullTextAvailable?: unknown }>;
+  sources: Array<{ id?: unknown; fullTextAvailable?: unknown; provenance?: unknown }>;
   coverage: {
     dimensions?: Array<{ id?: unknown; status?: unknown; sourceIds?: unknown }>;
   };
@@ -298,7 +298,18 @@ export function evaluateTopJournalAssessment(input: {
   const inputById = new Map(input.inputs.map((ownerInput) => [ownerInput.id, ownerInput]));
   for (const claim of centralClaims) {
     for (const sourceId of claim.evidenceSourceIds) {
-      const ownerInput = inputById.get(sourceId);
+      const source = sourceById.get(sourceId);
+      const provenance =
+        source?.provenance &&
+        typeof source.provenance === "object" &&
+        !Array.isArray(source.provenance)
+          ? (source.provenance as Record<string, unknown>)
+          : null;
+      const ownerInputId =
+        provenance?.kind === "input" && typeof provenance.id === "string"
+          ? provenance.id
+          : sourceId;
+      const ownerInput = inputById.get(ownerInputId);
       if (
         ownerInput &&
         (ownerInput.trustStatus !== "verified-owner-input" ||

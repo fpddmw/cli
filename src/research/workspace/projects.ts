@@ -32,6 +32,7 @@ import {
 import type {
   ProjectEvidenceRequirements,
   ProjectInput,
+  ProjectInputTrustStatus,
   ResearchPolicyBinding,
   ProjectState,
   WorkPackage,
@@ -166,6 +167,10 @@ export async function addProjectInput(
   projectId: string,
   inputPath: string,
   role: ProjectInput["role"],
+  options: {
+    trustStatus?: ProjectInputTrustStatus;
+    independentlyReproduced?: boolean;
+  } = {},
 ): Promise<ProjectInput> {
   validateProjectId(projectId);
   const canonicalInput = resolve(inputPath);
@@ -203,6 +208,8 @@ export async function addProjectInput(
       dimensions: [],
       fullText: true,
       publicationDate: null,
+      trustStatus: options.trustStatus ?? defaultInputTrustStatus(role),
+      independentlyReproduced: options.independentlyReproduced ?? false,
       addedAt: new Date().toISOString(),
     };
     project.inputs.push(input);
@@ -216,9 +223,17 @@ export async function addProjectInput(
       role,
       sha256,
       bytes: input.bytes,
+      trustStatus: input.trustStatus,
+      independentlyReproduced: input.independentlyReproduced,
     });
     return input;
   });
+}
+
+function defaultInputTrustStatus(role: ProjectInput["role"]): ProjectInputTrustStatus {
+  if (role === "reference") return "reference-only";
+  if (role === "replication") return "replication-candidate";
+  return "unverified-owner-input";
 }
 
 export async function loadProject(root: string, projectId: string): Promise<ProjectState> {

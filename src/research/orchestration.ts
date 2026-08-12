@@ -74,7 +74,12 @@ import {
 } from "./workspace/runtime.js";
 import { schemaForStage } from "./workspace/schemas.js";
 import { pathExists, sha256Text, workspacePaths } from "./workspace/storage.js";
-import type { ProjectEvidenceRequirements, ProjectInput, ResearchMode } from "./workspace/types.js";
+import type {
+  ProjectEvidenceRequirements,
+  ProjectInput,
+  ProjectInputTrustStatus,
+  ResearchMode,
+} from "./workspace/types.js";
 import {
   doctorResearchWorkspace,
   initializeResearchWorkspace,
@@ -130,7 +135,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research publication close <project-id> [--workspace <path>] [--json]
   tiangong-ai research project init <project-id> --question <question> [--goal evidence-report|top-journal] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
   tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
-  tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--workspace <path>] [--json]
+  tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--trust-status verified-owner-input|unverified-owner-input|reference-only|replication-candidate] [--independently-reproduced] [--workspace <path>] [--json]
   tiangong-ai research project retry <project-id> [--package <package-id>] [--workspace <path>] [--json]
   tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|acquire|analyze|synthesize] [--workspace <path>] [--json]
   tiangong-ai research project addendum <closed-project-id> --to <target-project-id> [--workspace <path>] [--json]
@@ -1077,7 +1082,13 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     if (inputAction !== "add") throw unknownAction("research project input", inputAction ?? "");
     const args = parseStrictArgs(
       inputRest,
-      { ...WORKSPACE_OPTIONS, path: "string", role: "string" },
+      {
+        ...WORKSPACE_OPTIONS,
+        path: "string",
+        role: "string",
+        "trust-status": "string",
+        "independently-reproduced": "boolean",
+      },
       "research project input add",
     );
     if (strictBoolean(args, "help")) return writeHelp(io);
@@ -1091,7 +1102,11 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     }
     const role = inputRole(strictString(args, "role"));
     const root = await workspaceFromArgs(args);
-    const input = await addProjectInput(root, projectId, inputPath, role);
+    const trustStatus = projectInputTrustStatus(strictString(args, "trust-status"), role);
+    const input = await addProjectInput(root, projectId, inputPath, role, {
+      ...(trustStatus ? { trustStatus } : {}),
+      independentlyReproduced: strictBoolean(args, "independently-reproduced"),
+    });
     writeJson(io, input, args);
     return 0;
   }
@@ -1560,6 +1575,25 @@ function inputRole(value: string | undefined): ProjectInput["role"] {
   if (value === "reference" || value === "replication") return value;
   throw new CliError(`Unsupported research input role: ${value}`, {
     code: "RESEARCH_INPUT_ROLE_INVALID",
+    exitCode: 2,
+  });
+}
+
+function projectInputTrustStatus(
+  value: string | undefined,
+  role: ProjectInput["role"],
+): ProjectInputTrustStatus | undefined {
+  if (!value) return undefined;
+  if (
+    value === "verified-owner-input" ||
+    value === "unverified-owner-input" ||
+    value === "reference-only" ||
+    value === "replication-candidate"
+  ) {
+    return value;
+  }
+  throw new CliError(`Unsupported trust status for ${role} input: ${value}`, {
+    code: "RESEARCH_INPUT_TRUST_INVALID",
     exitCode: 2,
   });
 }

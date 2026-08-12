@@ -297,6 +297,7 @@ export interface NativeStagePacket {
   bindingSha256: string;
   prompt: string;
   outputSchema: Record<string, unknown>;
+  publicationPolicy: StagedPublicationPolicy | null;
   discovery: DiscoveryProgress | null;
   limits: {
     maxOutputBytes: number;
@@ -322,6 +323,22 @@ export interface NativeStagePacket {
   };
   rules: string[];
   packetSha256: string;
+}
+
+interface StagedPublicationPolicy {
+  resolvedPolicySha256: string;
+  approvalSha256: string;
+  verdictCeiling: string;
+  targetJournal: string | null;
+  manifestPath: string;
+  documents: Array<{
+    id: string;
+    kind: string;
+    logicalPath: string;
+    path: string;
+    sha256: string;
+    sourceClass: "bundled-default" | "human-customized";
+  }>;
 }
 
 interface NativeStageSession {
@@ -518,6 +535,7 @@ export async function prepareNativeResearchStage(input: {
       );
       const prompt = [
         "Perform this producer stage in the current interactive host session. Do not launch codex exec, claude -p, or any other nested reasoning agent.",
+        capsule.publicationPolicyDocumentation,
         input.stage === "discover" && hasBrokeredEvidence
           ? "Use native Web/Browser broadly for discovery when useful, but record every native search/navigation with recordActivity and register its candidates. Before admitting any native lead, formalize the same URL or DOI through fetchEvidence so it receives an immutable broker receipt. Assess candidates in bounded batches with recordAssessment as they arrive; the final output is only a small coverage closeout. Native results without broker/input provenance are discovery leads, never evidence."
           : input.stage === "acquire"
@@ -547,6 +565,7 @@ export async function prepareNativeResearchStage(input: {
             ? { inputOnlyProvenanceIds: capsule.inputManifest.map((record) => record.id) }
             : {},
         ),
+        publicationPolicy: capsule.publicationPolicy,
         discovery,
         limits: {
           maxOutputBytes: config.budget.maxBytesPerPackage,
@@ -1448,19 +1467,23 @@ async function executeWorkPackage(
         options,
         requestId,
         purpose: "primary",
-        prompt: packagePrompt(
-          project,
-          workPackage,
-          capsule.inputManifest,
-          capsule.stagedSkills,
-          capsule.capabilityDocumentation,
-          capsule.reviewPacketSha256,
-          capsule.contextBundle,
-          capsule.contextBundleContent,
-          stageContextContent,
-          discovery,
-          await listEvidenceCandidates(root, project.id),
-        ),
+        prompt:
+          packagePrompt(
+            project,
+            workPackage,
+            capsule.inputManifest,
+            capsule.stagedSkills,
+            capsule.capabilityDocumentation,
+            capsule.reviewPacketSha256,
+            capsule.contextBundle,
+            capsule.contextBundleContent,
+            stageContextContent,
+            discovery,
+            await listEvidenceCandidates(root, project.id),
+          ) +
+          (capsule.publicationPolicyDocumentation
+            ? `\n\n${capsule.publicationPolicyDocumentation}`
+            : ""),
         brokerUrl: primaryBrokerUrl,
         inputOnlyProvenance,
         maxOutputTokens: Math.min(stageOutputTokens, reservation.tokens),
@@ -1745,6 +1768,8 @@ interface Capsule {
   contextBundleContent: string;
   stagedSkills: string[];
   capabilityDocumentation: string;
+  publicationPolicy: StagedPublicationPolicy | null;
+  publicationPolicyDocumentation: string;
   reviewPacketSha256: string | null;
   reviewPacketRecord: OutputRecord | null;
 }
@@ -1759,6 +1784,58 @@ interface CapsuleInputRecord {
   contextSha256: string;
   contextBytes: number;
   fullTextStaged: boolean;
+}
+
+async function stagePublicationPolicy(
+  root: string,
+  project: ProjectState,
+  capsuleProject: string,
+): Promise<StagedPublicationPolicy | null> {
+  const policy = project.publicationPolicy;
+  if (!policy) return null;
+  const documents: StagedPublicationPolicy["documents"] = [];
+  for (const document of policy.documents) {
+    const source = resolveContained(workspacePaths(root).control, document.objectLocator);
+    const sourceInfo = await lstat(source).catch(() => undefined);
+    if (
+      !sourceInfo?.isFile() ||
+      sourceInfo.isSymbolicLink() ||
+      (await sha256File(source)) !== document.sha256
+    ) {
+      throw new CliError(`Approved Research Policy object failed verification: ${document.id}.`, {
+        code: "RESEARCH_POLICY_CHANGED",
+        exitCode: 3,
+      });
+    }
+    const logicalPath = join(
+      "inputs",
+      "research-policy",
+      `${document.kind}-${document.id}.md`,
+    ).replaceAll("\\", "/");
+    const destination = resolveContained(capsuleProject, logicalPath);
+    await ensureDirectory(dirname(destination));
+    await cp(source, destination, { force: false });
+    documents.push({
+      id: document.id,
+      kind: document.kind,
+      logicalPath: document.logicalPath,
+      path: destination,
+      sha256: document.sha256,
+      sourceClass: document.sourceClass,
+    });
+  }
+  documents.sort((left, right) => left.id.localeCompare(right.id));
+  const manifestPath = join("inputs", "research-policy", "manifest.json").replaceAll("\\", "/");
+  const staged: StagedPublicationPolicy = {
+    resolvedPolicySha256: policy.resolvedPolicySha256,
+    approvalSha256: policy.approvalSha256,
+    verdictCeiling: policy.verdictCeiling,
+    targetJournal: policy.targetJournal,
+    manifestPath: resolveContained(capsuleProject, manifestPath),
+    documents,
+  };
+  await writeJsonAtomic(staged.manifestPath, staged);
+  return staged;
 }
 
 async function createCapsule(
@@ -1887,6 +1964,19 @@ async function createCapsule(
       contextPath: inputManifest[index]?.contextPath ?? "inputs/unavailable",
     })),
   });
+  const publicationPolicy = await stagePublicationPolicy(root, project, capsuleProject);
+  const publicationPolicyDocumentation = publicationPolicy
+    ? [
+        "Approved Research Policy (mandatory for every producer and reviewer decision):",
+        `resolvedPolicySha256=${publicationPolicy.resolvedPolicySha256}`,
+        `verdictCeiling=${publicationPolicy.verdictCeiling}`,
+        ...publicationPolicy.documents.map(
+          (document) =>
+            `- ${document.kind}:${document.id} sha256=${document.sha256} path=${document.path}`,
+        ),
+        "Read every listed policy document before reasoning. Generic defaults are explicit constraints, not evidence that a target journal will accept the manuscript.",
+      ].join("\n")
+    : "";
   const stagedSkills = await stageLockedCapabilities(root, join(capsuleProject, "skills"));
   const capabilityDocumentation = await buildCapabilityDocumentation(
     capsuleProject,
@@ -1924,6 +2014,8 @@ async function createCapsule(
     contextBundleContent,
     stagedSkills,
     capabilityDocumentation,
+    publicationPolicy,
+    publicationPolicyDocumentation,
     reviewPacketSha256: reviewPacket?.sha256 ?? null,
     reviewPacketRecord: reviewPacket?.record ?? null,
   };

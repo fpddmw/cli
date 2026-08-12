@@ -8,6 +8,7 @@ import type {
   ProjectInput,
   ProjectInputPlan,
   ProjectInputPlanEntry,
+  ProjectInputTrustStatus,
   VerifiedProjectInputPlan,
   VerifiedProjectInputPlanEntry,
 } from "./types.js";
@@ -96,6 +97,10 @@ export async function reverifyProjectInputPlan(
           sourceType: entry.sourceType,
           fullText: entry.fullText,
           publicationDate: entry.publicationDate,
+          ...(entry.trustStatus ? { trustStatus: entry.trustStatus } : {}),
+          ...(entry.independentlyReproduced !== undefined
+            ? { independentlyReproduced: entry.independentlyReproduced }
+            : {}),
         }),
       )
       .sort(compareInputPlanEntries),
@@ -161,6 +166,8 @@ export function projectInputsFromPlan(
     dimensions: [...entry.dimensions],
     fullText: entry.fullText,
     publicationDate: entry.publicationDate,
+    trustStatus: entry.trustStatus ?? defaultInputTrustStatus(entry.role),
+    independentlyReproduced: entry.independentlyReproduced ?? false,
     addedAt,
   }));
 }
@@ -198,7 +205,10 @@ function isProjectInputPlanEntry(value: unknown): value is ProjectInputPlanEntry
     candidate.dimensions.every((item) => typeof item === "string") &&
     typeof candidate.sourceType === "string" &&
     typeof candidate.fullText === "boolean" &&
-    (candidate.publicationDate === null || typeof candidate.publicationDate === "string")
+    (candidate.publicationDate === null || typeof candidate.publicationDate === "string") &&
+    (candidate.trustStatus === undefined || validTrustStatus(candidate.trustStatus)) &&
+    (candidate.independentlyReproduced === undefined ||
+      typeof candidate.independentlyReproduced === "boolean")
   );
 }
 
@@ -243,7 +253,24 @@ function normalizeInputPlanEntry(entry: ProjectInputPlanEntry): ProjectInputPlan
     contextRanges,
     dimensions,
     sourceType,
+    trustStatus: entry.trustStatus ?? defaultInputTrustStatus(entry.role),
+    independentlyReproduced: entry.independentlyReproduced ?? false,
   };
+}
+
+function defaultInputTrustStatus(role: ProjectInput["role"]): ProjectInputTrustStatus {
+  if (role === "reference") return "reference-only";
+  if (role === "replication") return "replication-candidate";
+  return "unverified-owner-input";
+}
+
+function validTrustStatus(value: unknown): boolean {
+  return [
+    "verified-owner-input",
+    "unverified-owner-input",
+    "reference-only",
+    "replication-candidate",
+  ].includes(String(value));
 }
 
 async function verifyInputPlanEntry(

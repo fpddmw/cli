@@ -180,8 +180,16 @@ export interface ProjectInput {
   dimensions?: string[];
   fullText?: boolean;
   publicationDate?: string | null;
+  trustStatus?: ProjectInputTrustStatus;
+  independentlyReproduced?: boolean;
   addedAt: string;
 }
+
+export type ProjectInputTrustStatus =
+  | "verified-owner-input"
+  | "unverified-owner-input"
+  | "reference-only"
+  | "replication-candidate";
 
 export interface ProjectInputLineRange {
   startLine: number;
@@ -197,6 +205,8 @@ export interface ProjectInputPlanEntry {
   sourceType: string;
   fullText: boolean;
   publicationDate: string | null;
+  trustStatus?: ProjectInputTrustStatus;
+  independentlyReproduced?: boolean;
 }
 
 export interface ProjectInputPlan {
