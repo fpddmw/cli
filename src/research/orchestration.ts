@@ -47,6 +47,16 @@ import {
 } from "./workspace/projects.js";
 import { evaluateProjectPreflight } from "./workspace/preflight.js";
 import {
+  closePublication,
+  freezePublicationManuscript,
+  inspectPublicationStatus,
+  preparePublicationReview,
+  publicationAssessmentSchema,
+  publicationReviewSchema,
+  submitPublicationReview,
+  type PublicationReviewRole,
+} from "./workspace/publication-workflow.js";
+import {
   approveResearchPolicy,
   initializeResearchPolicy,
   inspectResearchPolicyCatalog,
@@ -85,6 +95,7 @@ export async function runResearchOrchestrationCommand(
   if (subcommand === "workspace") return runWorkspace(argv, io);
   if (subcommand === "capability") return runCapability(argv, io);
   if (subcommand === "policy") return runPolicy(argv, io);
+  if (subcommand === "publication") return runPublication(argv, io);
   if (subcommand === "project") return runProject(argv, io);
   if (subcommand === "schema") return runSchema(argv, io);
   if (subcommand === "status") return runStatus(argv, io);
@@ -112,6 +123,11 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research policy validate <project-id> [--workspace <path>] [--json]
   tiangong-ai research policy approve <project-id> --confirm [--acknowledge-defaults] [--workspace <path>] [--json]
   tiangong-ai research policy resolve <project-id> [--workspace <path>] [--json]
+  tiangong-ai research publication freeze <project-id> --manuscript <absolute-file> --assessment <absolute-json> --producer-agent codex|claude --producer-session <opaque-id> [--supplements <absolute-json-array>] [--workspace <path>] [--json]
+  tiangong-ai research publication review prepare <project-id> --role evidence|methods-reproducibility|domain-novelty|journal-editor --reviewer-agent codex|claude --reviewer-session <opaque-id> [--workspace <path>] [--json]
+  tiangong-ai research publication review submit <project-id> --role evidence|methods-reproducibility|domain-novelty|journal-editor --review <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research publication status <project-id> [--workspace <path>] [--json]
+  tiangong-ai research publication close <project-id> [--workspace <path>] [--json]
   tiangong-ai research project init <project-id> --question <question> [--goal evidence-report|top-journal] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
   tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--workspace <path>] [--json]
@@ -131,12 +147,140 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project evidence assessment record <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence download bind <project-id> --candidate <id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence artifact register <project-id> --candidate <id> --path <absolute-file> [--download-binding <id> | --derived-from-artifact <id>] [--media-type <type>] [--source-url <https-url>] [--license <declared-license>] [--license-url <https-url>] [--host-type <type>] [--article-version <version>] [--workspace <path>] [--json]
-  tiangong-ai research schema show <discover|acquire|analyze|synthesize|review|doctor> [--json]
+  tiangong-ai research schema show <discover|acquire|analyze|synthesize|review|doctor|publication-assessment|publication-review-evidence|publication-review-methods-reproducibility|publication-review-domain-novelty|publication-review-journal-editor> [--json]
   tiangong-ai research status [--project <project-id>] [--all] [--workspace <absolute-path>] [--json]
   tiangong-ai research run [--project <project-id>] [--max-parallel <1-8>] [--max-cycles <1-100>] [--dry-run] [--progress-jsonl] [--workspace <absolute-path>] [--json]
 
 ${researchSetupHelp()}
 `;
+}
+
+async function runPublication(argv: string[], io: CliIO): Promise<number> {
+  const [action, ...rest] = argv;
+  if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action === "freeze") {
+    const args = parseStrictArgs(
+      rest,
+      {
+        ...WORKSPACE_OPTIONS,
+        manuscript: "string",
+        assessment: "string",
+        supplements: "string",
+        "producer-agent": "string",
+        "producer-session": "string",
+      },
+      "research publication freeze",
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(args.positionals, "research publication freeze");
+    const manuscriptPath = strictString(args, "manuscript");
+    const assessmentPath = strictString(args, "assessment");
+    const producerSessionId = strictString(args, "producer-session");
+    if (!manuscriptPath || !assessmentPath || !producerSessionId) {
+      throw new CliError(
+        "research publication freeze requires --manuscript, --assessment, --producer-agent, and --producer-session.",
+        { code: "RESEARCH_PUBLICATION_ARGUMENT_REQUIRED", exitCode: 2 },
+      );
+    }
+    const root = await workspaceFromArgs(args);
+    const supplementsPath = strictString(args, "supplements");
+    writeJson(
+      io,
+      await freezePublicationManuscript({
+        root,
+        projectId,
+        manuscriptPath,
+        assessmentPath,
+        supplementPaths: supplementsPath ? await readAbsolutePathArray(supplementsPath) : [],
+        producerAgent: publicationAgent(strictString(args, "producer-agent"), "producer"),
+        producerSessionId,
+      }),
+      args,
+    );
+    return 0;
+  }
+  if (action === "review") {
+    const [reviewAction, ...reviewRest] = rest;
+    if (reviewAction === "--help" || reviewAction === "-h") return writeHelp(io);
+    if (reviewAction === "prepare") {
+      const args = parseStrictArgs(
+        reviewRest,
+        {
+          ...WORKSPACE_OPTIONS,
+          role: "string",
+          "reviewer-agent": "string",
+          "reviewer-session": "string",
+        },
+        "research publication review prepare",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research publication review prepare");
+      const reviewerSessionId = strictString(args, "reviewer-session");
+      if (!reviewerSessionId) {
+        throw new CliError("publication review prepare requires --reviewer-session.", {
+          code: "RESEARCH_PUBLICATION_ARGUMENT_REQUIRED",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      writeJson(
+        io,
+        await preparePublicationReview({
+          root,
+          projectId,
+          role: publicationReviewRole(strictString(args, "role")),
+          reviewerAgent: publicationAgent(strictString(args, "reviewer-agent"), "reviewer"),
+          reviewerSessionId,
+        }),
+        args,
+      );
+      return 0;
+    }
+    if (reviewAction === "submit") {
+      const args = parseStrictArgs(
+        reviewRest,
+        { ...WORKSPACE_OPTIONS, role: "string", review: "string" },
+        "research publication review submit",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research publication review submit");
+      const reviewPath = strictString(args, "review");
+      if (!reviewPath) {
+        throw new CliError("publication review submit requires --review.", {
+          code: "RESEARCH_PUBLICATION_ARGUMENT_REQUIRED",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      writeJson(
+        io,
+        await submitPublicationReview({
+          root,
+          projectId,
+          role: publicationReviewRole(strictString(args, "role")),
+          reviewPath,
+        }),
+        args,
+      );
+      return 0;
+    }
+    throw unknownAction("research publication review", reviewAction ?? "missing");
+  }
+  if (action === "status" || action === "close") {
+    const args = parseStrictArgs(rest, WORKSPACE_OPTIONS, `research publication ${action}`);
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(args.positionals, `research publication ${action}`);
+    const root = await workspaceFromArgs(args);
+    writeJson(
+      io,
+      action === "status"
+        ? await inspectPublicationStatus(root, projectId)
+        : await closePublication(root, projectId),
+      args,
+    );
+    return 0;
+  }
+  throw unknownAction("research publication", action);
 }
 
 async function runPolicy(argv: string[], io: CliIO): Promise<number> {
@@ -243,6 +387,15 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
   const args = parseStrictArgs(rest, COMMON_OPTIONS, "research schema show");
   if (strictBoolean(args, "help")) return writeHelp(io);
   const stage = onePositional(args.positionals, "research schema show");
+  if (stage === "publication-assessment") {
+    writeJson(io, publicationAssessmentSchema(), args);
+    return 0;
+  }
+  if (stage.startsWith("publication-review-")) {
+    const role = publicationReviewRole(stage.slice("publication-review-".length));
+    writeJson(io, publicationReviewSchema(role), args);
+    return 0;
+  }
   if (
     stage !== "discover" &&
     stage !== "acquire" &&
@@ -1409,6 +1562,65 @@ function inputRole(value: string | undefined): ProjectInput["role"] {
     code: "RESEARCH_INPUT_ROLE_INVALID",
     exitCode: 2,
   });
+}
+
+function publicationReviewRole(value: string | undefined): PublicationReviewRole {
+  if (
+    value === "evidence" ||
+    value === "methods-reproducibility" ||
+    value === "domain-novelty" ||
+    value === "journal-editor"
+  ) {
+    return value;
+  }
+  throw new CliError(
+    "--role must be evidence, methods-reproducibility, domain-novelty, or journal-editor.",
+    { code: "RESEARCH_PUBLICATION_REVIEW_ROLE_INVALID", exitCode: 2 },
+  );
+}
+
+function publicationAgent(value: string | undefined, label: string): "codex" | "claude" {
+  if (value === "codex" || value === "claude") return value;
+  throw new CliError(`--${label}-agent must be codex or claude.`, {
+    code: "RESEARCH_PUBLICATION_AGENT_INVALID",
+    exitCode: 2,
+  });
+}
+
+async function readAbsolutePathArray(path: string): Promise<string[]> {
+  if (!isAbsolute(path)) {
+    throw new CliError("--supplements must be an absolute JSON file path.", {
+      code: "RESEARCH_PUBLICATION_FILE_INVALID",
+      exitCode: 2,
+    });
+  }
+  const selected = resolve(path);
+  const info = await lstat(selected).catch(() => undefined);
+  if (!info?.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) {
+    throw new CliError("--supplements must be a bounded regular non-symlink JSON file.", {
+      code: "RESEARCH_PUBLICATION_FILE_INVALID",
+      exitCode: 2,
+    });
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(selected, "utf8")) as unknown;
+  } catch {
+    throw new CliError("--supplements contains invalid JSON.", {
+      code: "RESEARCH_PUBLICATION_FILE_INVALID",
+      exitCode: 2,
+    });
+  }
+  if (
+    !Array.isArray(value) ||
+    value.some((item) => typeof item !== "string" || !isAbsolute(item) || resolve(item) !== item)
+  ) {
+    throw new CliError("--supplements must contain an array of absolute canonical paths.", {
+      code: "RESEARCH_PUBLICATION_FILE_INVALID",
+      exitCode: 2,
+    });
+  }
+  return value;
 }
 
 function integerOption(value: string | undefined, fallback: number, label: string): number {
