@@ -50,6 +50,7 @@ import {
   refreshProject,
   saveProject,
 } from "./projects.js";
+import { assertResearchPolicyBinding } from "./research-policy.js";
 import {
   configuredResearchSecrets,
   sanitizeResearchRecord,
@@ -188,6 +189,9 @@ async function runResearchWorkspaceInternal(
     await verifyJournal(workspacePaths(root).journal);
     const config = await loadWorkspaceConfig(root);
     assertExecutionConfiguration(config);
+    for (const project of await projectsForRun(root, options.projectId)) {
+      await assertProjectPublicationPolicy(root, project);
+    }
     let doctorAttestation: WorkspaceDoctorAttestation | null = null;
     const capabilities = await verifyCapabilities(root);
     if (capabilities.status !== "verified") {
@@ -403,6 +407,8 @@ export async function prepareNativeResearchStage(input: {
     await verifyJournal(workspacePaths(input.root).journal);
     const config = await loadWorkspaceConfig(input.root);
     assertExecutionConfiguration(config);
+    const project = await loadProject(input.root, input.projectId);
+    await assertProjectPublicationPolicy(input.root, project);
     if (config.producer.agent !== input.hostAgent) {
       throw new CliError(
         `This workspace requires the current native ${config.producer.agent} host, not ${input.hostAgent}.`,
@@ -427,7 +433,6 @@ export async function prepareNativeResearchStage(input: {
         });
       }
     }
-    const project = await loadProject(input.root, input.projectId);
     if (input.stage === "discover") {
       await registerProjectInputCandidates(input.root, project.id, project.inputs);
     }
@@ -895,6 +900,7 @@ export async function submitNativeResearchStage(input: {
       });
     }
     const project = await loadProject(input.root, input.projectId);
+    await assertProjectPublicationPolicy(input.root, project);
     if (project.handoff.state !== "agent-actionable") {
       throw new CliError("Native stage is paused for an unresolved project handoff.", {
         code: "RESEARCH_PROJECT_HANDOFF_REQUIRED",
@@ -1343,6 +1349,7 @@ async function executeWorkPackage(
   doctorAttestation: WorkspaceDoctorAttestation | null,
 ): Promise<{ projectId: string; packageId: string; status: string }> {
   const project = await loadProject(root, projectId);
+  await assertProjectPublicationPolicy(root, project);
   const workPackage = packageById(project, packageId);
   const now = new Date().toISOString();
   workPackage.status = "running";
@@ -3292,6 +3299,14 @@ async function closeProjectMechanically(
     status: "complete",
     closedAt: new Date().toISOString(),
     questionSha256: sha256Text(project.question),
+    publicationPolicy: project.publicationPolicy
+      ? {
+          projectId: project.publicationPolicy.projectId,
+          resolvedPolicySha256: project.publicationPolicy.resolvedPolicySha256,
+          approvalSha256: project.publicationPolicy.approvalSha256,
+          verdictCeiling: project.publicationPolicy.verdictCeiling,
+        }
+      : null,
     evidenceRequirements: project.evidenceRequirements,
     evidenceSnapshot: {
       snapshotId: snapshot.snapshotId,
@@ -3324,6 +3339,12 @@ async function closeProjectMechanically(
   );
   await writeJsonAtomic(closurePath, closure);
   return zeroExecutionResult();
+}
+
+async function assertProjectPublicationPolicy(root: string, project: ProjectState): Promise<void> {
+  if (project.publicationPolicy) {
+    await assertResearchPolicyBinding(root, project.publicationPolicy);
+  }
 }
 
 async function commitStageEvidenceBindings(

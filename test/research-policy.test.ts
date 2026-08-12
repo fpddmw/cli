@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
+import { lockCapabilities } from "../src/research/workspace/capabilities.js";
+import { initializeProject } from "../src/research/workspace/projects.js";
 import {
   approveResearchPolicy,
   initializeResearchPolicy,
@@ -12,6 +14,7 @@ import {
   inspectResearchPolicyStatus,
   loadApprovedResearchPolicy,
 } from "../src/research/workspace/research-policy.js";
+import { prepareNativeResearchStage } from "../src/research/workspace/runtime.js";
 import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
 
 describe("top-journal Research Policy", () => {
@@ -68,6 +71,16 @@ describe("top-journal Research Policy", () => {
       assert.equal(binding.verdictCeiling, "top-journal-candidate");
       assert.equal(binding.targetJournal, null);
       assert.equal(binding.resolvedConstraints?.minDirectPeerReviewedFullText, 5);
+      await lockCapabilities(root);
+      await initializeProject(
+        root,
+        "top-journal-paper",
+        "Does treatment X improve the central outcome Y?",
+        undefined,
+        false,
+        undefined,
+        binding,
+      );
 
       const stale = await inspectResearchPolicyStatus(root, "top-journal-paper", {
         now: new Date("2030-01-01T00:00:00.000Z"),
@@ -79,6 +92,15 @@ describe("top-journal Research Policy", () => {
       assert.equal(changed.status, "changed");
       await assert.rejects(
         loadApprovedResearchPolicy(root, "top-journal-paper"),
+        (error: unknown) => errorCode(error) === "RESEARCH_POLICY_CHANGED",
+      );
+      await assert.rejects(
+        prepareNativeResearchStage({
+          root,
+          projectId: "top-journal-paper",
+          stage: "discover",
+          hostAgent: "codex",
+        }),
         (error: unknown) => errorCode(error) === "RESEARCH_POLICY_CHANGED",
       );
     } finally {
