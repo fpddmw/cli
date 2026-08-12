@@ -55,6 +55,7 @@ import {
   publicationReviewSchema,
   submitPublicationReview,
   type PublicationReviewRole,
+  type PublicationStatus,
 } from "./workspace/publication-workflow.js";
 import {
   approveResearchPolicy,
@@ -63,6 +64,10 @@ import {
   inspectResearchPolicyStatus,
   loadApprovedResearchPolicy,
 } from "./workspace/research-policy.js";
+import {
+  resolveInstalledResearchPolicySource,
+  runInteractiveResearchPolicyWizard,
+} from "./workspace/research-policy-wizard.js";
 import {
   abortNativeResearchStage,
   inspectNativeResearchStage,
@@ -122,8 +127,9 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research capability credential set --id <logical-id> --from-env <name> [--workspace <absolute-path>] [--json]
   tiangong-ai research capability lock [--workspace <absolute-path>] [--json]
   tiangong-ai research capability verify [--workspace <absolute-path>] [--json]
-  tiangong-ai research policy catalog --source-root <absolute-installed-skill-root> [--json]
-  tiangong-ai research policy init <project-id> --source-root <absolute-installed-skill-root> --article-type <id> --field <id> --journal-class <id> [--include-exact-journal-template] [--workspace <path>] [--json]
+  tiangong-ai research policy wizard <project-id> [--workspace <path>] [--json]
+  tiangong-ai research policy catalog [--source-root <absolute-installed-skill-root>] [--workspace <path>] [--json]
+  tiangong-ai research policy init <project-id> [--source-root <absolute-installed-skill-root>] --article-type <id> --field <id> --journal-class <id> [--include-exact-journal-template] [--workspace <path>] [--json]
   tiangong-ai research policy status <project-id> [--workspace <path>] [--json]
   tiangong-ai research policy validate <project-id> [--workspace <path>] [--json]
   tiangong-ai research policy approve <project-id> --confirm [--acknowledge-defaults] [--workspace <path>] [--json]
@@ -291,21 +297,30 @@ async function runPublication(argv: string[], io: CliIO): Promise<number> {
 async function runPolicy(argv: string[], io: CliIO): Promise<number> {
   const [action, ...rest] = argv;
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action === "wizard") {
+    const args = parseStrictArgs(rest, WORKSPACE_OPTIONS, "research policy wizard");
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(args.positionals, "research policy wizard");
+    const root = await workspaceFromArgs(args);
+    return runInteractiveResearchPolicyWizard({
+      root,
+      projectId,
+      io,
+      json: strictBoolean(args, "json"),
+    });
+  }
   if (action === "catalog") {
     const args = parseStrictArgs(
       rest,
-      { ...COMMON_OPTIONS, "source-root": "string" },
+      { ...WORKSPACE_OPTIONS, "source-root": "string" },
       "research policy catalog",
     );
     if (strictBoolean(args, "help")) return writeHelp(io);
     rejectPositionals(args.positionals, "research policy catalog");
-    const sourceRoot = strictString(args, "source-root");
-    if (!sourceRoot) {
-      throw new CliError("research policy catalog requires --source-root.", {
-        code: "RESEARCH_POLICY_SOURCE_REQUIRED",
-        exitCode: 2,
-      });
-    }
+    const explicitSourceRoot = strictString(args, "source-root");
+    const sourceRoot =
+      explicitSourceRoot ??
+      (await resolveInstalledResearchPolicySource(await workspaceFromArgs(args), io.env));
     writeJson(io, await inspectResearchPolicyCatalog(sourceRoot), args);
     return 0;
   }
@@ -324,17 +339,19 @@ async function runPolicy(argv: string[], io: CliIO): Promise<number> {
     );
     if (strictBoolean(args, "help")) return writeHelp(io);
     const projectId = onePositional(args.positionals, "research policy init");
-    const sourceRoot = strictString(args, "source-root");
     const articleType = strictString(args, "article-type");
     const field = strictString(args, "field");
     const journalClass = strictString(args, "journal-class");
-    if (!sourceRoot || !articleType || !field || !journalClass) {
+    if (!articleType || !field || !journalClass) {
       throw new CliError(
-        "research policy init requires --source-root, --article-type, --field, and --journal-class.",
+        "research policy init requires --article-type, --field, and --journal-class.",
         { code: "RESEARCH_POLICY_INVALID", exitCode: 2 },
       );
     }
     const root = await workspaceFromArgs(args);
+    const sourceRoot =
+      strictString(args, "source-root") ??
+      (await resolveInstalledResearchPolicySource(root, io.env));
     writeJson(
       io,
       await initializeResearchPolicy({
@@ -1242,6 +1259,9 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
         const nativeStage = await inspectNativeResearchStage(root, current);
         const snapshot = await inspectSnapshotForStatus(root, current.id);
         const readyPackage = nextReadyPackage(current)?.id ?? null;
+        const publication = current.publicationPolicy
+          ? await inspectPublicationForStatus(root, current.id)
+          : null;
         return {
           id: current.id,
           question: current.question,
@@ -1252,8 +1272,15 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
           evidenceState: current.evidenceState,
           snapshot,
           nativeStage,
+          publication,
           readyPackage,
-          recommendedAction: projectRecommendedAction(root, current, readyPackage, nativeStage),
+          recommendedAction: projectRecommendedAction(
+            root,
+            current,
+            readyPackage,
+            nativeStage,
+            publication,
+          ),
           usage: current.usage,
           inputs: current.inputs,
           packages: current.packages,
@@ -1319,11 +1346,26 @@ async function inspectSnapshotForStatus(
   }
 }
 
+async function inspectPublicationForStatus(
+  root: string,
+  projectId: string,
+): Promise<PublicationStatus | { generationStatus: "invalid"; code: string }> {
+  try {
+    return await inspectPublicationStatus(root, projectId);
+  } catch (error) {
+    return {
+      generationStatus: "invalid",
+      code: error instanceof CliError ? error.code : "RESEARCH_PUBLICATION_STATE_INVALID",
+    };
+  }
+}
+
 function projectRecommendedAction(
   root: string,
   project: Awaited<ReturnType<typeof loadProject>>,
   readyPackage: string | null,
   nativeStage: Awaited<ReturnType<typeof inspectNativeResearchStage>>,
+  publication: PublicationStatus | { generationStatus: "invalid"; code: string } | null,
 ): string {
   if (project.lineage.supersededBy) {
     return `Continue with superseding project ${project.lineage.supersededBy}.`;
@@ -1344,6 +1386,21 @@ function projectRecommendedAction(
     return nativeStage.recommendedAction ?? "Resume the active native stage.";
   }
   if (project.status === "complete") {
+    if (project.publicationPolicy) {
+      if (publication && "code" in publication) {
+        return `Publication state is invalid (${publication.code}); inspect Research Policy and frozen object bindings before continuing.`;
+      }
+      if (!publication || publication.generationStatus === "not-started") {
+        return `Freeze the final manuscript and publication assessment, then inspect publication status: tiangong-ai research publication freeze ${project.id} --help`;
+      }
+      if (publication.closureSha256) {
+        return `Publication closure is complete at ${publication.readinessVerdict}; inspect the immutable closure before post-closure authoring.`;
+      }
+      if (publication.reviewState !== "complete") {
+        return `Complete fresh independent publication reviews for ${publication.missingReviewRoles.join(", ")}; inspect: tiangong-ai research publication status ${project.id} --workspace ${root}`;
+      }
+      return `Mechanically close the reviewed frozen manuscript: tiangong-ai research publication close ${project.id} --workspace ${root}`;
+    }
     return `Create an immutable evidence addendum only when new evidence exists: tiangong-ai research project addendum ${project.id} --to <new-project-id> --workspace ${root}`;
   }
   if (project.status === "blocked") {

@@ -24,6 +24,8 @@ const RULE_ID_PATTERN = /^[a-z0-9][a-z0-9-]{2,127}$/;
 const MAX_POLICY_DOCUMENT_BYTES = 256 * 1024;
 const MAX_POLICY_STACK_BYTES = 2 * 1024 * 1024;
 const PLACEHOLDER_PATTERN = /__[A-Z0-9_]+__|\b(?:TODO|TBD)\b/;
+const SENSITIVE_POLICY_QUERY_KEY =
+  /^(?:access[_-]?token|api[_-]?key|apikey|auth|authorization|code|cookie|credential|key|password|secret|session(?:[_-]?id)?|sig|signature|token)$/i;
 
 const KNOWN_RULES = new Set([
   "all-material-claims-traceable",
@@ -148,6 +150,7 @@ interface PolicyManifestDocument {
   kind: string;
   templateClass: ParsedPolicyDocument["templateClass"];
   templateSha256: string;
+  templateBodySha256: string;
 }
 
 interface PolicyTemplateManifest {
@@ -162,6 +165,7 @@ interface PolicyTemplateManifest {
     exactJournal: boolean;
   };
   documents: PolicyManifestDocument[];
+  manifestSha256: string;
 }
 
 interface PolicyApproval extends ResearchPolicyBinding {
@@ -209,7 +213,7 @@ export async function inspectResearchPolicyCatalog(sourceRoot: string): Promise<
     ),
   ]);
   return {
-    schemaVersion: 1,
+    schemaVersion: 1 as const,
     sourceTreeSha256: await hashRegularTree(root),
     categories: {
       articleTypes: await markdownBasenames(join(policyRoot, "article-types")),
@@ -275,17 +279,24 @@ export async function initializeResearchPolicy(input: {
         "Research Policy defaults exceed the stack limit.",
       );
     }
-    await writeTextAtomic(join(userRoot, destinationLogicalPath), parsed.content, 0o600);
+    const materializedContent = materializePolicyTemplate(parsed.content, {
+      articleType: input.articleType,
+      field: input.field,
+      journalClass: input.journalClass,
+      exactJournal: input.includeExactJournalTemplate === true,
+    });
+    await writeTextAtomic(join(userRoot, destinationLogicalPath), materializedContent, 0o600);
     manifestDocuments.push({
       logicalPath: destinationLogicalPath,
       id: parsed.id,
       kind: parsed.kind,
       templateClass: parsed.templateClass,
-      templateSha256: parsed.sha256,
+      templateSha256: sha256Text(materializedContent),
+      templateBodySha256: sha256Text(parsed.body),
     });
   }
-  const manifest: PolicyTemplateManifest = {
-    schemaVersion: 1,
+  const manifestCore = {
+    schemaVersion: 1 as const,
     projectId: input.projectId,
     initializedAt: new Date().toISOString(),
     sourceTreeSha256: catalog.sourceTreeSha256,
@@ -298,6 +309,10 @@ export async function initializeResearchPolicy(input: {
     documents: manifestDocuments.sort((left, right) =>
       left.logicalPath.localeCompare(right.logicalPath),
     ),
+  };
+  const manifest: PolicyTemplateManifest = {
+    ...manifestCore,
+    manifestSha256: sha256Text(canonicalJson(manifestCore)),
   };
   await writeJsonAtomic(policyManifestPath(root, input.projectId), manifest);
   await appendJournalEvent(
@@ -314,6 +329,145 @@ export async function initializeResearchPolicy(input: {
     },
   );
   return inspectResearchPolicyStatus(root, input.projectId);
+}
+
+export async function completeResearchPublicationBrief(
+  rootInput: string,
+  projectId: string,
+  input: {
+    centralQuestion: string;
+    centralClaim: string;
+    centralOutcome: string;
+    contributionType: string;
+    targetJournal?: string | null;
+  },
+): Promise<ResearchPolicyStatus> {
+  validateProjectId(projectId);
+  const root = resolve(rootInput);
+  await loadPolicyManifest(root, projectId);
+  const values = {
+    centralQuestion: policyHumanValue("central research question", input.centralQuestion, 8, 4_000),
+    centralClaim: policyHumanValue("central claim", input.centralClaim, 8, 4_000),
+    centralOutcome: policyHumanValue("central outcome", input.centralOutcome, 3, 1_000),
+    contributionType: policyHumanValue("contribution type", input.contributionType, 3, 500),
+    ...(input.targetJournal === undefined
+      ? {}
+      : {
+          targetJournal:
+            input.targetJournal === null
+              ? "none"
+              : policyHumanValue("target journal", input.targetJournal, 2, 200),
+        }),
+  };
+  await updatePolicyFrontmatter(
+    join(policyUserRoot(root, projectId), "publication-brief.md"),
+    values,
+  );
+  await appendJournalEvent(
+    workspacePaths(root).journal,
+    "research.policy.publication-brief.completed",
+    projectId,
+    { projectId, fields: Object.keys(values).sort() },
+  );
+  return inspectResearchPolicyStatus(root, projectId);
+}
+
+export async function completeResearchExactJournalPolicy(
+  rootInput: string,
+  projectId: string,
+  input: {
+    journalName: string;
+    officialGuidelinesUrl: string;
+    officialGuidelinesRetrievedAt: string;
+    scope: string;
+    editorialSignificance: string;
+    evidenceExpectations: string;
+    methodsAndValidation: string;
+    reproducibility: string;
+    deskRejectTriggers: string;
+    requiredReviewerQuestions: string;
+    permittedPivots: string;
+  },
+): Promise<ResearchPolicyStatus> {
+  validateProjectId(projectId);
+  const root = resolve(rootInput);
+  const manifest = await loadPolicyManifest(root, projectId);
+  if (!manifest.selection.exactJournal) {
+    throw policyError(
+      "RESEARCH_POLICY_TARGET_MISSING",
+      "This Research Policy was not initialized with an exact-journal template.",
+      2,
+    );
+  }
+  const journalName = policyHumanValue("target journal", input.journalName, 2, 200);
+  const officialGuidelinesUrl = policyOfficialUrl(input.officialGuidelinesUrl);
+  const officialGuidelinesRetrievedAt = policyIsoDate(input.officialGuidelinesRetrievedAt);
+  const sections = {
+    Scope: policyHumanValue("journal scope", input.scope, 12, 8_000),
+    "Editorial significance": policyHumanValue(
+      "journal editorial significance",
+      input.editorialSignificance,
+      12,
+      8_000,
+    ),
+    "Evidence expectations": policyHumanValue(
+      "journal evidence expectations",
+      input.evidenceExpectations,
+      12,
+      8_000,
+    ),
+    "Methods and validation": policyHumanValue(
+      "journal methods and validation",
+      input.methodsAndValidation,
+      12,
+      8_000,
+    ),
+    Reproducibility: policyHumanValue(
+      "journal reproducibility requirements",
+      input.reproducibility,
+      12,
+      8_000,
+    ),
+    "Desk-reject triggers": policyHumanValue(
+      "journal desk-reject triggers",
+      input.deskRejectTriggers,
+      12,
+      8_000,
+    ),
+    "Required reviewer questions": policyHumanValue(
+      "journal reviewer questions",
+      input.requiredReviewerQuestions,
+      12,
+      8_000,
+    ),
+    "Permitted pivots": policyHumanValue(
+      "journal permitted pivots",
+      input.permittedPivots,
+      12,
+      8_000,
+    ),
+  };
+  await updatePolicyDocument(
+    join(policyUserRoot(root, projectId), "journal.md"),
+    { journalName, officialGuidelinesUrl, officialGuidelinesRetrievedAt },
+    [
+      `# Exact target-journal policy: ${journalName}`,
+      "",
+      ...Object.entries(sections).flatMap(([heading, body]) => [`## ${heading}`, "", body, ""]),
+    ].join("\n"),
+  );
+  await appendJournalEvent(
+    workspacePaths(root).journal,
+    "research.policy.exact-journal.completed",
+    projectId,
+    {
+      projectId,
+      journalName,
+      officialGuidelinesHost: new URL(officialGuidelinesUrl).hostname,
+      officialGuidelinesRetrievedAt,
+    },
+  );
+  return inspectResearchPolicyStatus(root, projectId);
 }
 
 export async function inspectResearchPolicyStatus(
@@ -453,6 +607,16 @@ export async function approveResearchPolicy(
       "An exact-journal policy must name the exact target journal.",
       2,
     );
+  }
+  if (exactJournal) {
+    const expected = manifest.documents.find((document) => document.kind === "exact-journal");
+    if (!expected || sha256Text(exactJournal.body) === expected.templateBodySha256) {
+      throw policyError(
+        "RESEARCH_POLICY_EXACT_JOURNAL_INCOMPLETE",
+        "The exact-journal policy still contains the generic template body. Review current official guidance and customize its substantive requirements before approval.",
+        2,
+      );
+    }
   }
   const unresolvedDocuments = documents.filter((document) =>
     PLACEHOLDER_PATTERN.test(document.content),
@@ -685,6 +849,122 @@ async function requirePolicySourceRoot(input: string): Promise<string> {
   return input;
 }
 
+function materializePolicyTemplate(
+  content: string,
+  selection: {
+    articleType: string;
+    field: string;
+    journalClass: string;
+    exactJournal: boolean;
+  },
+): string {
+  return content
+    .replaceAll("__SELECT_ARTICLE_TYPE__", selection.articleType)
+    .replaceAll("__SELECT_FIELD__", selection.field)
+    .replaceAll("__SELECT_JOURNAL_CLASS__", selection.journalClass)
+    .replaceAll(
+      "__SELECT_EXACT_JOURNAL_OR_NONE__",
+      selection.exactJournal ? "__REPLACE_JOURNAL_NAME__" : "none",
+    );
+}
+
+async function updatePolicyFrontmatter(
+  path: string,
+  values: Record<string, string>,
+): Promise<void> {
+  await updatePolicyDocument(path, values);
+}
+
+async function updatePolicyDocument(
+  path: string,
+  values: Record<string, string>,
+  body?: string,
+): Promise<void> {
+  await parsePolicyFile(path, false);
+  const content = await readFile(path, "utf8");
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/.exec(content);
+  if (!match) {
+    throw policyError(
+      "RESEARCH_POLICY_INVALID",
+      `Policy frontmatter is missing: ${basename(path)}`,
+    );
+  }
+  const document = parseDocument(match[1]!, {
+    schema: "core",
+    uniqueKeys: true,
+    version: "1.2",
+  });
+  if (document.errors.length || document.warnings.length) {
+    throw policyError(
+      "RESEARCH_POLICY_INVALID",
+      `Policy frontmatter is invalid: ${basename(path)}`,
+    );
+  }
+  for (const [key, value] of Object.entries(values)) document.set(key, value);
+  const frontmatter = document.toString({ lineWidth: 0 }).trimEnd();
+  const nextBody = body === undefined ? match[2]! : `\n${body.trim()}\n`;
+  await writeTextAtomic(path, `---\n${frontmatter}\n---\n${nextBody}`, 0o600);
+}
+
+function policyHumanValue(label: string, input: string, minimum: number, maximum: number): string {
+  const value = input.trim();
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (
+    bytes < minimum ||
+    bytes > maximum ||
+    /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(value) ||
+    PLACEHOLDER_PATTERN.test(value)
+  ) {
+    throw policyError(
+      "RESEARCH_POLICY_INVALID",
+      `Research Policy ${label} must be explicit, bounded, and free of placeholders.`,
+      2,
+    );
+  }
+  return value;
+}
+
+function policyOfficialUrl(input: string): string {
+  const value = policyHumanValue("official guidelines URL", input, 10, 2_048);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw policyError("RESEARCH_POLICY_INVALID", "Official guidelines URL must be a valid URL.", 2);
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.hash) {
+    throw policyError(
+      "RESEARCH_POLICY_INVALID",
+      "Official guidelines URL must use HTTPS and must not contain credentials or a fragment.",
+      2,
+    );
+  }
+  if ([...url.searchParams.keys()].some((key) => SENSITIVE_POLICY_QUERY_KEY.test(key))) {
+    throw policyError(
+      "RESEARCH_POLICY_INVALID",
+      "Official guidelines URL must not contain sensitive query parameters.",
+      2,
+    );
+  }
+  return url.toString();
+}
+
+function policyIsoDate(input: string): string {
+  const value = input.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw policyError(
+      "RESEARCH_POLICY_INVALID",
+      "Guidelines retrieval date must be YYYY-MM-DD.",
+      2,
+    );
+  }
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+    throw policyError("RESEARCH_POLICY_INVALID", "Guidelines retrieval date is invalid.", 2);
+  }
+  return value;
+}
+
 async function markdownBasenames(directory: string): Promise<string[]> {
   const info = await lstat(directory).catch(() => undefined);
   if (!info?.isDirectory() || info.isSymbolicLink()) {
@@ -846,10 +1126,30 @@ async function loadPolicyManifest(
     manifest.schemaVersion !== 1 ||
     manifest.projectId !== projectId ||
     !Array.isArray(manifest.documents) ||
+    manifest.documents.some(
+      (document) =>
+        !isObject(document) ||
+        typeof document.logicalPath !== "string" ||
+        typeof document.id !== "string" ||
+        typeof document.kind !== "string" ||
+        typeof document.templateSha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(document.templateSha256) ||
+        typeof document.templateBodySha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(document.templateBodySha256),
+    ) ||
     !isObject(manifest.selection) ||
-    typeof manifest.sourceTreeSha256 !== "string"
+    typeof manifest.sourceTreeSha256 !== "string" ||
+    typeof manifest.manifestSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(manifest.manifestSha256)
   ) {
     throw policyError("RESEARCH_POLICY_INVALID", "Research Policy template manifest is invalid.");
+  }
+  const { manifestSha256, ...manifestCore } = manifest;
+  if (sha256Text(canonicalJson(manifestCore)) !== manifestSha256) {
+    throw policyError(
+      "RESEARCH_POLICY_INVALID",
+      "Research Policy template manifest failed its content hash.",
+    );
   }
   return manifest;
 }

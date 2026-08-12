@@ -72,6 +72,27 @@ describe("top-journal Research Policy", () => {
       assert.equal(binding.verdictCeiling, "top-journal-candidate");
       assert.equal(binding.targetJournal, null);
       assert.equal(binding.resolvedConstraints?.minDirectPeerReviewedFullText, 5);
+
+      const manifestPath = join(
+        root,
+        ".tiangong-research",
+        "policies",
+        "projects",
+        "top-journal-paper",
+        "template-manifest.json",
+      );
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+        manifestSha256: string;
+        selection: { field: string };
+      };
+      manifest.selection.field = "tampered-field";
+      await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
+      await assert.rejects(
+        loadApprovedResearchPolicy(root, "top-journal-paper"),
+        (error: unknown) => errorCode(error) === "RESEARCH_POLICY_INVALID",
+      );
+      manifest.selection.field = "engineering-computing";
+      await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
       await lockCapabilities(root);
       await initializeProject(
         root,

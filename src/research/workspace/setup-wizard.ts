@@ -1025,7 +1025,7 @@ class ResearchSetupReadlineOutput extends Writable {
   }
 }
 
-class TextResearchSetupWizardPrompt implements ResearchSetupWizardPrompt {
+export class TextResearchSetupWizardPrompt implements ResearchSetupWizardPrompt {
   readonly #readline: Interface;
   readonly #readlineOutput: ResearchSetupReadlineOutput;
   readonly #output: Output;

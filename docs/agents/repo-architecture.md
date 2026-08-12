@@ -96,7 +96,13 @@ storage writes, queueing, and document status transitions.
   companion readiness gates, domain-scoped setup readiness, persistent review
   packets/bounded evidence contexts with exact cited-item JSON-Pointer
   projections, tool-free independent review, and
-  mechanical closure-time hash verification.
+  mechanical closure-time hash verification. For `top-journal` goals it also
+  owns the project-installed Policy-source resolver, generic Policy catalog and
+  guided human completion, content/manifest approval hashes and expiry gates,
+  mechanical publication assessment, immutable final-manuscript generations,
+  append-only fresh-session enforcement across four independent reviewer
+  roles, and a separate publication closure whose language cannot exceed the
+  approved Policy ceiling.
 - `src/education/**`: education search command handling and source specs for
   course, education, and textbook edge-search functions.
 - `src/edge-search.ts`: shared edge-search forwarding helper. It derives
@@ -226,6 +232,14 @@ producer packets contain bounded, hash-verified prior artifacts. The platform
 `sandbox-exec`/Bubblewrap capsule is used for the independently launched
 reviewer CLI; that adapter disables shell, unified-exec, filesystem, and
 undeclared integrations.
+
+Final manuscript authoring follows the same native-host boundary. The CLI
+validates and freezes the native artifact but does not author it or launch a
+nested producer. The base research reviewer remains a CLI-isolated other-family
+reviewer; the final publication gate adds four role-specific, fresh reviewer
+sessions bound to one frozen manuscript generation. Base closure and
+publication closure are distinct objects and neither implies journal
+acceptance.
 
 When a producer reaches login, MFA, CAPTCHA, paywall, authorization, or another
 human-only boundary, it records the activity and requests a durable

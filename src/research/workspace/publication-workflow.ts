@@ -4,13 +4,14 @@ import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node
 
 import { CliError } from "../../errors.js";
 import { RESEARCH_CONTROL_DIRECTORY } from "./constants.js";
-import { appendJournalEvent } from "./journal.js";
+import { appendJournalEvent, readJournal, verifyJournal } from "./journal.js";
 import {
   evaluateTopJournalAssessment,
   type PublicationAssessment,
   type TopJournalAssessmentResult,
 } from "./publication.js";
 import { loadProject } from "./projects.js";
+import { assertResearchPolicyBinding } from "./research-policy.js";
 import {
   canonicalJson,
   ensureDirectory,
@@ -106,7 +107,7 @@ interface PublicationCurrentPointer {
 interface ReviewerSessionRegistry {
   schemaVersion: 1;
   sessions: Array<{
-    sessionId: string;
+    sessionSha256: string;
     projectId: string;
     generationSha256: string;
     role: PublicationReviewRole;
@@ -410,6 +411,14 @@ export async function freezePublicationManuscript(input: {
   return withWorkspaceLock(input.root, "research.publication.freeze", async () => {
     const project = await requireClosedTopJournalProject(input.root, input.projectId);
     const producerSessionId = requireSessionId(input.producerSessionId, "producer");
+    if (
+      (await usedReviewerSessionHashes(input.root, project.id)).has(sha256Text(producerSessionId))
+    ) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_REVIEW_NOT_INDEPENDENT",
+        "A native producer session must not reuse any prior independent reviewer session.",
+      );
+    }
     const assessmentValue = parsePublicationAssessment(
       JSON.parse(await readRegularTextFile(input.assessmentPath, "publication assessment")),
     );
@@ -561,7 +570,12 @@ export async function preparePublicationReview(input: {
       );
     }
     const registry = await loadReviewerRegistry(input.root, project.id);
-    if (registry.sessions.some((entry) => entry.sessionId === sessionId)) {
+    const sessionSha256 = sha256Text(sessionId);
+    const usedSessions = await usedReviewerSessionHashes(input.root, project.id);
+    if (
+      usedSessions.has(sessionSha256) ||
+      registry.sessions.some((entry) => entry.sessionSha256 === sessionSha256)
+    ) {
       throw publicationError(
         "RESEARCH_PUBLICATION_REVIEW_NOT_INDEPENDENT",
         "Each required review must use a fresh independent reviewer session.",
@@ -612,14 +626,14 @@ export async function preparePublicationReview(input: {
     };
     await writeImmutableJson(packetPath, packet, packet.packetSha256, "publication review packet");
     registry.sessions.push({
-      sessionId,
+      sessionSha256,
       projectId: project.id,
       generationSha256: generation.generationSha256,
       role: input.role,
       agent: input.reviewerAgent,
       registeredAt: preparedAt,
     });
-    registry.sessions.sort((left, right) => left.sessionId.localeCompare(right.sessionId));
+    registry.sessions.sort((left, right) => left.sessionSha256.localeCompare(right.sessionSha256));
     await writeJsonAtomic(reviewerRegistryPath(input.root, project.id), registry);
     await appendJournalEvent(
       workspacePaths(input.root).journal,
@@ -630,6 +644,7 @@ export async function preparePublicationReview(input: {
         generationSha256: generation.generationSha256,
         role: input.role,
         reviewerAgent: input.reviewerAgent,
+        reviewerSessionSha256: sessionSha256,
         packetSha256: packet.packetSha256,
       },
     );
@@ -837,6 +852,7 @@ async function requireClosedTopJournalProject(
       3,
     );
   }
+  await assertResearchPolicyBinding(root, project.publicationPolicy);
   return project;
 }
 
@@ -1036,9 +1052,14 @@ async function loadReviewerRegistry(
     !Array.isArray(value.sessions) ||
     value.sessions.some(
       (entry) =>
-        typeof entry.sessionId !== "string" ||
+        typeof entry.sessionSha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(entry.sessionSha256) ||
+        entry.projectId !== projectId ||
+        typeof entry.generationSha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(entry.generationSha256) ||
         !isPublicationReviewRole(entry.role) ||
-        !["codex", "claude"].includes(entry.agent),
+        !["codex", "claude"].includes(entry.agent) ||
+        typeof entry.registeredAt !== "string",
     )
   ) {
     throw publicationError(
@@ -1047,6 +1068,30 @@ async function loadReviewerRegistry(
     );
   }
   return value;
+}
+
+async function usedReviewerSessionHashes(root: string, projectId: string): Promise<Set<string>> {
+  const journalPath = workspacePaths(root).journal;
+  await verifyJournal(journalPath);
+  const hashes = new Set<string>();
+  for (const event of await readJournal(journalPath)) {
+    if (
+      event.type !== "publication.review.prepared" ||
+      event.scope !== projectId ||
+      event.payload.projectId !== projectId
+    ) {
+      continue;
+    }
+    const value = event.payload.reviewerSessionSha256;
+    if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_STATE_INVALID",
+        "A publication review journal event is missing its session hash binding.",
+      );
+    }
+    hashes.add(value);
+  }
+  return hashes;
 }
 
 async function loadReviewPacket(

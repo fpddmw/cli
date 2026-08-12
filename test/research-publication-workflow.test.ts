@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -15,6 +15,13 @@ import {
 } from "../src/research/workspace/publication-workflow.js";
 import type { PublicationAssessment } from "../src/research/workspace/publication.js";
 import { initializeProject, loadProject, saveProject } from "../src/research/workspace/projects.js";
+import {
+  approveResearchPolicy,
+  completeResearchExactJournalPolicy,
+  completeResearchPublicationBrief,
+  initializeResearchPolicy,
+  loadApprovedResearchPolicy,
+} from "../src/research/workspace/research-policy.js";
 import {
   canonicalJson,
   sha256Text,
@@ -66,6 +73,21 @@ describe("top-journal publication workflow", () => {
       ]);
       assert.equal(status.exitCode, 0);
       assert.equal(JSON.parse(status.stdout).reviewState, "not-started");
+
+      const workspaceStatus = await invokeCli([
+        "research",
+        "status",
+        "--project",
+        fixture.projectId,
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(workspaceStatus.exitCode, 0);
+      assert.match(
+        JSON.parse(workspaceStatus.stdout).projects[0].recommendedAction,
+        /publication status|final manuscript/i,
+      );
 
       for (const schemaName of [
         "publication-assessment",
@@ -164,6 +186,15 @@ describe("top-journal publication workflow", () => {
         reviewerAgent: "claude",
         reviewerSessionId: "fresh-reviewer-session",
       });
+      await rm(
+        join(
+          workspacePaths(fixture.root).projects,
+          fixture.projectId,
+          "publication",
+          "reviewer-sessions.json",
+        ),
+        { force: true },
+      );
       await assert.rejects(
         preparePublicationReview({
           root: fixture.root,
@@ -173,6 +204,40 @@ describe("top-journal publication workflow", () => {
           reviewerSessionId: "fresh-reviewer-session",
         }),
         (error: unknown) => errorCode(error) === "RESEARCH_PUBLICATION_REVIEW_NOT_INDEPENDENT",
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("invalidates publication work when the approved Research Policy changes", async () => {
+    const fixture = await publicationFixture("policy-drift");
+    try {
+      await freezePublicationManuscript({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        supplementPaths: [],
+        producerAgent: "codex",
+        producerSessionId: "native-policy-bound-producer",
+      });
+      const briefPath = join(
+        fixture.root,
+        "research-policy",
+        fixture.projectId,
+        "publication-brief.md",
+      );
+      await writeFile(briefPath, `${await readFile(briefPath, "utf8")}\nChanged scope.\n`);
+      await assert.rejects(
+        preparePublicationReview({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          role: "evidence",
+          reviewerAgent: "claude",
+          reviewerSessionId: "fresh-after-policy-drift",
+        }),
+        (error: unknown) => errorCode(error) === "RESEARCH_POLICY_CHANGED",
       );
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
@@ -295,7 +360,7 @@ async function publicationFixture(
 ) {
   const root = await mkdtemp(join(tmpdir(), "tiangong-publication-workflow-"));
   await initializeResearchWorkspace(root, "Publication workflow");
-  const policy = publicationPolicy(projectId);
+  const policy = await createApprovedPublicationPolicy(root, projectId);
   await initializeProject(
     root,
     projectId,
@@ -379,24 +444,94 @@ async function publicationFixture(
   return { root, projectId, policy, manuscript, supplement, assessment, snapshotSha256 };
 }
 
-function publicationPolicy(projectId: string): ResearchPolicyBinding {
-  return {
-    goal: "top-journal",
+async function createApprovedPublicationPolicy(
+  root: string,
+  projectId: string,
+): Promise<ResearchPolicyBinding> {
+  const source = join(root, "policy-source");
+  await writePublicationPolicyPack(source);
+  await initializeResearchPolicy({
+    root,
     projectId,
+    sourceRoot: source,
     articleType: "original-empirical",
     field: "engineering-computing",
     journalClass: "discipline-flagship",
+    includeExactJournalTemplate: true,
+  });
+  await completeResearchPublicationBrief(root, projectId, {
+    centralQuestion: "Does the studied intervention produce the observed central outcome?",
+    centralClaim: "The studied intervention changes the observed central outcome.",
+    centralOutcome: "Observed central outcome",
+    contributionType: "new-empirical-estimate",
     targetJournal: "Example Journal",
-    resolvedPolicySha256: "a".repeat(64),
-    approvalSha256: "b".repeat(64),
-    verdictCeiling: "target-journal-submission-ready",
-    documents: [],
-    resolvedRules: [],
-    resolvedConstraints: {},
-    requiredReviewers: [...REVIEW_ROLES],
-    approvedAt: "2026-08-12T00:00:00.000Z",
-    expiresAt: "2027-08-12T00:00:00.000Z",
-  };
+  });
+  await completeResearchExactJournalPolicy(root, projectId, {
+    journalName: "Example Journal",
+    officialGuidelinesUrl: "https://example.org/journal/guidelines",
+    officialGuidelinesRetrievedAt: "2026-08-12",
+    scope: "Original empirical studies with broad engineering significance.",
+    editorialSignificance: "Results must change understanding or a material engineering decision.",
+    evidenceExpectations: "Direct full-text empirical evidence must support each central claim.",
+    methodsAndValidation: "Methods require uncertainty, robustness, and independent validation.",
+    reproducibility: "All material results must be independently reproduced from frozen inputs.",
+    deskRejectTriggers:
+      "Unobserved outcomes, unsupported novelty, or unreproduced results block review.",
+    requiredReviewerQuestions:
+      "Do evidence, methods, novelty, and journal fit support the exact claim?",
+    permittedPivots:
+      "Narrow the claim, collect evidence, redesign the study, or change journal class.",
+  });
+  for (const file of ["article-type.md", "field.md", "journal-class.md"]) {
+    const path = join(root, "research-policy", projectId, file);
+    await writeFile(path, `${await readFile(path, "utf8")}\nHuman-reviewed requirement.\n`);
+  }
+  await approveResearchPolicy(root, projectId, {
+    confirm: true,
+    acknowledgeDefaults: true,
+  });
+  return loadApprovedResearchPolicy(root, projectId);
+}
+
+async function writePublicationPolicyPack(root: string): Promise<void> {
+  const policyRoot = join(root, "assets", "research-policy", "defaults");
+  const documents: Array<[string, string, string, string]> = [
+    ["baseline/top-journal.md", "baseline.top-journal", "baseline", "bundled-default"],
+    ["article-types/original-empirical.md", "article.original", "article-type", "bundled-default"],
+    ["fields/engineering-computing.md", "field.engineering", "field", "bundled-default"],
+    [
+      "journal-classes/discipline-flagship.md",
+      "journal.flagship",
+      "journal-class",
+      "bundled-default",
+    ],
+    ["reviewer-rubrics/evidence.md", "reviewer.evidence", "reviewer-rubric", "bundled-default"],
+    [
+      "reviewer-rubrics/methods-reproducibility.md",
+      "reviewer.methods",
+      "reviewer-rubric",
+      "bundled-default",
+    ],
+    ["reviewer-rubrics/domain-novelty.md", "reviewer.domain", "reviewer-rubric", "bundled-default"],
+    ["reviewer-rubrics/journal-editor.md", "reviewer.editor", "reviewer-rubric", "bundled-default"],
+    ["project/publication-brief.md", "project.brief", "publication-brief", "project-template"],
+    [
+      "journals/exact-journal-template.md",
+      "journal.exact",
+      "exact-journal",
+      "exact-journal-template",
+    ],
+  ];
+  for (const [relative, id, kind, templateClass] of documents) {
+    const path = join(policyRoot, relative);
+    await mkdir(join(path, ".."), { recursive: true });
+    const isBrief = kind === "publication-brief";
+    const isJournal = kind === "exact-journal";
+    await writeFile(
+      path,
+      `---\nschemaVersion: 1\nid: ${id}\nkind: ${kind}\ntemplateClass: ${templateClass}\npolicyVersion: 1\ntargetTier: top\narticleType: original-empirical\nfield: engineering-computing\njournalClass: discipline-flagship\ntargetJournal: ${isBrief ? "__SELECT_EXACT_JOURNAL_OR_NONE__" : "none"}\njournalName: ${isJournal ? "__REPLACE_JOURNAL_NAME__" : "none"}\nofficialGuidelinesUrl: ${isJournal ? "__REPLACE_OFFICIAL_HTTPS_URL__" : "https://example.org"}\nofficialGuidelinesRetrievedAt: ${isJournal ? "__REPLACE_YYYY-MM-DD__" : "2026-08-12"}\ncentralQuestion: ${isBrief ? "__DEFINE_CENTRAL_QUESTION__" : "defined"}\ncentralClaim: ${isBrief ? "__DEFINE_CENTRAL_CLAIM__" : "defined"}\ncentralOutcome: ${isBrief ? "__DEFINE_CENTRAL_OUTCOME__" : "defined"}\ncontributionType: ${isBrief ? "__DEFINE_CONTRIBUTION_TYPE__" : "defined"}\nrules:\n  - central-claim-directly-supported\nconstraints:\n  minDirectPeerReviewedFullText: 1\nrequiredReviewers:\n  - evidence\n  - methods-reproducibility\n  - domain-novelty\n  - journal-editor\nreviewAfterDays: 365\n---\n\n# ${id}\n\nGeneric policy content requiring substantive human review.\n`,
+    );
+  }
 }
 
 function publicationAssessment(override: Partial<PublicationAssessment>): PublicationAssessment {
