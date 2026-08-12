@@ -67,6 +67,12 @@ describe("top-journal Research Policy", () => {
       const binding = await loadApprovedResearchPolicy(root, "top-journal-paper");
       assert.equal(binding.verdictCeiling, "top-journal-candidate");
       assert.equal(binding.targetJournal, null);
+      assert.equal(binding.resolvedConstraints?.minDirectPeerReviewedFullText, 5);
+
+      const stale = await inspectResearchPolicyStatus(root, "top-journal-paper", {
+        now: new Date("2030-01-01T00:00:00.000Z"),
+      });
+      assert.equal(stale.status, "stale");
 
       await writeFile(briefPath, `${await readFile(briefPath, "utf8")}\nMaterial change.\n`);
       const changed = await inspectResearchPolicyStatus(root, "top-journal-paper");
@@ -74,6 +80,46 @@ describe("top-journal Research Policy", () => {
       await assert.rejects(
         loadApprovedResearchPolicy(root, "top-journal-paper"),
         (error: unknown) => errorCode(error) === "RESEARCH_POLICY_CHANGED",
+      );
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(source, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("reports conflicting policy identity before approval", async () => {
+    const root = await temporaryDirectory();
+    const source = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, "Policy workspace");
+      await writePolicyPack(source);
+      await initializeResearchPolicy({
+        root,
+        projectId: "conflicting-paper",
+        sourceRoot: source,
+        articleType: "original-empirical",
+        field: "engineering-computing",
+        journalClass: "discipline-flagship",
+      });
+      const articlePolicy = join(root, "research-policy", "conflicting-paper", "article-type.md");
+      await writeFile(
+        articlePolicy,
+        (await readFile(articlePolicy, "utf8")).replace(
+          "articleType: original-empirical",
+          "articleType: computational-modeling",
+        ),
+      );
+      const status = await inspectResearchPolicyStatus(root, "conflicting-paper");
+      assert.equal(status.status, "conflict");
+      assert.ok(status.conflicts.some((value) => value.includes("articleType")));
+      await assert.rejects(
+        approveResearchPolicy(root, "conflicting-paper", {
+          confirm: true,
+          acknowledgeDefaults: true,
+        }),
+        (error: unknown) => errorCode(error) === "RESEARCH_POLICY_CONFLICT",
       );
     } finally {
       await Promise.all([
@@ -168,7 +214,7 @@ async function writePolicyPack(root: string): Promise<void> {
     const isBrief = kind === "publication-brief";
     await writeFile(
       path,
-      `---\nschemaVersion: 1\nid: ${id}\nkind: ${kind}\ntemplateClass: ${templateClass}\npolicyVersion: 1\ntargetTier: top\narticleType: original-empirical\nfield: engineering-computing\njournalClass: discipline-flagship\ntargetJournal: none\ncentralQuestion: ${isBrief ? "__DEFINE_CENTRAL_QUESTION__" : "defined"}\ncentralClaim: ${isBrief ? "__DEFINE_CENTRAL_CLAIM__" : "defined"}\ncentralOutcome: ${isBrief ? "__DEFINE_CENTRAL_OUTCOME__" : "defined"}\ncontributionType: ${isBrief ? "__DEFINE_CONTRIBUTION_TYPE__" : "defined"}\nrules:\n  - central-claim-directly-supported\nrequiredReviewers:\n  - evidence\nreviewAfterDays: 180\n---\n\n# ${id}\n\nPolicy content.\n`,
+      `---\nschemaVersion: 1\nid: ${id}\nkind: ${kind}\ntemplateClass: ${templateClass}\npolicyVersion: 1\ntargetTier: top\narticleType: original-empirical\nfield: engineering-computing\njournalClass: discipline-flagship\ntargetJournal: none\ncentralQuestion: ${isBrief ? "__DEFINE_CENTRAL_QUESTION__" : "defined"}\ncentralClaim: ${isBrief ? "__DEFINE_CENTRAL_CLAIM__" : "defined"}\ncentralOutcome: ${isBrief ? "__DEFINE_CENTRAL_OUTCOME__" : "defined"}\ncontributionType: ${isBrief ? "__DEFINE_CONTRIBUTION_TYPE__" : "defined"}\nrules:\n  - central-claim-directly-supported\nconstraints:\n  minDirectPeerReviewedFullText: ${kind === "article-type" ? 5 : 2}\nrequiredReviewers:\n  - evidence\nreviewAfterDays: 180\n---\n\n# ${id}\n\nPolicy content.\n`,
     );
   }
 }

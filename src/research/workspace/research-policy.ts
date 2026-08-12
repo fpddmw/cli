@@ -107,12 +107,23 @@ const POLICY_KINDS = new Set([
   "publication-brief",
 ]);
 
+const KNOWN_CONSTRAINTS = new Map<string, "boolean" | "integer">([
+  ["minDirectPeerReviewedFullText", "integer"],
+  ["minDirectEmpiricalFullText", "integer"],
+  ["minDirectModelFullText", "integer"],
+  ["requireCompleteCandidateDisposition", "boolean"],
+  ["requireRecallAudit", "boolean"],
+  ["requireCentralDimensionsCovered", "boolean"],
+  ["requireIndependentReproduction", "boolean"],
+]);
+
 export type ResearchPolicyStatusKind =
   | "missing"
   | "default-unapproved"
   | "default-approved"
   | "custom-draft"
   | "custom-approved"
+  | "conflict"
   | "stale"
   | "changed"
   | "invalid";
@@ -126,6 +137,7 @@ interface ParsedPolicyDocument {
   content: string;
   sha256: string;
   rules: string[];
+  constraints: Record<string, boolean | number>;
   requiredReviewers: string[];
   reviewAfterDays: number;
 }
@@ -165,6 +177,7 @@ export interface ResearchPolicyStatus {
   defaultDocuments: number;
   customDocuments: number;
   invalidDocuments: string[];
+  conflicts: string[];
   approvedAt: string | null;
   expiresAt: string | null;
   resolvedPolicySha256: string | null;
@@ -306,6 +319,7 @@ export async function initializeResearchPolicy(input: {
 export async function inspectResearchPolicyStatus(
   rootInput: string,
   projectId: string,
+  options: { now?: Date } = {},
 ): Promise<ResearchPolicyStatus> {
   validateProjectId(projectId);
   const root = resolve(rootInput);
@@ -326,6 +340,19 @@ export async function inspectResearchPolicyStatus(
       "Repair the reported policy file and validate again.",
     ]);
   }
+  const conflicts = policyConflicts(manifest, documents);
+  if (conflicts.length) {
+    return statusResult(
+      root,
+      projectId,
+      "conflict",
+      documents,
+      invalidDocuments,
+      null,
+      ["Resolve the conflicting policy identities before approval."],
+      conflicts,
+    );
+  }
   const approval = await loadPolicyApproval(root, projectId);
   const policySetSha256 = policySetHash(manifest, documents);
   if (!approval) {
@@ -341,7 +368,7 @@ export async function inspectResearchPolicyStatus(
       "Policy content changed after approval. Review the diff and approve the new exact hash before continuing.",
     ]);
   }
-  if (Date.parse(approval.expiresAt) <= Date.now()) {
+  if (Date.parse(approval.expiresAt) <= (options.now ?? new Date()).getTime()) {
     return statusResult(root, projectId, "stale", documents, invalidDocuments, approval, [
       "The approved policy review window expired. Verify current field and journal requirements, then approve a refreshed policy.",
     ]);
@@ -381,6 +408,15 @@ export async function approveResearchPolicy(
   const root = resolve(rootInput);
   const manifest = await loadPolicyManifest(root, projectId);
   const documents = await loadCurrentPolicyDocuments(root, manifest, false);
+  const conflicts = policyConflicts(manifest, documents);
+  if (conflicts.length) {
+    throw policyError(
+      "RESEARCH_POLICY_CONFLICT",
+      "Research Policy identities conflict with the reviewed selection.",
+      2,
+      { conflicts },
+    );
+  }
   const brief = documents.find((document) => document.kind === "publication-brief");
   if (!brief || PLACEHOLDER_PATTERN.test(brief.content)) {
     throw policyError(
@@ -410,9 +446,7 @@ export async function approveResearchPolicy(
     );
   }
   const exactJournal = documents.find((document) => document.kind === "exact-journal");
-  const targetJournal = normalizeTargetJournal(
-    exactJournal?.metadata.journalName ?? brief.metadata.targetJournal,
-  );
+  const targetJournal = normalizeTargetJournal(exactJournal?.metadata.journalName);
   if (exactJournal && !targetJournal) {
     throw policyError(
       "RESEARCH_POLICY_TARGET_MISMATCH",
@@ -436,6 +470,7 @@ export async function approveResearchPolicy(
   const reviewAfterDays = Math.min(...documents.map((document) => document.reviewAfterDays));
   const expiresAt = new Date(Date.parse(approvedAt) + reviewAfterDays * 86_400_000).toISOString();
   const resolvedRules = [...new Set(documents.flatMap((document) => document.rules))].sort();
+  const resolvedConstraints = mergePolicyConstraints(documents);
   const requiredReviewers = [
     ...new Set(documents.flatMap((document) => document.requiredReviewers)),
   ].sort();
@@ -463,9 +498,23 @@ export async function approveResearchPolicy(
       objectLocator: locator,
     });
   }
-  const verdictCeiling: ResearchVerdictCeiling = targetJournal
-    ? "target-journal-submission-ready"
-    : "top-journal-candidate";
+  const customizedKinds = new Set(
+    documents
+      .filter((document) => document.sourceClass === "human-customized")
+      .map((document) => document.kind),
+  );
+  const classPolicyCustomized = [
+    "article-type",
+    "field",
+    "journal-class",
+    "publication-brief",
+  ].every((kind) => customizedKinds.has(kind));
+  const verdictCeiling: ResearchVerdictCeiling =
+    targetJournal && classPolicyCustomized && customizedKinds.has("exact-journal")
+      ? "target-journal-submission-ready"
+      : classPolicyCustomized
+        ? "top-journal-class-ready"
+        : "top-journal-candidate";
   const bindingBase: Omit<PolicyApproval, "approvalSha256"> = {
     schemaVersion: 1,
     goal: "top-journal",
@@ -479,6 +528,7 @@ export async function approveResearchPolicy(
       canonicalJson({
         policySetSha256,
         resolvedRules,
+        resolvedConstraints,
         requiredReviewers,
         articleType: manifest.selection.articleType,
         field: manifest.selection.field,
@@ -489,6 +539,7 @@ export async function approveResearchPolicy(
     verdictCeiling,
     documents: objectDocuments,
     resolvedRules,
+    resolvedConstraints,
     requiredReviewers,
     approvedAt,
     expiresAt,
@@ -546,6 +597,14 @@ export async function loadApprovedResearchPolicy(
       `Research Policy for ${projectId} is invalid.`,
       2,
       { invalidDocuments: status.invalidDocuments },
+    );
+  }
+  if (status.status === "conflict") {
+    throw policyError(
+      "RESEARCH_POLICY_CONFLICT",
+      `Research Policy for ${projectId} contains conflicting identities.`,
+      2,
+      { conflicts: status.conflicts },
     );
   }
   if (status.status !== "custom-approved" && status.status !== "default-approved") {
@@ -712,6 +771,7 @@ async function parsePolicyFile(
     throw policyError("RESEARCH_POLICY_INVALID", `Policy identity is invalid: ${basename(path)}`);
   }
   const rules = stringArray(metadata.rules, "rules", basename(path));
+  const constraints = policyConstraints(metadata.constraints, basename(path));
   const requiredReviewers = stringArray(
     metadata.requiredReviewers ?? [],
     "requiredReviewers",
@@ -758,6 +818,7 @@ async function parsePolicyFile(
     content,
     sha256: sha256Text(content),
     rules,
+    constraints,
     requiredReviewers,
     reviewAfterDays,
   };
@@ -856,7 +917,8 @@ async function loadPolicyApproval(root: string, projectId: string): Promise<Poli
     !/^[a-f0-9]{64}$/.test(approval.policySetSha256) ||
     !/^[a-f0-9]{64}$/.test(approval.resolvedPolicySha256) ||
     !/^[a-f0-9]{64}$/.test(approval.approvalSha256) ||
-    !Array.isArray(approval.documents)
+    !Array.isArray(approval.documents) ||
+    !isObject(approval.resolvedConstraints)
   ) {
     throw policyError("RESEARCH_POLICY_INVALID", "Research Policy approval is invalid.");
   }
@@ -875,6 +937,7 @@ function statusResult(
   invalidDocuments: string[],
   approval: PolicyApproval | null,
   guidanceParts: string[],
+  conflicts: string[] = [],
 ): ResearchPolicyStatus {
   const defaultDocuments = documents.filter(
     (document) => document.sourceClass === "bundled-default",
@@ -887,6 +950,7 @@ function statusResult(
     defaultDocuments,
     customDocuments: documents.length - defaultDocuments,
     invalidDocuments,
+    conflicts,
     approvedAt: approval?.approvedAt ?? null,
     expiresAt: approval?.expiresAt ?? null,
     resolvedPolicySha256: approval?.resolvedPolicySha256 ?? null,
@@ -894,6 +958,87 @@ function statusResult(
     targetJournal: approval?.targetJournal ?? null,
     guidance: guidanceParts.join(" "),
   };
+}
+
+function policyConstraints(value: unknown, file: string): Record<string, boolean | number> {
+  if (value === undefined) return {};
+  if (!isObject(value)) {
+    throw policyError("RESEARCH_POLICY_INVALID", `Policy constraints must be a mapping: ${file}`);
+  }
+  const result: Record<string, boolean | number> = {};
+  for (const [key, constraint] of Object.entries(value)) {
+    const kind = KNOWN_CONSTRAINTS.get(key);
+    if (!kind) {
+      throw policyError("RESEARCH_POLICY_INVALID", `Policy contains an unknown constraint: ${key}`);
+    }
+    if (
+      (kind === "boolean" && typeof constraint !== "boolean") ||
+      (kind === "integer" &&
+        (typeof constraint !== "number" ||
+          !Number.isInteger(constraint) ||
+          constraint < 0 ||
+          constraint > 10_000))
+    ) {
+      throw policyError("RESEARCH_POLICY_INVALID", `Policy constraint is invalid: ${key}`);
+    }
+    result[key] = constraint as boolean | number;
+  }
+  return result;
+}
+
+function mergePolicyConstraints(
+  documents: Array<Pick<ParsedPolicyDocument, "constraints">>,
+): Record<string, boolean | number> {
+  const resolved: Record<string, boolean | number> = {};
+  for (const document of documents) {
+    for (const [key, value] of Object.entries(document.constraints)) {
+      const current = resolved[key];
+      resolved[key] =
+        typeof value === "number"
+          ? Math.max(typeof current === "number" ? current : 0, value)
+          : Boolean(current) || value;
+    }
+  }
+  return Object.fromEntries(
+    Object.entries(resolved).sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function policyConflicts(
+  manifest: PolicyTemplateManifest,
+  documents: Array<ParsedPolicyDocument & { logicalPath: string }>,
+): string[] {
+  const conflicts: string[] = [];
+  const expectedIdentity: Array<[string, string, string]> = [
+    ["article-type", "articleType", manifest.selection.articleType],
+    ["field", "field", manifest.selection.field],
+    ["journal-class", "journalClass", manifest.selection.journalClass],
+  ];
+  for (const [kind, key, expected] of expectedIdentity) {
+    const document = documents.find((candidate) => candidate.kind === kind);
+    const actual = document?.metadata[key];
+    if (!document || typeof actual !== "string" || actual !== expected) {
+      conflicts.push(`${kind}.${key} must equal ${expected}.`);
+    }
+  }
+  const brief = documents.find((document) => document.kind === "publication-brief");
+  for (const [key, expected] of [
+    ["articleType", manifest.selection.articleType],
+    ["field", manifest.selection.field],
+    ["journalClass", manifest.selection.journalClass],
+  ] as Array<[string, string]>) {
+    const actual = brief?.metadata[key];
+    if (typeof actual === "string" && PLACEHOLDER_PATTERN.test(actual)) continue;
+    if (!brief || actual !== expected)
+      conflicts.push(`publication-brief.${key} must equal ${expected}.`);
+  }
+  const exactJournal = documents.find((document) => document.kind === "exact-journal");
+  const exactTarget = normalizeTargetJournal(exactJournal?.metadata.journalName);
+  const briefTarget = normalizeTargetJournal(brief?.metadata.targetJournal);
+  if (exactJournal && exactTarget && briefTarget && exactTarget !== briefTarget) {
+    conflicts.push("publication-brief.targetJournal must match exact-journal.journalName.");
+  }
+  return conflicts.sort();
 }
 
 function normalizeTargetJournal(value: unknown): string | null {
