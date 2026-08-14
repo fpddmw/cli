@@ -42,6 +42,8 @@ ownership:
         include:
           - package.json
           - package-lock.json
+          - .dockerignore
+          - Dockerfile.clean-test
           - .nvmrc
           - .gitattributes
           - tsconfig.json
@@ -62,6 +64,8 @@ routing:
       paths:
         - package.json
         - package-lock.json
+        - .dockerignore
+        - Dockerfile.clean-test
         - .nvmrc
         - .gitattributes
         - tsconfig.json
@@ -87,6 +91,8 @@ coverage:
     - .github/workflows/**
     - package.json
     - package-lock.json
+    - .dockerignore
+    - Dockerfile.clean-test
     - .nvmrc
     - .gitattributes
     - .prettierrc.json
@@ -172,6 +178,10 @@ rules:
         kind: runtime-config
       - path: package-lock.json
         kind: dependency-lock
+      - path: .dockerignore
+        kind: clean-container-context-policy
+      - path: Dockerfile.clean-test
+        kind: clean-container-image
       - path: .nvmrc
         kind: node-baseline
       - path: .gitattributes

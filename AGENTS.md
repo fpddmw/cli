@@ -11,6 +11,8 @@ checkPaths:
   - AGENTS.md
   - README.md
   - package.json
+  - .dockerignore
+  - Dockerfile.clean-test
   - .github/workflows/**
   - .docpact/config.yaml
   - docs/agents/**
@@ -62,7 +64,7 @@ This repository owns the Tiangong AI command-line interface.
 Run before delivery:
 
 ```bash
-npm run test:clean
+npm run test:clean:cold
 npm run lint
 npm run build
 npm test
@@ -71,9 +73,17 @@ docpact validate-config --root . --strict
 docpact lint --root . --worktree --mode enforce
 ```
 
-For Auto Research changes, `npm run test:clean` is the authoritative TDD gate.
-Write the regression first, observe it fail in that clean container, then make
-it pass there. Host-only results are supplemental.
+For Auto Research changes, `npm run test:clean` is the iterative authoritative
+TDD gate. It may reuse input-valid Docker build layers, but every invocation
+runs the tests in a separately created offline container with isolated HOME and
+temporary filesystems. Write the regression first, observe it fail there, then
+make it pass in another fresh container. Host-only results are supplemental.
+
+Run `npm run test:clean:cold` after changing `.dockerignore`, the clean-test
+Dockerfile, a dependency manifest or lockfile, and before delivery. Hosted PR
+and publish workflows use this cold mode explicitly; it adds `--no-cache` but
+does not use `--pull`, because base versions change only through reviewed digest
+updates.
 
 Use `npm run typecheck` for a faster TypeScript-only check.
 Use `npm run prepush:gate` when `docpact` is installed and you want the

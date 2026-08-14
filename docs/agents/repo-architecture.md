@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-12
-lastReviewedCommit: 7d692de934c51178df520ccdaa212acc7dc303f0
+lastReviewedAt: 2026-08-14
+lastReviewedCommit: 6369461ca3c0866c5a37f991dac8760ea8f361a2
 ---
 
 # Repo Architecture

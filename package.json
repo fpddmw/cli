@@ -32,6 +32,7 @@
     "test:coverage": "npm run build && node ./scripts/run-test-coverage.cjs",
     "test:container": "node ./scripts/assert-clean-container.mjs && npm run lint && npm run test:coverage",
     "test:clean": "sh ./scripts/test-clean-container.sh",
+    "test:clean:cold": "sh ./scripts/test-clean-container.sh --cold-build",
     "audit:research-setup-pins": "npm run build && node ./scripts/audit-research-setup-pins.mjs",
     "prepush:gate": "npm run test:clean && docpact validate-config --root . --strict && docpact lint --root . --worktree --mode enforce",
     "lint": "npm run lint:format && npm run lint:coverage-guards",
