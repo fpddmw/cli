@@ -63,7 +63,7 @@ jobs:
           fi
 
       - name: Run mandatory clean-container gate
-        run: npm run test:clean
+        run: npm run test:clean:cold
 
       - name: Verify package
         env:

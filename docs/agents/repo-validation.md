@@ -10,6 +10,8 @@ whenToUpdate: "When Node baseline, package scripts, coverage thresholds, docpact
 checkPaths:
   - package.json
   - package-lock.json
+  - .dockerignore
+  - Dockerfile.clean-test
   - .nvmrc
   - .gitattributes
   - .prettierrc.json
@@ -58,7 +60,7 @@ four rows.
 Run before delivery:
 
 ```bash
-npm run test:clean
+npm run test:clean:cold
 npm run lint
 npm test
 npm run test:coverage
@@ -67,16 +69,23 @@ docpact validate-config --root . --strict
 docpact lint --root . --worktree --mode enforce
 ```
 
-`npm run test:clean` builds `Dockerfile.clean-test` with `--no-cache` from the
-digest-pinned Node 24 image, copies only the `.dockerignore`-filtered checkout,
-and runs the full lint/coverage gate as a non-root user in an ephemeral,
-runtime-offline container. It must be the red and green environment for Auto
-Research changes; host tests cannot replace it. Provider live checks and the
-networked immutable-pin audit run separately because they are explicit
-networked validations.
+`npm run test:clean` is the iterative red/green/refactor entrypoint. It builds
+from the digest-pinned Node 24 image, may reuse Docker layers whose declared
+inputs still match, copies only the `.dockerignore`-filtered checkout, and runs
+the full lint/coverage gate as a non-root user in a newly created,
+runtime-offline container. Tests run after container creation and are never a
+build-cache result. Host tests cannot replace this gate.
 
-The container has no host mounts, Docker socket, credentials, or runtime
-network. It enables Docker's privileged namespace mode solely so the non-root
+`npm run test:clean:cold` selects the same isolation contract with an explicit
+`--no-cache` build. Run it after `.dockerignore`, Dockerfile, dependency
+manifest, or lockfile changes and before delivery. PR and publish workflows use
+cold mode. Neither mode uses `--pull`; the base image stays reproducible until
+its reviewed digest changes. Provider live checks and the networked
+immutable-pin audit run separately because they are explicit networked
+validations.
+
+Every runtime container has no host mounts, Docker socket, credentials, or
+runtime network. It enables Docker's privileged namespace mode solely so the non-root
 test process can exercise the real nested Bubblewrap capsule instead of skipping
 or mocking it; the isolation assertion still rejects root execution, host HOME,
 global Skills, and global CLI state.

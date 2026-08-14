@@ -24,7 +24,7 @@ jobs:
           fi
 
       - name: Run clean-container gate
-        run: npm run test:clean
+        run: npm run test:clean:cold
 
   quality-gate:
     name: quality-gate (${{ matrix.os }} / ${{ matrix.arch }})
