@@ -220,6 +220,30 @@ generations, Policy/evidence/base-output hashes, four role-specific review
 schemas, producer/reviewer separation, append-only reviewer-session reuse
 rejection, raw-session non-persistence, active-base-research status, revision
 invalidation, and publication closure language ceilings.
+`test/research-scientific-design.test.ts` uses the EV pavement-model R9 failure
+as a fixed regression for truth-role confusion, non-independent validation,
+effective-sample inflation, quantity/threshold overclaim, closest-work
+full-text gaps, unresolved blocking gaps, unfair baselines, and context-plan
+overflow. Later EV review regressions cover retrievable raw-byte model and
+environment bindings, implementation-versus-freeze status, Policy ownership of
+pending model/environment/uncertainty objects, exact joint-state mappings,
+continuous decision-consequence graphs, explicit factor/uncertainty
+composition, and the rule that specification bytes do not establish
+executability. `test/research-scientific-admission.test.ts` covers native producer
+session hashing, immutable design admission, Policy/design identity, complete
+lifecycle reservations, and target-specific fork generations.
+`test/research-scientific-review.test.ts` covers the ordered research-design,
+real-record evidence-construct, and pilot-methods gates; other-family/fresh
+reviewer sessions; closed assessment/review schemas; mechanical precedence;
+stage-time hash revalidation; machine-visible future obligations before their
+due gate and blocking errors at that gate; and the invariant that 200,000
+resamples of four independent structures still provide four independent
+structures.
+`test/research-audit-bundle.test.ts` covers exact portable export and independent
+verification, formal evidence/artifact bytes, transformed input bindings,
+environment and journal proofs, read-only content, tamper/extra-byte rejection,
+and exclusion of credentials, active state, capsules, unrelated projects,
+host-specific paths, and sensitive URL/authentication material.
 Production tests additionally require an external
 public-internet plan and block downstream work when any capability marked
 `requiredForDiscovery` lacks a broker receipt. The failure distinguishes a

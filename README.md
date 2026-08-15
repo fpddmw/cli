@@ -269,7 +269,7 @@ regular non-symlink `runtime-lock.json` exact stable CLI version. Setup and
 release CI reject a missing resolver or any stale exact CLI version in the
 orchestrator's `SKILL.md` or `references/*.md`.
 
-### Top-journal Research Policy and final publication gate
+### Top-journal Policy, scientific design, and publication gates
 
 A `top-journal` project starts with a human-reviewed Markdown Policy, not with
 model execution. After project-scoped setup reaches `READY`, use the guided
@@ -292,22 +292,86 @@ binds the manifest and every document by SHA-256; edits, manifest tampering, or
 expiry block preflight and all later stages until the Policy is reviewed and
 approved again.
 
-Use the Policy project ID when admitting the research project:
+Before search, the current native Codex or Claude host must author a
+project-specific scientific design. The CLI owns the closed schema and rejects
+designs that confuse model-to-model disagreement with observed truth, inflate
+independent sample size through resampling, omit quantity/threshold semantics,
+leave blocking gaps unresolved, or cannot fit the complete review lifecycle.
+The CLI validates, freezes, hashes, and routes this design; it does not author
+the design or launch a nested producer.
+
+Hash binding alone does not make a model executable. Each model declares raw
+implementation bytes, a retrievable safe locator and entrypoint, exact
+environment-lock bytes, implementation/environment status, and a freeze gate.
+Source-derived uncertainty states also declare whether their values are frozen
+or pending, and every joint state maps exact parameter-state IDs. Pending model,
+environment, or uncertainty objects are allowed only when a planned Policy rule
+owns the same due gate. They are exposed in every earlier review packet as
+`futureGateObligations` and become blocking mechanical errors at that gate.
+Freezing them requires a new authoritative generation; it never upgrades the
+old object in place.
+
+Use the same Policy project ID and exact design when preflighting and admitting
+the research project:
 
 ```bash
+tiangong-ai research schema show scientific-design --json
 tiangong-ai research project preflight \
   --question "A specific, testable research question" \
   --goal top-journal --policy-project top-journal-paper \
   --requirements /absolute/path/to/evidence-requirements.json \
+  --design /absolute/path/to/scientific-design.json \
+  --workspace /absolute/path/to/workspace --json
+tiangong-ai research project init top-journal-paper \
+  --question "A specific, testable research question" \
+  --goal top-journal \
+  --requirements /absolute/path/to/evidence-requirements.json \
+  --design /absolute/path/to/scientific-design.json \
+  --design-producer-agent codex \
+  --design-producer-session OPAQUE_NATIVE_SESSION \
+  --confirm-budget \
   --workspace /absolute/path/to/workspace --json
 ```
 
 The base evidence lifecycle remains
 `discover -> acquire -> analyze -> synthesize -> review -> close`, authored in
-the current interactive Codex or Claude Code host. After base closure, the
-current native host writes a final manuscript and schema-valid publication
-assessment. `research publication freeze` then content-addresses the Policy,
-evidence snapshot, base outputs, manuscript, assessment, and supplements.
+the current interactive Codex or Claude Code host. A fresh independent reviewer
+must first pass three hash-bound scientific gates: `research-design` before
+discovery, a real-record and outcome-blind `evidence-construct` canary after
+discovery and before acquisition, and `pilot-methods` after acquisition and
+before analysis. Reviewer prose cannot override a mechanical failure.
+
+```bash
+tiangong-ai research schema show scientific-assessment-research-design --json
+tiangong-ai research project scientific review prepare top-journal-paper \
+  --role research-design \
+  --assessment /absolute/path/to/research-design-assessment.json \
+  --reviewer-agent claude \
+  --reviewer-session FRESH_OPAQUE_REVIEW_SESSION \
+  --workspace /absolute/path/to/workspace --json
+tiangong-ai research schema show scientific-review-research-design --json
+tiangong-ai research project scientific review submit top-journal-paper \
+  --role research-design --review /absolute/path/to/review.json \
+  --workspace /absolute/path/to/workspace --json
+```
+
+Repeat the same prepare/submit route for `evidence-construct` and
+`pilot-methods` at their stage boundaries. A top-journal fork or addendum is a
+new authoritative generation and therefore requires a target-specific approved
+Policy, design, and fresh native producer session; it cannot inherit scientific
+approval from a superseded generation.
+
+Review packet `stageInputs` identify promoted portable objects by purpose,
+owner, source locator, and SHA-256 over raw file bytes. `packetSha256` is the
+logical packet identity that excludes its own identity field; the portable
+audit manifest separately records the raw stored packet-file digest. This keeps
+packet identity and byte-level transfer verification explicit rather than
+overloading one hash with both meanings.
+
+After base closure, the current native host writes a final manuscript and
+schema-valid publication assessment. `research publication freeze` then
+content-addresses the Policy, scientific design and early reviews, evidence
+snapshot, base outputs, manuscript, assessment, and supplements.
 Exactly four fresh independent sessions review that frozen generation:
 evidence, methods/reproducibility, domain/novelty, and journal-editor. A revised
 manuscript invalidates prior reviews; reviewer-session reuse is rejected from
@@ -331,6 +395,21 @@ The CLI returns a mechanically bounded ceiling:
 `top-journal-candidate`, `top-journal-class-ready`, or
 `target-journal-submission-ready`. Evidence and review failures can only lower
 it. None of these states predicts or guarantees editorial acceptance.
+
+Before external handoff or archival, export and independently verify a portable
+audit directory. It contains the selected project, portable copies of admitted
+inputs, formal evidence and artifact bytes, Policy/design/review objects,
+outputs, environment fingerprints, and journal proofs. Credentials, setup
+sources, browser profiles, native active state, capsules, unrelated projects,
+and host-specific absolute paths are excluded.
+
+```bash
+tiangong-ai research project audit export top-journal-paper \
+  --output /absolute/path/to/new-audit-directory \
+  --workspace /absolute/path/to/workspace --json
+tiangong-ai research project audit verify \
+  --bundle /absolute/path/to/new-audit-directory --json
+```
 
 `research setup status --json` reports credential persistence separately from
 readiness. It also reports the effective exact-npx CLI package/version/root,
@@ -527,12 +606,15 @@ repair with no research tools.
 Total, per-package, output, repair, broker-response bytes, estimated broker
 context tokens, context items, wall-time, output-count, output-size, and attempt
 limits live in `.tiangong-research/config.json`.
-New production workspaces use generous but finite runaway ceilings: 20,000,000
-total tokens and package ceilings of 12,000,000 for discovery, 2,000,000 for
+New production workspaces use generous but finite runaway ceilings: 50,000,000
+total tokens, USD 5,000, 30 days, and package ceilings of 12,000,000 for discovery, 2,000,000 for
 acquisition, 1,500,000 each for analysis and synthesis, and 2,500,000 for
 review. Primary output is bounded at 32,000 tokens and a separately invoked
 repair at 16,000. The production broker hard ceiling is 256 bounded views with
 32,000 context tokens per view; input context is bounded at 128,000 tokens.
+Top-journal admission additionally reserves three early scientific reviews at
+500,000 tokens each, four final publication reviews at 750,000 each, and one
+4,000,000-token revision cycle, including their finite wall-time allowances.
 These values are not a target spend. Coverage-derived working plans and early
 stop control ordinary use, while the finite ceilings, three attempts per
 package, and explicit confirmation above the cost threshold stop runaway work.

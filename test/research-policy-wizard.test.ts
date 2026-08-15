@@ -63,6 +63,22 @@ describe("Research Policy Wizard", () => {
     }
   });
 
+  it("uses a verified orchestrator when research is ready but an optional companion is degraded", async () => {
+    const fixture = await policyWizardFixture("policy-partial-setup", false, true);
+    try {
+      const result = await executeResearchPolicyWizard({
+        root: fixture.root,
+        projectId: "research-ready-paper",
+        prompt: new ScriptedPolicyPrompt(),
+      });
+      assert.equal(result.status.status, "custom-draft");
+      assert.equal(result.sourceRoot, await realpath(fixture.orchestratorRoot));
+    } finally {
+      fixture.restoreCatalog();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("fails with an actionable setup error when the orchestrator is not installed", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-policy-no-orchestrator-"));
     try {
@@ -154,6 +170,7 @@ class ScriptedPolicyPrompt implements ResearchPolicyWizardPrompt {
 async function policyWizardFixture(
   prefix: string,
   includeExactJournal = false,
+  optionalCompanionDegraded = false,
 ): Promise<{
   root: string;
   orchestratorRoot: string;
@@ -179,13 +196,32 @@ async function policyWizardFixture(
   await writeJsonAtomic(workspacePaths(root).setupState, {
     schemaVersion: 1,
     planSha256: setupPlan.planSha256,
-    status: "ready",
+    status: optionalCompanionDegraded ? "partially-ready" : "ready",
     currentStep: null,
     completedSteps: ["install", "doctor"],
     attempts: 1,
     updatedAt: new Date().toISOString(),
     lastError: null,
   });
+  if (optionalCompanionDegraded) {
+    await writeJsonAtomic(workspacePaths(root).setupReport, {
+      schemaVersion: 1,
+      workspace: await realpath(root),
+      planSha256: setupPlan.planSha256,
+      checkedAt: new Date().toISOString(),
+      mode: "live",
+      readiness: "READY",
+      researchReadiness: "READY",
+      preprocessingReadiness: "NOT_REQUIRED",
+      acquisitionReadiness: "DEGRADED",
+      authoringReadiness: "NOT_REQUIRED",
+      overallReadiness: "PARTIALLY_READY",
+      checks: [],
+      capabilityDoctor: null,
+      workspaceDoctor: null,
+      summary: { pass: 1, warn: 1, fail: 1 },
+    });
+  }
   return {
     root,
     orchestratorRoot,

@@ -63,6 +63,12 @@ export interface ResearchBudget {
   maxBrokerCalls: number;
   maxBrokerItems: number;
   maxInputContextTokens: number;
+  earlyScientificReviewMaxTokens: number;
+  finalPublicationReviewMaxTokens: number;
+  revisionReserveTokens: number;
+  earlyScientificReviewMaxWallSeconds: number;
+  finalPublicationReviewMaxWallSeconds: number;
+  revisionReserveWallSeconds: number;
 }
 
 export interface WorkspaceMarker {
@@ -289,6 +295,37 @@ export interface WorkPackage {
   completedAt: string | null;
 }
 
+export type ScientificReviewRole = "research-design" | "evidence-construct" | "pilot-methods";
+
+export type ScientificGateStatus =
+  | "pending"
+  | "prepared"
+  | "passed"
+  | "revision-required"
+  | "stopped";
+
+export interface ScientificDesignBinding {
+  schemaVersion: 1;
+  designSha256: string;
+  objectLocator: string;
+  centralStudyKind: string;
+  producer: {
+    agent: AgentKind;
+    sessionSha256: string;
+  };
+  mechanicalIssueCodes: string[];
+  gates: Record<
+    ScientificReviewRole,
+    {
+      status: ScientificGateStatus;
+      packetSha256: string | null;
+      assessmentSha256: string | null;
+      reviewSha256: string | null;
+      reviewerSessionSha256: string | null;
+    }
+  >;
+}
+
 export interface ProjectUsage {
   tokens: number;
   inputTokens: number;
@@ -309,6 +346,7 @@ export interface ProjectState {
   inputs: ProjectInput[];
   evidenceRequirements: ProjectEvidenceRequirements;
   publicationPolicy?: ResearchPolicyBinding | null;
+  scientificDesign: ScientificDesignBinding | null;
   packages: WorkPackage[];
   usage: ProjectUsage;
   lineage: {

@@ -51,6 +51,7 @@ import {
   saveProject,
 } from "./projects.js";
 import { assertResearchPolicyBinding } from "./research-policy.js";
+import { assertScientificGateForStage } from "./scientific-review.js";
 import {
   configuredResearchSecrets,
   sanitizeResearchRecord,
@@ -425,6 +426,7 @@ export async function prepareNativeResearchStage(input: {
     const config = await loadWorkspaceConfig(input.root);
     assertExecutionConfiguration(config);
     const project = await loadProject(input.root, input.projectId);
+    await assertScientificGateForStage(input.root, project, input.stage);
     await assertProjectPublicationPolicy(input.root, project);
     if (config.producer.agent !== input.hostAgent) {
       throw new CliError(
@@ -1368,8 +1370,9 @@ async function executeWorkPackage(
   doctorAttestation: WorkspaceDoctorAttestation | null,
 ): Promise<{ projectId: string; packageId: string; status: string }> {
   const project = await loadProject(root, projectId);
-  await assertProjectPublicationPolicy(root, project);
   const workPackage = packageById(project, packageId);
+  await assertScientificGateForStage(root, project, workPackage.stage);
+  await assertProjectPublicationPolicy(root, project);
   const now = new Date().toISOString();
   workPackage.status = "running";
   workPackage.attempts += 1;

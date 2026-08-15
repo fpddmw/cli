@@ -30,6 +30,12 @@ import {
 } from "../src/research/workspace/storage.js";
 import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
+import {
+  passEvidenceConstructGate,
+  passPilotMethodsGate,
+  passResearchDesignGate,
+  scientificDesignInput,
+} from "./helpers/scientific-design.js";
 
 const REVIEW_ROLES: PublicationReviewRole[] = [
   "evidence",
@@ -53,6 +59,10 @@ describe("top-journal publication workflow", () => {
         false,
         undefined,
         policy,
+        await scientificDesignInput(root, projectId, {
+          targetJournal: policy.targetJournal,
+          policyRules: policy.resolvedRules,
+        }),
       );
       const status = await invokeCli([
         "research",
@@ -465,9 +475,28 @@ async function publicationFixture(
     false,
     undefined,
     policy,
+    await scientificDesignInput(root, projectId, {
+      targetJournal: policy.targetJournal,
+      policyRules: policy.resolvedRules,
+    }),
   );
-  const project = await loadProject(root, projectId);
+  await passResearchDesignGate(root, projectId);
+  let project = await loadProject(root, projectId);
   const outputRoot = join(workspacePaths(root).projects, projectId, "outputs");
+  await writeJsonAtomic(join(outputRoot, "evidence.json"), {
+    schemaVersion: 1,
+    sources: [],
+  });
+  const discover = project.packages.find((workPackage) => workPackage.id === "discover")!;
+  discover.status = "complete";
+  discover.completedAt = "2026-08-12T00:00:00.000Z";
+  await saveProject(root, project);
+  await passEvidenceConstructGate(root, projectId);
+  project = await loadProject(root, projectId);
+  await writeJsonAtomic(join(outputRoot, "acquisition.json"), {
+    schemaVersion: 1,
+    artifacts: [],
+  });
   const snapshotCore = {
     schemaVersion: 1,
     kind: "tiangong-evidence-snapshot",
@@ -505,6 +534,12 @@ async function publicationFixture(
   const snapshotSha256 = sha256Text(canonicalJson(snapshotCore));
   const snapshot = { ...snapshotCore, snapshotSha256 };
   await writeJsonAtomic(join(outputRoot, "evidence-snapshot.json"), snapshot);
+  const acquire = project.packages.find((workPackage) => workPackage.id === "acquire")!;
+  acquire.status = "complete";
+  acquire.completedAt = "2026-08-12T00:00:00.000Z";
+  await saveProject(root, project);
+  await passPilotMethodsGate(root, projectId);
+  project = await loadProject(root, projectId);
   await writeJsonAtomic(join(outputRoot, "analysis.json"), {
     schemaVersion: 1,
     findings: [],
