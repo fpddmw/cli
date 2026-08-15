@@ -1,0 +1,1426 @@
+{
+  "schemaVersion": 1,
+  "projectId": "ev-pavement-r9-narrowed",
+  "workingTitle": "Cross-model structural uncertainty and gross HMA consequences under a specified overlay rule",
+  "identity": {
+    "centralStudyKind": "cross-model-comparison",
+    "contributionStatement": "Quantify cross-model structural discrepancies and their decision consequences without treating any engineering model as field truth.",
+    "components": [
+      {
+        "kind": "cross-model-comparison",
+        "role": "central",
+        "purpose": "Compare model structure and decision rankings on compatible declared operations.",
+        "bridgeEdgeIds": ["edge-model-to-overlay"]
+      },
+      {
+        "kind": "scenario-analysis",
+        "role": "supporting",
+        "purpose": "Translate model discrepancies through an explicit overlay rule.",
+        "bridgeEdgeIds": [
+          "edge-model-to-overlay",
+          "edge-model-overlay-to-scenario",
+          "edge-service-share-to-overlay"
+        ]
+      },
+      {
+        "kind": "material-flow-accounting",
+        "role": "supporting",
+        "purpose": "Calculate gross installed HMA for one modeled overlay event.",
+        "bridgeEdgeIds": ["edge-overlay-to-hma"]
+      },
+      {
+        "kind": "observational-empirical",
+        "role": "contextual",
+        "purpose": "Use LTPP only for maintenance intervals, overlay thickness, and density context.",
+        "bridgeEdgeIds": []
+      }
+    ],
+    "modelStructures": [
+      {
+        "id": "mechanistic-fatigue-model",
+        "label": "Mechanistic fatigue model",
+        "family": "mechanistic-empirical",
+        "version": "frozen-equations-v1",
+        "equationSet": "Published bottom-up fatigue transfer functions and response equations frozen in the implementation artifact.",
+        "coefficientSet": "Published coefficient table frozen without outcome-driven recalibration.",
+        "implementationArtifactSha256": "56d8a62662e0cb5b72ccf3a850ab3d8c67877617a140068838acd01fbd7d4c8c",
+        "implementationArtifactLocator": "lineage/objects/fixture-mechanistic-fatigue-model.json",
+        "implementationEntrypoint": "evaluate-fatigue-damage",
+        "implementationStatus": "executable-frozen",
+        "implementationFreezeBeforeGate": "research-design",
+        "environmentLockSha256": "1a555ffae331667cf14a431fa9eb2b43e7818f61dde3eae542f479544428a33a",
+        "environmentLockLocator": "lineage/objects/fixture-mechanistic-environment-lock.json",
+        "environmentLockStatus": "exact-frozen",
+        "environmentLockFreezeBeforeGate": "research-design",
+        "artifactHashBasis": "raw-file-bytes",
+        "baselineRole": "candidate",
+        "baselineSelectionJustification": "This mechanistic structure is the prespecified candidate because it exposes the pavement response pathway under the same frozen inputs.",
+        "sourceEvidenceRoleIds": ["role-central-model"]
+      },
+      {
+        "id": "reference-fatigue-model",
+        "label": "Reference fatigue model",
+        "family": "independent-reference",
+        "version": "published-reference-v1",
+        "equationSet": "Published reference fatigue equations independently encoded and frozen before outcome inspection.",
+        "coefficientSet": "Published reference coefficient table with no candidate-specific tuning.",
+        "implementationArtifactSha256": "cbabf6d9be9c397e2504efcf2325fed332c1644870ad039f8aecbec234cde438",
+        "implementationArtifactLocator": "lineage/objects/fixture-reference-fatigue-model.json",
+        "implementationEntrypoint": "evaluate-reference-fatigue",
+        "implementationStatus": "executable-frozen",
+        "implementationFreezeBeforeGate": "research-design",
+        "environmentLockSha256": "df6b7c6506f18bf4fc04326fd55612c0ab36d1230fa4151ed5004a5bd1c0fad8",
+        "environmentLockLocator": "lineage/objects/fixture-reference-environment-lock.json",
+        "environmentLockStatus": "exact-frozen",
+        "environmentLockFreezeBeforeGate": "research-design",
+        "artifactHashBasis": "raw-file-bytes",
+        "baselineRole": "strongest-available",
+        "baselineSelectionJustification": "The reference is the strongest independently published model that exposes a compatible fatigue endpoint and can be run on identical inputs without field-truth claims.",
+        "sourceEvidenceRoleIds": ["role-central-model"]
+      }
+    ],
+    "allowedClaimVerbs": ["differs from", "agrees with", "implies under assumptions"],
+    "targetJournals": {
+      "primary": "International Journal of Pavement Engineering",
+      "alternate": "Road Materials and Pavement Design",
+      "fallback": "Journal of Transportation Engineering, Part B",
+      "approvalStatus": "policy-approved"
+    }
+  },
+  "policyRuleDispositions": [],
+  "estimands": [
+    {
+      "id": "estimand-model",
+      "role": "central",
+      "population": "Declared pavement structures and heavy-vehicle configurations",
+      "analysisUnit": "independent pavement-structure cluster",
+      "exposure": "declared heavy-vehicle load configuration",
+      "comparator": "alternative engineering model structures",
+      "outcome": "cross-model fatigue-damage discrepancy and decision disagreement",
+      "spatialScale": "pavement-structure",
+      "timeHorizon": "single modeled load case",
+      "resultClass": "model-output"
+    },
+    {
+      "id": "estimand-hma",
+      "role": "supporting",
+      "population": "Declared modeled overlay events",
+      "analysisUnit": "lane-kilometre event",
+      "exposure": "specified overlay rule",
+      "comparator": "no modeled overlay event",
+      "outcome": "gross installed HMA mixture",
+      "spatialScale": "lane-kilometre",
+      "timeHorizon": "one modeled overlay event",
+      "resultClass": "scenario-output"
+    }
+  ],
+  "claims": [
+    {
+      "id": "claim-discrepancy",
+      "role": "central",
+      "statement": "Engineering model structures differ in response ranking and modeled overlay decisions on the declared cases.",
+      "resultClass": "model-output",
+      "edgeIds": ["edge-model-to-overlay"],
+      "endpointIds": [
+        "endpoint-fatigue",
+        "endpoint-reference-fatigue",
+        "endpoint-overlay-mechanistic",
+        "endpoint-overlay-reference"
+      ],
+      "comparisonIds": [
+        "comparison-discrepancy",
+        "comparison-ranking",
+        "comparison-overlay-disagreement"
+      ],
+      "estimandIds": ["estimand-model"],
+      "quantityIds": [
+        "quantity-model-discrepancy",
+        "quantity-model-direction",
+        "quantity-overlay-decision-disagreement"
+      ],
+      "evidenceRoleIds": [
+        "role-central-model",
+        "role-central-data",
+        "role-closest-work",
+        "role-counterevidence"
+      ],
+      "hypothesisMode": "two-sided",
+      "nullOutcomeStatement": "The frozen model structures may agree within the declared decision tolerance."
+    },
+    {
+      "id": "claim-hma",
+      "role": "supporting",
+      "statement": "Under the specified overlay rule, a modeled additional event implies a gross installed HMA mixture requirement per lane-kilometre.",
+      "resultClass": "scenario-output",
+      "edgeIds": [
+        "edge-model-overlay-to-scenario",
+        "edge-service-share-to-overlay",
+        "edge-overlay-to-hma"
+      ],
+      "endpointIds": [
+        "endpoint-overlay-baseline",
+        "endpoint-overlay-scenario",
+        "endpoint-gross-hma"
+      ],
+      "comparisonIds": ["comparison-overlay-count"],
+      "estimandIds": ["estimand-hma"],
+      "quantityIds": [
+        "quantity-gross-hma",
+        "quantity-service-share",
+        "quantity-additional-overlay-count"
+      ],
+      "evidenceRoleIds": ["role-central-model", "role-central-data", "role-material-conversion"],
+      "hypothesisMode": "descriptive",
+      "nullOutcomeStatement": null
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-model-to-overlay",
+      "role": "central",
+      "fromConstruct": "engineering model response",
+      "toConstruct": "modeled overlay decision",
+      "evidenceMode": "model-bridge",
+      "requiredJoinKeys": [
+        "vehicle-configuration",
+        "pavement-structure",
+        "declared-response-definition"
+      ],
+      "temporalAlignment": "same modeled case",
+      "spatialAlignment": "same pavement structure",
+      "fromModelStructureIds": ["mechanistic-fatigue-model", "reference-fatigue-model"],
+      "toModelStructureIds": [],
+      "fromEndpointIds": ["endpoint-fatigue", "endpoint-reference-fatigue"],
+      "toEndpointIds": ["endpoint-overlay-mechanistic", "endpoint-overlay-reference"],
+      "operatorId": "operator-load-to-overlay-count",
+      "operatorDefinition": "For each model, configuration, and pavement structure, accumulate the frozen single-load damage response over the declared 50-year traffic sequence, apply the identical overlay trigger with boundary-year exclusion, reset accumulated damage after each trigger, and retain the resulting integer event count. Preserve the one-to-one structure identifier; never pool structures or extrapolate to a network.",
+      "aggregationRule": "Apply the frozen load-to-event accumulation operator separately to each model output on the identical traffic sequence.",
+      "scaleReconciliation": "Map each single-load response to one 50-year event count for the same pavement structure through the declared accumulation operator; report structure-level results only.",
+      "quantityIds": [
+        "quantity-model-discrepancy",
+        "quantity-model-direction",
+        "quantity-overlay-decision-disagreement"
+      ],
+      "uncertaintyParameterIds": [
+        "uncertainty-shared-layer-modulus",
+        "uncertainty-shared-layer-thickness",
+        "uncertainty-vehicle-load-factor"
+      ],
+      "sameSectionRequired": true,
+      "sameEventRequired": false,
+      "status": "planned",
+      "blockingReason": null
+    },
+    {
+      "id": "edge-model-overlay-to-scenario",
+      "role": "supporting",
+      "fromConstruct": "model-specific pavement-structure overlay event count",
+      "toConstruct": "model-indexed road-section baseline overlay event count",
+      "evidenceMode": "model-bridge",
+      "requiredJoinKeys": [
+        "model-structure-id",
+        "pavement-structure",
+        "road-section-id",
+        "scenario-id"
+      ],
+      "temporalAlignment": "same frozen 50-year scenario",
+      "spatialAlignment": "same one-to-one declared pavement structure and road section",
+      "fromModelStructureIds": ["mechanistic-fatigue-model", "reference-fatigue-model"],
+      "toModelStructureIds": [],
+      "fromEndpointIds": ["endpoint-overlay-mechanistic", "endpoint-overlay-reference"],
+      "toEndpointIds": ["endpoint-overlay-baseline"],
+      "operatorId": "operator-model-event-to-section-baseline",
+      "operatorDefinition": "Carry each frozen model's integer overlay event count from one pavement structure to its one-to-one declared road-section representation while retaining the model-structure identifier. Do not average models, pool structures, or extrapolate to a network.",
+      "aggregationRule": "No aggregation; preserve one model by one pavement structure by one road section.",
+      "scaleReconciliation": "Declare one lane-kilometre road-section view of the same pavement structure and retain the model identifier and 50-year event count unchanged.",
+      "quantityIds": [
+        "quantity-overlay-decision-disagreement",
+        "quantity-additional-overlay-count"
+      ],
+      "uncertaintyParameterIds": [
+        "uncertainty-shared-layer-modulus",
+        "uncertainty-shared-layer-thickness",
+        "uncertainty-vehicle-load-factor"
+      ],
+      "sameSectionRequired": true,
+      "sameEventRequired": false,
+      "status": "planned",
+      "blockingReason": null
+    },
+    {
+      "id": "edge-service-share-to-overlay",
+      "role": "supporting",
+      "fromConstruct": "declared freight service share",
+      "toConstruct": "modeled overlay event",
+      "evidenceMode": "assumption-only",
+      "requiredJoinKeys": ["scenario-id", "service-share", "overlay-rule"],
+      "temporalAlignment": "same frozen 50-year scenario",
+      "spatialAlignment": "same declared lane-kilometre scenario",
+      "fromModelStructureIds": [],
+      "toModelStructureIds": [],
+      "fromEndpointIds": ["endpoint-overlay-baseline"],
+      "toEndpointIds": ["endpoint-overlay-scenario"],
+      "operatorId": "operator-service-share-event-difference",
+      "operatorDefinition": "Evaluate every frozen service-share state with the same overlay rule, subtract the baseline event count from the scenario event count, and retain the signed integer difference for the same section and 50-year horizon.",
+      "aggregationRule": "Apply the frozen service-share grid and overlay trigger without interpolation beyond the declared scenario points.",
+      "scaleReconciliation": "Map the declared service fraction to modeled section events, then retain the event count for one lane-kilometre without network extrapolation.",
+      "quantityIds": ["quantity-service-share", "quantity-additional-overlay-count"],
+      "uncertaintyParameterIds": [
+        "uncertainty-baseline-interval",
+        "uncertainty-analysis-horizon",
+        "uncertainty-overlay-trigger",
+        "uncertainty-vehicle-load-factor"
+      ],
+      "sameSectionRequired": true,
+      "sameEventRequired": false,
+      "status": "planned",
+      "blockingReason": null
+    },
+    {
+      "id": "edge-overlay-to-hma",
+      "role": "supporting",
+      "fromConstruct": "modeled overlay event",
+      "toConstruct": "gross installed HMA mixture",
+      "evidenceMode": "accounting-bridge",
+      "requiredJoinKeys": ["overlay-thickness", "lane-width", "mixture-density"],
+      "temporalAlignment": "same modeled event",
+      "spatialAlignment": "one lane-kilometre",
+      "fromModelStructureIds": [],
+      "toModelStructureIds": [],
+      "fromEndpointIds": ["endpoint-overlay-scenario"],
+      "toEndpointIds": ["endpoint-gross-hma"],
+      "operatorId": "operator-overlay-event-to-gross-hma",
+      "operatorDefinition": "For each scenario overlay event, multiply the frozen overlay thickness by the declared lane width, one-kilometre length, and mixture density, convert cubic metres to tonnes, and report tonnes per lane-kilometre per event without RAP, binder, network, or annual extrapolation.",
+      "aggregationRule": "Multiply frozen thickness, lane width, length, and mixture density per event.",
+      "scaleReconciliation": "Reduce each 50-year road-section event to one declared lane-kilometre event and report no network or annual extrapolation.",
+      "quantityIds": ["quantity-gross-hma"],
+      "uncertaintyParameterIds": ["uncertainty-overlay-thickness", "uncertainty-mixture-density"],
+      "sameSectionRequired": false,
+      "sameEventRequired": true,
+      "status": "planned",
+      "blockingReason": null
+    }
+  ],
+  "endpoints": [
+    {
+      "id": "endpoint-fatigue",
+      "label": "Bottom-up fatigue damage ratio",
+      "physicalConstruct": "bottom-up fatigue damage",
+      "scale": "pavement-structure",
+      "unit": "ratio",
+      "timeBasis": "single modeled load case",
+      "modelStructureId": "mechanistic-fatigue-model",
+      "truthRole": "engineering-model"
+    },
+    {
+      "id": "endpoint-reference-fatigue",
+      "label": "Reference-model bottom-up fatigue damage ratio",
+      "physicalConstruct": "bottom-up fatigue damage",
+      "scale": "pavement-structure",
+      "unit": "ratio",
+      "timeBasis": "single modeled load case",
+      "modelStructureId": "reference-fatigue-model",
+      "truthRole": "engineering-model"
+    },
+    {
+      "id": "endpoint-overlay-mechanistic",
+      "label": "Mechanistic-model overlay event count",
+      "physicalConstruct": "modeled overlay event count",
+      "scale": "pavement-structure",
+      "unit": "event",
+      "timeBasis": "specified 50-year scenario",
+      "modelStructureId": "mechanistic-fatigue-model",
+      "truthRole": "scenario-output"
+    },
+    {
+      "id": "endpoint-overlay-reference",
+      "label": "Reference-model overlay event count",
+      "physicalConstruct": "modeled overlay event count",
+      "scale": "pavement-structure",
+      "unit": "event",
+      "timeBasis": "specified 50-year scenario",
+      "modelStructureId": "reference-fatigue-model",
+      "truthRole": "scenario-output"
+    },
+    {
+      "id": "endpoint-overlay-baseline",
+      "label": "Baseline modeled overlay event count",
+      "physicalConstruct": "modeled overlay event count",
+      "scale": "road-section",
+      "unit": "event",
+      "timeBasis": "specified 50-year scenario",
+      "modelStructureId": null,
+      "truthRole": "scenario-output"
+    },
+    {
+      "id": "endpoint-overlay-scenario",
+      "label": "Scenario modeled overlay event count",
+      "physicalConstruct": "modeled overlay event count",
+      "scale": "road-section",
+      "unit": "event",
+      "timeBasis": "specified 50-year scenario",
+      "modelStructureId": null,
+      "truthRole": "scenario-output"
+    },
+    {
+      "id": "endpoint-gross-hma",
+      "label": "Gross installed HMA per overlay event",
+      "physicalConstruct": "gross installed HMA mixture",
+      "scale": "lane-kilometre event",
+      "unit": "t/lane-km/event",
+      "timeBasis": "one modeled overlay event",
+      "modelStructureId": null,
+      "truthRole": "accounting-output"
+    }
+  ],
+  "comparisons": [
+    {
+      "id": "comparison-discrepancy",
+      "leftEndpointId": "endpoint-fatigue",
+      "rightEndpointId": "endpoint-reference-fatigue",
+      "operation": "discrepancy",
+      "axis": "same-endpoint-cross-model",
+      "quantityIds": ["quantity-model-discrepancy", "quantity-model-direction"],
+      "thresholdIds": ["threshold-model-discrepancy"],
+      "decisionRule": "Classify a case as materially discrepant only when the absolute symmetric normalized discrepancy exceeds 0.10 and its sign remains stable across every frozen shared-input sensitivity state; otherwise report agreement within tolerance.",
+      "reportingLevel": "Report each vehicle configuration within each pavement structure, followed by a four-structure cluster summary without treating the 12 cells as independent.",
+      "truthEndpointId": null
+    },
+    {
+      "id": "comparison-ranking",
+      "leftEndpointId": "endpoint-fatigue",
+      "rightEndpointId": "endpoint-reference-fatigue",
+      "operation": "ranking",
+      "axis": "same-endpoint-cross-model",
+      "quantityIds": ["quantity-model-direction"],
+      "thresholdIds": [],
+      "decisionRule": "For each pavement structure, compare the complete ordering of the three frozen vehicle configurations; report exact agreement, ties, or rank reversal without declaring either model correct.",
+      "reportingLevel": "Report configuration rankings within each pavement structure and the count of structures with exact agreement, ties, or reversal.",
+      "truthEndpointId": null
+    },
+    {
+      "id": "comparison-overlay-disagreement",
+      "leftEndpointId": "endpoint-overlay-mechanistic",
+      "rightEndpointId": "endpoint-overlay-reference",
+      "operation": "discrepancy",
+      "axis": "same-endpoint-cross-model",
+      "quantityIds": ["quantity-overlay-decision-disagreement"],
+      "thresholdIds": ["threshold-overlay-disagreement"],
+      "decisionRule": "Classify the frozen model structures as decision-disagreeing for a case only when their 50-year overlay event counts differ by at least one event in every reported central sensitivity state.",
+      "reportingLevel": "Report the integer event-count difference by configuration within pavement structure and summarize at the four-structure cluster level.",
+      "truthEndpointId": null
+    },
+    {
+      "id": "comparison-overlay-count",
+      "leftEndpointId": "endpoint-overlay-baseline",
+      "rightEndpointId": "endpoint-overlay-scenario",
+      "operation": "discrepancy",
+      "axis": "decision-consequence",
+      "quantityIds": ["quantity-additional-overlay-count"],
+      "thresholdIds": ["threshold-overlay"],
+      "decisionRule": "Flag the first frozen service-share state whose scenario count exceeds the baseline by at least one event, while reporting every state and every threshold sensitivity result.",
+      "reportingLevel": "Report signed additional events for one declared road section over the frozen 50-year scenario; do not extrapolate to a network.",
+      "truthEndpointId": null
+    }
+  ],
+  "quantities": [
+    {
+      "id": "quantity-service-share",
+      "label": "Freight service share",
+      "quantityType": "share",
+      "unit": "fraction",
+      "numeratorType": "declared freight service from the target configuration",
+      "denominatorType": "total_declared_freight_service",
+      "denominatorDescription": "all declared heavy-truck freight service in the scenario",
+      "normalizationMode": "not-applicable",
+      "normalizationJustification": "This is a bounded scenario fraction, not a directional comparison between model outputs.",
+      "valueMode": "nonnegative",
+      "uncertaintyParameterIds": [],
+      "spatialScope": "declared heavy-truck service",
+      "temporalScope": "specified scenario",
+      "allowedTerms": ["freight service share"],
+      "prohibitedTerms": ["truck pass share", "registered vehicle share", "empirical adoption rate"]
+    },
+    {
+      "id": "quantity-model-discrepancy",
+      "label": "Cross-model fatigue damage ratio discrepancy",
+      "quantityType": "index",
+      "unit": "ratio",
+      "numeratorType": "absolute cross-model damage-ratio difference",
+      "denominatorType": "mean_cross_model_fatigue_damage_ratio",
+      "denominatorDescription": "arithmetic mean of the two frozen model damage ratios on the same case",
+      "normalizationMode": "symmetric",
+      "normalizationJustification": "A symmetric denominator preserves model exchangeability because neither engineering model is designated as field truth.",
+      "valueMode": "absolute",
+      "uncertaintyParameterIds": [
+        "uncertainty-shared-layer-modulus",
+        "uncertainty-shared-layer-thickness",
+        "uncertainty-vehicle-load-factor"
+      ],
+      "spatialScope": "same declared pavement structure",
+      "temporalScope": "same modeled load case",
+      "allowedTerms": ["cross-model discrepancy", "ranking disagreement"],
+      "prohibitedTerms": ["field error", "validated accuracy", "causal effect"]
+    },
+    {
+      "id": "quantity-model-direction",
+      "label": "Signed cross-model fatigue damage ratio difference",
+      "quantityType": "index",
+      "unit": "ratio",
+      "numeratorType": "mechanistic-model damage ratio minus reference-model damage ratio",
+      "denominatorType": "mean_cross_model_fatigue_damage_ratio",
+      "denominatorDescription": "arithmetic mean of the two frozen model damage ratios on the same case",
+      "normalizationMode": "symmetric",
+      "normalizationJustification": "The symmetric denominator preserves model exchangeability while the frozen subtraction order supplies direction only for sign-stability and ranking reports.",
+      "valueMode": "signed",
+      "uncertaintyParameterIds": [
+        "uncertainty-shared-layer-modulus",
+        "uncertainty-shared-layer-thickness",
+        "uncertainty-vehicle-load-factor"
+      ],
+      "spatialScope": "same declared pavement structure",
+      "temporalScope": "same modeled load case",
+      "allowedTerms": ["signed model difference", "direction stability"],
+      "prohibitedTerms": ["field error", "validated accuracy", "causal effect"]
+    },
+    {
+      "id": "quantity-overlay-decision-disagreement",
+      "label": "Absolute cross-model overlay event-count disagreement",
+      "quantityType": "count",
+      "unit": "event",
+      "numeratorType": "absolute difference between the two frozen model overlay event counts",
+      "denominatorType": "same_pavement_structure_scenario",
+      "denominatorDescription": "one identical pavement structure, traffic sequence, and 50-year scenario",
+      "normalizationMode": "not-applicable",
+      "normalizationJustification": "The quantity is an integer event-count difference and is not normalized.",
+      "valueMode": "absolute",
+      "uncertaintyParameterIds": [
+        "uncertainty-shared-layer-modulus",
+        "uncertainty-shared-layer-thickness",
+        "uncertainty-vehicle-load-factor"
+      ],
+      "spatialScope": "same declared pavement structure",
+      "temporalScope": "same 50-year modeled scenario",
+      "allowedTerms": ["overlay decision disagreement", "event-count difference"],
+      "prohibitedTerms": ["observed maintenance error", "validated prediction error"]
+    },
+    {
+      "id": "quantity-additional-overlay-count",
+      "label": "Signed additional overlay event count",
+      "quantityType": "count",
+      "unit": "event",
+      "numeratorType": "scenario overlay event count minus baseline overlay event count",
+      "denominatorType": "same_road_section_scenario",
+      "denominatorDescription": "one declared road section over the identical 50-year scenario",
+      "normalizationMode": "not-applicable",
+      "normalizationJustification": "The quantity is a signed integer event difference and is not normalized.",
+      "valueMode": "signed",
+      "uncertaintyParameterIds": [
+        "uncertainty-baseline-interval",
+        "uncertainty-analysis-horizon",
+        "uncertainty-overlay-trigger",
+        "uncertainty-vehicle-load-factor"
+      ],
+      "spatialScope": "one declared road section",
+      "temporalScope": "specified 50-year scenario",
+      "allowedTerms": ["additional modeled overlay event", "scenario event difference"],
+      "prohibitedTerms": ["observed overlay increase", "network maintenance demand"]
+    },
+    {
+      "id": "quantity-gross-hma",
+      "label": "Gross installed HMA mixture",
+      "quantityType": "material",
+      "unit": "t/lane-km/event",
+      "numeratorType": "gross installed mixture mass",
+      "denominatorType": "lane_km_overlay_event",
+      "denominatorDescription": "one lane-kilometre modeled overlay event",
+      "normalizationMode": "not-applicable",
+      "normalizationJustification": "The accounting quantity is reported per physical event and is not normalized against another model.",
+      "valueMode": "nonnegative",
+      "uncertaintyParameterIds": ["uncertainty-overlay-thickness", "uncertainty-mixture-density"],
+      "spatialScope": "one lane-kilometre",
+      "temporalScope": "one modeled overlay event",
+      "allowedTerms": ["gross installed HMA", "overlay mixture requirement"],
+      "prohibitedTerms": [
+        "asphalt demand",
+        "binder demand",
+        "virgin material demand",
+        "network annual demand"
+      ]
+    }
+  ],
+  "validationPlans": [
+    {
+      "id": "validation-cross-model",
+      "claimIds": ["claim-discrepancy"],
+      "role": "cross-model-reference",
+      "parameterDatasetIds": ["gkyrtis-2025"],
+      "comparisonDatasetIds": ["fhwa-ict-25-003"],
+      "datasetRoles": [
+        {
+          "datasetId": "gkyrtis-2025",
+          "role": "parameter-source",
+          "sharedUpstreamIds": ["declared-load-configurations"],
+          "justification": "Supplies frozen model inputs and configuration definitions; it is not an outcome validation dataset."
+        },
+        {
+          "datasetId": "fhwa-ict-25-003",
+          "role": "non-independent-cross-check",
+          "sharedUpstreamIds": ["declared-load-configurations"],
+          "justification": "Checks equation and endpoint implementation against published examples but shares definitions and is not independent field validation."
+        }
+      ],
+      "factorIds": ["factor-load-configuration"],
+      "exposureIdentifierAvailable": true,
+      "independentDataGeneratingProcess": false,
+      "outcomeBlind": true,
+      "originalUnitCount": 12,
+      "independentClusterCount": 4,
+      "effectiveIndependentUnits": 4,
+      "originalUnitDefinition": "Twelve pavement-structure by declared-load-configuration cells: four frozen pavement structures crossed with three frozen non-powertrain configuration levels.",
+      "independentClusterDefinition": "Four pavement structures identified by pavement-structure-id are the independent data-generating clusters.",
+      "nestingRule": "The three declared load configurations are repeated within every pavement structure and are not counted as independent clusters.",
+      "reportingUnitDefinition": "Report discrepancies and rankings by configuration within structure; uncertainty summaries resample and report at pavement-structure level.",
+      "clusterKeyIds": ["pavement-structure-id"],
+      "independenceJustification": "The four frozen pavement structures are the only independent comparison clusters.",
+      "resamplingUnit": "pavement-structure",
+      "resamplingIterations": 35,
+      "resamplingMethod": "exact-enumeration",
+      "resamplingStateSpaceSize": 35,
+      "reportingPrecision": "Report the exact 35 cluster-level multisets; do not infer precision from iteration count.",
+      "minimumDetectableDifference": "No population-level MDD claim with four independent structures.",
+      "independentValidation": {
+        "status": "unavailable-scope-bounded",
+        "gapId": "gap-powertrain-wim",
+        "justification": "No independent powertrain-labelled field outcome exists; claims remain cross-model."
+      },
+      "status": "feasible",
+      "blockingReason": null
+    },
+    {
+      "id": "validation-ltpp-context",
+      "claimIds": ["claim-hma"],
+      "role": "background-constraint",
+      "parameterDatasetIds": [],
+      "comparisonDatasetIds": ["ltpp-sdr39"],
+      "datasetRoles": [
+        {
+          "datasetId": "ltpp-sdr39",
+          "role": "background-context",
+          "sharedUpstreamIds": [],
+          "justification": "Supplies descriptive interval, thickness, and density context only; it is not used to validate either frozen model."
+        }
+      ],
+      "factorIds": [],
+      "exposureIdentifierAvailable": false,
+      "independentDataGeneratingProcess": true,
+      "outcomeBlind": true,
+      "originalUnitCount": 392,
+      "independentClusterCount": 0,
+      "effectiveIndependentUnits": 0,
+      "originalUnitDefinition": "The 392 source records are candidate LTPP section observations before deterministic section deduplication.",
+      "independentClusterDefinition": "Verified unique LTPP sections after deduplication; the count remains zero until the frozen data audit completes.",
+      "nestingRule": "Repeated records are nested within LTPP section and may not be counted as independent observations.",
+      "reportingUnitDefinition": "Report section-level descriptive context only after deduplication; make no validation or population-precision claim.",
+      "clusterKeyIds": ["ltpp-section-id"],
+      "independenceJustification": "Repeated records will be deduplicated by LTPP section before any descriptive context count is reported.",
+      "resamplingUnit": "ltpp-section",
+      "resamplingIterations": 0,
+      "resamplingMethod": "none",
+      "resamplingStateSpaceSize": 0,
+      "reportingPrecision": "Descriptive context only; no validation or resampling precision claim.",
+      "minimumDetectableDifference": null,
+      "independentValidation": {
+        "status": "not-required",
+        "gapId": null,
+        "justification": "This plan supplies context and is not presented as validation."
+      },
+      "status": "planned",
+      "blockingReason": null
+    }
+  ],
+  "thresholds": [
+    {
+      "id": "threshold-model-discrepancy",
+      "claimId": "claim-discrepancy",
+      "quantityId": "quantity-model-discrepancy",
+      "type": "analytic",
+      "reportedAs": "analytic-threshold",
+      "criterion": "The absolute symmetric normalized discrepancy exceeds 0.10 and the discrepancy sign is stable across every frozen shared-input sensitivity state.",
+      "criterionQuantityIds": ["quantity-model-discrepancy", "quantity-model-direction"],
+      "numericValue": 0.1,
+      "unit": "ratio",
+      "direction": "above",
+      "basis": "reporting-convention",
+      "basisJustification": "The 0.10 symmetric discrepancy is a prespecified reporting convention, not an empirical accuracy or policy threshold; every result is also reported continuously.",
+      "stabilityMode": "sign",
+      "stabilityQuantityId": "quantity-model-direction",
+      "stabilityRule": "The signed mechanistic-minus-reference discrepancy must retain the same nonzero sign in all seven central one-at-a-time states; any zero or reversal is reported as unstable.",
+      "sensitivityReportingRule": "Report the continuous absolute and signed values for all seven states before the threshold classification and never suppress an unstable state.",
+      "assumptionIds": ["model-exchangeability", "same-input-case"],
+      "sensitivityParameterIds": [
+        "uncertainty-shared-layer-modulus",
+        "uncertainty-shared-layer-thickness",
+        "uncertainty-vehicle-load-factor"
+      ]
+    },
+    {
+      "id": "threshold-overlay-disagreement",
+      "claimId": "claim-discrepancy",
+      "quantityId": "quantity-overlay-decision-disagreement",
+      "type": "analytic",
+      "reportedAs": "analytic-threshold",
+      "criterion": "The absolute integer event-count difference between the two frozen model structures exceeds zero events over the same 50-year case.",
+      "criterionQuantityIds": ["quantity-overlay-decision-disagreement"],
+      "numericValue": 0,
+      "unit": "event",
+      "direction": "above",
+      "basis": "decision-consequence",
+      "basisJustification": "One integer overlay event is the smallest nonzero difference under the frozen event-count operator and therefore changes the modeled maintenance decision.",
+      "stabilityMode": "classification",
+      "stabilityQuantityId": "quantity-overlay-decision-disagreement",
+      "stabilityRule": "Decision disagreement is stable only when the event-count difference remains at least one in every reported central uncertainty state.",
+      "sensitivityReportingRule": "Report all seven central states and label the case unstable if any state crosses the one-event classification boundary.",
+      "assumptionIds": ["same-overlay-operator", "boundary-year-exclusion"],
+      "sensitivityParameterIds": [
+        "uncertainty-shared-layer-modulus",
+        "uncertainty-shared-layer-thickness",
+        "uncertainty-vehicle-load-factor"
+      ]
+    },
+    {
+      "id": "threshold-overlay",
+      "claimId": "claim-hma",
+      "quantityId": "quantity-additional-overlay-count",
+      "type": "scenario",
+      "reportedAs": "scenario-threshold",
+      "criterion": "Within the frozen service-share grid, flag the first scenario whose signed integer overlay-count difference exceeds zero events over 50 years.",
+      "criterionQuantityIds": ["quantity-service-share", "quantity-additional-overlay-count"],
+      "numericValue": 0,
+      "unit": "event",
+      "direction": "above",
+      "basis": "decision-consequence",
+      "basisJustification": "One event is the smallest integer change produced by the frozen overlay operator and defines the first scenario with an additional modeled intervention.",
+      "stabilityMode": "classification",
+      "stabilityQuantityId": "quantity-additional-overlay-count",
+      "stabilityRule": "The first flagged service-share state is stable only when the additional-event classification is unchanged across all nine scenario sensitivity states.",
+      "sensitivityReportingRule": "Report the complete service-share grid under every one-at-a-time scenario state and disclose all threshold crossings or ordering changes.",
+      "assumptionIds": [
+        "linear-share-mixing",
+        "twenty-one-year-baseline",
+        "boundary-year-exclusion"
+      ],
+      "sensitivityParameterIds": [
+        "uncertainty-baseline-interval",
+        "uncertainty-analysis-horizon",
+        "uncertainty-overlay-trigger",
+        "uncertainty-vehicle-load-factor"
+      ]
+    }
+  ],
+  "evidenceRoles": [
+    {
+      "id": "role-central-model",
+      "role": "central-model-source",
+      "claimIds": ["claim-discrepancy", "claim-hma"],
+      "coverageDimensionIds": ["central-model-definitions", "cross-model-validation"],
+      "sourceTypeRequirements": ["academic-paper", "government-technical-report"],
+      "peerReviewedRequired": true,
+      "required": true,
+      "minimumFullText": 4,
+      "minimumIndependentSources": 6,
+      "minimumDatedSources": 4
+    },
+    {
+      "id": "role-central-data",
+      "role": "central-data-documentation",
+      "claimIds": ["claim-discrepancy", "claim-hma"],
+      "coverageDimensionIds": ["pavement-context", "overlay-rule"],
+      "sourceTypeRequirements": ["official-data", "government-technical-report", "standard"],
+      "peerReviewedRequired": false,
+      "required": true,
+      "minimumFullText": 2,
+      "minimumIndependentSources": 3,
+      "minimumDatedSources": 3
+    },
+    {
+      "id": "role-closest-work",
+      "role": "closest-prior-work",
+      "claimIds": ["claim-discrepancy"],
+      "coverageDimensionIds": ["closest-prior-work"],
+      "sourceTypeRequirements": ["academic-paper"],
+      "peerReviewedRequired": true,
+      "required": true,
+      "minimumFullText": 6,
+      "minimumIndependentSources": 6,
+      "minimumDatedSources": 4
+    },
+    {
+      "id": "role-counterevidence",
+      "role": "counterevidence",
+      "claimIds": ["claim-discrepancy"],
+      "coverageDimensionIds": ["counterevidence", "limitations"],
+      "sourceTypeRequirements": ["academic-paper", "counterevidence"],
+      "peerReviewedRequired": true,
+      "required": true,
+      "minimumFullText": 2,
+      "minimumIndependentSources": 2,
+      "minimumDatedSources": 1
+    },
+    {
+      "id": "role-material-conversion",
+      "role": "material-conversion",
+      "claimIds": ["claim-hma"],
+      "coverageDimensionIds": ["material-conversion"],
+      "sourceTypeRequirements": ["academic-paper", "standard"],
+      "peerReviewedRequired": false,
+      "required": true,
+      "minimumFullText": 2,
+      "minimumIndependentSources": 3,
+      "minimumDatedSources": 2
+    }
+  ],
+  "knownGaps": [
+    {
+      "id": "gap-powertrain-wim",
+      "description": "No powertrain-labelled WIM exposure is available, so the project does not claim EV field validation.",
+      "sourceProjectId": "ev-pavement-r7",
+      "sourceArtifacts": [
+        {
+          "sha256": "c9ebc5a54a543d8fbaa4f6f149301ced1b26124703c4f1226eb4b7c97ae010be",
+          "objectLocator": "lineage/objects/c9ebc5a54a543d8fbaa4f6f149301ced1b26124703c4f1226eb4b7c97ae010be.json",
+          "hashBasis": "raw-file-bytes",
+          "kind": "owner-attestation"
+        }
+      ],
+      "lineageStatus": "owner-attested",
+      "disposition": "scope-narrowed",
+      "evidenceRefs": [
+        {
+          "kind": "claim",
+          "id": "claim-discrepancy"
+        },
+        {
+          "kind": "validation-plan",
+          "id": "validation-ltpp-context"
+        }
+      ]
+    },
+    {
+      "id": "gap-event-material-tickets",
+      "description": "No same-project RAP, yield, removal, or ticket data are available, so the quantity remains gross installed HMA only.",
+      "sourceProjectId": "ev-pavement-r7",
+      "sourceArtifacts": [
+        {
+          "sha256": "c426152b0a40778372f0cce9a34048fd631d9ebd36963410880bd8b03aafac40",
+          "objectLocator": "lineage/objects/c426152b0a40778372f0cce9a34048fd631d9ebd36963410880bd8b03aafac40.json",
+          "hashBasis": "raw-file-bytes",
+          "kind": "owner-attestation"
+        }
+      ],
+      "lineageStatus": "owner-attested",
+      "disposition": "scope-narrowed",
+      "evidenceRefs": [
+        {
+          "kind": "quantity",
+          "id": "quantity-gross-hma"
+        }
+      ]
+    }
+  ],
+  "uncertaintyParameters": [
+    {
+      "id": "uncertainty-shared-layer-modulus",
+      "label": "Shared pavement layer modulus range",
+      "distributionOrRange": "Frozen source-supported low, central, and high modulus states applied identically to both model structures",
+      "states": [
+        {
+          "id": "modulus-low",
+          "label": "Low",
+          "value": "2500",
+          "unit": "MPa"
+        },
+        {
+          "id": "modulus-central",
+          "label": "Central",
+          "value": "3500",
+          "unit": "MPa"
+        },
+        {
+          "id": "modulus-high",
+          "label": "High",
+          "value": "4500",
+          "unit": "MPa"
+        }
+      ],
+      "stateValueType": "numeric",
+      "stateValueStatus": "frozen",
+      "freezeBeforeGate": "research-design",
+      "factorIds": [],
+      "applicationPoint": "Shared pavement-input preparation before either frozen model is evaluated.",
+      "compositionRule": "Replace the central modulus with the source-bound low or high state identically for both model structures; change no other factor or parameter.",
+      "preservesFactorLevelIdentity": true,
+      "sourceEvidenceRoleIds": ["role-central-model", "role-central-data"],
+      "quantityIds": [
+        "quantity-model-discrepancy",
+        "quantity-model-direction",
+        "quantity-overlay-decision-disagreement"
+      ]
+    },
+    {
+      "id": "uncertainty-shared-layer-thickness",
+      "label": "Shared pavement layer thickness range",
+      "distributionOrRange": "Frozen construction-tolerance states applied identically to both model structures",
+      "states": [
+        {
+          "id": "layer-thickness-low",
+          "label": "Low",
+          "value": "180",
+          "unit": "mm"
+        },
+        {
+          "id": "layer-thickness-central",
+          "label": "Central",
+          "value": "200",
+          "unit": "mm"
+        },
+        {
+          "id": "layer-thickness-high",
+          "label": "High",
+          "value": "220",
+          "unit": "mm"
+        }
+      ],
+      "stateValueType": "numeric",
+      "stateValueStatus": "frozen",
+      "freezeBeforeGate": "research-design",
+      "factorIds": [],
+      "applicationPoint": "Shared pavement-input preparation before either frozen model is evaluated.",
+      "compositionRule": "Replace the central layer thickness with the source-bound low or high state identically for both model structures; change no other factor or parameter.",
+      "preservesFactorLevelIdentity": true,
+      "sourceEvidenceRoleIds": ["role-central-model", "role-central-data"],
+      "quantityIds": [
+        "quantity-model-discrepancy",
+        "quantity-model-direction",
+        "quantity-overlay-decision-disagreement"
+      ]
+    },
+    {
+      "id": "uncertainty-vehicle-load-factor",
+      "label": "Vehicle load-factor sensitivity",
+      "distributionOrRange": "Frozen low, central, and high load-factor states shared by both model structures and the scenario bridge",
+      "states": [
+        {
+          "id": "load-factor-low",
+          "label": "Low",
+          "value": "0.95",
+          "unit": "ratio"
+        },
+        {
+          "id": "load-factor-central",
+          "label": "Central",
+          "value": "1.00",
+          "unit": "ratio"
+        },
+        {
+          "id": "load-factor-high",
+          "label": "High",
+          "value": "1.05",
+          "unit": "ratio"
+        }
+      ],
+      "stateValueType": "numeric",
+      "stateValueStatus": "frozen",
+      "freezeBeforeGate": "research-design",
+      "factorIds": ["factor-load-configuration"],
+      "applicationPoint": "Immediately after selecting a frozen load-configuration level and before supplying the load input to either model or scenario operator.",
+      "compositionRule": "Multiply each level's normalized load factor by the shared source-bound sensitivity multiplier; never replace or relabel the 0.85, 1.00, or 1.15 exposure level.",
+      "preservesFactorLevelIdentity": true,
+      "sourceEvidenceRoleIds": ["role-central-model", "role-central-data"],
+      "quantityIds": [
+        "quantity-model-discrepancy",
+        "quantity-model-direction",
+        "quantity-overlay-decision-disagreement",
+        "quantity-additional-overlay-count"
+      ]
+    },
+    {
+      "id": "uncertainty-baseline-interval",
+      "label": "Baseline maintenance interval sensitivity",
+      "distributionOrRange": "Frozen source-supported maintenance-interval scenarios",
+      "states": [
+        {
+          "id": "baseline-interval-low",
+          "label": "Short",
+          "value": "18",
+          "unit": "year"
+        },
+        {
+          "id": "baseline-interval-central",
+          "label": "Central",
+          "value": "21",
+          "unit": "year"
+        },
+        {
+          "id": "baseline-interval-high",
+          "label": "Long",
+          "value": "24",
+          "unit": "year"
+        }
+      ],
+      "stateValueType": "numeric",
+      "stateValueStatus": "frozen",
+      "freezeBeforeGate": "research-design",
+      "factorIds": [],
+      "applicationPoint": "Baseline event-count initialization for every service-share state.",
+      "compositionRule": "Replace only the baseline maintenance interval with the selected source-bound state and recompute event counts without changing service share.",
+      "preservesFactorLevelIdentity": true,
+      "sourceEvidenceRoleIds": ["role-central-data"],
+      "quantityIds": ["quantity-additional-overlay-count"]
+    },
+    {
+      "id": "uncertainty-analysis-horizon",
+      "label": "Analysis-horizon sensitivity",
+      "distributionOrRange": "Frozen boundary-year inclusion and exclusion states around the 50-year horizon",
+      "states": [
+        {
+          "id": "horizon-49",
+          "label": "Lower boundary",
+          "value": "49",
+          "unit": "year"
+        },
+        {
+          "id": "horizon-50",
+          "label": "Central",
+          "value": "50",
+          "unit": "year"
+        },
+        {
+          "id": "horizon-51",
+          "label": "Upper boundary",
+          "value": "51",
+          "unit": "year"
+        }
+      ],
+      "stateValueType": "numeric",
+      "stateValueStatus": "frozen",
+      "freezeBeforeGate": "research-design",
+      "factorIds": [],
+      "applicationPoint": "Boundary-year handling in the overlay event-count operator.",
+      "compositionRule": "Evaluate the same service-share grid at exactly 49, 50, and 51 years while leaving service-share values unchanged.",
+      "preservesFactorLevelIdentity": true,
+      "sourceEvidenceRoleIds": ["role-central-data"],
+      "quantityIds": ["quantity-additional-overlay-count"]
+    },
+    {
+      "id": "uncertainty-overlay-trigger",
+      "label": "Overlay-trigger sensitivity",
+      "distributionOrRange": "Frozen low, central, and high trigger states supported by the overlay-rule evidence role",
+      "states": [
+        {
+          "id": "overlay-trigger-low",
+          "label": "Low",
+          "value": "0.80",
+          "unit": "ratio"
+        },
+        {
+          "id": "overlay-trigger-central",
+          "label": "Central",
+          "value": "1.00",
+          "unit": "ratio"
+        },
+        {
+          "id": "overlay-trigger-high",
+          "label": "High",
+          "value": "1.20",
+          "unit": "ratio"
+        }
+      ],
+      "stateValueType": "numeric",
+      "stateValueStatus": "frozen",
+      "freezeBeforeGate": "research-design",
+      "factorIds": [],
+      "applicationPoint": "Overlay-trigger comparison inside the event accumulation and reset operator.",
+      "compositionRule": "Replace only the trigger with the selected source-bound state and recompute counts for every unchanged service-share level.",
+      "preservesFactorLevelIdentity": true,
+      "sourceEvidenceRoleIds": ["role-central-data"],
+      "quantityIds": ["quantity-additional-overlay-count"]
+    },
+    {
+      "id": "uncertainty-overlay-thickness",
+      "label": "Overlay thickness range",
+      "distributionOrRange": "90-150 mm sensitivity range",
+      "states": [
+        {
+          "id": "overlay-thickness-90",
+          "label": "Low",
+          "value": "90",
+          "unit": "mm"
+        },
+        {
+          "id": "overlay-thickness-120",
+          "label": "Central",
+          "value": "120",
+          "unit": "mm"
+        },
+        {
+          "id": "overlay-thickness-150",
+          "label": "High",
+          "value": "150",
+          "unit": "mm"
+        }
+      ],
+      "stateValueType": "numeric",
+      "stateValueStatus": "frozen",
+      "freezeBeforeGate": "research-design",
+      "factorIds": [],
+      "applicationPoint": "Gross-HMA accounting operator for each modeled overlay event.",
+      "compositionRule": "Evaluate each frozen thickness state with every frozen density state without changing event counts.",
+      "preservesFactorLevelIdentity": true,
+      "sourceEvidenceRoleIds": ["role-central-data"],
+      "quantityIds": ["quantity-gross-hma"]
+    },
+    {
+      "id": "uncertainty-mixture-density",
+      "label": "HMA mixture density range",
+      "distributionOrRange": "2.25-2.45 t/m3 sensitivity range",
+      "states": [
+        {
+          "id": "density-225",
+          "label": "Low",
+          "value": "2.25",
+          "unit": "t/m3"
+        },
+        {
+          "id": "density-235",
+          "label": "Central",
+          "value": "2.35",
+          "unit": "t/m3"
+        },
+        {
+          "id": "density-245",
+          "label": "High",
+          "value": "2.45",
+          "unit": "t/m3"
+        }
+      ],
+      "stateValueType": "numeric",
+      "stateValueStatus": "frozen",
+      "freezeBeforeGate": "research-design",
+      "factorIds": [],
+      "applicationPoint": "Gross-HMA accounting operator after event volume is computed.",
+      "compositionRule": "Multiply event volume by each frozen density state across the full thickness-by-density factorial without changing event counts.",
+      "preservesFactorLevelIdentity": true,
+      "sourceEvidenceRoleIds": ["role-material-conversion"],
+      "quantityIds": ["quantity-gross-hma"]
+    }
+  ],
+  "uncertaintyGroups": [
+    {
+      "id": "uncertainty-group-central-models",
+      "parameterIds": [
+        "uncertainty-shared-layer-modulus",
+        "uncertainty-shared-layer-thickness",
+        "uncertainty-vehicle-load-factor"
+      ],
+      "combinationMode": "one-at-a-time",
+      "jointStateIds": [
+        "central-all",
+        "modulus-low-only",
+        "modulus-high-only",
+        "layer-thickness-low-only",
+        "layer-thickness-high-only",
+        "load-factor-low-only",
+        "load-factor-high-only"
+      ],
+      "applicationRule": "Run the all-central state and then vary exactly one parameter to its low or high state while holding the other two central; apply identical state values to both frozen model structures and report all seven states.",
+      "sharedAcrossModelStructureIds": ["mechanistic-fatigue-model", "reference-fatigue-model"],
+      "jointStateBindings": [
+        {
+          "jointStateId": "central-all",
+          "parameterStateIds": ["modulus-central", "layer-thickness-central", "load-factor-central"]
+        },
+        {
+          "jointStateId": "modulus-low-only",
+          "parameterStateIds": ["modulus-low", "layer-thickness-central", "load-factor-central"]
+        },
+        {
+          "jointStateId": "modulus-high-only",
+          "parameterStateIds": ["modulus-high", "layer-thickness-central", "load-factor-central"]
+        },
+        {
+          "jointStateId": "layer-thickness-low-only",
+          "parameterStateIds": ["modulus-central", "layer-thickness-low", "load-factor-central"]
+        },
+        {
+          "jointStateId": "layer-thickness-high-only",
+          "parameterStateIds": ["modulus-central", "layer-thickness-high", "load-factor-central"]
+        },
+        {
+          "jointStateId": "load-factor-low-only",
+          "parameterStateIds": ["modulus-central", "layer-thickness-central", "load-factor-low"]
+        },
+        {
+          "jointStateId": "load-factor-high-only",
+          "parameterStateIds": ["modulus-central", "layer-thickness-central", "load-factor-high"]
+        }
+      ]
+    },
+    {
+      "id": "uncertainty-group-overlay-scenario",
+      "parameterIds": [
+        "uncertainty-baseline-interval",
+        "uncertainty-analysis-horizon",
+        "uncertainty-overlay-trigger",
+        "uncertainty-vehicle-load-factor"
+      ],
+      "combinationMode": "one-at-a-time",
+      "jointStateIds": [
+        "scenario-central-all",
+        "baseline-interval-low-only",
+        "baseline-interval-high-only",
+        "horizon-low-only",
+        "horizon-high-only",
+        "overlay-trigger-low-only",
+        "overlay-trigger-high-only",
+        "scenario-load-factor-low-only",
+        "scenario-load-factor-high-only"
+      ],
+      "applicationRule": "Run the all-central scenario and then vary exactly one of the four parameters to its low or high state; evaluate the complete service-share grid in every one of the nine states.",
+      "sharedAcrossModelStructureIds": [],
+      "jointStateBindings": [
+        {
+          "jointStateId": "scenario-central-all",
+          "parameterStateIds": [
+            "baseline-interval-central",
+            "horizon-50",
+            "overlay-trigger-central",
+            "load-factor-central"
+          ]
+        },
+        {
+          "jointStateId": "baseline-interval-low-only",
+          "parameterStateIds": [
+            "baseline-interval-low",
+            "horizon-50",
+            "overlay-trigger-central",
+            "load-factor-central"
+          ]
+        },
+        {
+          "jointStateId": "baseline-interval-high-only",
+          "parameterStateIds": [
+            "baseline-interval-high",
+            "horizon-50",
+            "overlay-trigger-central",
+            "load-factor-central"
+          ]
+        },
+        {
+          "jointStateId": "horizon-low-only",
+          "parameterStateIds": [
+            "baseline-interval-central",
+            "horizon-49",
+            "overlay-trigger-central",
+            "load-factor-central"
+          ]
+        },
+        {
+          "jointStateId": "horizon-high-only",
+          "parameterStateIds": [
+            "baseline-interval-central",
+            "horizon-51",
+            "overlay-trigger-central",
+            "load-factor-central"
+          ]
+        },
+        {
+          "jointStateId": "overlay-trigger-low-only",
+          "parameterStateIds": [
+            "baseline-interval-central",
+            "horizon-50",
+            "overlay-trigger-low",
+            "load-factor-central"
+          ]
+        },
+        {
+          "jointStateId": "overlay-trigger-high-only",
+          "parameterStateIds": [
+            "baseline-interval-central",
+            "horizon-50",
+            "overlay-trigger-high",
+            "load-factor-central"
+          ]
+        },
+        {
+          "jointStateId": "scenario-load-factor-low-only",
+          "parameterStateIds": [
+            "baseline-interval-central",
+            "horizon-50",
+            "overlay-trigger-central",
+            "load-factor-low"
+          ]
+        },
+        {
+          "jointStateId": "scenario-load-factor-high-only",
+          "parameterStateIds": [
+            "baseline-interval-central",
+            "horizon-50",
+            "overlay-trigger-central",
+            "load-factor-high"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "uncertainty-group-hma-accounting",
+      "parameterIds": ["uncertainty-overlay-thickness", "uncertainty-mixture-density"],
+      "combinationMode": "full-factorial",
+      "jointStateIds": [
+        "hma-90-225",
+        "hma-90-235",
+        "hma-90-245",
+        "hma-120-225",
+        "hma-120-235",
+        "hma-120-245",
+        "hma-150-225",
+        "hma-150-235",
+        "hma-150-245"
+      ],
+      "applicationRule": "Evaluate all nine thickness-by-density combinations and report the full range plus the prespecified central 120 mm by 2.35 t/m3 state.",
+      "sharedAcrossModelStructureIds": [],
+      "jointStateBindings": [
+        {
+          "jointStateId": "hma-90-225",
+          "parameterStateIds": ["overlay-thickness-90", "density-225"]
+        },
+        {
+          "jointStateId": "hma-90-235",
+          "parameterStateIds": ["overlay-thickness-90", "density-235"]
+        },
+        {
+          "jointStateId": "hma-90-245",
+          "parameterStateIds": ["overlay-thickness-90", "density-245"]
+        },
+        {
+          "jointStateId": "hma-120-225",
+          "parameterStateIds": ["overlay-thickness-120", "density-225"]
+        },
+        {
+          "jointStateId": "hma-120-235",
+          "parameterStateIds": ["overlay-thickness-120", "density-235"]
+        },
+        {
+          "jointStateId": "hma-120-245",
+          "parameterStateIds": ["overlay-thickness-120", "density-245"]
+        },
+        {
+          "jointStateId": "hma-150-225",
+          "parameterStateIds": ["overlay-thickness-150", "density-225"]
+        },
+        {
+          "jointStateId": "hma-150-235",
+          "parameterStateIds": ["overlay-thickness-150", "density-235"]
+        },
+        {
+          "jointStateId": "hma-150-245",
+          "parameterStateIds": ["overlay-thickness-150", "density-245"]
+        }
+      ]
+    }
+  ],
+  "factors": [
+    {
+      "id": "factor-load-configuration",
+      "label": "Declared modeled load configuration",
+      "role": "exposure",
+      "observationalStatus": "modeled-only",
+      "applicabilityBoundary": "The three levels are generic frozen load cases used only for cross-model comparison. They do not identify propulsion technology, fleet prevalence, adoption, or field exposure.",
+      "evidenceRoleIds": ["role-central-model", "role-central-data"],
+      "levels": [
+        {
+          "id": "load-configuration-a",
+          "label": "Configuration A",
+          "definition": "Frozen lower load-factor case evaluated on every pavement structure.",
+          "attributes": [
+            {
+              "id": "normalized-load-factor",
+              "label": "Normalized load factor",
+              "value": "0.85",
+              "unit": "ratio"
+            }
+          ]
+        },
+        {
+          "id": "load-configuration-b",
+          "label": "Configuration B",
+          "definition": "Frozen central load-factor case evaluated on every pavement structure.",
+          "attributes": [
+            {
+              "id": "normalized-load-factor",
+              "label": "Normalized load factor",
+              "value": "1.00",
+              "unit": "ratio"
+            }
+          ]
+        },
+        {
+          "id": "load-configuration-c",
+          "label": "Configuration C",
+          "definition": "Frozen upper load-factor case evaluated on every pavement structure.",
+          "attributes": [
+            {
+              "id": "normalized-load-factor",
+              "label": "Normalized load factor",
+              "value": "1.15",
+              "unit": "ratio"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "baselinePlan": {
+    "sameInputInformation": true,
+    "comparableCalibrationBudget": true,
+    "sameEndpoint": true,
+    "frozenBeforeAnalysis": true,
+    "decisionLossMetrics": [
+      {
+        "id": "loss-overlay-decision-disagreement",
+        "label": "Overlay decision disagreement",
+        "comparisonIds": ["comparison-overlay-disagreement"],
+        "quantityIds": ["quantity-overlay-decision-disagreement"],
+        "decisionRule": "Count a loss when the two frozen models imply different integer overlay event counts for the identical case.",
+        "reportingLevel": "Configuration within pavement structure, then four-structure cluster summary."
+      },
+      {
+        "id": "loss-configuration-ranking-disagreement",
+        "label": "Configuration ranking disagreement",
+        "comparisonIds": ["comparison-ranking"],
+        "quantityIds": ["quantity-model-direction"],
+        "decisionRule": "Classify exact ordering agreement, tie, or rank reversal across the three declared configurations without designating either model as truth.",
+        "reportingLevel": "Pavement structure, followed by counts over four independent structures."
+      },
+      {
+        "id": "loss-overlay-scenario-trigger",
+        "label": "Scenario overlay trigger",
+        "comparisonIds": ["comparison-overlay-count"],
+        "quantityIds": ["quantity-additional-overlay-count"],
+        "decisionRule": "Identify the first frozen service-share state with a positive integer additional event count and disclose threshold instability across all scenario states.",
+        "reportingLevel": "One declared road section over the frozen 50-year scenario."
+      }
+    ]
+  },
+  "contextPlan": {
+    "maxEstimatedTokens": 128000,
+    "estimatedTokens": 92000,
+    "claimCriticalCapsuleIds": [
+      "central-model-definitions",
+      "closest-prior-work",
+      "material-conversion"
+    ],
+    "backgroundIndexOnly": true,
+    "centralEvidenceFits": true
+  }
+}

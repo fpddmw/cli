@@ -20,20 +20,29 @@ import {
 import { projectInputsFromPlan, reverifyProjectInputPlan } from "./input-plan.js";
 import { evaluateProjectPreflight } from "./preflight.js";
 import {
+  evaluateScientificDesign,
+  scientificDesignPolicyGaps,
+  type VerifiedScientificDesign,
+} from "./scientific-design.js";
+import {
   ensureDirectory,
   fileRecord,
   fileSize,
   isObject,
   readJsonFile,
   sha256File,
+  sha256Text,
   workspacePaths,
   writeJsonAtomic,
 } from "./storage.js";
 import type {
+  AgentKind,
   ProjectEvidenceRequirements,
   ProjectInput,
   ProjectInputTrustStatus,
   ResearchPolicyBinding,
+  ScientificDesignBinding,
+  ScientificReviewRole,
   ProjectState,
   WorkPackage,
   WorkspaceConfig,
@@ -51,6 +60,11 @@ export async function initializeProject(
   budgetConfirmed = false,
   inputPlan?: VerifiedProjectInputPlan,
   publicationPolicy?: ResearchPolicyBinding,
+  scientificDesignInput?: {
+    design: VerifiedScientificDesign;
+    producerAgent: AgentKind;
+    producerSessionId: string;
+  },
 ): Promise<ProjectState> {
   validateProjectId(projectId);
   const normalizedQuestion = question.trim();
@@ -98,6 +112,21 @@ export async function initializeProject(
     const requirements = normalizeEvidenceRequirements(
       evidenceRequirements ?? defaultEvidenceRequirements(config),
     );
+    if (publicationPolicy && !scientificDesignInput) {
+      throw new CliError("Top-journal research requires an explicit scientific design contract.", {
+        code: "RESEARCH_SCIENTIFIC_DESIGN_REQUIRED",
+        exitCode: 2,
+      });
+    }
+    if (!publicationPolicy && scientificDesignInput) {
+      throw new CliError("A scientific design contract requires an approved top-journal policy.", {
+        code: "RESEARCH_SCIENTIFIC_DESIGN_POLICY_REQUIRED",
+        exitCode: 2,
+      });
+    }
+    const scientificDesign = scientificDesignInput
+      ? prepareScientificDesignBinding(projectId, publicationPolicy!, scientificDesignInput)
+      : null;
     const admittedInputPlan = inputPlan ? await reverifyProjectInputPlan(inputPlan) : undefined;
     if (config.mode === "production-research") {
       const preflight = await evaluateProjectPreflight(
@@ -105,6 +134,10 @@ export async function initializeProject(
         normalizedQuestion,
         requirements,
         admittedInputPlan ?? null,
+        {
+          publicationPolicy: publicationPolicy ?? null,
+          scientificDesign: scientificDesignInput?.design ?? null,
+        },
       );
       if (!preflight.readyToInitialize) {
         throw new CliError("Production project initialization was blocked by preflight.", {
@@ -126,6 +159,7 @@ export async function initializeProject(
       inputs: admittedInputPlan ? projectInputsFromPlan(admittedInputPlan, now) : [],
       evidenceRequirements: requirements,
       publicationPolicy: publicationPolicy ?? null,
+      scientificDesign,
       packages: defaultWorkPackages(config),
       usage: {
         tokens: 0,
@@ -144,6 +178,12 @@ export async function initializeProject(
       ensureDirectory(join(projectRoot, "outputs")),
       ensureDirectory(join(projectRoot, "runs")),
     ]);
+    if (scientificDesign && scientificDesignInput) {
+      await writeJsonAtomic(
+        join(paths.control, scientificDesign.objectLocator),
+        scientificDesignInput.design.contract,
+      );
+    }
     await writeJsonAtomic(projectPath, project);
     await registerProjectInputCandidates(root, projectId, project.inputs);
     await appendJournalEvent(paths.journal, "project.initialized", projectId, {
@@ -151,6 +191,8 @@ export async function initializeProject(
       questionSha256: await hashQuestion(normalizedQuestion),
       inputPlanSha256: admittedInputPlan?.sha256 ?? null,
       publicationPolicySha256: publicationPolicy?.resolvedPolicySha256 ?? null,
+      scientificDesignSha256: scientificDesign?.designSha256 ?? null,
+      scientificDesignProducerSessionSha256: scientificDesign?.producer.sessionSha256 ?? null,
       inputs: project.inputs.map((input) => ({
         id: input.id,
         role: input.role,
@@ -330,6 +372,14 @@ export async function forkProject(
   sourceProjectId: string,
   targetProjectId: string,
   resumeThrough?: "discover" | "acquire" | "analyze" | "synthesize",
+  scientificReapproval?: {
+    publicationPolicy: ResearchPolicyBinding;
+    scientificDesign: {
+      design: VerifiedScientificDesign;
+      producerAgent: AgentKind;
+      producerSessionId: string;
+    };
+  },
 ): Promise<ProjectState> {
   validateProjectId(sourceProjectId);
   validateProjectId(targetProjectId);
@@ -341,6 +391,21 @@ export async function forkProject(
   }
   return withWorkspaceLock(root, "project.fork", async () => {
     const source = await loadProject(root, sourceProjectId);
+    const sourceRequiresScientificReapproval = Boolean(
+      source.publicationPolicy || source.scientificDesign,
+    );
+    if (sourceRequiresScientificReapproval && !scientificReapproval) {
+      throw new CliError(
+        "A top-journal recovery fork requires a newly approved project-specific policy and scientific design.",
+        { code: "RESEARCH_SCIENTIFIC_DESIGN_REAPPROVAL_REQUIRED", exitCode: 3 },
+      );
+    }
+    if (!sourceRequiresScientificReapproval && scientificReapproval) {
+      throw new CliError("Scientific reapproval is valid only for a top-journal source project.", {
+        code: "RESEARCH_SCIENTIFIC_DESIGN_REAPPROVAL_INVALID",
+        exitCode: 2,
+      });
+    }
     if (source.lineage.supersededBy) {
       throw new CliError(
         `Project ${sourceProjectId} is historical; fork the authoritative project ${source.lineage.supersededBy}.`,
@@ -367,6 +432,39 @@ export async function forkProject(
       });
     }
     const config = await loadWorkspaceConfig(root);
+    const targetPolicy = scientificReapproval?.publicationPolicy ?? null;
+    if (targetPolicy && targetPolicy.projectId !== targetProjectId) {
+      throw new CliError("Recovery policy must be approved for the target project generation.", {
+        code: "RESEARCH_SCIENTIFIC_DESIGN_REAPPROVAL_INVALID",
+        exitCode: 2,
+      });
+    }
+    const targetScientificDesign = scientificReapproval
+      ? prepareScientificDesignBinding(
+          targetProjectId,
+          scientificReapproval.publicationPolicy,
+          scientificReapproval.scientificDesign,
+        )
+      : null;
+    if (config.mode === "production-research") {
+      const preflight = await evaluateProjectPreflight(
+        root,
+        source.question,
+        source.evidenceRequirements,
+        null,
+        {
+          publicationPolicy: targetPolicy,
+          scientificDesign: scientificReapproval?.scientificDesign.design ?? null,
+        },
+      );
+      if (!preflight.readyToInitialize) {
+        throw new CliError("Recovery generation was blocked by production preflight.", {
+          code: "RESEARCH_PREFLIGHT_BLOCKED",
+          exitCode: 3,
+          details: { gaps: preflight.gaps, preflightSha256: preflight.preflightSha256 },
+        });
+      }
+    }
     const packages = defaultWorkPackages(config);
     const inheritedStages = resumeThrough
       ? ["discover", "acquire", "analyze", "synthesize"].slice(
@@ -407,9 +505,8 @@ export async function forkProject(
         requiredCompanionIds: [...(source.evidenceRequirements.requiredCompanionIds ?? [])],
         requiredDiscoveryScopes: [...(source.evidenceRequirements.requiredDiscoveryScopes ?? [])],
       },
-      publicationPolicy: source.publicationPolicy
-        ? structuredClone(source.publicationPolicy)
-        : null,
+      publicationPolicy: targetPolicy,
+      scientificDesign: targetScientificDesign,
       packages,
       usage: {
         tokens: 0,
@@ -432,6 +529,12 @@ export async function forkProject(
       ensureDirectory(join(targetRoot, "outputs")),
       ensureDirectory(join(targetRoot, "runs")),
     ]);
+    if (targetScientificDesign && scientificReapproval) {
+      await writeJsonAtomic(
+        join(workspacePaths(root).control, targetScientificDesign.objectLocator),
+        scientificReapproval.scientificDesign.design.contract,
+      );
+    }
     const inheritedOutputs: Array<{ path: string; sha256: string; bytes: number }> = [];
     const stageOutput: Record<string, string> = {
       discover: "outputs/evidence.json",
@@ -483,6 +586,9 @@ export async function forkProject(
       inheritedOutputs,
       inheritedUsage: false,
       sourceSuperseded: true,
+      publicationPolicySha256: targetPolicy?.resolvedPolicySha256 ?? null,
+      scientificDesignSha256: targetScientificDesign?.designSha256 ?? null,
+      scientificDesignProducerSessionSha256: targetScientificDesign?.producer.sessionSha256 ?? null,
     });
     return project;
   });
@@ -552,6 +658,14 @@ export async function createProjectAddendum(
   root: string,
   sourceProjectId: string,
   targetProjectId: string,
+  scientificReapproval?: {
+    publicationPolicy: ResearchPolicyBinding;
+    scientificDesign: {
+      design: VerifiedScientificDesign;
+      producerAgent: AgentKind;
+      producerSessionId: string;
+    };
+  },
 ): Promise<ProjectState> {
   validateProjectId(sourceProjectId);
   validateProjectId(targetProjectId);
@@ -563,6 +677,21 @@ export async function createProjectAddendum(
   }
   return withWorkspaceLock(root, "project.addendum", async () => {
     const source = refreshProject(await loadProject(root, sourceProjectId));
+    const sourceRequiresScientificReapproval = Boolean(
+      source.publicationPolicy || source.scientificDesign,
+    );
+    if (sourceRequiresScientificReapproval && !scientificReapproval) {
+      throw new CliError(
+        "A top-journal addendum requires a newly approved project-specific policy and scientific design.",
+        { code: "RESEARCH_SCIENTIFIC_DESIGN_REAPPROVAL_REQUIRED", exitCode: 3 },
+      );
+    }
+    if (!sourceRequiresScientificReapproval && scientificReapproval) {
+      throw new CliError("Scientific reapproval is valid only for a top-journal source project.", {
+        code: "RESEARCH_SCIENTIFIC_DESIGN_REAPPROVAL_INVALID",
+        exitCode: 2,
+      });
+    }
     if (source.status !== "complete" || source.packages.at(-1)?.stage !== "close") {
       throw new CliError("An addendum requires a mechanically closed source project.", {
         code: "RESEARCH_PROJECT_ADDENDUM_INVALID",
@@ -613,6 +742,39 @@ export async function createProjectAddendum(
       });
     }
     const config = await loadWorkspaceConfig(root);
+    const targetPolicy = scientificReapproval?.publicationPolicy ?? null;
+    if (targetPolicy && targetPolicy.projectId !== targetProjectId) {
+      throw new CliError("Addendum policy must be approved for the target project generation.", {
+        code: "RESEARCH_SCIENTIFIC_DESIGN_REAPPROVAL_INVALID",
+        exitCode: 2,
+      });
+    }
+    const targetScientificDesign = scientificReapproval
+      ? prepareScientificDesignBinding(
+          targetProjectId,
+          scientificReapproval.publicationPolicy,
+          scientificReapproval.scientificDesign,
+        )
+      : null;
+    if (config.mode === "production-research") {
+      const preflight = await evaluateProjectPreflight(
+        root,
+        source.question,
+        source.evidenceRequirements,
+        null,
+        {
+          publicationPolicy: targetPolicy,
+          scientificDesign: scientificReapproval?.scientificDesign.design ?? null,
+        },
+      );
+      if (!preflight.readyToInitialize) {
+        throw new CliError("Addendum generation was blocked by production preflight.", {
+          code: "RESEARCH_PREFLIGHT_BLOCKED",
+          exitCode: 3,
+          details: { gaps: preflight.gaps, preflightSha256: preflight.preflightSha256 },
+        });
+      }
+    }
     const now = new Date().toISOString();
     const target: ProjectState = {
       schemaVersion: 1,
@@ -631,9 +793,8 @@ export async function createProjectAddendum(
         requiredCompanionIds: [...(source.evidenceRequirements.requiredCompanionIds ?? [])],
         requiredDiscoveryScopes: [...(source.evidenceRequirements.requiredDiscoveryScopes ?? [])],
       },
-      publicationPolicy: source.publicationPolicy
-        ? structuredClone(source.publicationPolicy)
-        : null,
+      publicationPolicy: targetPolicy,
+      scientificDesign: targetScientificDesign,
       packages: defaultWorkPackages(config),
       usage: {
         tokens: 0,
@@ -660,6 +821,12 @@ export async function createProjectAddendum(
       ensureDirectory(join(targetRoot, "runs")),
       ensureDirectory(join(targetRoot, "evidence", "snapshots")),
     ]);
+    if (targetScientificDesign && scientificReapproval) {
+      await writeJsonAtomic(
+        join(workspacePaths(root).control, targetScientificDesign.objectLocator),
+        scientificReapproval.scientificDesign.design.contract,
+      );
+    }
     const inheritedOutputs: Array<{ path: string; sha256: string; bytes: number }> = [];
     for (const logicalPath of ["outputs/evidence.json", "outputs/acquisition.json"] as const) {
       const sourcePath = join(workspacePaths(root).projects, sourceProjectId, logicalPath);
@@ -732,6 +899,10 @@ export async function createProjectAddendum(
         baseSnapshotSha256: snapshot.snapshotSha256,
         inheritedOutputs,
         originalClosurePreserved: true,
+        publicationPolicySha256: targetPolicy?.resolvedPolicySha256 ?? null,
+        scientificDesignSha256: targetScientificDesign?.designSha256 ?? null,
+        scientificDesignProducerSessionSha256:
+          targetScientificDesign?.producer.sessionSha256 ?? null,
       },
     );
     return target;
@@ -772,7 +943,37 @@ export function refreshProject(project: ProjectState): ProjectState {
 export function nextReadyPackage(project: ProjectState): WorkPackage | undefined {
   refreshProject(project);
   if (project.handoff.state !== "agent-actionable") return undefined;
-  return project.packages.find((workPackage) => workPackage.status === "ready");
+  const candidate = project.packages.find((workPackage) => workPackage.status === "ready");
+  if (!candidate) return undefined;
+  const gate = nextScientificGate(project);
+  if (gate && gate.status !== "passed") {
+    const packageOrder = ["discover", "acquire", "analyze", "synthesize", "review", "close"];
+    if (packageOrder.indexOf(candidate.id) >= packageOrder.indexOf(gate.blocksPackage)) {
+      return undefined;
+    }
+  }
+  return candidate;
+}
+
+export function nextScientificGate(project: ProjectState): {
+  role: ScientificReviewRole;
+  blocksPackage: "discover" | "acquire" | "analyze";
+  status: ScientificDesignBinding["gates"][ScientificReviewRole]["status"];
+} | null {
+  if (!project.scientificDesign) return null;
+  const ordered: Array<{
+    role: ScientificReviewRole;
+    blocksPackage: "discover" | "acquire" | "analyze";
+  }> = [
+    { role: "research-design", blocksPackage: "discover" },
+    { role: "evidence-construct", blocksPackage: "acquire" },
+    { role: "pilot-methods", blocksPackage: "analyze" },
+  ];
+  for (const item of ordered) {
+    const status = project.scientificDesign.gates[item.role].status;
+    if (status !== "passed") return { ...item, status };
+  }
+  return null;
 }
 
 export function packageById(project: ProjectState, packageId: string): WorkPackage {
@@ -885,6 +1086,8 @@ function validateProjectShape(project: ProjectState, expectedId: string): void {
     (project.budgetConfirmedAt !== null && typeof project.budgetConfirmedAt !== "string") ||
     !Array.isArray(project.inputs) ||
     !isEvidenceRequirements(project.evidenceRequirements) ||
+    !isScientificDesignBinding(project.scientificDesign, expectedId) ||
+    (Boolean(project.publicationPolicy) && project.scientificDesign === null) ||
     !Array.isArray(project.packages) ||
     !project.usage ||
     typeof project.usage.tokens !== "number" ||
@@ -951,6 +1154,140 @@ function initialHandoffState(): ProjectState["handoff"] {
     resolvedAt: null,
     resolutionNote: null,
   };
+}
+
+function prepareScientificDesignBinding(
+  projectId: string,
+  policy: ResearchPolicyBinding,
+  input: {
+    design: VerifiedScientificDesign;
+    producerAgent: AgentKind;
+    producerSessionId: string;
+  },
+): ScientificDesignBinding {
+  const contract = input.design.contract;
+  const normalized = `${JSON.stringify(contract, null, 2)}\n`;
+  if (
+    contract.projectId !== projectId ||
+    input.design.sha256 !== sha256Text(normalized) ||
+    input.design.bytes !== Buffer.byteLength(normalized, "utf8")
+  ) {
+    throw new CliError("Scientific design does not match its verified project and hash binding.", {
+      code: "RESEARCH_SCIENTIFIC_DESIGN_PROJECT_MISMATCH",
+      exitCode: 2,
+    });
+  }
+  if (!input.producerSessionId.trim()) {
+    throw new CliError("Scientific design requires an opaque native producer session identifier.", {
+      code: "RESEARCH_SCIENTIFIC_DESIGN_PRODUCER_INVALID",
+      exitCode: 2,
+    });
+  }
+  if (
+    policy.targetJournal &&
+    policy.targetJournal.trim().toLocaleLowerCase("en-US") !==
+      contract.identity.targetJournals.primary.trim().toLocaleLowerCase("en-US")
+  ) {
+    throw new CliError("Scientific design primary journal does not match Research Policy.", {
+      code: "RESEARCH_SCIENTIFIC_DESIGN_POLICY_MISMATCH",
+      exitCode: 2,
+    });
+  }
+  const expectedJournalApprovalStatus = policy.targetJournal ? "policy-approved" : "candidate-only";
+  if (contract.identity.targetJournals.approvalStatus !== expectedJournalApprovalStatus) {
+    throw new CliError(
+      policy.targetJournal
+        ? "An exact-journal Research Policy requires a policy-approved scientific design target."
+        : "A generic Research Policy may list exact journals only as candidates.",
+      {
+        code: "RESEARCH_SCIENTIFIC_DESIGN_POLICY_MISMATCH",
+        exitCode: 2,
+        details: {
+          expectedApprovalStatus: expectedJournalApprovalStatus,
+          actualApprovalStatus: contract.identity.targetJournals.approvalStatus,
+        },
+      },
+    );
+  }
+  const evaluation = evaluateScientificDesign(contract);
+  if (!evaluation.readyForDesignReview) {
+    throw new CliError("Scientific design has blocking mechanical issues.", {
+      code: "RESEARCH_SCIENTIFIC_DESIGN_BLOCKED",
+      exitCode: 3,
+      details: { issueCodes: evaluation.issueCodes },
+    });
+  }
+  const policyGaps = scientificDesignPolicyGaps(contract, policy);
+  if (policyGaps.length) {
+    throw new CliError("Scientific design does not discharge the approved Research Policy.", {
+      code: "RESEARCH_SCIENTIFIC_DESIGN_POLICY_MISMATCH",
+      exitCode: 3,
+      details: { gaps: policyGaps },
+    });
+  }
+  const pendingGate = () => ({
+    status: "pending" as const,
+    packetSha256: null,
+    assessmentSha256: null,
+    reviewSha256: null,
+    reviewerSessionSha256: null,
+  });
+  return {
+    schemaVersion: 1,
+    designSha256: input.design.sha256,
+    objectLocator: `projects/${projectId}/scientific/design/objects/${input.design.sha256}.json`,
+    centralStudyKind: contract.identity.centralStudyKind,
+    producer: {
+      agent: input.producerAgent,
+      sessionSha256: sha256Text(input.producerSessionId),
+    },
+    mechanicalIssueCodes: evaluation.issueCodes,
+    gates: {
+      "research-design": pendingGate(),
+      "evidence-construct": pendingGate(),
+      "pilot-methods": pendingGate(),
+    },
+  };
+}
+
+function isScientificDesignBinding(
+  value: unknown,
+  projectId: string,
+): value is ScientificDesignBinding | null {
+  if (value === null) return true;
+  if (!isObject(value) || value.schemaVersion !== 1) return false;
+  if (
+    typeof value.designSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.designSha256) ||
+    value.objectLocator !==
+      `projects/${projectId}/scientific/design/objects/${value.designSha256}.json` ||
+    typeof value.centralStudyKind !== "string" ||
+    !isObject(value.producer) ||
+    !["codex", "claude"].includes(String(value.producer.agent)) ||
+    typeof value.producer.sessionSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.producer.sessionSha256) ||
+    !Array.isArray(value.mechanicalIssueCodes) ||
+    value.mechanicalIssueCodes.some((item) => typeof item !== "string") ||
+    !isObject(value.gates)
+  ) {
+    return false;
+  }
+  const roles: ScientificReviewRole[] = ["research-design", "evidence-construct", "pilot-methods"];
+  const gates = value.gates as Record<string, unknown>;
+  return roles.every((role) => isScientificGateBinding(gates[role]));
+}
+
+function isScientificGateBinding(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    ["pending", "prepared", "passed", "revision-required", "stopped"].includes(
+      String(value.status),
+    ) &&
+    nullableSha256(value.packetSha256) &&
+    nullableSha256(value.assessmentSha256) &&
+    nullableSha256(value.reviewSha256) &&
+    nullableSha256(value.reviewerSessionSha256)
+  );
 }
 
 function isProjectLineage(value: unknown): value is ProjectState["lineage"] {

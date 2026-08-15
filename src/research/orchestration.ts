@@ -25,6 +25,7 @@ import {
 import { appendJournalEvent } from "./workspace/journal.js";
 import { fetchNativeCandidateSource } from "./workspace/broker.js";
 import { registerEvidenceArtifact } from "./workspace/artifacts.js";
+import { exportProjectAuditBundle, verifyProjectAuditBundle } from "./workspace/audit-bundle.js";
 import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
 import { inspectDiscoveryProgress } from "./workspace/discovery-status.js";
 import { recordDiscoveryAssessmentBatch } from "./workspace/discovery.js";
@@ -78,12 +79,25 @@ import {
   submitNativeResearchStage,
 } from "./workspace/runtime.js";
 import { schemaForStage } from "./workspace/schemas.js";
+import {
+  readAndVerifyScientificDesign,
+  scientificDesignSchema,
+} from "./workspace/scientific-design.js";
+import {
+  inspectScientificReviewStatus,
+  prepareScientificReview,
+  scientificGateAssessmentSchema,
+  scientificReviewSchema,
+  submitScientificReview,
+  type ScientificReviewStatus,
+} from "./workspace/scientific-review.js";
 import { pathExists, sha256Text, workspacePaths } from "./workspace/storage.js";
 import type {
   ProjectEvidenceRequirements,
   ProjectInput,
   ProjectInputTrustStatus,
   ResearchMode,
+  ScientificReviewRole,
 } from "./workspace/types.js";
 import {
   doctorResearchWorkspace,
@@ -139,16 +153,21 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research publication review submit <project-id> --role evidence|methods-reproducibility|domain-novelty|journal-editor --review <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research publication status <project-id> [--workspace <path>] [--json]
   tiangong-ai research publication close <project-id> [--workspace <path>] [--json]
-  tiangong-ai research project init <project-id> --question <question> [--goal evidence-report|top-journal] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
-  tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
+  tiangong-ai research project init <project-id> --question <question> [--goal evidence-report|top-journal] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
+  tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id> --design <absolute-json>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--trust-status verified-owner-input|unverified-owner-input|reference-only|replication-candidate] [--independently-reproduced] [--workspace <path>] [--json]
   tiangong-ai research project retry <project-id> [--package <package-id>] [--workspace <path>] [--json]
-  tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|acquire|analyze|synthesize] [--workspace <path>] [--json]
-  tiangong-ai research project addendum <closed-project-id> --to <target-project-id> [--workspace <path>] [--json]
+  tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|acquire|analyze|synthesize] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--workspace <path>] [--json]
+  tiangong-ai research project addendum <closed-project-id> --to <target-project-id> [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--workspace <path>] [--json]
   tiangong-ai research project archive <project-id> --reason <text> [--workspace <path>] [--json]
   tiangong-ai research project abandon <project-id> --reason <text> [--workspace <path>] [--json]
   tiangong-ai research project handoff request <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project handoff resolve <project-id> --note <text> [--workspace <path>] [--json]
+  tiangong-ai research project scientific review prepare <project-id> --role research-design|evidence-construct|pilot-methods --assessment <absolute-json> --reviewer-agent codex|claude --reviewer-session <opaque-id> [--workspace <path>] [--json]
+  tiangong-ai research project scientific review submit <project-id> --role research-design|evidence-construct|pilot-methods --review <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project scientific status <project-id> [--workspace <path>] [--json]
+  tiangong-ai research project audit export <project-id> --output <absolute-new-directory> [--workspace <path>] [--json]
+  tiangong-ai research project audit verify --bundle <absolute-directory> [--json]
   tiangong-ai research project stage prepare <project-id> --stage discover|acquire|analyze|synthesize --host-agent codex|claude [--workspace <path>] [--json]
   tiangong-ai research project stage submit <project-id> --session <id> --output <absolute-json> [--confirm-model <id>] [--workspace <path>] [--json]
   tiangong-ai research project stage abort <project-id> --session <id> [--workspace <path>] [--json]
@@ -158,7 +177,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project evidence assessment record <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence download bind <project-id> --candidate <id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence artifact register <project-id> --candidate <id> --path <absolute-file> [--download-binding <id> | --derived-from-artifact <id>] [--media-type <type>] [--source-url <https-url>] [--license <declared-license>] [--license-url <https-url>] [--host-type <type>] [--article-version <version>] [--workspace <path>] [--json]
-  tiangong-ai research schema show <discover|acquire|analyze|synthesize|review|doctor|publication-assessment|publication-review-evidence|publication-review-methods-reproducibility|publication-review-domain-novelty|publication-review-journal-editor> [--json]
+  tiangong-ai research schema show <discover|acquire|analyze|synthesize|review|doctor|scientific-design|scientific-assessment-research-design|scientific-assessment-evidence-construct|scientific-assessment-pilot-methods|scientific-review-research-design|scientific-review-evidence-construct|scientific-review-pilot-methods|publication-assessment|publication-review-evidence|publication-review-methods-reproducibility|publication-review-domain-novelty|publication-review-journal-editor> [--compatibility claude-code] [--json]
   tiangong-ai research status [--project <project-id>] [--all] [--workspace <absolute-path>] [--json]
   tiangong-ai research run [--project <project-id>] [--max-parallel <1-8>] [--max-cycles <1-100>] [--dry-run] [--progress-jsonl] [--workspace <absolute-path>] [--json]
 
@@ -406,33 +425,72 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
   const [action, ...rest] = argv;
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
   if (action !== "show") throw unknownAction("research schema", action);
-  const args = parseStrictArgs(rest, COMMON_OPTIONS, "research schema show");
+  const args = parseStrictArgs(
+    rest,
+    { ...COMMON_OPTIONS, compatibility: "string" },
+    "research schema show",
+  );
   if (strictBoolean(args, "help")) return writeHelp(io);
   const stage = onePositional(args.positionals, "research schema show");
-  if (stage === "publication-assessment") {
-    writeJson(io, publicationAssessmentSchema(), args);
-    return 0;
-  }
-  if (stage.startsWith("publication-review-")) {
+  let schema: Record<string, unknown>;
+  if (stage === "scientific-design") {
+    schema = scientificDesignSchema();
+  } else if (stage.startsWith("scientific-assessment-")) {
+    const role = scientificReviewRole(stage.slice("scientific-assessment-".length));
+    schema = scientificGateAssessmentSchema(role);
+  } else if (stage.startsWith("scientific-review-")) {
+    const role = scientificReviewRole(stage.slice("scientific-review-".length));
+    schema = scientificReviewSchema(role);
+  } else if (stage === "publication-assessment") {
+    schema = publicationAssessmentSchema();
+  } else if (stage.startsWith("publication-review-")) {
     const role = publicationReviewRole(stage.slice("publication-review-".length));
-    writeJson(io, publicationReviewSchema(role), args);
-    return 0;
-  }
-  if (
-    stage !== "discover" &&
-    stage !== "acquire" &&
-    stage !== "analyze" &&
-    stage !== "synthesize" &&
-    stage !== "review" &&
-    stage !== "doctor"
+    schema = publicationReviewSchema(role);
+  } else if (
+    stage === "discover" ||
+    stage === "acquire" ||
+    stage === "analyze" ||
+    stage === "synthesize" ||
+    stage === "review" ||
+    stage === "doctor"
   ) {
+    schema = schemaForStage(stage);
+  } else {
     throw new CliError(`Unsupported research schema stage: ${stage}`, {
       code: "RESEARCH_SCHEMA_INVALID",
       exitCode: 2,
     });
   }
-  writeJson(io, schemaForStage(stage), args);
+  writeJson(io, compatibleSchema(schema, strictString(args, "compatibility")), args);
   return 0;
+}
+
+function compatibleSchema(
+  schema: Record<string, unknown>,
+  compatibility: string | undefined,
+): Record<string, unknown> {
+  if (!compatibility) return schema;
+  if (compatibility !== "claude-code") {
+    throw new CliError(`Unsupported schema compatibility target: ${compatibility}`, {
+      code: "RESEARCH_SCHEMA_COMPATIBILITY_INVALID",
+      exitCode: 2,
+      details: { supported: ["claude-code"] },
+    });
+  }
+  const compatible = structuredClone(schema);
+  const stripMetadata = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) stripMetadata(item);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const record = value as Record<string, unknown>;
+    delete record.$schema;
+    delete record.$id;
+    for (const item of Object.values(record)) stripMetadata(item);
+  };
+  stripMetadata(compatible);
+  return compatible;
 }
 
 async function runContext(argv: string[], io: CliIO): Promise<number> {
@@ -658,6 +716,47 @@ async function runCapability(argv: string[], io: CliIO): Promise<number> {
 async function runProject(argv: string[], io: CliIO): Promise<number> {
   const [action, ...rest] = argv;
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action === "audit") {
+    const [auditAction, ...auditRest] = rest;
+    if (auditAction === "export") {
+      const args = parseStrictArgs(
+        auditRest,
+        { ...WORKSPACE_OPTIONS, output: "string" },
+        "research project audit export",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project audit export");
+      const destination = strictString(args, "output");
+      if (!destination) {
+        throw new CliError("Audit export requires --output.", {
+          code: "RESEARCH_AUDIT_BUNDLE_PATH_INVALID",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      writeJson(io, await exportProjectAuditBundle({ root, projectId, destination }), args);
+      return 0;
+    }
+    if (auditAction === "verify") {
+      const args = parseStrictArgs(
+        auditRest,
+        { ...COMMON_OPTIONS, bundle: "string" },
+        "research project audit verify",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      rejectPositionals(args.positionals, "research project audit verify");
+      const bundlePath = strictString(args, "bundle");
+      if (!bundlePath) {
+        throw new CliError("Audit verification requires --bundle.", {
+          code: "RESEARCH_AUDIT_BUNDLE_PATH_INVALID",
+          exitCode: 2,
+        });
+      }
+      writeJson(io, await verifyProjectAuditBundle(bundlePath), args);
+      return 0;
+    }
+    throw unknownAction("research project audit", auditAction ?? "");
+  }
   if (action === "handoff") {
     const [handoffAction, ...handoffRest] = rest;
     if (handoffAction === "request") {
@@ -706,6 +805,97 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       return 0;
     }
     throw unknownAction("research project handoff", handoffAction ?? "");
+  }
+  if (action === "scientific") {
+    const [scientificAction, ...scientificRest] = rest;
+    if (scientificAction === "status") {
+      const args = parseStrictArgs(
+        scientificRest,
+        WORKSPACE_OPTIONS,
+        "research project scientific status",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project scientific status");
+      const root = await workspaceFromArgs(args);
+      writeJson(io, await inspectScientificReviewStatus(root, projectId), args);
+      return 0;
+    }
+    if (scientificAction !== "review") {
+      throw unknownAction("research project scientific", scientificAction ?? "");
+    }
+    const [reviewAction, ...reviewRest] = scientificRest;
+    if (reviewAction === "prepare") {
+      const args = parseStrictArgs(
+        reviewRest,
+        {
+          ...WORKSPACE_OPTIONS,
+          role: "string",
+          assessment: "string",
+          "reviewer-agent": "string",
+          "reviewer-session": "string",
+        },
+        "research project scientific review prepare",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(
+        args.positionals,
+        "research project scientific review prepare",
+      );
+      const assessmentPath = strictString(args, "assessment");
+      const reviewerSessionId = strictString(args, "reviewer-session");
+      if (!assessmentPath || !reviewerSessionId) {
+        throw new CliError(
+          "Scientific review prepare requires --assessment, --reviewer-agent, and --reviewer-session.",
+          { code: "RESEARCH_SCIENTIFIC_REVIEW_ARGUMENT_REQUIRED", exitCode: 2 },
+        );
+      }
+      const root = await workspaceFromArgs(args);
+      writeJson(
+        io,
+        await prepareScientificReview({
+          root,
+          projectId,
+          role: scientificReviewRole(strictString(args, "role")),
+          assessmentPath,
+          reviewerAgent: publicationAgent(strictString(args, "reviewer-agent"), "reviewer"),
+          reviewerSessionId,
+        }),
+        args,
+      );
+      return 0;
+    }
+    if (reviewAction === "submit") {
+      const args = parseStrictArgs(
+        reviewRest,
+        { ...WORKSPACE_OPTIONS, role: "string", review: "string" },
+        "research project scientific review submit",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(
+        args.positionals,
+        "research project scientific review submit",
+      );
+      const reviewPath = strictString(args, "review");
+      if (!reviewPath) {
+        throw new CliError("Scientific review submit requires --review.", {
+          code: "RESEARCH_SCIENTIFIC_REVIEW_ARGUMENT_REQUIRED",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      writeJson(
+        io,
+        await submitScientificReview({
+          root,
+          projectId,
+          role: scientificReviewRole(strictString(args, "role")),
+          reviewPath,
+        }),
+        args,
+      );
+      return 0;
+    }
+    throw unknownAction("research project scientific review", reviewAction ?? "");
   }
   if (action === "stage") {
     const [stageAction, ...stageRest] = rest;
@@ -1017,6 +1207,9 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         goal: "string",
         requirements: "string",
         "input-plan": "string",
+        design: "string",
+        "design-producer-agent": "string",
+        "design-producer-session": "string",
         "confirm-budget": "boolean",
       },
       "research project init",
@@ -1034,6 +1227,23 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     const goal = researchGoal(strictString(args, "goal"));
     const requirementsPath = strictString(args, "requirements");
     const inputPlanPath = strictString(args, "input-plan");
+    const publicationPolicy =
+      goal === "top-journal" ? await loadApprovedResearchPolicy(root, projectId) : undefined;
+    const designPath = strictString(args, "design");
+    const designProducerAgent = strictString(args, "design-producer-agent");
+    const designProducerSession = strictString(args, "design-producer-session");
+    if (goal === "top-journal" && (!designPath || !designProducerAgent || !designProducerSession)) {
+      throw new CliError(
+        "Top-journal init requires --design, --design-producer-agent, and --design-producer-session.",
+        { code: "RESEARCH_SCIENTIFIC_DESIGN_REQUIRED", exitCode: 2 },
+      );
+    }
+    if (goal !== "top-journal" && (designPath || designProducerAgent || designProducerSession)) {
+      throw new CliError("Scientific design options are only valid with --goal top-journal.", {
+        code: "RESEARCH_SCIENTIFIC_DESIGN_POLICY_REQUIRED",
+        exitCode: 2,
+      });
+    }
     const project = await initializeProject(
       root,
       projectId,
@@ -1041,7 +1251,14 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       requirementsPath ? await readEvidenceRequirements(requirementsPath) : undefined,
       strictBoolean(args, "confirm-budget"),
       inputPlanPath ? await readAndVerifyProjectInputPlan(inputPlanPath) : undefined,
-      goal === "top-journal" ? await loadApprovedResearchPolicy(root, projectId) : undefined,
+      publicationPolicy,
+      designPath && designProducerAgent && designProducerSession
+        ? {
+            design: await readAndVerifyScientificDesign(designPath, projectId),
+            producerAgent: publicationAgent(designProducerAgent, "design producer"),
+            producerSessionId: designProducerSession,
+          }
+        : undefined,
     );
     writeJson(io, project, args);
     return 0;
@@ -1056,6 +1273,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         "policy-project": "string",
         requirements: "string",
         "input-plan": "string",
+        design: "string",
       },
       "research project preflight",
     );
@@ -1071,6 +1289,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     const root = await workspaceFromArgs(args);
     const goal = researchGoal(strictString(args, "goal"));
     const policyProject = strictString(args, "policy-project");
+    let publicationPolicy = null;
     if (goal === "top-journal") {
       if (!policyProject) {
         throw new CliError("Top-journal preflight requires --policy-project.", {
@@ -1078,7 +1297,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
           exitCode: 2,
         });
       }
-      await loadApprovedResearchPolicy(root, policyProject);
+      publicationPolicy = await loadApprovedResearchPolicy(root, policyProject);
     } else if (policyProject) {
       throw new CliError("--policy-project is only valid with --goal top-journal.", {
         code: "RESEARCH_POLICY_INVALID",
@@ -1089,7 +1308,26 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     const requirements = requirementsPath ? await readEvidenceRequirements(requirementsPath) : null;
     const inputPlanPath = strictString(args, "input-plan");
     const inputPlan = inputPlanPath ? await readAndVerifyProjectInputPlan(inputPlanPath) : null;
-    const result = await evaluateProjectPreflight(root, question, requirements, inputPlan);
+    const designPath = strictString(args, "design");
+    if (goal === "top-journal" && !designPath) {
+      throw new CliError("Top-journal preflight requires --design.", {
+        code: "RESEARCH_SCIENTIFIC_DESIGN_REQUIRED",
+        exitCode: 2,
+      });
+    }
+    if (goal !== "top-journal" && designPath) {
+      throw new CliError("--design is only valid with --goal top-journal.", {
+        code: "RESEARCH_SCIENTIFIC_DESIGN_POLICY_REQUIRED",
+        exitCode: 2,
+      });
+    }
+    const scientificDesign = designPath
+      ? await readAndVerifyScientificDesign(designPath, policyProject)
+      : null;
+    const result = await evaluateProjectPreflight(root, question, requirements, inputPlan, {
+      publicationPolicy,
+      scientificDesign,
+    });
     writeJson(io, result, args);
     return result.readyToInitialize ? 0 : 3;
   }
@@ -1143,7 +1381,14 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   if (action === "fork") {
     const args = parseStrictArgs(
       rest,
-      { ...WORKSPACE_OPTIONS, to: "string", "resume-through": "string" },
+      {
+        ...WORKSPACE_OPTIONS,
+        to: "string",
+        "resume-through": "string",
+        design: "string",
+        "design-producer-agent": "string",
+        "design-producer-session": "string",
+      },
       "research project fork",
     );
     if (strictBoolean(args, "help")) return writeHelp(io);
@@ -1156,11 +1401,40 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       });
     }
     const root = await workspaceFromArgs(args);
+    const source = await loadProject(root, sourceProjectId);
+    const designPath = strictString(args, "design");
+    const designProducerAgent = strictString(args, "design-producer-agent");
+    const designProducerSession = strictString(args, "design-producer-session");
+    if (
+      source.publicationPolicy &&
+      (!designPath || !designProducerAgent || !designProducerSession)
+    ) {
+      throw new CliError(
+        "A top-journal fork requires a target-specific approved policy plus --design, --design-producer-agent, and --design-producer-session.",
+        { code: "RESEARCH_SCIENTIFIC_DESIGN_REAPPROVAL_REQUIRED", exitCode: 3 },
+      );
+    }
+    if (!source.publicationPolicy && (designPath || designProducerAgent || designProducerSession)) {
+      throw new CliError("Scientific reapproval options require a top-journal source project.", {
+        code: "RESEARCH_SCIENTIFIC_DESIGN_REAPPROVAL_INVALID",
+        exitCode: 2,
+      });
+    }
     const project = await forkProject(
       root,
       sourceProjectId,
       targetProjectId,
       resumeStage(strictString(args, "resume-through")),
+      designPath && designProducerAgent && designProducerSession
+        ? {
+            publicationPolicy: await loadApprovedResearchPolicy(root, targetProjectId),
+            scientificDesign: {
+              design: await readAndVerifyScientificDesign(designPath, targetProjectId),
+              producerAgent: publicationAgent(designProducerAgent, "design producer"),
+              producerSessionId: designProducerSession,
+            },
+          }
+        : undefined,
     );
     writeJson(io, project, args);
     return 0;
@@ -1168,7 +1442,13 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   if (action === "addendum") {
     const args = parseStrictArgs(
       rest,
-      { ...WORKSPACE_OPTIONS, to: "string" },
+      {
+        ...WORKSPACE_OPTIONS,
+        to: "string",
+        design: "string",
+        "design-producer-agent": "string",
+        "design-producer-session": "string",
+      },
       "research project addendum",
     );
     if (strictBoolean(args, "help")) return writeHelp(io);
@@ -1181,7 +1461,40 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       });
     }
     const root = await workspaceFromArgs(args);
-    const project = await createProjectAddendum(root, sourceProjectId, targetProjectId);
+    const source = await loadProject(root, sourceProjectId);
+    const designPath = strictString(args, "design");
+    const designProducerAgent = strictString(args, "design-producer-agent");
+    const designProducerSession = strictString(args, "design-producer-session");
+    if (
+      source.publicationPolicy &&
+      (!designPath || !designProducerAgent || !designProducerSession)
+    ) {
+      throw new CliError(
+        "A top-journal addendum requires a target-specific approved policy plus --design, --design-producer-agent, and --design-producer-session.",
+        { code: "RESEARCH_SCIENTIFIC_DESIGN_REAPPROVAL_REQUIRED", exitCode: 3 },
+      );
+    }
+    if (!source.publicationPolicy && (designPath || designProducerAgent || designProducerSession)) {
+      throw new CliError("Scientific reapproval options require a top-journal source project.", {
+        code: "RESEARCH_SCIENTIFIC_DESIGN_REAPPROVAL_INVALID",
+        exitCode: 2,
+      });
+    }
+    const project = await createProjectAddendum(
+      root,
+      sourceProjectId,
+      targetProjectId,
+      designPath && designProducerAgent && designProducerSession
+        ? {
+            publicationPolicy: await loadApprovedResearchPolicy(root, targetProjectId),
+            scientificDesign: {
+              design: await readAndVerifyScientificDesign(designPath, targetProjectId),
+              producerAgent: publicationAgent(designProducerAgent, "design producer"),
+              producerSessionId: designProducerSession,
+            },
+          }
+        : undefined,
+    );
     writeJson(io, project, args);
     return 0;
   }
@@ -1259,6 +1572,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
         const nativeStage = await inspectNativeResearchStage(root, current);
         const snapshot = await inspectSnapshotForStatus(root, current.id);
         const readyPackage = nextReadyPackage(current)?.id ?? null;
+        const scientificReview = await inspectScientificReviewStatus(root, current.id);
         const publication = current.publicationPolicy
           ? await inspectPublicationForStatus(root, current.id)
           : null;
@@ -1272,6 +1586,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
           evidenceState: current.evidenceState,
           snapshot,
           nativeStage,
+          scientificReview,
           publication,
           readyPackage,
           recommendedAction: projectRecommendedAction(
@@ -1279,6 +1594,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
             current,
             readyPackage,
             nativeStage,
+            scientificReview,
             publication,
           ),
           usage: current.usage,
@@ -1365,6 +1681,7 @@ function projectRecommendedAction(
   project: Awaited<ReturnType<typeof loadProject>>,
   readyPackage: string | null,
   nativeStage: Awaited<ReturnType<typeof inspectNativeResearchStage>>,
+  scientificReview: ScientificReviewStatus,
   publication: PublicationStatus | { generationStatus: "invalid"; code: string } | null,
 ): string {
   if (project.lineage.supersededBy) {
@@ -1384,6 +1701,14 @@ function projectRecommendedAction(
   }
   if (nativeStage.status === "active") {
     return nativeStage.recommendedAction ?? "Resume the active native stage.";
+  }
+  if (scientificReview.nextGate) {
+    const gate = scientificReview.nextGate;
+    if (gate.status === "stopped") {
+      return `Scientific ${gate.role} review stopped the project; inspect the frozen review and request user or external action instead of continuing.`;
+    }
+    const schema = `scientific-assessment-${gate.role}`;
+    return `Use the native producer App to create a bounded ${gate.role} assessment from schema ${schema}, then prepare an independent review: tiangong-ai research project scientific review prepare ${project.id} --role ${gate.role} --assessment <absolute-json> --reviewer-agent <codex|claude> --reviewer-session <fresh-opaque-id> --workspace ${root}`;
   }
   if (project.status === "complete") {
     if (project.publicationPolicy) {
@@ -1668,6 +1993,16 @@ function publicationReviewRole(value: string | undefined): PublicationReviewRole
     "--role must be evidence, methods-reproducibility, domain-novelty, or journal-editor.",
     { code: "RESEARCH_PUBLICATION_REVIEW_ROLE_INVALID", exitCode: 2 },
   );
+}
+
+function scientificReviewRole(value: string | undefined): ScientificReviewRole {
+  if (value === "research-design" || value === "evidence-construct" || value === "pilot-methods") {
+    return value;
+  }
+  throw new CliError("--role must be research-design, evidence-construct, or pilot-methods.", {
+    code: "RESEARCH_SCIENTIFIC_REVIEW_ROLE_INVALID",
+    exitCode: 2,
+  });
 }
 
 function publicationAgent(value: string | undefined, label: string): "codex" | "claude" {

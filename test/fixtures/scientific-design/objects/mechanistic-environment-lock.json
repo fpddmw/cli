@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "kind": "environment-lock",
+  "modelId": "mechanistic-fatigue-model",
+  "runtime": "declarative-json-evaluator",
+  "runtimeVersion": "1.0.0",
+  "dependencies": []
+}

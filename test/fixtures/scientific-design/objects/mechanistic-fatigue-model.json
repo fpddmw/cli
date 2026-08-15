@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "kind": "model-implementation",
+  "modelId": "mechanistic-fatigue-model",
+  "language": "declarative-json",
+  "entrypoint": "evaluate-fatigue-damage",
+  "equations": [
+    "damage = coefficient * strain_exponent * modulus_exponent",
+    "overlay_event_count = accumulate_and_reset(damage, trigger, horizon)"
+  ],
+  "coefficients": {
+    "sourcePolicy": "published-values-only",
+    "outcomeDrivenRecalibration": false
+  }
+}

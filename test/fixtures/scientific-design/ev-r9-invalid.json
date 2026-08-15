@@ -1,0 +1,511 @@
+{
+  "schemaVersion": 1,
+  "projectId": "ev-pavement-r9",
+  "workingTitle": "Electric trucks, pavement damage, and asphalt demand",
+  "identity": {
+    "centralStudyKind": "causal-empirical",
+    "contributionStatement": "Validate an EV-specific pavement effect in LTPP and convert it into asphalt demand.",
+    "components": [
+      {
+        "kind": "causal-empirical",
+        "role": "central",
+        "purpose": "Estimate an EV-specific field effect.",
+        "bridgeEdgeIds": []
+      },
+      {
+        "kind": "cross-model-comparison",
+        "role": "supporting",
+        "purpose": "Compare a fatigue model with a service-equivalent reference model.",
+        "bridgeEdgeIds": ["edge-model-to-field"]
+      },
+      {
+        "kind": "material-flow-accounting",
+        "role": "supporting",
+        "purpose": "Translate one modeled overlay into material demand.",
+        "bridgeEdgeIds": ["edge-overlay-to-material"]
+      }
+    ],
+    "modelStructures": [
+      {
+        "id": "fatigue-model",
+        "label": "Fatigue model",
+        "family": "mechanistic-empirical",
+        "version": "unvalidated-v1",
+        "equationSet": "Frozen illustrative fatigue equation set.",
+        "coefficientSet": "Frozen illustrative fatigue coefficients.",
+        "implementationArtifactSha256": "db10c38d2a5cb022ae63904188218c111a842b8ce8ba01f2dc8a3f3f58c039f5",
+        "implementationArtifactLocator": "lineage/objects/invalid-fatigue-model.json",
+        "implementationEntrypoint": "evaluate-invalid-fatigue",
+        "implementationStatus": "executable-frozen",
+        "implementationFreezeBeforeGate": "research-design",
+        "environmentLockSha256": "4623d79ef3cf1ce057817c817779400d06ff37eaef694f7130e119ed4658ef5a",
+        "environmentLockLocator": "lineage/objects/invalid-fatigue-environment.json",
+        "environmentLockStatus": "exact-frozen",
+        "environmentLockFreezeBeforeGate": "research-design",
+        "artifactHashBasis": "raw-file-bytes",
+        "baselineRole": "candidate",
+        "baselineSelectionJustification": "Frozen candidate implementation for the intentionally invalid scientific route fixture.",
+        "sourceEvidenceRoleIds": ["role-central-data"]
+      },
+      {
+        "id": "service-reference-model",
+        "label": "Service reference model",
+        "family": "service-equivalence",
+        "version": "reference-v1",
+        "equationSet": "Frozen illustrative service-equivalence equation set.",
+        "coefficientSet": "Frozen illustrative reference coefficients.",
+        "implementationArtifactSha256": "d4d382d092bd3631134450e5540232200a28842b42edc5f66ad5178f16e2dcde",
+        "implementationArtifactLocator": "lineage/objects/invalid-reference-model.json",
+        "implementationEntrypoint": "evaluate-invalid-reference",
+        "implementationStatus": "executable-frozen",
+        "implementationFreezeBeforeGate": "research-design",
+        "environmentLockSha256": "8756641041472b73bcd6e859ab0566911f078eaac9285d4f02304a6a7af8ca68",
+        "environmentLockLocator": "lineage/objects/invalid-reference-environment.json",
+        "environmentLockStatus": "exact-frozen",
+        "environmentLockFreezeBeforeGate": "research-design",
+        "artifactHashBasis": "raw-file-bytes",
+        "baselineRole": "reference",
+        "baselineSelectionJustification": "Frozen comparison reference for the intentionally invalid scientific route fixture.",
+        "sourceEvidenceRoleIds": ["role-central-data"]
+      }
+    ],
+    "allowedClaimVerbs": ["causes", "validates", "predicts"],
+    "targetJournals": {
+      "primary": "International Journal of Pavement Engineering",
+      "alternate": "Road Materials and Pavement Design",
+      "fallback": "Journal of Transportation Engineering, Part B",
+      "approvalStatus": "policy-approved"
+    }
+  },
+  "policyRuleDispositions": [],
+  "estimands": [
+    {
+      "id": "estimand-ev-field",
+      "role": "central",
+      "population": "United States highway sections",
+      "analysisUnit": "LTPP section-year",
+      "exposure": "electric heavy-truck share",
+      "comparator": "internal-combustion heavy trucks",
+      "outcome": "EV-specific pavement deterioration and asphalt demand",
+      "spatialScale": "road-section",
+      "timeHorizon": "annual and 50-year lifecycle",
+      "resultClass": "causal-estimate"
+    }
+  ],
+  "claims": [
+    {
+      "id": "claim-field-validation",
+      "role": "central",
+      "statement": "LTPP validates an EV-specific pavement-damage effect.",
+      "resultClass": "causal-estimate",
+      "edgeIds": ["edge-model-to-field"],
+      "endpointIds": ["endpoint-fatigue", "endpoint-service-factor", "endpoint-iri"],
+      "comparisonIds": ["comparison-model-error", "comparison-field-validation"],
+      "estimandIds": ["estimand-ev-field"],
+      "quantityIds": ["quantity-ev-share"],
+      "evidenceRoleIds": ["role-central-data", "role-closest-work"],
+      "hypothesisMode": "directional",
+      "nullOutcomeStatement": null
+    },
+    {
+      "id": "claim-material",
+      "role": "central",
+      "statement": "The modeled effect increases asphalt demand at an estimated adoption threshold.",
+      "resultClass": "causal-estimate",
+      "edgeIds": ["edge-overlay-to-material"],
+      "endpointIds": ["endpoint-overlay"],
+      "comparisonIds": [],
+      "estimandIds": ["estimand-ev-field"],
+      "quantityIds": ["quantity-gross-hma"],
+      "evidenceRoleIds": ["role-central-data"],
+      "hypothesisMode": "directional",
+      "nullOutcomeStatement": null
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-model-to-field",
+      "role": "central",
+      "fromConstruct": "EV battery placement and axle load",
+      "toConstruct": "observed field deterioration",
+      "evidenceMode": "direct-observation",
+      "requiredJoinKeys": ["powertrain", "section", "year"],
+      "temporalAlignment": "same section-year",
+      "spatialAlignment": "same road section",
+      "fromModelStructureIds": ["fatigue-model", "service-reference-model"],
+      "toModelStructureIds": [],
+      "fromEndpointIds": ["endpoint-fatigue", "endpoint-service-factor"],
+      "toEndpointIds": ["endpoint-iri"],
+      "operatorId": "operator-invalid-model-field-join",
+      "operatorDefinition": "Join the declared model endpoints to the field endpoint by the fixture keys; this executable declaration does not make the scientifically invalid endpoint or exposure compatible.",
+      "aggregationRule": "Join modeled exposure to the claimed field outcome by declared keys.",
+      "scaleReconciliation": "Retain the declared section-year scale.",
+      "quantityIds": ["quantity-ev-share"],
+      "uncertaintyParameterIds": [],
+      "sameSectionRequired": true,
+      "sameEventRequired": false,
+      "status": "constructible",
+      "blockingReason": null
+    },
+    {
+      "id": "edge-overlay-to-material",
+      "role": "central",
+      "fromConstruct": "modeled overlay event",
+      "toConstruct": "asphalt demand",
+      "evidenceMode": "model-bridge",
+      "requiredJoinKeys": ["overlay-thickness", "lane-width", "density"],
+      "temporalAlignment": "modeled event",
+      "spatialAlignment": "lane-kilometre",
+      "fromModelStructureIds": [],
+      "toModelStructureIds": [],
+      "fromEndpointIds": ["endpoint-overlay"],
+      "toEndpointIds": ["endpoint-overlay"],
+      "operatorId": "operator-invalid-overlay-material",
+      "operatorDefinition": "Apply the fixture geometry multiplication while intentionally retaining the wrong non-accounting bridge mode for evaluator regression.",
+      "aggregationRule": "Multiply overlay geometry and mixture density.",
+      "scaleReconciliation": "Report one lane-kilometre event.",
+      "quantityIds": ["quantity-gross-hma"],
+      "uncertaintyParameterIds": ["uncertainty-invalid-hma"],
+      "sameSectionRequired": false,
+      "sameEventRequired": true,
+      "status": "constructible",
+      "blockingReason": null
+    }
+  ],
+  "endpoints": [
+    {
+      "id": "endpoint-fatigue",
+      "label": "Bottom-up fatigue damage ratio",
+      "physicalConstruct": "bottom-up fatigue damage",
+      "scale": "pavement-structure",
+      "unit": "ratio",
+      "timeBasis": "single modeled load case",
+      "modelStructureId": "fatigue-model",
+      "truthRole": "engineering-model"
+    },
+    {
+      "id": "endpoint-service-factor",
+      "label": "Service-equivalent adjustment factor",
+      "physicalConstruct": "multi-mechanism service equivalence",
+      "scale": "vehicle-service",
+      "unit": "ratio",
+      "timeBasis": "modeled freight service",
+      "modelStructureId": "service-reference-model",
+      "truthRole": "engineering-model"
+    },
+    {
+      "id": "endpoint-iri",
+      "label": "Annual IRI change",
+      "physicalConstruct": "surface roughness change",
+      "scale": "road-section",
+      "unit": "m/km/year",
+      "timeBasis": "annual",
+      "modelStructureId": null,
+      "truthRole": "field-observation"
+    },
+    {
+      "id": "endpoint-overlay",
+      "label": "Modeled overlay event",
+      "physicalConstruct": "maintenance trigger",
+      "scale": "road-section",
+      "unit": "event",
+      "timeBasis": "50-year scenario",
+      "modelStructureId": null,
+      "truthRole": "scenario-output"
+    }
+  ],
+  "comparisons": [
+    {
+      "id": "comparison-model-error",
+      "leftEndpointId": "endpoint-fatigue",
+      "rightEndpointId": "endpoint-service-factor",
+      "operation": "error",
+      "axis": "model-to-observation",
+      "quantityIds": ["quantity-ev-share"],
+      "thresholdIds": [],
+      "decisionRule": "Report model error only against the declared truth endpoint under the frozen operation.",
+      "reportingLevel": "Report by pavement structure and declared vehicle configuration.",
+      "truthEndpointId": "endpoint-service-factor"
+    },
+    {
+      "id": "comparison-field-validation",
+      "leftEndpointId": "endpoint-service-factor",
+      "rightEndpointId": "endpoint-iri",
+      "operation": "validation",
+      "axis": "model-to-observation",
+      "quantityIds": ["quantity-ev-share"],
+      "thresholdIds": [],
+      "decisionRule": "Report validation only when endpoint signatures and exposure identity are both available.",
+      "reportingLevel": "Report at deduplicated road-section level.",
+      "truthEndpointId": "endpoint-iri"
+    }
+  ],
+  "quantities": [
+    {
+      "id": "quantity-ev-share",
+      "label": "Affected heavy-truck traffic share",
+      "quantityType": "share",
+      "unit": "fraction",
+      "numeratorType": "affected freight service",
+      "denominatorType": "freight_service_share",
+      "denominatorDescription": "declared freight service base",
+      "normalizationMode": "not-applicable",
+      "normalizationJustification": "The scenario share is not a cross-model directional normalization.",
+      "valueMode": "nonnegative",
+      "uncertaintyParameterIds": [],
+      "spatialScope": "lane",
+      "temporalScope": "scenario",
+      "allowedTerms": ["freight service share"],
+      "prohibitedTerms": ["truck pass share", "adoption rate"]
+    },
+    {
+      "id": "quantity-gross-hma",
+      "label": "Gross installed HMA mixture",
+      "quantityType": "material",
+      "unit": "t/lane-km/event",
+      "numeratorType": "gross installed mixture mass",
+      "denominatorType": "lane_km_overlay_event",
+      "denominatorDescription": "one lane-kilometre overlay event",
+      "normalizationMode": "not-applicable",
+      "normalizationJustification": "The material accounting quantity is reported per event.",
+      "valueMode": "nonnegative",
+      "uncertaintyParameterIds": ["uncertainty-invalid-hma"],
+      "spatialScope": "one lane-kilometre",
+      "temporalScope": "one modeled overlay event",
+      "allowedTerms": ["gross installed HMA", "overlay mixture requirement"],
+      "prohibitedTerms": [
+        "asphalt demand",
+        "binder demand",
+        "virgin material demand",
+        "network annual demand"
+      ]
+    }
+  ],
+  "validationPlans": [
+    {
+      "id": "validation-ltpp-ev",
+      "claimIds": ["claim-field-validation"],
+      "role": "external-dgp",
+      "parameterDatasetIds": ["gkyrtis-2025"],
+      "comparisonDatasetIds": ["ltpp-sdr39"],
+      "datasetRoles": [
+        {
+          "datasetId": "gkyrtis-2025",
+          "role": "parameter-source",
+          "sharedUpstreamIds": [],
+          "justification": "Fixture parameter source."
+        },
+        {
+          "datasetId": "ltpp-sdr39",
+          "role": "independent-validation",
+          "sharedUpstreamIds": [],
+          "justification": "The intentionally invalid design misclassifies this source as exposure-valid independent validation."
+        }
+      ],
+      "factorIds": [],
+      "exposureIdentifierAvailable": false,
+      "independentDataGeneratingProcess": true,
+      "outcomeBlind": false,
+      "originalUnitCount": 10446,
+      "independentClusterCount": 1752,
+      "effectiveIndependentUnits": 1752,
+      "originalUnitDefinition": "Repeated LTPP section-year records before section-level deduplication.",
+      "independentClusterDefinition": "Road sections identified by ltpp-section-id.",
+      "nestingRule": "Section-year records are nested within road section.",
+      "reportingUnitDefinition": "Report at deduplicated road-section level.",
+      "clusterKeyIds": ["ltpp-section-id"],
+      "independenceJustification": "Repeated section-years are clustered by section.",
+      "resamplingUnit": "section",
+      "resamplingIterations": 200000,
+      "resamplingMethod": "cluster-bootstrap",
+      "resamplingStateSpaceSize": 0,
+      "reportingPrecision": "Cluster-bootstrap interval.",
+      "minimumDetectableDifference": null,
+      "independentValidation": {
+        "status": "available",
+        "gapId": null,
+        "justification": "The design incorrectly treats this source as independent validation."
+      },
+      "status": "feasible",
+      "blockingReason": null
+    },
+    {
+      "id": "validation-cross-model",
+      "claimIds": ["claim-field-validation"],
+      "role": "external-dgp",
+      "parameterDatasetIds": ["gkyrtis-2025"],
+      "comparisonDatasetIds": ["fhwa-ict-25-003"],
+      "datasetRoles": [
+        {
+          "datasetId": "gkyrtis-2025",
+          "role": "parameter-source",
+          "sharedUpstreamIds": ["declared-configurations"],
+          "justification": "Fixture parameter source."
+        },
+        {
+          "datasetId": "fhwa-ict-25-003",
+          "role": "independent-validation",
+          "sharedUpstreamIds": ["declared-configurations"],
+          "justification": "The intentionally invalid design misclassifies a shared-upstream reference as independent validation."
+        }
+      ],
+      "factorIds": [],
+      "exposureIdentifierAvailable": true,
+      "independentDataGeneratingProcess": false,
+      "outcomeBlind": false,
+      "originalUnitCount": 12,
+      "independentClusterCount": 4,
+      "effectiveIndependentUnits": 12,
+      "originalUnitDefinition": "Twelve repeated model cells from four structures and three vehicle configurations.",
+      "independentClusterDefinition": "Four pavement structures keyed by pavement-structure-id.",
+      "nestingRule": "Vehicle configurations are repeated within pavement structure.",
+      "reportingUnitDefinition": "The invalid design incorrectly reports repeated model cells as independent.",
+      "clusterKeyIds": ["pavement-structure-id"],
+      "independenceJustification": "The design incorrectly counts repeated model cells beyond four structures.",
+      "resamplingUnit": "cell",
+      "resamplingIterations": 200000,
+      "resamplingMethod": "cluster-bootstrap",
+      "resamplingStateSpaceSize": 0,
+      "reportingPrecision": "Bootstrap interval.",
+      "minimumDetectableDifference": null,
+      "independentValidation": {
+        "status": "available",
+        "gapId": null,
+        "justification": "The design incorrectly treats a shared upstream reference as independent."
+      },
+      "status": "feasible",
+      "blockingReason": null
+    }
+  ],
+  "thresholds": [
+    {
+      "id": "threshold-overlay",
+      "claimId": "claim-material",
+      "quantityId": "quantity-ev-share",
+      "type": "scenario",
+      "reportedAs": "estimated-threshold",
+      "criterion": "Flag the first scenario that produces one additional overlay event.",
+      "criterionQuantityIds": ["quantity-ev-share"],
+      "numericValue": 1,
+      "unit": "fraction",
+      "direction": "above",
+      "basis": "reporting-convention",
+      "basisJustification": "Fixture declaration retained only to isolate the intended threshold type and missing-sensitivity failures.",
+      "stabilityMode": "none",
+      "stabilityQuantityId": null,
+      "stabilityRule": "No stability classification is claimed in this intentionally invalid route.",
+      "sensitivityReportingRule": "No sensitivity states are available; the dedicated evaluator issue remains expected.",
+      "assumptionIds": ["linear-share-mixing", "twenty-one-year-baseline"],
+      "sensitivityParameterIds": []
+    }
+  ],
+  "evidenceRoles": [
+    {
+      "id": "role-central-data",
+      "role": "central-data-documentation",
+      "claimIds": ["claim-field-validation", "claim-material"],
+      "coverageDimensionIds": ["central-data"],
+      "sourceTypeRequirements": ["official-data"],
+      "peerReviewedRequired": false,
+      "required": true,
+      "minimumFullText": 1,
+      "minimumIndependentSources": 1,
+      "minimumDatedSources": 1
+    },
+    {
+      "id": "role-closest-work",
+      "role": "closest-prior-work",
+      "claimIds": ["claim-field-validation"],
+      "coverageDimensionIds": ["closest-prior-work"],
+      "sourceTypeRequirements": ["academic-paper"],
+      "peerReviewedRequired": true,
+      "required": true,
+      "minimumFullText": 0,
+      "minimumIndependentSources": 4,
+      "minimumDatedSources": 1
+    }
+  ],
+  "knownGaps": [
+    {
+      "id": "gap-powertrain-wim",
+      "description": "No powertrain-labelled WIM exposure is available.",
+      "sourceProjectId": "ev-pavement-r7",
+      "sourceArtifacts": [
+        {
+          "sha256": "c9ebc5a54a543d8fbaa4f6f149301ced1b26124703c4f1226eb4b7c97ae010be",
+          "objectLocator": "lineage/objects/c9ebc5a54a543d8fbaa4f6f149301ced1b26124703c4f1226eb4b7c97ae010be.json",
+          "hashBasis": "raw-file-bytes",
+          "kind": "owner-attestation"
+        }
+      ],
+      "lineageStatus": "owner-attested",
+      "disposition": "unresolved",
+      "evidenceRefs": []
+    }
+  ],
+  "uncertaintyParameters": [
+    {
+      "id": "uncertainty-invalid-hma",
+      "label": "Illustrative HMA conversion uncertainty",
+      "distributionOrRange": "Unverified illustrative range",
+      "states": [
+        { "id": "invalid-hma-low", "label": "Low", "value": "low", "unit": "ratio" },
+        {
+          "id": "invalid-hma-central",
+          "label": "Central",
+          "value": "central",
+          "unit": "ratio"
+        },
+        { "id": "invalid-hma-high", "label": "High", "value": "high", "unit": "ratio" }
+      ],
+      "stateValueType": "categorical",
+      "stateValueStatus": "frozen",
+      "freezeBeforeGate": "research-design",
+      "factorIds": [],
+      "applicationPoint": "Illustrative invalid accounting conversion.",
+      "compositionRule": "Apply the selected illustrative state to the invalid accounting quantity.",
+      "preservesFactorLevelIdentity": true,
+      "sourceEvidenceRoleIds": ["role-central-data"],
+      "quantityIds": ["quantity-gross-hma"]
+    }
+  ],
+  "uncertaintyGroups": [
+    {
+      "id": "uncertainty-group-invalid-hma",
+      "parameterIds": ["uncertainty-invalid-hma"],
+      "combinationMode": "full-factorial",
+      "jointStateIds": ["invalid-hma-low", "invalid-hma-central", "invalid-hma-high"],
+      "jointStateBindings": [
+        {
+          "jointStateId": "invalid-hma-low",
+          "parameterStateIds": ["invalid-hma-low"]
+        },
+        {
+          "jointStateId": "invalid-hma-central",
+          "parameterStateIds": ["invalid-hma-central"]
+        },
+        {
+          "jointStateId": "invalid-hma-high",
+          "parameterStateIds": ["invalid-hma-high"]
+        }
+      ],
+      "applicationRule": "Evaluate all three fixture states.",
+      "sharedAcrossModelStructureIds": []
+    }
+  ],
+  "factors": [],
+  "baselinePlan": {
+    "sameInputInformation": false,
+    "comparableCalibrationBudget": false,
+    "sameEndpoint": false,
+    "frozenBeforeAnalysis": false,
+    "decisionLossMetrics": []
+  },
+  "contextPlan": {
+    "maxEstimatedTokens": 32000,
+    "estimatedTokens": 110979,
+    "claimCriticalCapsuleIds": [],
+    "backgroundIndexOnly": false,
+    "centralEvidenceFits": false
+  }
+}

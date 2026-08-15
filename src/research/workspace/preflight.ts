@@ -1,12 +1,19 @@
 import { loadCapabilityDeclarations, verifyCapabilities } from "./capabilities.js";
 import { hasPublicInternetCapability } from "./external-skills.js";
 import { deriveDiscoveryPlan } from "./discovery-planning.js";
+import {
+  evaluateScientificDesign,
+  scientificDesignPolicyGaps,
+  type ScientificDesignContract,
+  type VerifiedScientificDesign,
+} from "./scientific-design.js";
 import { schemaForStage } from "./schemas.js";
 import { canonicalJson, sha256Text } from "./storage.js";
 import type {
   AgentPackageStage,
   AgentRoute,
   ProjectEvidenceRequirements,
+  ResearchPolicyBinding,
   VerifiedProjectInputPlan,
   WorkspaceConfig,
 } from "./types.js";
@@ -39,6 +46,10 @@ export async function evaluateProjectPreflight(
   question: string,
   requirements: ProjectEvidenceRequirements | null,
   inputPlan: VerifiedProjectInputPlan | null,
+  options: {
+    publicationPolicy?: ResearchPolicyBinding | null;
+    scientificDesign?: VerifiedScientificDesign | null;
+  } = {},
 ) {
   const config = await loadWorkspaceConfig(root);
   const capabilities = await loadCapabilityDeclarations(root);
@@ -84,8 +95,90 @@ export async function evaluateProjectPreflight(
             reservedAgentPackageCost(config.reviewer, packageTokens.review, config),
         )
       : null;
+  const lifecycleEnabled = Boolean(options.publicationPolicy);
+  const earlyScientificReviewCount = lifecycleEnabled ? 3 : 0;
+  const finalPublicationReviewCount = lifecycleEnabled ? 4 : 0;
+  const revisionCount = lifecycleEnabled ? 1 : 0;
+  const lifecycleTokenReservation =
+    tokenReservation +
+    earlyScientificReviewCount * config.budget.earlyScientificReviewMaxTokens +
+    finalPublicationReviewCount * config.budget.finalPublicationReviewMaxTokens +
+    revisionCount * config.budget.revisionReserveTokens;
+  const lifecycleWallReservation =
+    wallReservation +
+    earlyScientificReviewCount * config.budget.earlyScientificReviewMaxWallSeconds +
+    finalPublicationReviewCount * config.budget.finalPublicationReviewMaxWallSeconds +
+    revisionCount * config.budget.revisionReserveWallSeconds;
+  const lifecycleEstimatedMaxCostUsd =
+    !lifecycleEnabled || estimatedMaxCostUsd === null
+      ? estimatedMaxCostUsd
+      : roundMoney(
+          estimatedMaxCostUsd +
+            earlyScientificReviewCount *
+              reservedAgentPackageCost(
+                config.reviewer,
+                config.budget.earlyScientificReviewMaxTokens,
+                config,
+              ) +
+            finalPublicationReviewCount *
+              reservedAgentPackageCost(
+                config.reviewer,
+                config.budget.finalPublicationReviewMaxTokens,
+                config,
+              ) +
+            revisionCount *
+              Math.max(
+                reservedAgentPackageCost(
+                  config.producer,
+                  config.budget.revisionReserveTokens,
+                  config,
+                ),
+                reservedAgentPackageCost(
+                  config.reviewer,
+                  config.budget.revisionReserveTokens,
+                  config,
+                ),
+              ),
+        );
   const gaps: string[] = [];
   const coverageGaps: EvidenceCoverageGap[] = [];
+  const designEvaluation = options.scientificDesign
+    ? evaluateScientificDesign(options.scientificDesign.contract)
+    : null;
+  if (options.publicationPolicy && !options.scientificDesign) {
+    gaps.push("scientific-design-missing");
+  }
+  if (options.scientificDesign && !options.publicationPolicy) {
+    gaps.push("scientific-design-policy-missing");
+  }
+  if (
+    options.publicationPolicy &&
+    options.scientificDesign &&
+    options.publicationPolicy.projectId !== options.scientificDesign.contract.projectId
+  ) {
+    gaps.push("scientific-design-policy-project-mismatch");
+  }
+  if (
+    options.publicationPolicy?.targetJournal &&
+    options.scientificDesign &&
+    options.publicationPolicy.targetJournal.trim().toLocaleLowerCase("en-US") !==
+      options.scientificDesign.contract.identity.targetJournals.primary
+        .trim()
+        .toLocaleLowerCase("en-US")
+  ) {
+    gaps.push("scientific-design-policy-journal-mismatch");
+  }
+  if (designEvaluation) {
+    gaps.push(...designEvaluation.issueCodes.map((code) => `scientific-design:${code}`));
+  }
+  if (options.publicationPolicy && options.scientificDesign) {
+    appendScientificDesignContractGaps(
+      gaps,
+      options.scientificDesign.contract,
+      options.publicationPolicy,
+      requirements,
+    );
+  }
   if (config.mode === "production-research" && !requirements) {
     gaps.push("explicit-evidence-requirements-missing");
   }
@@ -138,6 +231,25 @@ export async function evaluateProjectPreflight(
   if (estimatedMaxCostUsd !== null && estimatedMaxCostUsd > config.budget.maxCostUsd) {
     gaps.push(
       `package-cost-reservations-exceed-total:${estimatedMaxCostUsd}/${config.budget.maxCostUsd}`,
+    );
+  }
+  if (lifecycleEnabled && lifecycleTokenReservation > config.budget.maxTokens) {
+    gaps.push(
+      `full-lifecycle-token-reservation-exceeds-total:${lifecycleTokenReservation}/${config.budget.maxTokens}`,
+    );
+  }
+  if (lifecycleEnabled && lifecycleWallReservation > config.budget.maxWallSeconds) {
+    gaps.push(
+      `full-lifecycle-wall-reservation-exceeds-total:${lifecycleWallReservation}/${config.budget.maxWallSeconds}`,
+    );
+  }
+  if (
+    lifecycleEnabled &&
+    lifecycleEstimatedMaxCostUsd !== null &&
+    lifecycleEstimatedMaxCostUsd > config.budget.maxCostUsd
+  ) {
+    gaps.push(
+      `full-lifecycle-cost-reservation-exceeds-total:${lifecycleEstimatedMaxCostUsd}/${config.budget.maxCostUsd}`,
     );
   }
   const discoverOutputTokens =
@@ -275,6 +387,14 @@ export async function evaluateProjectPreflight(
     mode: config.mode,
     questionSha256: sha256Text(question),
     evidenceRequirements: requirements,
+    scientificDesign:
+      options.scientificDesign === null || options.scientificDesign === undefined
+        ? null
+        : {
+            sha256: options.scientificDesign.sha256,
+            projectId: options.scientificDesign.contract.projectId,
+            evaluation: designEvaluation,
+          },
     capabilities: networkCapabilities,
     inputPlan:
       inputPlan === null
@@ -336,6 +456,33 @@ export async function evaluateProjectPreflight(
       },
       preCallTokenReservations,
       maxTurns,
+      lifecycleReservation: {
+        enabled: lifecycleEnabled,
+        reviewCounts: {
+          earlyScientific: earlyScientificReviewCount,
+          finalPublication: finalPublicationReviewCount,
+          revisions: revisionCount,
+        },
+        phaseTokens: {
+          baseResearch: tokenReservation,
+          earlyScientificReviews:
+            earlyScientificReviewCount * config.budget.earlyScientificReviewMaxTokens,
+          finalPublicationReviews:
+            finalPublicationReviewCount * config.budget.finalPublicationReviewMaxTokens,
+          revision: revisionCount * config.budget.revisionReserveTokens,
+        },
+        phaseWallSeconds: {
+          baseResearch: wallReservation,
+          earlyScientificReviews:
+            earlyScientificReviewCount * config.budget.earlyScientificReviewMaxWallSeconds,
+          finalPublicationReviews:
+            finalPublicationReviewCount * config.budget.finalPublicationReviewMaxWallSeconds,
+          revision: revisionCount * config.budget.revisionReserveWallSeconds,
+        },
+        totalTokens: lifecycleTokenReservation,
+        totalWallSeconds: lifecycleWallReservation,
+        estimatedMaxCostUsd: lifecycleEstimatedMaxCostUsd,
+      },
     },
     executionPolicy: {
       producer: {
@@ -547,6 +694,79 @@ function appendEvidencePlanGaps(
     gaps.push(
       `evidence-plan-dated-sources-insufficient:${plannedDatedCount}/${requirements.minDatedSources}`,
     );
+  }
+}
+
+function appendScientificDesignContractGaps(
+  gaps: string[],
+  design: ScientificDesignContract,
+  policy: ResearchPolicyBinding,
+  requirements: ProjectEvidenceRequirements | null,
+): void {
+  const prefix = "scientific-design-contract:";
+  gaps.push(...scientificDesignPolicyGaps(design, policy).map((gap) => `${prefix}${gap}`));
+  if (policy.targetJournal) {
+    if (design.identity.targetJournals.approvalStatus !== "policy-approved") {
+      gaps.push(`${prefix}policy-journal-unapproved`);
+    }
+  } else if (design.identity.targetJournals.approvalStatus !== "candidate-only") {
+    gaps.push(`${prefix}policy-journal-approval-unbound`);
+  }
+
+  const requiredRoles = design.evidenceRoles.filter((role) => role.required);
+  if (requirements) {
+    const mappedDimensions = new Set(requiredRoles.flatMap((role) => role.coverageDimensionIds));
+    const mappedSourceTypes = new Set(requiredRoles.flatMap((role) => role.sourceTypeRequirements));
+    for (const dimension of requirements.dimensions) {
+      if (!mappedDimensions.has(dimension)) {
+        gaps.push(`${prefix}evidence-dimension-uncovered:${dimension}`);
+      }
+    }
+    for (const sourceType of requirements.sourceTypes) {
+      if (!mappedSourceTypes.has(sourceType)) {
+        gaps.push(`${prefix}evidence-source-type-uncovered:${sourceType}`);
+      }
+    }
+    const independentFloor = requiredRoles.reduce(
+      (sum, role) => sum + role.minimumIndependentSources,
+      0,
+    );
+    const fullTextFloor = requiredRoles.reduce((sum, role) => sum + role.minimumFullText, 0);
+    const datedFloor = requiredRoles.reduce((sum, role) => sum + role.minimumDatedSources, 0);
+    if (independentFloor < requirements.minSources) {
+      gaps.push(
+        `${prefix}evidence-source-floor-insufficient:${independentFloor}/${requirements.minSources}`,
+      );
+    }
+    if (fullTextFloor < requirements.minFullTextSources) {
+      gaps.push(
+        `${prefix}evidence-fulltext-floor-insufficient:${fullTextFloor}/${requirements.minFullTextSources}`,
+      );
+    }
+    if (datedFloor < requirements.minDatedSources) {
+      gaps.push(
+        `${prefix}evidence-dated-floor-insufficient:${datedFloor}/${requirements.minDatedSources}`,
+      );
+    }
+  }
+
+  if (policy.resolvedRules.includes("independent-validation-required")) {
+    const centralClaimIds = new Set(
+      design.claims.filter((claim) => claim.role === "central").map((claim) => claim.id),
+    );
+    const centralPlans = design.validationPlans.filter((plan) =>
+      plan.claimIds.some((claimId) => centralClaimIds.has(claimId)),
+    );
+    for (const plan of centralPlans) {
+      if (!["available", "unavailable-scope-bounded"].includes(plan.independentValidation.status)) {
+        gaps.push(`${prefix}independent-validation-undispositioned:${plan.id}`);
+      }
+    }
+    for (const claimId of centralClaimIds) {
+      if (!centralPlans.some((plan) => plan.claimIds.includes(claimId))) {
+        gaps.push(`${prefix}independent-validation-unplanned:${claimId}`);
+      }
+    }
   }
 }
 

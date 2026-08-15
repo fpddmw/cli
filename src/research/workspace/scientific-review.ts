@@ -1,0 +1,1837 @@
+import { Ajv2020, type ErrorObject, type ValidateFunction } from "ajv/dist/2020.js";
+import { lstat, readFile } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
+
+import { CliError } from "../../errors.js";
+import { appendJournalEvent, verifyJournal } from "./journal.js";
+import { loadProject, nextScientificGate, saveProject } from "./projects.js";
+import {
+  evaluateScientificDesign,
+  parseScientificDesign,
+  scientificDesignPolicyGaps,
+  type ScientificDesignContract,
+} from "./scientific-design.js";
+import { sanitizeResearchValue } from "./sanitization.js";
+import {
+  canonicalJson,
+  fileRecord,
+  isObject,
+  pathExists,
+  resolveContained,
+  sha256File,
+  sha256Text,
+  workspacePaths,
+  writeJsonAtomic,
+  writeTextAtomic,
+} from "./storage.js";
+import type {
+  AgentKind,
+  ProjectState,
+  ScientificReviewRole,
+  ScientificGateStatus,
+} from "./types.js";
+import { loadWorkspaceConfig, withWorkspaceLock } from "./workspace.js";
+
+const MAX_SCIENTIFIC_REVIEW_BYTES = 2 * 1024 * 1024;
+const SHA256_PATTERN = "^[a-f0-9]{64}$";
+
+type ReviewDisposition = "pass" | "revise" | "stop" | "handoff";
+
+interface ScientificFinding {
+  code: string;
+  severity: "blocking" | "warning" | "note";
+  message: string;
+  evidenceIds: string[];
+}
+
+interface ResearchDesignAssessment {
+  schemaVersion: 1;
+  role: "research-design";
+  designSha256: string;
+  recommendation: ReviewDisposition;
+  checks: {
+    identityCoherent: boolean;
+    estimandObservable: boolean;
+    claimGraphComplete: boolean;
+    endpointTruthRolesCorrect: boolean;
+    quantityOntologyComplete: boolean;
+    validationSemanticsCorrect: boolean;
+    knownGapDispositionComplete: boolean;
+    lifecycleFeasible: boolean;
+  };
+  findings: ScientificFinding[];
+}
+
+interface EvidenceConstructAssessment {
+  schemaVersion: 1;
+  role: "evidence-construct";
+  designSha256: string;
+  recommendation: ReviewDisposition;
+  constructCanary: {
+    usesRealRecords: boolean;
+    outcomeBlind: boolean;
+    resultValuesInspected: boolean;
+    rowCount: number;
+    constructedEdgeIds: string[];
+    failedEdgeIds: string[];
+    artifactSha256s: string[];
+  };
+  evidenceRoleCoverage: Array<{
+    roleId: string;
+    fullTextSourceIds: string[];
+    independentSourceIds: string[];
+    datedSourceIds: string[];
+    peerReviewedSourceIds: string[];
+    dimensionIds: string[];
+    sourceTypes: string[];
+  }>;
+  closestWorkDispositionComplete: boolean;
+  centralEvidenceFitsContext: boolean;
+  findings: ScientificFinding[];
+}
+
+interface PilotMethodsAssessment {
+  schemaVersion: 1;
+  role: "pilot-methods";
+  designSha256: string;
+  recommendation: ReviewDisposition;
+  checks: {
+    noDataLeakage: boolean;
+    noCircularValidation: boolean;
+    endpointComparisonsCompatible: boolean;
+    baselineFair: boolean;
+    unitsAndDenominatorsVerified: boolean;
+    thresholdsTyped: boolean;
+    decisionLossMetricsComputed: boolean;
+  };
+  validationAudits: Array<{
+    validationPlanId: string;
+    outcomeBlind: boolean;
+    originalUnitCount: number;
+    independentClusterCount: number;
+    effectiveIndependentUnits: number;
+    clusterKeyIds: string[];
+    independenceJustification: string;
+    resamplingUnit: string;
+    resamplingIterations: number;
+    resamplingMethod: "exact-enumeration" | "cluster-bootstrap" | "none";
+    resamplingStateSpaceSize: number;
+    reportingPrecision: string;
+    minimumDetectableDifference: string | null;
+    independentValidationStatus:
+      | "available"
+      | "planned"
+      | "unavailable-scope-bounded"
+      | "not-required";
+    independentValidationGapId: string | null;
+  }>;
+  decisionLossMetricIds: string[];
+  findings: ScientificFinding[];
+}
+
+type ScientificGateAssessment =
+  | ResearchDesignAssessment
+  | EvidenceConstructAssessment
+  | PilotMethodsAssessment;
+
+interface ScientificReview {
+  schemaVersion: 1;
+  role: ScientificReviewRole;
+  packetSha256: string;
+  reviewerSessionSha256: string;
+  decision: ReviewDisposition;
+  findings: ScientificFinding[];
+  boundedRecommendation: string;
+}
+
+interface ScientificMechanicalIssue {
+  code: string;
+  message: string;
+  objectIds: string[];
+}
+
+interface ScientificFutureGateObligation {
+  code:
+    | "UNCERTAINTY_STATE_VALUES_NOT_FROZEN"
+    | "MODEL_IMPLEMENTATION_NOT_FROZEN"
+    | "MODEL_ENVIRONMENT_LOCK_NOT_FROZEN";
+  dueGate: "evidence-construct" | "pilot-methods";
+  objectIds: string[];
+  policyRuleIds: string[];
+}
+
+interface ScientificReviewStageInput {
+  path: string;
+  sha256: string;
+  bytes: number;
+  purpose: "inherited-gap" | "model-implementation" | "model-environment-lock" | "stage-output";
+  ownerId: string;
+  sourceLocator: string;
+  hashBasis: "raw-file-bytes";
+}
+
+export interface ScientificReviewPacket {
+  schemaVersion: 1;
+  kind: "tiangong-scientific-review-packet";
+  projectId: string;
+  role: ScientificReviewRole;
+  design: {
+    sha256: string;
+    objectLocator: string;
+  };
+  policy: {
+    resolvedPolicySha256: string;
+    approvalSha256: string;
+    targetJournal: string | null;
+    bindingSha256: string;
+    objectLocator: string;
+  };
+  reviewer: {
+    agent: AgentKind;
+    sessionSha256: string;
+  };
+  preparedAt: string;
+  stageInputs: ScientificReviewStageInput[];
+  assessment: {
+    sha256: string;
+    objectLocator: string;
+  };
+  mechanicalAssessment: {
+    canPass: boolean;
+    issueCodes: string[];
+    issues: ScientificMechanicalIssue[];
+    futureGateObligations: ScientificFutureGateObligation[];
+    designEvaluation: {
+      readyForDesignReview: boolean;
+      issueCodes: string[];
+      effectiveIndependentUnits: number;
+      requiredEvidenceRoles: number;
+    };
+  };
+  lifecycle: {
+    producerExecution: "native-host-app";
+    baseStages: Array<"discover" | "acquire" | "analyze" | "synthesize" | "review" | "close">;
+    earlyScientificReviews: ScientificReviewRole[];
+    finalPublicationReviews: string[];
+    finalManuscriptFreezeRequired: true;
+    newGenerationOnMaterialChange: true;
+    revisionReserveIncluded: true;
+  };
+  instructions: string[];
+  packetSha256: string;
+}
+
+export interface ScientificReviewStatus {
+  projectId: string;
+  reviewState: "not-required" | "awaiting-review" | "revision-required" | "stopped" | "complete";
+  nextGate: ReturnType<typeof nextScientificGate>;
+  gates: NonNullable<ProjectState["scientificDesign"]>["gates"] | null;
+}
+
+interface ReviewerSessionRegistry {
+  schemaVersion: 1;
+  sessions: Array<{
+    sessionSha256: string;
+    role: ScientificReviewRole;
+    agent: AgentKind;
+    packetSha256: string;
+    usedAt: string;
+  }>;
+}
+
+const ajv = new Ajv2020({ allErrors: true, strict: true });
+const assessmentValidators = new Map<ScientificReviewRole, ValidateFunction>();
+const reviewValidators = new Map<ScientificReviewRole, ValidateFunction>();
+
+export function scientificGateAssessmentSchema(
+  role: ScientificReviewRole,
+): Record<string, unknown> {
+  const properties: Record<string, unknown> = {
+    schemaVersion: { const: 1 },
+    role: { const: role },
+    designSha256: { type: "string", pattern: SHA256_PATTERN },
+    recommendation: { enum: ["pass", "revise", "stop", "handoff"] },
+    findings: findingsSchema(),
+  };
+  let roleRequired: string[];
+  if (role === "research-design") {
+    properties.checks = closedObject(
+      [
+        "identityCoherent",
+        "estimandObservable",
+        "claimGraphComplete",
+        "endpointTruthRolesCorrect",
+        "quantityOntologyComplete",
+        "validationSemanticsCorrect",
+        "knownGapDispositionComplete",
+        "lifecycleFeasible",
+      ],
+      {
+        identityCoherent: { type: "boolean" },
+        estimandObservable: { type: "boolean" },
+        claimGraphComplete: { type: "boolean" },
+        endpointTruthRolesCorrect: { type: "boolean" },
+        quantityOntologyComplete: { type: "boolean" },
+        validationSemanticsCorrect: { type: "boolean" },
+        knownGapDispositionComplete: { type: "boolean" },
+        lifecycleFeasible: { type: "boolean" },
+      },
+    );
+    roleRequired = ["checks"];
+  } else if (role === "evidence-construct") {
+    properties.constructCanary = closedObject(
+      [
+        "usesRealRecords",
+        "outcomeBlind",
+        "resultValuesInspected",
+        "rowCount",
+        "constructedEdgeIds",
+        "failedEdgeIds",
+        "artifactSha256s",
+      ],
+      {
+        usesRealRecords: { type: "boolean" },
+        outcomeBlind: { type: "boolean" },
+        resultValuesInspected: { type: "boolean" },
+        rowCount: { type: "integer", minimum: 0 },
+        constructedEdgeIds: stringSetSchema(),
+        failedEdgeIds: stringSetSchema(),
+        artifactSha256s: {
+          type: "array",
+          uniqueItems: true,
+          items: { type: "string", pattern: SHA256_PATTERN },
+        },
+      },
+    );
+    properties.evidenceRoleCoverage = {
+      type: "array",
+      items: closedObject(
+        [
+          "roleId",
+          "fullTextSourceIds",
+          "independentSourceIds",
+          "datedSourceIds",
+          "peerReviewedSourceIds",
+          "dimensionIds",
+          "sourceTypes",
+        ],
+        {
+          roleId: boundedStringSchema(),
+          fullTextSourceIds: stringSetSchema(),
+          independentSourceIds: stringSetSchema(),
+          datedSourceIds: stringSetSchema(),
+          peerReviewedSourceIds: stringSetSchema(),
+          dimensionIds: stringSetSchema(),
+          sourceTypes: stringSetSchema(),
+        },
+      ),
+    };
+    properties.closestWorkDispositionComplete = { type: "boolean" };
+    properties.centralEvidenceFitsContext = { type: "boolean" };
+    roleRequired = [
+      "constructCanary",
+      "evidenceRoleCoverage",
+      "closestWorkDispositionComplete",
+      "centralEvidenceFitsContext",
+    ];
+  } else {
+    properties.checks = closedObject(
+      [
+        "noDataLeakage",
+        "noCircularValidation",
+        "endpointComparisonsCompatible",
+        "baselineFair",
+        "unitsAndDenominatorsVerified",
+        "thresholdsTyped",
+        "decisionLossMetricsComputed",
+      ],
+      {
+        noDataLeakage: { type: "boolean" },
+        noCircularValidation: { type: "boolean" },
+        endpointComparisonsCompatible: { type: "boolean" },
+        baselineFair: { type: "boolean" },
+        unitsAndDenominatorsVerified: { type: "boolean" },
+        thresholdsTyped: { type: "boolean" },
+        decisionLossMetricsComputed: { type: "boolean" },
+      },
+    );
+    properties.validationAudits = {
+      type: "array",
+      minItems: 1,
+      items: closedObject(
+        [
+          "validationPlanId",
+          "outcomeBlind",
+          "originalUnitCount",
+          "independentClusterCount",
+          "effectiveIndependentUnits",
+          "clusterKeyIds",
+          "independenceJustification",
+          "resamplingUnit",
+          "resamplingIterations",
+          "resamplingMethod",
+          "resamplingStateSpaceSize",
+          "reportingPrecision",
+          "minimumDetectableDifference",
+          "independentValidationStatus",
+          "independentValidationGapId",
+        ],
+        {
+          validationPlanId: boundedStringSchema(),
+          outcomeBlind: { type: "boolean" },
+          originalUnitCount: { type: "integer", minimum: 0 },
+          independentClusterCount: { type: "integer", minimum: 0 },
+          effectiveIndependentUnits: { type: "number", minimum: 0 },
+          clusterKeyIds: stringSetSchema(),
+          independenceJustification: boundedStringSchema(),
+          resamplingUnit: boundedStringSchema(),
+          resamplingIterations: { type: "integer", minimum: 0 },
+          resamplingMethod: { enum: ["exact-enumeration", "cluster-bootstrap", "none"] },
+          resamplingStateSpaceSize: { type: "integer", minimum: 0 },
+          reportingPrecision: boundedStringSchema(),
+          minimumDetectableDifference: { type: ["string", "null"] },
+          independentValidationStatus: {
+            enum: ["available", "planned", "unavailable-scope-bounded", "not-required"],
+          },
+          independentValidationGapId: { type: ["string", "null"] },
+        },
+      ),
+    };
+    properties.decisionLossMetricIds = stringSetSchema();
+    roleRequired = ["checks", "validationAudits", "decisionLossMetricIds"];
+  }
+  return {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "schemaVersion",
+      "role",
+      "designSha256",
+      "recommendation",
+      ...roleRequired,
+      "findings",
+    ],
+    properties,
+  };
+}
+
+export function scientificReviewSchema(role: ScientificReviewRole): Record<string, unknown> {
+  return {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "schemaVersion",
+      "role",
+      "packetSha256",
+      "reviewerSessionSha256",
+      "decision",
+      "findings",
+      "boundedRecommendation",
+    ],
+    properties: {
+      schemaVersion: { const: 1 },
+      role: { const: role },
+      packetSha256: { type: "string", pattern: SHA256_PATTERN },
+      reviewerSessionSha256: { type: "string", pattern: SHA256_PATTERN },
+      decision: { enum: ["pass", "revise", "stop", "handoff"] },
+      findings: findingsSchema(),
+      boundedRecommendation: { type: "string", minLength: 1, maxLength: 8000 },
+    },
+  };
+}
+
+export async function prepareScientificReview(input: {
+  root: string;
+  projectId: string;
+  role: ScientificReviewRole;
+  assessmentPath: string;
+  reviewerAgent: AgentKind;
+  reviewerSessionId: string;
+}): Promise<ScientificReviewPacket> {
+  return withWorkspaceLock(input.root, "research.scientific-review.prepare", async () => {
+    const paths = workspacePaths(input.root);
+    await verifyJournal(paths.journal);
+    const [config, project] = await Promise.all([
+      loadWorkspaceConfig(input.root),
+      loadProject(input.root, input.projectId),
+    ]);
+    if (!project.scientificDesign || !project.publicationPolicy) {
+      throw scientificGateError("This project does not have a scientific design review route.");
+    }
+    const next = nextScientificGate(project);
+    if (!next || next.role !== input.role) {
+      throw new CliError("Scientific review role is not the next blocking gate.", {
+        code: "RESEARCH_SCIENTIFIC_REVIEW_ORDER_INVALID",
+        exitCode: 3,
+        details: { requestedRole: input.role, nextRole: next?.role ?? null },
+      });
+    }
+    if (!["pending", "revision-required"].includes(next.status)) {
+      throw new CliError("The current scientific gate already has an active review packet.", {
+        code: "RESEARCH_SCIENTIFIC_REVIEW_STATE_INVALID",
+        exitCode: 3,
+        details: { role: input.role, status: next.status },
+      });
+    }
+    if (config.reviewer.agent !== input.reviewerAgent) {
+      throw new CliError("Scientific review must use the configured independent reviewer route.", {
+        code: "RESEARCH_SCIENTIFIC_REVIEWER_MISMATCH",
+        exitCode: 3,
+        details: {
+          configuredReviewer: config.reviewer.agent,
+          requestedReviewer: input.reviewerAgent,
+        },
+      });
+    }
+    if (input.reviewerAgent === project.scientificDesign.producer.agent) {
+      throw new CliError("Scientific review must use a different agent family from the producer.", {
+        code: "RESEARCH_SCIENTIFIC_REVIEW_NOT_INDEPENDENT",
+        exitCode: 3,
+      });
+    }
+    const sessionId = input.reviewerSessionId.trim();
+    if (!sessionId) {
+      throw new CliError("Scientific review requires an opaque reviewer session identifier.", {
+        code: "RESEARCH_SCIENTIFIC_REVIEW_SESSION_INVALID",
+        exitCode: 2,
+      });
+    }
+    const reviewerSessionSha256 = sha256Text(sessionId);
+    if (reviewerSessionSha256 === project.scientificDesign.producer.sessionSha256) {
+      throw new CliError("Producer and reviewer session identities must be independent.", {
+        code: "RESEARCH_SCIENTIFIC_REVIEW_NOT_INDEPENDENT",
+        exitCode: 3,
+      });
+    }
+    const projectRoot = join(paths.projects, project.id);
+    const registryPath = join(projectRoot, "scientific", "reviewer-sessions.json");
+    const registry = await loadReviewerSessionRegistry(registryPath);
+    if (registry.sessions.some((entry) => entry.sessionSha256 === reviewerSessionSha256)) {
+      throw new CliError("A reviewer session may be used for only one scientific review packet.", {
+        code: "RESEARCH_SCIENTIFIC_REVIEW_SESSION_REUSED",
+        exitCode: 3,
+      });
+    }
+    const design = await loadBoundScientificDesign(input.root, project);
+    const assessment = await readAssessment(input.assessmentPath, input.role);
+    if (assessment.designSha256 !== project.scientificDesign.designSha256) {
+      throw new CliError("Scientific assessment does not match the frozen design.", {
+        code: "RESEARCH_SCIENTIFIC_ASSESSMENT_DESIGN_MISMATCH",
+        exitCode: 3,
+      });
+    }
+    const stageInputs = await stageInputRecords(input.root, project, input.role, design);
+    const assessmentSha256 = exactJsonSha256(assessment);
+    const assessmentLocator = `projects/${project.id}/scientific/assessments/${input.role}/${assessmentSha256}.json`;
+    await writeImmutableJson(join(paths.control, assessmentLocator), assessment);
+    const policyBindingSha256 = exactJsonSha256(project.publicationPolicy);
+    const policyObjectLocator = `projects/${project.id}/scientific/policy/objects/${policyBindingSha256}.json`;
+    await writeImmutableJson(
+      resolveContained(paths.control, policyObjectLocator),
+      project.publicationPolicy,
+    );
+    const packetPolicy: ScientificReviewPacket["policy"] = {
+      resolvedPolicySha256: project.publicationPolicy.resolvedPolicySha256,
+      approvalSha256: project.publicationPolicy.approvalSha256,
+      targetJournal: project.publicationPolicy.targetJournal,
+      bindingSha256: policyBindingSha256,
+      objectLocator: policyObjectLocator,
+    };
+    await assertBoundPolicyObject(input.root, project, packetPolicy);
+    const designEvaluation = evaluateScientificDesign(design);
+    const issues = evaluateAssessment(
+      input.role,
+      assessment,
+      design,
+      project.evidenceRequirements,
+      project.publicationPolicy,
+    );
+    const futureGateObligations = scientificFutureGateObligations(design, input.role);
+    const packetCore = {
+      schemaVersion: 1 as const,
+      kind: "tiangong-scientific-review-packet" as const,
+      projectId: project.id,
+      role: input.role,
+      design: {
+        sha256: project.scientificDesign.designSha256,
+        objectLocator: project.scientificDesign.objectLocator,
+      },
+      policy: packetPolicy,
+      reviewer: { agent: input.reviewerAgent, sessionSha256: reviewerSessionSha256 },
+      preparedAt: new Date().toISOString(),
+      stageInputs,
+      assessment: { sha256: assessmentSha256, objectLocator: assessmentLocator },
+      mechanicalAssessment: {
+        canPass: issues.length === 0 && assessment.recommendation === "pass",
+        issueCodes: issues.map((issue) => issue.code),
+        issues,
+        futureGateObligations,
+        designEvaluation: {
+          readyForDesignReview: designEvaluation.readyForDesignReview,
+          issueCodes: designEvaluation.issueCodes,
+          effectiveIndependentUnits: designEvaluation.effectiveIndependentUnits,
+          requiredEvidenceRoles: designEvaluation.requiredEvidenceRoles,
+        },
+      },
+      lifecycle: {
+        producerExecution: "native-host-app" as const,
+        baseStages: ["discover", "acquire", "analyze", "synthesize", "review", "close"] as Array<
+          "discover" | "acquire" | "analyze" | "synthesize" | "review" | "close"
+        >,
+        earlyScientificReviews: [
+          "research-design",
+          "evidence-construct",
+          "pilot-methods",
+        ] as ScientificReviewRole[],
+        finalPublicationReviews: [...project.publicationPolicy.requiredReviewers],
+        finalManuscriptFreezeRequired: true as const,
+        newGenerationOnMaterialChange: true as const,
+        revisionReserveIncluded: true as const,
+      },
+      instructions: reviewInstructions(input.role),
+    };
+    const packetSha256 = sha256Text(canonicalJson(packetCore));
+    const packet: ScientificReviewPacket = { ...packetCore, packetSha256 };
+    const packetLocator = `projects/${project.id}/scientific/review-packets/${input.role}/${packetSha256}.json`;
+    await writeImmutableJson(join(paths.control, packetLocator), packet);
+    registry.sessions.push({
+      sessionSha256: reviewerSessionSha256,
+      role: input.role,
+      agent: input.reviewerAgent,
+      packetSha256,
+      usedAt: packet.preparedAt,
+    });
+    await writeJsonAtomic(registryPath, registry);
+    const gate = project.scientificDesign.gates[input.role];
+    gate.status = "prepared";
+    gate.packetSha256 = packetSha256;
+    gate.assessmentSha256 = assessmentSha256;
+    gate.reviewSha256 = null;
+    gate.reviewerSessionSha256 = reviewerSessionSha256;
+    project.updatedAt = packet.preparedAt;
+    await saveProject(input.root, project);
+    await appendJournalEvent(paths.journal, "scientific-review.prepared", project.id, {
+      projectId: project.id,
+      role: input.role,
+      designSha256: project.scientificDesign.designSha256,
+      assessmentSha256,
+      packetSha256,
+      policyBindingSha256,
+      reviewerAgent: input.reviewerAgent,
+      reviewerSessionSha256,
+      mechanicalIssueCodes: packet.mechanicalAssessment.issueCodes,
+      futureGateObligations,
+      stageInputs,
+    });
+    return packet;
+  });
+}
+
+export async function submitScientificReview(input: {
+  root: string;
+  projectId: string;
+  role: ScientificReviewRole;
+  reviewPath: string;
+}): Promise<{ status: ScientificGateStatus; reviewSha256: string; issueCodes: string[] }> {
+  return withWorkspaceLock(input.root, "research.scientific-review.submit", async () => {
+    const paths = workspacePaths(input.root);
+    await verifyJournal(paths.journal);
+    const project = await loadProject(input.root, input.projectId);
+    const binding = project.scientificDesign;
+    if (!binding) throw scientificGateError("Project does not have a scientific design binding.");
+    const gate = binding.gates[input.role];
+    if (
+      gate.status !== "prepared" ||
+      !gate.packetSha256 ||
+      !gate.assessmentSha256 ||
+      !gate.reviewerSessionSha256
+    ) {
+      throw new CliError("Scientific review has no prepared packet to submit.", {
+        code: "RESEARCH_SCIENTIFIC_REVIEW_STATE_INVALID",
+        exitCode: 3,
+        details: { role: input.role, status: gate.status },
+      });
+    }
+    const packet = await loadBoundPacket(input.root, project, input.role, gate.packetSha256);
+    const review = await readReview(input.reviewPath, input.role);
+    if (
+      review.packetSha256 !== packet.packetSha256 ||
+      review.reviewerSessionSha256 !== packet.reviewer.sessionSha256 ||
+      review.reviewerSessionSha256 !== gate.reviewerSessionSha256
+    ) {
+      throw new CliError("Scientific review does not match its packet and reviewer binding.", {
+        code: "RESEARCH_SCIENTIFIC_REVIEW_BINDING_INVALID",
+        exitCode: 3,
+      });
+    }
+    const reviewSha256 = exactJsonSha256(review);
+    const reviewLocator = `projects/${project.id}/scientific/reviews/${input.role}/${reviewSha256}.json`;
+    await writeImmutableJson(join(paths.control, reviewLocator), review);
+    const assessment = await loadBoundAssessment(input.root, project, input.role, packet);
+    const mechanicsPass =
+      packet.mechanicalAssessment.issueCodes.length === 0 &&
+      packet.mechanicalAssessment.canPass &&
+      assessment.recommendation === "pass";
+    let status: ScientificGateStatus;
+    if (review.decision === "pass" && mechanicsPass) status = "passed";
+    else if (review.decision === "stop" || review.decision === "handoff") status = "stopped";
+    else status = "revision-required";
+    gate.status = status;
+    gate.reviewSha256 = reviewSha256;
+    project.updatedAt = new Date().toISOString();
+    await saveProject(input.root, project);
+    await appendJournalEvent(paths.journal, "scientific-review.submitted", project.id, {
+      projectId: project.id,
+      role: input.role,
+      packetSha256: packet.packetSha256,
+      assessmentSha256: packet.assessment.sha256,
+      reviewSha256,
+      reviewerSessionSha256: review.reviewerSessionSha256,
+      reviewerDecision: review.decision,
+      mechanicalIssueCodes: packet.mechanicalAssessment.issueCodes,
+      status,
+    });
+    return { status, reviewSha256, issueCodes: packet.mechanicalAssessment.issueCodes };
+  });
+}
+
+export async function assertScientificGateForStage(
+  root: string,
+  project: ProjectState,
+  stage: "discover" | "acquire" | "analyze" | "synthesize" | "review" | "close",
+): Promise<void> {
+  if (!project.scientificDesign) return;
+  const design = await loadBoundScientificDesign(root, project);
+  for (const role of requiredGateRoles(stage)) {
+    const gate = project.scientificDesign.gates[role];
+    if (gate.status !== "passed" || !gate.packetSha256 || !gate.reviewSha256) {
+      throw new CliError(`Scientific ${role} review must pass before ${stage}.`, {
+        code: "RESEARCH_SCIENTIFIC_GATE_REQUIRED",
+        exitCode: 3,
+        details: { role, stage, status: gate.status },
+      });
+    }
+    const packet = await loadBoundPacket(root, project, role, gate.packetSha256);
+    const review = await loadBoundReview(root, project, role, gate.reviewSha256);
+    const assessment = await loadBoundAssessment(root, project, role, packet);
+    const currentIssues = evaluateAssessment(
+      role,
+      assessment,
+      design,
+      project.evidenceRequirements,
+      project.publicationPolicy!,
+    ).map((issue) => issue.code);
+    if (
+      packet.assessment.sha256 !== gate.assessmentSha256 ||
+      packet.reviewer.sessionSha256 !== gate.reviewerSessionSha256 ||
+      review.packetSha256 !== packet.packetSha256 ||
+      review.reviewerSessionSha256 !== packet.reviewer.sessionSha256 ||
+      review.decision !== "pass" ||
+      assessment.recommendation !== "pass" ||
+      packet.mechanicalAssessment.issueCodes.length !== 0 ||
+      currentIssues.length !== 0
+    ) {
+      throw scientificGateError(
+        "Scientific gate bindings or mechanical results are invalid.",
+        role,
+      );
+    }
+  }
+}
+
+export async function inspectScientificReviewStatus(
+  root: string,
+  projectId: string,
+): Promise<ScientificReviewStatus> {
+  const project = await loadProject(root, projectId);
+  if (!project.scientificDesign) {
+    return { projectId, reviewState: "not-required", nextGate: null, gates: null };
+  }
+  const nextGate = nextScientificGate(project);
+  const reviewState = !nextGate
+    ? "complete"
+    : nextGate.status === "revision-required"
+      ? "revision-required"
+      : nextGate.status === "stopped"
+        ? "stopped"
+        : "awaiting-review";
+  return {
+    projectId,
+    reviewState,
+    nextGate,
+    gates: structuredClone(project.scientificDesign.gates),
+  };
+}
+
+function evaluateAssessment(
+  role: ScientificReviewRole,
+  assessment: ScientificGateAssessment,
+  design: ScientificDesignContract,
+  requirements: ProjectState["evidenceRequirements"],
+  policy: NonNullable<ProjectState["publicationPolicy"]>,
+): ScientificMechanicalIssue[] {
+  const issues = new Map<string, ScientificMechanicalIssue>();
+  const add = (code: string, message: string, objectIds: string[] = []) => {
+    if (!issues.has(code)) issues.set(code, { code, message, objectIds });
+  };
+  const gateRank: Record<ScientificReviewRole | "publication-freeze", number> = {
+    "research-design": 0,
+    "evidence-construct": 1,
+    "pilot-methods": 2,
+    "publication-freeze": 3,
+  };
+  for (const gap of scientificDesignPolicyGaps(design, policy)) {
+    add(
+      `POLICY_${gap.replaceAll(/[^A-Za-z0-9]+/gu, "_").toUpperCase()}`,
+      "The frozen scientific design no longer matches its approved Research Policy disposition contract.",
+      [gap],
+    );
+  }
+  const duePolicyRules = design.policyRuleDispositions.filter(
+    (disposition) =>
+      disposition.status === "planned" &&
+      disposition.dueGate !== "publication-freeze" &&
+      gateRank[disposition.dueGate] <= gateRank[role],
+  );
+  if (duePolicyRules.length) {
+    add(
+      "POLICY_RULE_DUE_UNRESOLVED",
+      "A planned Research Policy rule reached its declared early-review gate without a new design generation that records how it was satisfied.",
+      duePolicyRules.map((disposition) => disposition.ruleId),
+    );
+  }
+  const dueUncertaintyFreezes = design.uncertaintyParameters.filter(
+    (parameter) =>
+      parameter.stateValueStatus === "pending-source-acquisition" &&
+      gateRank[parameter.freezeBeforeGate] <= gateRank[role],
+  );
+  if (dueUncertaintyFreezes.length) {
+    add(
+      "UNCERTAINTY_STATE_VALUES_NOT_FROZEN",
+      "Source-derived uncertainty values reached their declared freeze gate without a new authoritative design generation containing exact states and source bindings.",
+      dueUncertaintyFreezes.map((parameter) => parameter.id),
+    );
+  }
+  const dueModelImplementations = design.identity.modelStructures.filter(
+    (model) =>
+      model.implementationStatus === "pending-source-acquisition" &&
+      gateRank[model.implementationFreezeBeforeGate] <= gateRank[role],
+  );
+  if (dueModelImplementations.length) {
+    add(
+      "MODEL_IMPLEMENTATION_NOT_FROZEN",
+      "A model implementation reached its declared freeze gate without a new authoritative design generation binding executable model bytes.",
+      dueModelImplementations.map((model) => model.id),
+    );
+  }
+  const dueModelEnvironmentLocks = design.identity.modelStructures.filter(
+    (model) =>
+      model.environmentLockStatus === "pending-runtime-lock" &&
+      gateRank[model.environmentLockFreezeBeforeGate] <= gateRank[role],
+  );
+  if (dueModelEnvironmentLocks.length) {
+    add(
+      "MODEL_ENVIRONMENT_LOCK_NOT_FROZEN",
+      "A model environment reached its declared freeze gate without a new authoritative design generation binding an exact runtime and dependency lock.",
+      dueModelEnvironmentLocks.map((model) => model.id),
+    );
+  }
+  if (role === "research-design") {
+    const value = assessment as ResearchDesignAssessment;
+    for (const issue of evaluateScientificDesign(design).issues) {
+      add(issue.code, issue.message, issue.objectIds);
+    }
+    for (const [key, passed] of Object.entries(value.checks)) {
+      if (!passed) add(`DESIGN_CHECK_${camelToCode(key)}_FAILED`, `Design check ${key} failed.`);
+    }
+  } else if (role === "evidence-construct") {
+    const value = assessment as EvidenceConstructAssessment;
+    const canary = value.constructCanary;
+    if (
+      !canary.usesRealRecords ||
+      !canary.outcomeBlind ||
+      canary.resultValuesInspected ||
+      canary.rowCount < 1 ||
+      canary.artifactSha256s.length < 1
+    ) {
+      add("CANARY_NOT_REAL", "Construct canary must use real records without inspecting outcomes.");
+    }
+    const centralEdges = design.edges
+      .filter((edge) => edge.role === "central")
+      .map((edge) => edge.id);
+    const unconstructed = centralEdges.filter(
+      (edgeId) =>
+        !canary.constructedEdgeIds.includes(edgeId) || canary.failedEdgeIds.includes(edgeId),
+    );
+    if (unconstructed.length) {
+      add(
+        "CENTRAL_EDGE_UNCONSTRUCTED",
+        "Every central claim edge must survive a real-record construct canary.",
+        unconstructed,
+      );
+    }
+    for (const required of design.evidenceRoles.filter((item) => item.required)) {
+      const coverage = value.evidenceRoleCoverage.find((item) => item.roleId === required.id);
+      if (
+        !coverage ||
+        new Set(coverage.fullTextSourceIds).size < required.minimumFullText ||
+        new Set(coverage.independentSourceIds).size < required.minimumIndependentSources
+      ) {
+        add(
+          "EVIDENCE_ROLE_FULLTEXT_INSUFFICIENT",
+          "A required evidence role lacks its frozen full-text or independence minimum.",
+          [required.id],
+        );
+      }
+      if (!coverage || new Set(coverage.datedSourceIds).size < required.minimumDatedSources) {
+        add(
+          "EVIDENCE_ROLE_DATED_INSUFFICIENT",
+          "A required evidence role lacks its frozen dated-source minimum.",
+          [required.id],
+        );
+      }
+      if (
+        required.peerReviewedRequired &&
+        (!coverage || new Set(coverage.peerReviewedSourceIds).size < required.minimumFullText)
+      ) {
+        add(
+          "EVIDENCE_ROLE_PEER_REVIEWED_INSUFFICIENT",
+          "A peer-reviewed evidence role lacks its required frozen peer-reviewed full texts.",
+          [required.id],
+        );
+      }
+      const dimensions = new Set(coverage?.dimensionIds ?? []);
+      if (required.coverageDimensionIds.some((dimension) => !dimensions.has(dimension))) {
+        add(
+          "EVIDENCE_ROLE_DIMENSION_UNCOVERED",
+          "A required evidence role did not demonstrate every declared research dimension.",
+          [required.id],
+        );
+      }
+      const sourceTypes = new Set(coverage?.sourceTypes ?? []);
+      if (required.sourceTypeRequirements.some((sourceType) => !sourceTypes.has(sourceType))) {
+        add(
+          "EVIDENCE_ROLE_SOURCE_TYPE_UNCOVERED",
+          "A required evidence role did not demonstrate every declared source type.",
+          [required.id],
+        );
+      }
+      if (coverage) {
+        const independentIds = new Set(coverage.independentSourceIds);
+        const fullTextIds = new Set(coverage.fullTextSourceIds);
+        if (
+          coverage.fullTextSourceIds.some((sourceId) => !independentIds.has(sourceId)) ||
+          coverage.datedSourceIds.some((sourceId) => !independentIds.has(sourceId)) ||
+          coverage.peerReviewedSourceIds.some(
+            (sourceId) => !independentIds.has(sourceId) || !fullTextIds.has(sourceId),
+          )
+        ) {
+          add(
+            "EVIDENCE_ROLE_SOURCE_ID_INCONSISTENT",
+            "Full-text, dated, and peer-reviewed IDs must refer to sources in the same role's independent source set.",
+            [required.id],
+          );
+        }
+      }
+    }
+    const allIndependentSourceIds = new Set(
+      value.evidenceRoleCoverage.flatMap((coverage) => coverage.independentSourceIds),
+    );
+    const allFullTextSourceIds = new Set(
+      value.evidenceRoleCoverage.flatMap((coverage) => coverage.fullTextSourceIds),
+    );
+    const allDatedSourceIds = new Set(
+      value.evidenceRoleCoverage.flatMap((coverage) => coverage.datedSourceIds),
+    );
+    if (allIndependentSourceIds.size < requirements.minSources) {
+      add(
+        "EVIDENCE_UNIQUE_SOURCE_COVERAGE_INSUFFICIENT",
+        "Unique evidence sources across roles do not meet the project minimum.",
+      );
+    }
+    if (allFullTextSourceIds.size < requirements.minFullTextSources) {
+      add(
+        "EVIDENCE_UNIQUE_FULLTEXT_COVERAGE_INSUFFICIENT",
+        "Unique full-text sources across roles do not meet the project minimum.",
+      );
+    }
+    if (allDatedSourceIds.size < requirements.minDatedSources) {
+      add(
+        "EVIDENCE_UNIQUE_DATED_COVERAGE_INSUFFICIENT",
+        "Unique dated sources across roles do not meet the project minimum.",
+      );
+    }
+    if (!value.closestWorkDispositionComplete) {
+      add(
+        "CLOSEST_WORK_DISPOSITION_INCOMPLETE",
+        "Closest prior work must be obtained, compared, and dispositioned before acquisition.",
+      );
+    }
+    if (!value.centralEvidenceFitsContext) {
+      add(
+        "CENTRAL_CONTEXT_OVERFLOW",
+        "Central evidence does not fit the planned context and extraction route.",
+      );
+    }
+  } else {
+    const value = assessment as PilotMethodsAssessment;
+    for (const [key, passed] of Object.entries(value.checks)) {
+      if (!passed) add(`PILOT_CHECK_${camelToCode(key)}_FAILED`, `Pilot check ${key} failed.`);
+    }
+    const auditIds = value.validationAudits.map((audit) => audit.validationPlanId);
+    const knownPlanIds = new Set(design.validationPlans.map((plan) => plan.id));
+    const missingOrUnknownPlans = [
+      ...design.validationPlans
+        .map((plan) => plan.id)
+        .filter((planId) => !auditIds.includes(planId)),
+      ...auditIds.filter((planId) => !knownPlanIds.has(planId)),
+    ];
+    if (new Set(auditIds).size !== auditIds.length || missingOrUnknownPlans.length) {
+      add(
+        "VALIDATION_PLAN_UNVERIFIED",
+        "Every declared validation plan requires exactly one pilot audit and undeclared plans are forbidden.",
+        [...new Set(missingOrUnknownPlans)],
+      );
+    }
+    for (const audit of value.validationAudits) {
+      if (
+        audit.independentClusterCount > audit.originalUnitCount ||
+        audit.effectiveIndependentUnits > audit.independentClusterCount
+      ) {
+        add(
+          "EFFECTIVE_SAMPLE_SIZE_INFLATED",
+          "Resampling cannot create independent units beyond the original independent clusters.",
+          [audit.validationPlanId],
+        );
+      }
+      const repeatedWithinCluster = audit.originalUnitCount > audit.independentClusterCount;
+      if (
+        repeatedWithinCluster &&
+        /^(cell|row|record|observation|measurement)s?$/iu.test(audit.resamplingUnit.trim())
+      ) {
+        add(
+          "RESAMPLING_UNIT_INVALID",
+          "Resampling must preserve the independent cluster when observations repeat within clusters.",
+          [audit.validationPlanId],
+        );
+      }
+      const plan = design.validationPlans.find(
+        (candidate) => candidate.id === audit.validationPlanId,
+      );
+      if (!plan) continue;
+      if (
+        audit.originalUnitCount !== plan.originalUnitCount ||
+        audit.independentClusterCount !== plan.independentClusterCount ||
+        audit.effectiveIndependentUnits !== plan.effectiveIndependentUnits
+      ) {
+        add(
+          "PILOT_SAMPLE_DEFINITION_DRIFT",
+          "Pilot sample counts differ from the frozen validation plan and require a new design generation.",
+          [plan.id],
+        );
+      }
+      if (
+        !sameStringSet(audit.clusterKeyIds, plan.clusterKeyIds) ||
+        audit.independenceJustification !== plan.independenceJustification ||
+        audit.resamplingUnit !== plan.resamplingUnit
+      ) {
+        add(
+          "PILOT_CLUSTER_DEFINITION_DRIFT",
+          "Pilot cluster keys, independence justification, or resampling unit differ from the frozen validation plan.",
+          [plan.id],
+        );
+      }
+      if (
+        audit.resamplingIterations !== plan.resamplingIterations ||
+        audit.resamplingMethod !== plan.resamplingMethod ||
+        audit.resamplingStateSpaceSize !== plan.resamplingStateSpaceSize
+      ) {
+        add(
+          "PILOT_RESAMPLING_PLAN_DRIFT",
+          "Pilot resampling method, iterations, or state space differ from the frozen validation plan.",
+          [plan.id],
+        );
+      }
+      if (
+        audit.reportingPrecision !== plan.reportingPrecision ||
+        audit.minimumDetectableDifference !== plan.minimumDetectableDifference
+      ) {
+        add(
+          "PILOT_PRECISION_PLAN_DRIFT",
+          "Pilot reporting precision or minimum detectable difference differs from the frozen validation plan.",
+          [plan.id],
+        );
+      }
+      if (audit.outcomeBlind !== plan.outcomeBlind) {
+        add(
+          "PILOT_OUTCOME_BLINDING_DRIFT",
+          "Pilot outcome blinding differs from the frozen validation plan.",
+          [plan.id],
+        );
+      }
+      if (
+        audit.independentValidationStatus !== plan.independentValidation.status ||
+        audit.independentValidationGapId !== plan.independentValidation.gapId
+      ) {
+        add(
+          "PILOT_VALIDATION_DISPOSITION_DRIFT",
+          "Pilot independent-validation status or gap binding differs from the frozen validation plan.",
+          [plan.id],
+        );
+      }
+    }
+    const missingLoss = design.baselinePlan.decisionLossMetrics.filter(
+      (metric) => !value.decisionLossMetricIds.includes(metric.id),
+    );
+    if (missingLoss.length) {
+      add(
+        "DECISION_LOSS_METRIC_MISSING",
+        "Every frozen decision-loss metric must be computed in the pilot.",
+        missingLoss.map((metric) => metric.id),
+      );
+    }
+  }
+  return [...issues.values()];
+}
+
+async function stageInputRecords(
+  root: string,
+  project: ProjectState,
+  role: ScientificReviewRole,
+  design: ScientificDesignContract,
+): Promise<ScientificReviewStageInput[]> {
+  const paths = workspacePaths(root);
+  const projectRoot = join(paths.projects, project.id);
+  if (role === "research-design") {
+    const records: ScientificReviewStageInput[] = [];
+    const promote = async (input: {
+      sourceLocator: string;
+      sha256: string;
+      purpose: Exclude<ScientificReviewStageInput["purpose"], "stage-output">;
+      ownerId: string;
+      onFailure: (
+        reason:
+          | "unavailable-or-unsafe"
+          | "oversized"
+          | "content-hash-mismatch"
+          | "not-reviewable-json",
+      ) => CliError;
+    }) => {
+      const source = resolveContained(paths.control, input.sourceLocator);
+      const info = await lstat(source).catch(() => undefined);
+      if (!info?.isFile() || info.isSymbolicLink()) {
+        throw input.onFailure("unavailable-or-unsafe");
+      }
+      if (info.size > MAX_SCIENTIFIC_REVIEW_BYTES) {
+        throw input.onFailure("oversized");
+      }
+      if ((await sha256File(source)) !== input.sha256) {
+        throw input.onFailure("content-hash-mismatch");
+      }
+      const sourceBytes = await readFile(source, "utf8");
+      try {
+        JSON.parse(sourceBytes);
+      } catch {
+        throw input.onFailure("not-reviewable-json");
+      }
+      const promotedLocator = `projects/${project.id}/scientific/lineage/objects/${input.sha256}.json`;
+      const promoted = resolveContained(paths.control, promotedLocator);
+      if (await pathExists(promoted)) {
+        const promotedInfo = await lstat(promoted).catch(() => undefined);
+        if (
+          !promotedInfo?.isFile() ||
+          promotedInfo.isSymbolicLink() ||
+          promotedInfo.size !== info.size ||
+          (await sha256File(promoted)) !== input.sha256
+        ) {
+          throw scientificGateError(
+            "A promoted scientific design object failed its immutable binding.",
+            role,
+          );
+        }
+      } else {
+        await writeTextAtomic(promoted, sourceBytes);
+      }
+      records.push({
+        path: promotedLocator,
+        sha256: input.sha256,
+        bytes: info.size,
+        purpose: input.purpose,
+        ownerId: input.ownerId,
+        sourceLocator: input.sourceLocator,
+        hashBasis: "raw-file-bytes",
+      });
+    };
+    for (const model of design.identity.modelStructures) {
+      await promote({
+        sourceLocator: model.implementationArtifactLocator,
+        sha256: model.implementationArtifactSha256,
+        purpose: "model-implementation",
+        ownerId: model.id,
+        onFailure: (reason) => modelArtifactObjectError(role, model.id, "implementation", reason),
+      });
+      await promote({
+        sourceLocator: model.environmentLockLocator,
+        sha256: model.environmentLockSha256,
+        purpose: "model-environment-lock",
+        ownerId: model.id,
+        onFailure: (reason) => modelArtifactObjectError(role, model.id, "environment-lock", reason),
+      });
+    }
+    for (const gap of design.knownGaps) {
+      for (const artifact of gap.sourceArtifacts) {
+        await promote({
+          sourceLocator: artifact.objectLocator,
+          sha256: artifact.sha256,
+          purpose: "inherited-gap",
+          ownerId: gap.id,
+          onFailure: (reason) => inheritedGapObjectError(role, gap.id, artifact.kind, reason),
+        });
+      }
+    }
+    return records;
+  }
+  const requiredPackage = role === "evidence-construct" ? "discover" : "acquire";
+  const packageState = project.packages.find((item) => item.id === requiredPackage);
+  if (packageState?.status !== "complete") {
+    throw new CliError(`Scientific ${role} review requires completed ${requiredPackage}.`, {
+      code: "RESEARCH_SCIENTIFIC_REVIEW_PREREQUISITE_MISSING",
+      exitCode: 3,
+      details: { role, requiredPackage, status: packageState?.status ?? null },
+    });
+  }
+  const relativeOutputs =
+    role === "evidence-construct"
+      ? ["outputs/evidence.json"]
+      : ["outputs/acquisition.json", "outputs/evidence-snapshot.json"];
+  return Promise.all(
+    relativeOutputs.map(async (relativePath) => {
+      const sourceLocator = `projects/${project.id}/${relativePath}`;
+      return {
+        ...(await fileRecord(join(projectRoot, relativePath), sourceLocator)),
+        purpose: "stage-output" as const,
+        ownerId: requiredPackage,
+        sourceLocator,
+        hashBasis: "raw-file-bytes" as const,
+      };
+    }),
+  );
+}
+
+async function loadBoundScientificDesign(
+  root: string,
+  project: ProjectState,
+): Promise<ScientificDesignContract> {
+  const binding = project.scientificDesign;
+  if (!binding) throw scientificGateError("Project has no scientific design binding.");
+  const path = join(workspacePaths(root).control, binding.objectLocator);
+  const value = await readExactJson(path, "Scientific design", "RESEARCH_SCIENTIFIC_GATE_INVALID");
+  const design = parseScientificDesign(value);
+  const normalized = normalizedJson(design);
+  if (
+    design.projectId !== project.id ||
+    sha256Text(normalized) !== binding.designSha256 ||
+    (await readFile(path, "utf8")) !== normalized
+  ) {
+    throw scientificGateError("Frozen scientific design failed its exact binding.");
+  }
+  return design;
+}
+
+async function loadBoundPacket(
+  root: string,
+  project: ProjectState,
+  role: ScientificReviewRole,
+  packetSha256: string,
+): Promise<ScientificReviewPacket> {
+  const path = join(
+    workspacePaths(root).projects,
+    project.id,
+    "scientific",
+    "review-packets",
+    role,
+    `${packetSha256}.json`,
+  );
+  const value = await readExactJson(
+    path,
+    "Scientific review packet",
+    "RESEARCH_SCIENTIFIC_GATE_INVALID",
+  );
+  if (
+    !isScientificReviewPacket(
+      value,
+      project.id,
+      role,
+      project.publicationPolicy?.requiredReviewers ?? [],
+    )
+  ) {
+    throw scientificGateError("Scientific review packet is malformed.", role);
+  }
+  const { packetSha256: recorded, ...core } = value;
+  if (
+    recorded !== packetSha256 ||
+    sha256Text(canonicalJson(core)) !== packetSha256 ||
+    (await readFile(path, "utf8")) !== normalizedJson(value)
+  ) {
+    throw scientificGateError("Scientific review packet failed its immutable hash binding.", role);
+  }
+  await assertBoundPolicyObject(root, project, value.policy);
+  await assertBoundStageInputs(root, value.stageInputs, role);
+  return value;
+}
+
+async function assertBoundStageInputs(
+  root: string,
+  records: ScientificReviewPacket["stageInputs"],
+  role: ScientificReviewRole,
+): Promise<void> {
+  const paths = workspacePaths(root);
+  for (const record of records) {
+    const path = resolveContained(paths.control, record.path);
+    const info = await lstat(path).catch(() => undefined);
+    if (
+      !info?.isFile() ||
+      info.isSymbolicLink() ||
+      info.size !== record.bytes ||
+      (await sha256File(path)) !== record.sha256
+    ) {
+      throw scientificGateError(
+        "A scientific review stage input failed its immutable binding.",
+        role,
+      );
+    }
+  }
+}
+
+async function assertBoundPolicyObject(
+  root: string,
+  project: ProjectState,
+  packetPolicy: ScientificReviewPacket["policy"],
+): Promise<void> {
+  const binding = project.publicationPolicy;
+  if (!binding) throw scientificGateError("Project has no publication policy binding.");
+  const expectedSha256 = exactJsonSha256(binding);
+  const expectedLocator = `projects/${project.id}/scientific/policy/objects/${expectedSha256}.json`;
+  if (
+    packetPolicy.bindingSha256 !== expectedSha256 ||
+    packetPolicy.objectLocator !== expectedLocator ||
+    packetPolicy.resolvedPolicySha256 !== binding.resolvedPolicySha256 ||
+    packetPolicy.approvalSha256 !== binding.approvalSha256 ||
+    packetPolicy.targetJournal !== binding.targetJournal
+  ) {
+    throw scientificGateError("Scientific review policy binding does not match the project.");
+  }
+  const paths = workspacePaths(root);
+  const policyPath = resolveContained(paths.control, expectedLocator);
+  const value = await readExactJson(
+    policyPath,
+    "Scientific review policy binding",
+    "RESEARCH_SCIENTIFIC_GATE_INVALID",
+  );
+  if (
+    exactJsonSha256(value) !== expectedSha256 ||
+    (await readFile(policyPath, "utf8")) !== normalizedJson(binding)
+  ) {
+    throw scientificGateError("Scientific review policy object failed its immutable binding.");
+  }
+  for (const document of binding.documents) {
+    const documentPath = resolveContained(paths.control, document.objectLocator);
+    const info = await lstat(documentPath).catch(() => undefined);
+    if (
+      !info?.isFile() ||
+      info.isSymbolicLink() ||
+      (await sha256File(documentPath)) !== document.sha256
+    ) {
+      throw scientificGateError(
+        "A policy document referenced by the review packet is unavailable or drifted.",
+      );
+    }
+  }
+}
+
+async function loadBoundAssessment(
+  root: string,
+  project: ProjectState,
+  role: ScientificReviewRole,
+  packet: ScientificReviewPacket,
+): Promise<ScientificGateAssessment> {
+  const expectedLocator = `projects/${project.id}/scientific/assessments/${role}/${packet.assessment.sha256}.json`;
+  if (packet.assessment.objectLocator !== expectedLocator) {
+    throw scientificGateError("Scientific assessment locator is not canonical.", role);
+  }
+  const path = join(workspacePaths(root).control, expectedLocator);
+  const value = await readExactJson(
+    path,
+    "Scientific assessment",
+    "RESEARCH_SCIENTIFIC_GATE_INVALID",
+  );
+  const assessment = parseAssessment(value, role, "RESEARCH_SCIENTIFIC_GATE_INVALID");
+  if (
+    assessment.designSha256 !== project.scientificDesign?.designSha256 ||
+    exactJsonSha256(assessment) !== packet.assessment.sha256 ||
+    (await readFile(path, "utf8")) !== normalizedJson(assessment)
+  ) {
+    throw scientificGateError("Scientific assessment failed its immutable binding.", role);
+  }
+  return assessment;
+}
+
+async function loadBoundReview(
+  root: string,
+  project: ProjectState,
+  role: ScientificReviewRole,
+  reviewSha256: string,
+): Promise<ScientificReview> {
+  const path = join(
+    workspacePaths(root).projects,
+    project.id,
+    "scientific",
+    "reviews",
+    role,
+    `${reviewSha256}.json`,
+  );
+  const value = await readExactJson(path, "Scientific review", "RESEARCH_SCIENTIFIC_GATE_INVALID");
+  const review = parseReview(value, role, "RESEARCH_SCIENTIFIC_GATE_INVALID");
+  if (
+    exactJsonSha256(review) !== reviewSha256 ||
+    (await readFile(path, "utf8")) !== normalizedJson(review)
+  ) {
+    throw scientificGateError("Scientific review failed its immutable hash binding.", role);
+  }
+  return review;
+}
+
+async function readAssessment(
+  path: string,
+  role: ScientificReviewRole,
+): Promise<ScientificGateAssessment> {
+  return parseAssessment(
+    await readExternalJson(path, "Scientific assessment", "RESEARCH_SCIENTIFIC_ASSESSMENT_INVALID"),
+    role,
+  );
+}
+
+async function readReview(path: string, role: ScientificReviewRole): Promise<ScientificReview> {
+  return parseReview(
+    await readExternalJson(path, "Scientific review", "RESEARCH_SCIENTIFIC_REVIEW_INVALID"),
+    role,
+  );
+}
+
+function parseAssessment(
+  value: unknown,
+  role: ScientificReviewRole,
+  code = "RESEARCH_SCIENTIFIC_ASSESSMENT_INVALID",
+): ScientificGateAssessment {
+  let validate = assessmentValidators.get(role);
+  if (!validate) {
+    validate = ajv.compile(scientificGateAssessmentSchema(role));
+    assessmentValidators.set(role, validate);
+  }
+  if (!validate(value)) {
+    throw schemaError(
+      "Scientific assessment does not match the authoritative schema.",
+      code,
+      validate.errors,
+    );
+  }
+  return value as ScientificGateAssessment;
+}
+
+function parseReview(
+  value: unknown,
+  role: ScientificReviewRole,
+  code = "RESEARCH_SCIENTIFIC_REVIEW_INVALID",
+): ScientificReview {
+  let validate = reviewValidators.get(role);
+  if (!validate) {
+    validate = ajv.compile(scientificReviewSchema(role));
+    reviewValidators.set(role, validate);
+  }
+  if (!validate(value)) {
+    throw schemaError(
+      "Scientific review does not match the authoritative schema.",
+      code,
+      validate.errors,
+    );
+  }
+  return value as ScientificReview;
+}
+
+async function readExternalJson(path: string, label: string, code: string): Promise<unknown> {
+  if (!isAbsolute(path)) {
+    throw new CliError(`${label} path must be absolute.`, { code, exitCode: 2 });
+  }
+  return readExactJson(path, label, code);
+}
+
+async function readExactJson(path: string, label: string, code: string): Promise<unknown> {
+  const info = await lstat(path).catch(() => undefined);
+  if (!info?.isFile() || info.isSymbolicLink()) {
+    throw new CliError(`${label} must be an existing regular file and not a symbolic link.`, {
+      code,
+      exitCode: 2,
+    });
+  }
+  if (info.size > MAX_SCIENTIFIC_REVIEW_BYTES) {
+    throw new CliError(`${label} exceeds the bounded input size.`, { code, exitCode: 2 });
+  }
+  try {
+    return JSON.parse(await readFile(path, "utf8")) as unknown;
+  } catch {
+    throw new CliError(`${label} is not valid JSON.`, { code, exitCode: 2 });
+  }
+}
+
+async function writeImmutableJson(path: string, value: unknown): Promise<void> {
+  const expected = normalizedJson(value);
+  if (await pathExists(path)) {
+    const info = await lstat(path).catch(() => undefined);
+    if (!info?.isFile() || info.isSymbolicLink() || (await readFile(path, "utf8")) !== expected) {
+      throw scientificGateError("A content-addressed scientific object has been modified.");
+    }
+    return;
+  }
+  await writeJsonAtomic(path, value);
+}
+
+async function loadReviewerSessionRegistry(path: string): Promise<ReviewerSessionRegistry> {
+  if (!(await pathExists(path))) return { schemaVersion: 1, sessions: [] };
+  const value = await readExactJson(
+    path,
+    "Scientific reviewer session registry",
+    "RESEARCH_SCIENTIFIC_GATE_INVALID",
+  );
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    !Array.isArray(value.sessions) ||
+    value.sessions.some(
+      (entry) =>
+        !isObject(entry) ||
+        typeof entry.sessionSha256 !== "string" ||
+        !new RegExp(SHA256_PATTERN).test(entry.sessionSha256) ||
+        !["research-design", "evidence-construct", "pilot-methods"].includes(String(entry.role)) ||
+        !["codex", "claude"].includes(String(entry.agent)) ||
+        typeof entry.packetSha256 !== "string" ||
+        !new RegExp(SHA256_PATTERN).test(entry.packetSha256) ||
+        typeof entry.usedAt !== "string",
+    )
+  ) {
+    throw scientificGateError("Scientific reviewer session registry is malformed.");
+  }
+  return value as unknown as ReviewerSessionRegistry;
+}
+
+function isScientificReviewPacket(
+  value: unknown,
+  projectId: string,
+  role: ScientificReviewRole,
+  finalPublicationReviews: string[],
+): value is ScientificReviewPacket {
+  return (
+    isObject(value) &&
+    value.schemaVersion === 1 &&
+    value.kind === "tiangong-scientific-review-packet" &&
+    value.projectId === projectId &&
+    value.role === role &&
+    isObject(value.design) &&
+    typeof value.design.sha256 === "string" &&
+    typeof value.design.objectLocator === "string" &&
+    isObject(value.policy) &&
+    typeof value.policy.resolvedPolicySha256 === "string" &&
+    typeof value.policy.approvalSha256 === "string" &&
+    (value.policy.targetJournal === null || typeof value.policy.targetJournal === "string") &&
+    typeof value.policy.bindingSha256 === "string" &&
+    new RegExp(SHA256_PATTERN).test(value.policy.bindingSha256) &&
+    typeof value.policy.objectLocator === "string" &&
+    isObject(value.reviewer) &&
+    ["codex", "claude"].includes(String(value.reviewer.agent)) &&
+    typeof value.reviewer.sessionSha256 === "string" &&
+    typeof value.preparedAt === "string" &&
+    Array.isArray(value.stageInputs) &&
+    value.stageInputs.every(
+      (record) =>
+        isObject(record) &&
+        typeof record.path === "string" &&
+        record.path.startsWith(`projects/${projectId}/`) &&
+        typeof record.sha256 === "string" &&
+        new RegExp(SHA256_PATTERN).test(record.sha256) &&
+        typeof record.bytes === "number" &&
+        Number.isSafeInteger(record.bytes) &&
+        record.bytes >= 0 &&
+        [
+          "inherited-gap",
+          "model-implementation",
+          "model-environment-lock",
+          "stage-output",
+        ].includes(String(record.purpose)) &&
+        typeof record.ownerId === "string" &&
+        record.ownerId.length > 0 &&
+        typeof record.sourceLocator === "string" &&
+        record.sourceLocator.length > 0 &&
+        record.hashBasis === "raw-file-bytes",
+    ) &&
+    isObject(value.assessment) &&
+    typeof value.assessment.sha256 === "string" &&
+    typeof value.assessment.objectLocator === "string" &&
+    isObject(value.mechanicalAssessment) &&
+    typeof value.mechanicalAssessment.canPass === "boolean" &&
+    Array.isArray(value.mechanicalAssessment.issueCodes) &&
+    Array.isArray(value.mechanicalAssessment.issues) &&
+    Array.isArray(value.mechanicalAssessment.futureGateObligations) &&
+    value.mechanicalAssessment.futureGateObligations.every(
+      (obligation) =>
+        isObject(obligation) &&
+        [
+          "UNCERTAINTY_STATE_VALUES_NOT_FROZEN",
+          "MODEL_IMPLEMENTATION_NOT_FROZEN",
+          "MODEL_ENVIRONMENT_LOCK_NOT_FROZEN",
+        ].includes(String(obligation.code)) &&
+        ["evidence-construct", "pilot-methods"].includes(String(obligation.dueGate)) &&
+        Array.isArray(obligation.objectIds) &&
+        obligation.objectIds.every((id) => typeof id === "string" && id.length > 0) &&
+        Array.isArray(obligation.policyRuleIds) &&
+        obligation.policyRuleIds.every((id) => typeof id === "string" && id.length > 0),
+    ) &&
+    isObject(value.mechanicalAssessment.designEvaluation) &&
+    typeof value.mechanicalAssessment.designEvaluation.readyForDesignReview === "boolean" &&
+    Array.isArray(value.mechanicalAssessment.designEvaluation.issueCodes) &&
+    typeof value.mechanicalAssessment.designEvaluation.effectiveIndependentUnits === "number" &&
+    typeof value.mechanicalAssessment.designEvaluation.requiredEvidenceRoles === "number" &&
+    isObject(value.lifecycle) &&
+    value.lifecycle.producerExecution === "native-host-app" &&
+    exactStringArray(value.lifecycle.baseStages, [
+      "discover",
+      "acquire",
+      "analyze",
+      "synthesize",
+      "review",
+      "close",
+    ]) &&
+    exactStringArray(value.lifecycle.earlyScientificReviews, [
+      "research-design",
+      "evidence-construct",
+      "pilot-methods",
+    ]) &&
+    exactStringArray(value.lifecycle.finalPublicationReviews, finalPublicationReviews) &&
+    value.lifecycle.finalManuscriptFreezeRequired === true &&
+    value.lifecycle.newGenerationOnMaterialChange === true &&
+    value.lifecycle.revisionReserveIncluded === true &&
+    Array.isArray(value.instructions) &&
+    typeof value.packetSha256 === "string"
+  );
+}
+
+function requiredGateRoles(
+  stage: "discover" | "acquire" | "analyze" | "synthesize" | "review" | "close",
+): ScientificReviewRole[] {
+  const ordered: ScientificReviewRole[] = [
+    "research-design",
+    "evidence-construct",
+    "pilot-methods",
+  ];
+  if (stage === "discover") return ordered.slice(0, 1);
+  if (stage === "acquire") return ordered.slice(0, 2);
+  return ordered;
+}
+
+function reviewInstructions(role: ScientificReviewRole): string[] {
+  return [
+    `Review only the exact immutable ${role} packet and its referenced objects.`,
+    "Treat all mechanical failures as blocking; prose cannot upgrade them.",
+    "Use a fresh independent reviewer session and return the authoritative closed JSON schema.",
+    "Every stageInputs sha256 is the digest of raw file bytes at path; sourceLocator records provenance, while path is the promoted portable object that must be reviewed.",
+    "Do not infer field validation, causality, independence, or quantity scope beyond the design.",
+    "Interpret this gate within the declared lifecycle: three early scientific reviews precede four final publication reviews of the frozen manuscript.",
+    "A material post-review change must create a new authoritative generation and consume the declared revision reserve.",
+    "mechanicalAssessment.futureGateObligations names source-derived values, model implementations, and environment locks that are allowed to remain pending now but will become blocking mechanical errors at their exact due gate unless a new authoritative design generation freezes them.",
+  ];
+}
+
+function scientificFutureGateObligations(
+  design: ScientificDesignContract,
+  role: ScientificReviewRole,
+): ScientificFutureGateObligation[] {
+  const gateRank: Record<ScientificReviewRole, number> = {
+    "research-design": 0,
+    "evidence-construct": 1,
+    "pilot-methods": 2,
+  };
+  const grouped = new Map<string, { objectIds: string[]; policyRuleIds: Set<string> }>();
+  const addObligation = (
+    code: ScientificFutureGateObligation["code"],
+    dueGate: ScientificFutureGateObligation["dueGate"],
+    objectId: string,
+    policyRuleIds: string[],
+  ) => {
+    if (gateRank[dueGate] <= gateRank[role]) return;
+    const key = `${code}:${dueGate}`;
+    const current = grouped.get(key) ?? {
+      objectIds: [],
+      policyRuleIds: new Set<string>(),
+    };
+    current.objectIds.push(objectId);
+    policyRuleIds.forEach((ruleId) => current.policyRuleIds.add(ruleId));
+    grouped.set(key, current);
+  };
+  for (const parameter of design.uncertaintyParameters) {
+    if (
+      parameter.stateValueStatus !== "pending-source-acquisition" ||
+      parameter.freezeBeforeGate === "research-design"
+    ) {
+      continue;
+    }
+    addObligation(
+      "UNCERTAINTY_STATE_VALUES_NOT_FROZEN",
+      parameter.freezeBeforeGate,
+      parameter.id,
+      design.policyRuleDispositions
+        .filter(
+          (disposition) =>
+            disposition.status === "planned" &&
+            disposition.dueGate === parameter.freezeBeforeGate &&
+            disposition.uncertaintyParameterIds.includes(parameter.id),
+        )
+        .map((disposition) => disposition.ruleId),
+    );
+  }
+  for (const model of design.identity.modelStructures) {
+    if (
+      model.implementationStatus === "pending-source-acquisition" &&
+      model.implementationFreezeBeforeGate !== "research-design"
+    ) {
+      addObligation(
+        "MODEL_IMPLEMENTATION_NOT_FROZEN",
+        model.implementationFreezeBeforeGate,
+        model.id,
+        design.policyRuleDispositions
+          .filter(
+            (disposition) =>
+              disposition.status === "planned" &&
+              disposition.dueGate === model.implementationFreezeBeforeGate &&
+              disposition.modelStructureIds.includes(model.id),
+          )
+          .map((disposition) => disposition.ruleId),
+      );
+    }
+    if (
+      model.environmentLockStatus === "pending-runtime-lock" &&
+      model.environmentLockFreezeBeforeGate !== "research-design"
+    ) {
+      addObligation(
+        "MODEL_ENVIRONMENT_LOCK_NOT_FROZEN",
+        model.environmentLockFreezeBeforeGate,
+        model.id,
+        design.policyRuleDispositions
+          .filter(
+            (disposition) =>
+              disposition.status === "planned" &&
+              disposition.dueGate === model.environmentLockFreezeBeforeGate &&
+              disposition.modelStructureIds.includes(model.id),
+          )
+          .map((disposition) => disposition.ruleId),
+      );
+    }
+  }
+  return [...grouped.entries()].map(([key, obligation]) => ({
+    code: key.slice(0, key.indexOf(":")) as ScientificFutureGateObligation["code"],
+    dueGate: key.slice(key.indexOf(":") + 1) as ScientificFutureGateObligation["dueGate"],
+    objectIds: obligation.objectIds,
+    policyRuleIds: [...obligation.policyRuleIds],
+  }));
+}
+
+function exactStringArray(value: unknown, expected: string[]): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length === expected.length &&
+    value.every((item, index) => item === expected[index])
+  );
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((item) => right.includes(item));
+}
+
+function exactJsonSha256(value: unknown): string {
+  return sha256Text(normalizedJson(value));
+}
+
+function normalizedJson(value: unknown): string {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function closedObject(required: string[], properties: Record<string, unknown>) {
+  return { type: "object", additionalProperties: false, required, properties };
+}
+
+function boundedStringSchema() {
+  return { type: "string", minLength: 1, maxLength: 512 };
+}
+
+function stringSetSchema() {
+  return { type: "array", uniqueItems: true, items: boundedStringSchema() };
+}
+
+function findingsSchema() {
+  return {
+    type: "array",
+    items: closedObject(["code", "severity", "message", "evidenceIds"], {
+      code: { type: "string", minLength: 1, maxLength: 128, pattern: "^[A-Z0-9_-]+$" },
+      severity: { enum: ["blocking", "warning", "note"] },
+      message: { type: "string", minLength: 1, maxLength: 4000 },
+      evidenceIds: stringSetSchema(),
+    }),
+  };
+}
+
+function schemaError(message: string, code: string, errors: ErrorObject[] | null | undefined) {
+  return new CliError(message, {
+    code,
+    exitCode: 2,
+    details: sanitizeResearchValue({
+      validation: (errors ?? []).map((error) => `${error.instancePath || "/"}: ${error.message}`),
+    }),
+  });
+}
+
+function scientificGateError(message: string, role?: ScientificReviewRole): CliError {
+  return new CliError(message, {
+    code: "RESEARCH_SCIENTIFIC_GATE_INVALID",
+    exitCode: 3,
+    details: role ? { role } : undefined,
+  });
+}
+
+function inheritedGapObjectError(
+  role: ScientificReviewRole,
+  gapId: string,
+  artifactKind: ScientificDesignContract["knownGaps"][number]["sourceArtifacts"][number]["kind"],
+  reason: "unavailable-or-unsafe" | "oversized" | "content-hash-mismatch" | "not-reviewable-json",
+): CliError {
+  return new CliError("An inherited-gap source object failed its immutable binding.", {
+    code: "RESEARCH_SCIENTIFIC_GATE_INVALID",
+    exitCode: 3,
+    details: { role, gapId, artifactKind, reason },
+  });
+}
+
+function modelArtifactObjectError(
+  role: ScientificReviewRole,
+  modelId: string,
+  artifactKind: "implementation" | "environment-lock",
+  reason: "unavailable-or-unsafe" | "oversized" | "content-hash-mismatch" | "not-reviewable-json",
+): CliError {
+  return new CliError("A frozen model object failed its immutable binding.", {
+    code: "RESEARCH_SCIENTIFIC_GATE_INVALID",
+    exitCode: 3,
+    details: { role, modelId, artifactKind, reason },
+  });
+}
+
+function camelToCode(value: string): string {
+  return value.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
+}

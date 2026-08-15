@@ -887,12 +887,23 @@ export async function resolveVerifiedResearchSetupSkillDirectory(
       exitCode: 3,
     });
   }
-  if (status.state.status !== "ready") {
+  const report = status.report;
+  const researchCoreReady =
+    status.state.status === "ready" ||
+    (status.state.status === "partially-ready" &&
+      isObject(report) &&
+      report.schemaVersion === 1 &&
+      report.workspace === status.workspace &&
+      report.planSha256 === status.plan.planSha256 &&
+      report.researchReadiness === "READY" &&
+      (report.overallReadiness === "READY" || report.overallReadiness === "PARTIALLY_READY"));
+  if (!researchCoreReady) {
     throw setupError({
       code: "RESEARCH_SETUP_NOT_READY",
       step: "skill-resolution",
-      reason: `Research setup is ${status.state.status}, not ready.`,
-      minimumAction: "Complete setup apply and all required doctor checks before using the Skill.",
+      reason: `Research-core setup is not ready (setup state: ${status.state.status}).`,
+      minimumAction:
+        "Complete setup apply and every research-core doctor check before using the orchestrator; optional companion readiness is reported separately.",
       retryCommand: `tiangong-ai research setup status --workspace ${root} --json`,
       exitCode: 3,
     });

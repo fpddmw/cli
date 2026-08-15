@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "kind": "model-implementation",
+  "modelId": "reference-fatigue-model",
+  "language": "declarative-json",
+  "entrypoint": "evaluate-reference-fatigue",
+  "equations": [
+    "reference_damage = reference_coefficient * response_exponent",
+    "overlay_event_count = accumulate_and_reset(reference_damage, trigger, horizon)"
+  ],
+  "coefficients": {
+    "sourcePolicy": "published-reference-values-only",
+    "candidateSpecificTuning": false
+  }
+}

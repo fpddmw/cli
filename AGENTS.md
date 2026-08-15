@@ -17,7 +17,7 @@ checkPaths:
   - .docpact/config.yaml
   - docs/agents/**
   - src/**
-lastReviewedAt: 2026-08-13
+lastReviewedAt: 2026-08-15
 lastReviewedCommit: df263405bccb21cd5838d92d82dccf80ca01acb1
 ---
 

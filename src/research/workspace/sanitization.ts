@@ -73,15 +73,23 @@ function sanitizeUrls(value: string): string {
     const source = trailing ? bounded.source.slice(0, -trailing.length) : bounded.source;
     try {
       const url = new URL(source);
+      let changed = false;
       if (url.username || url.password) {
         url.username = "REDACTED";
         url.password = "";
+        changed = true;
       }
       for (const key of [...url.searchParams.keys()]) {
-        if (SENSITIVE_QUERY_KEY.test(key)) url.searchParams.set(key, "[REDACTED]");
+        if (SENSITIVE_QUERY_KEY.test(key)) {
+          url.searchParams.set(key, "[REDACTED]");
+          changed = true;
+        }
       }
-      if (SENSITIVE_URL_FRAGMENT.test(url.hash)) url.hash = "REDACTED";
-      return `${url.toString()}${trailing}${bounded.suffix}`;
+      if (SENSITIVE_URL_FRAGMENT.test(url.hash)) {
+        url.hash = "REDACTED";
+        changed = true;
+      }
+      return changed ? `${url.toString()}${trailing}${bounded.suffix}` : candidate;
     } catch {
       return candidate;
     }

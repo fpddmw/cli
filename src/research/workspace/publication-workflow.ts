@@ -12,6 +12,7 @@ import {
 } from "./publication.js";
 import { loadProject } from "./projects.js";
 import { assertResearchPolicyBinding } from "./research-policy.js";
+import { assertScientificGateForStage } from "./scientific-review.js";
 import {
   canonicalJson,
   ensureDirectory,
@@ -410,6 +411,7 @@ export async function freezePublicationManuscript(input: {
 }): Promise<PublicationGeneration & { status: "manuscript-frozen" }> {
   return withWorkspaceLock(input.root, "research.publication.freeze", async () => {
     const project = await requireClosedTopJournalProject(input.root, input.projectId);
+    await assertScientificGateForStage(input.root, project, "close");
     const producerSessionId = requireSessionId(input.producerSessionId, "producer");
     const producerSessionSha256 = sha256Text(producerSessionId);
     if ((await usedReviewerSessionHashes(input.root, project.id)).has(producerSessionSha256)) {

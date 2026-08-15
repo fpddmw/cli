@@ -17,6 +17,7 @@ import {
 import { prepareNativeResearchStage } from "../src/research/workspace/runtime.js";
 import { sha256File } from "../src/research/workspace/storage.js";
 import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
+import { passResearchDesignGate, scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("top-journal Research Policy", () => {
   it("copies explicit defaults, requires a completed brief, and invalidates approval on drift", async () => {
@@ -102,7 +103,12 @@ describe("top-journal Research Policy", () => {
         false,
         undefined,
         binding,
+        await scientificDesignInput(root, "top-journal-paper", {
+          approvalStatus: "candidate-only",
+          policyRules: binding.resolvedRules,
+        }),
       );
+      await passResearchDesignGate(root, "top-journal-paper");
 
       const packet = await prepareNativeResearchStage({
         root,

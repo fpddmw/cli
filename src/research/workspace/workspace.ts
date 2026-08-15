@@ -43,9 +43,9 @@ import type {
 const DOCTOR_ATTESTATION_TTL_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_SMOKE_BUDGET = {
-  maxTokens: 650_000,
-  maxCostUsd: 60,
-  maxWallSeconds: 72 * 60 * 60,
+  maxTokens: 1_500_000,
+  maxCostUsd: 100,
+  maxWallSeconds: 7 * 24 * 60 * 60,
   maxFilesPerPackage: 20,
   maxBytesPerPackage: 20 * 1024 * 1024,
   maxAttemptsPerPackage: 3,
@@ -73,15 +73,21 @@ const DEFAULT_SMOKE_BUDGET = {
   maxBrokerCalls: 24,
   maxBrokerItems: 100,
   maxInputContextTokens: 12_000,
+  earlyScientificReviewMaxTokens: 25_000,
+  finalPublicationReviewMaxTokens: 40_000,
+  revisionReserveTokens: 100_000,
+  earlyScientificReviewMaxWallSeconds: 30 * 60,
+  finalPublicationReviewMaxWallSeconds: 60 * 60,
+  revisionReserveWallSeconds: 4 * 60 * 60,
 } as const;
 
 // Production uses deliberately generous but finite ceilings. Coverage-driven
 // planning and early stop control ordinary spend; these values are the final
 // runaway guard, not a target for a successful research run.
 const DEFAULT_PRODUCTION_BUDGET = {
-  maxTokens: 20_000_000,
-  maxCostUsd: 2_000,
-  maxWallSeconds: 14 * 24 * 60 * 60,
+  maxTokens: 50_000_000,
+  maxCostUsd: 5_000,
+  maxWallSeconds: 30 * 24 * 60 * 60,
   maxFilesPerPackage: 500,
   maxBytesPerPackage: 512 * 1024 * 1024,
   maxAttemptsPerPackage: 3,
@@ -107,6 +113,12 @@ const DEFAULT_PRODUCTION_BUDGET = {
   maxBrokerCalls: 256,
   maxBrokerItems: 500,
   maxInputContextTokens: 128_000,
+  earlyScientificReviewMaxTokens: 500_000,
+  finalPublicationReviewMaxTokens: 750_000,
+  revisionReserveTokens: 4_000_000,
+  earlyScientificReviewMaxWallSeconds: 4 * 60 * 60,
+  finalPublicationReviewMaxWallSeconds: 6 * 60 * 60,
+  revisionReserveWallSeconds: 48 * 60 * 60,
 } as const;
 
 export async function initializeResearchWorkspace(
@@ -1047,7 +1059,13 @@ function isWorkspaceConfig(value: unknown): value is WorkspaceConfig {
     budget.maxBrokerContextTokens >= 16 &&
     positiveInteger(budget.maxBrokerCalls) &&
     positiveInteger(budget.maxBrokerItems) &&
-    positiveInteger(budget.maxInputContextTokens)
+    positiveInteger(budget.maxInputContextTokens) &&
+    positiveInteger(budget.earlyScientificReviewMaxTokens) &&
+    positiveInteger(budget.finalPublicationReviewMaxTokens) &&
+    positiveInteger(budget.revisionReserveTokens) &&
+    positiveInteger(budget.earlyScientificReviewMaxWallSeconds) &&
+    positiveInteger(budget.finalPublicationReviewMaxWallSeconds) &&
+    positiveInteger(budget.revisionReserveWallSeconds)
   );
 }
 

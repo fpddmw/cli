@@ -99,12 +99,25 @@ storage writes, queueing, and document status transitions.
   mechanical closure-time hash verification. For `top-journal` goals it also
   owns the project-installed Policy-source resolver, generic Policy catalog and
   guided human completion, content/manifest approval hashes and expiry gates,
+  a native-authored closed scientific-design contract with mechanical semantic
+  validation, raw-byte model/environment object bindings, executable-versus-
+  pending freeze states, exact joint uncertainty state mappings, continuous
+  decision-consequence graphs, Policy-owned future-gate obligations, exact
+  Policy/design/session bindings, three ordered independent scientific review
+  gates at discovery/acquisition/analysis boundaries,
+  real-record construct-canary and pilot-methods invariants, complete-lifecycle
+  review/revision reservations, and target-specific reapproval for every
+  authoritative fork or addendum generation,
   mechanical publication assessment, immutable final-manuscript generations,
   append-only fresh-session enforcement across four independent reviewer
   roles, hash-only persistence for producer/reviewer session identifiers, and a
   separate publication closure whose language cannot exceed the approved Policy
-  ceiling. Top-level status distinguishes active base research from invalid
-  publication state.
+  ceiling. It can export and independently verify an immutable portable audit
+  directory containing exact project inputs, evidence/artifact bytes,
+  Policy/design/review objects, environment fingerprints, and journal proofs,
+  while excluding credentials, ephemeral/native state, unrelated projects, and
+  host paths. Top-level status distinguishes active base research from invalid
+  scientific or publication state.
 - `src/education/**`: education search command handling and source specs for
   course, education, and textbook edge-search functions.
 - `src/edge-search.ts`: shared edge-search forwarding helper. It derives
@@ -242,6 +255,24 @@ reviewer; the final publication gate adds four role-specific, fresh reviewer
 sessions bound to one frozen manuscript generation. Base closure and
 publication closure are distinct objects and neither implies journal
 acceptance.
+
+Top-journal scientific reasoning follows that same boundary. The current native
+host authors the design and the three bounded gate assessments. The CLI rejects
+semantic impossibilities, freezes exact objects, prepares hash-bound packets,
+launches only the configured independent reviewer family, and mechanically
+revalidates every passed gate at each downstream runtime boundary. A reviewer
+cannot promote failed mechanics with prose, and a superseding generation must
+provide a new target-specific Policy, design, and producer session.
+
+A model/artifact digest establishes byte identity only. The design separately
+declares implementation and environment-lock status, retrievable locators,
+entrypoints, raw-file hash semantics, and the exact gate by which every pending
+object must be replaced. The same contract applies to source-derived
+uncertainty states and exact joint-state mappings. Earlier review packets expose
+these as Policy-owned future obligations; the due gate converts them into
+mechanical blockers unless a new authoritative generation freezes replacements.
+Packet logical identity and raw exported file identity remain distinct, with
+the latter carried by the portable audit manifest.
 
 When a producer reaches login, MFA, CAPTCHA, paywall, authorization, or another
 human-only boundary, it records the activity and requests a durable

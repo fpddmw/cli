@@ -1981,7 +1981,7 @@ describe("research workspace CLI", () => {
       );
       assert.equal(preflight.budget.discoveryPlan?.maxCalls, 14);
       assert.equal(preflight.budget.maxBrokerCalls, 256);
-      assert.equal(preflight.budget.maxTokens, 20_000_000);
+      assert.equal(preflight.budget.maxTokens, 50_000_000);
       assert.equal(preflight.budget.packageMaxTokens.discover, 12_000_000);
       assert.ok(
         preflight.budget.preCallTokenReservations.discover <=
