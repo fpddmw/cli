@@ -97,8 +97,13 @@ storage writes, queueing, and document status transitions.
   packets/bounded evidence contexts with exact cited-item JSON-Pointer
   projections, tool-free independent review, and
   mechanical closure-time hash verification. For `top-journal` goals it also
-  owns the project-installed Policy-source resolver, generic Policy catalog and
-  guided human completion, content/manifest approval hashes and expiry gates,
+  owns the project-installed Policy-source resolver, whole-pack Policy parsing
+  across every template category before catalog use, generic Policy catalog and
+  guided human completion, content/manifest approval hashes and expiry gates.
+  Setup doctor rejects an incompatible pinned Policy pack before provider live
+  checks or reviewer smoke. Scientific-design, ordered early-review, and
+  real-record construct-canary constraints are mandatory top-journal invariants
+  that must resolve true; they are not optional runtime switches. It also owns
   a native-authored closed scientific-design contract with mechanical semantic
   validation, raw-byte model/environment object bindings, executable-versus-
   pending freeze states, exact joint uncertainty state mappings, continuous

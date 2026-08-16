@@ -231,7 +231,7 @@ async function policyWizardFixture(
   };
 }
 
-async function writePolicyPack(root: string, includeExactJournal = false): Promise<void> {
+async function writePolicyPack(root: string, _includeExactJournal = false): Promise<void> {
   const policyRoot = join(root, "assets", "research-policy", "defaults");
   const docs: Array<[string, string, string, string]> = [
     ["baseline/top-journal.md", "baseline.top-journal", "baseline", "bundled-default"],
@@ -253,24 +253,24 @@ async function writePolicyPack(root: string, includeExactJournal = false): Promi
     ["reviewer-rubrics/domain-novelty.md", "reviewer.domain", "reviewer-rubric", "bundled-default"],
     ["reviewer-rubrics/journal-editor.md", "reviewer.editor", "reviewer-rubric", "bundled-default"],
     ["project/publication-brief.md", "project.brief", "publication-brief", "project-template"],
-    ...(includeExactJournal
-      ? [
-          [
-            "journals/exact-journal-template.md",
-            "journal.exact-template",
-            "exact-journal",
-            "exact-journal-template",
-          ] as [string, string, string, string],
-        ]
-      : []),
+    [
+      "journals/exact-journal-template.md",
+      "journal.exact-template",
+      "exact-journal",
+      "exact-journal-template",
+    ],
   ];
   for (const [relative, id, kind, templateClass] of docs) {
     const path = join(policyRoot, relative);
     await mkdir(join(path, ".."), { recursive: true });
     const brief = kind === "publication-brief";
+    const constraints =
+      kind === "baseline"
+        ? "constraints:\n  requireScientificDesignContract: true\n  requireEarlyScientificReviews: true\n  requireRealRecordConstructCanary: true\n"
+        : "";
     await writeFile(
       path,
-      `---\nschemaVersion: 1\nid: ${id}\nkind: ${kind}\ntemplateClass: ${templateClass}\npolicyVersion: 1\ntargetTier: top\narticleType: original-empirical\nfield: engineering-computing\njournalClass: discipline-flagship\ntargetJournal: none\ncentralQuestion: ${brief ? "__DEFINE_CENTRAL_QUESTION__" : "defined"}\ncentralClaim: ${brief ? "__DEFINE_CENTRAL_CLAIM__" : "defined"}\ncentralOutcome: ${brief ? "__DEFINE_CENTRAL_OUTCOME__" : "defined"}\ncontributionType: ${brief ? "__DEFINE_CONTRIBUTION_TYPE__" : "defined"}\nrules:\n  - central-claim-directly-supported\nrequiredReviewers:\n  - evidence\nreviewAfterDays: 180\n---\n\n# ${id}\n\nPolicy content.\n`,
+      `---\nschemaVersion: 1\nid: ${id}\nkind: ${kind}\ntemplateClass: ${templateClass}\npolicyVersion: 1\ntargetTier: top\narticleType: original-empirical\nfield: engineering-computing\njournalClass: discipline-flagship\ntargetJournal: none\ncentralQuestion: ${brief ? "__DEFINE_CENTRAL_QUESTION__" : "defined"}\ncentralClaim: ${brief ? "__DEFINE_CENTRAL_CLAIM__" : "defined"}\ncentralOutcome: ${brief ? "__DEFINE_CENTRAL_OUTCOME__" : "defined"}\ncontributionType: ${brief ? "__DEFINE_CONTRIBUTION_TYPE__" : "defined"}\nrules:\n  - central-claim-directly-supported\n${constraints}requiredReviewers:\n  - evidence\nreviewAfterDays: 180\n---\n\n# ${id}\n\nPolicy content.\n`,
     );
   }
 }

@@ -658,9 +658,13 @@ async function writePublicationPolicyPack(root: string): Promise<void> {
     await mkdir(join(path, ".."), { recursive: true });
     const isBrief = kind === "publication-brief";
     const isJournal = kind === "exact-journal";
+    const requiredTopJournalConstraints =
+      kind === "baseline"
+        ? "\n  requireScientificDesignContract: true\n  requireEarlyScientificReviews: true\n  requireRealRecordConstructCanary: true"
+        : "";
     await writeFile(
       path,
-      `---\nschemaVersion: 1\nid: ${id}\nkind: ${kind}\ntemplateClass: ${templateClass}\npolicyVersion: 1\ntargetTier: top\narticleType: original-empirical\nfield: engineering-computing\njournalClass: discipline-flagship\ntargetJournal: ${isBrief ? "__SELECT_EXACT_JOURNAL_OR_NONE__" : "none"}\njournalName: ${isJournal ? "__REPLACE_JOURNAL_NAME__" : "none"}\nofficialGuidelinesUrl: ${isJournal ? "__REPLACE_OFFICIAL_HTTPS_URL__" : "https://example.org"}\nofficialGuidelinesRetrievedAt: ${isJournal ? "__REPLACE_YYYY-MM-DD__" : "2026-08-12"}\ncentralQuestion: ${isBrief ? "__DEFINE_CENTRAL_QUESTION__" : "defined"}\ncentralClaim: ${isBrief ? "__DEFINE_CENTRAL_CLAIM__" : "defined"}\ncentralOutcome: ${isBrief ? "__DEFINE_CENTRAL_OUTCOME__" : "defined"}\ncontributionType: ${isBrief ? "__DEFINE_CONTRIBUTION_TYPE__" : "defined"}\nrules:\n  - central-claim-directly-supported\nconstraints:\n  minDirectPeerReviewedFullText: 1\nrequiredReviewers:\n  - evidence\n  - methods-reproducibility\n  - domain-novelty\n  - journal-editor\nreviewAfterDays: 365\n---\n\n# ${id}\n\nGeneric policy content requiring substantive human review.\n`,
+      `---\nschemaVersion: 1\nid: ${id}\nkind: ${kind}\ntemplateClass: ${templateClass}\npolicyVersion: 1\ntargetTier: top\narticleType: original-empirical\nfield: engineering-computing\njournalClass: discipline-flagship\ntargetJournal: ${isBrief ? "__SELECT_EXACT_JOURNAL_OR_NONE__" : "none"}\njournalName: ${isJournal ? "__REPLACE_JOURNAL_NAME__" : "none"}\nofficialGuidelinesUrl: ${isJournal ? "__REPLACE_OFFICIAL_HTTPS_URL__" : "https://example.org"}\nofficialGuidelinesRetrievedAt: ${isJournal ? "__REPLACE_YYYY-MM-DD__" : "2026-08-12"}\ncentralQuestion: ${isBrief ? "__DEFINE_CENTRAL_QUESTION__" : "defined"}\ncentralClaim: ${isBrief ? "__DEFINE_CENTRAL_CLAIM__" : "defined"}\ncentralOutcome: ${isBrief ? "__DEFINE_CENTRAL_OUTCOME__" : "defined"}\ncontributionType: ${isBrief ? "__DEFINE_CONTRIBUTION_TYPE__" : "defined"}\nrules:\n  - central-claim-directly-supported\nconstraints:\n  minDirectPeerReviewedFullText: 1${requiredTopJournalConstraints}\nrequiredReviewers:\n  - evidence\n  - methods-reproducibility\n  - domain-novelty\n  - journal-editor\nreviewAfterDays: 365\n---\n\n# ${id}\n\nGeneric policy content requiring substantive human review.\n`,
     );
   }
 }

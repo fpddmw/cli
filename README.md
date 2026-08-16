@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-08-16
-lastReviewedCommit: b8c2d6acaf44de0b9c7ea4530e54baff84ad034b
+lastReviewedCommit: ecf72d5a4b8f34139de3f5718900a41c6bf32dce
 ---
 
 # Tiangong AI CLI
@@ -283,9 +283,14 @@ tiangong-ai research policy status top-journal-paper \
 ```
 
 The Wizard resolves only the verified project-installed
-`tiangong-auto-research` tree. It copies a baseline plus one article type,
-field, journal class, project brief, and four reviewer rubrics. Generic defaults
-are clearly reported and require a separate acknowledgement. An exact-journal
+`tiangong-auto-research` tree. Before catalog use, the CLI parses every Markdown
+template in every category of that exact locked tree; setup doctor performs the
+same compatibility check before any provider live check or reviewer smoke. The
+baseline must require the scientific-design contract, ordered early reviews,
+and real-record construct canary, and those safeguards must remain true in the
+resolved Policy. The Wizard then copies a baseline plus one article type, field,
+journal class, project brief, and four reviewer rubrics. Generic defaults are
+clearly reported and require a separate acknowledgement. An exact-journal
 Policy additionally requires a current official HTTPS guideline URL, retrieval
 date, and substantive human content for all journal-specific sections. Approval
 binds the manifest and every document by SHA-256; edits, manifest tampering, or

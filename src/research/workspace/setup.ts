@@ -35,6 +35,7 @@ import {
   reconcileSetupManagedCapabilities,
 } from "./external-skills.js";
 import { appendJournalEvent } from "./journal.js";
+import { validateResearchPolicyPack } from "./research-policy.js";
 import {
   configuredResearchSecrets,
   isSensitiveEnvironmentName,
@@ -1771,6 +1772,30 @@ export async function doctorResearchSetup(
           ? null
           : "Restore the pinned Skill bytes; setup will not overwrite a drifted or symlinked directory.",
     });
+  }
+  for (const installation of installations.filter(
+    (candidate) => candidate.skillId === "tiangong.auto-research",
+  )) {
+    await setupDoctorCheck(
+      checks,
+      `top-journal-policy-pack.${installation.agent}`,
+      "publication-policy",
+      async () => {
+        if (installation.status !== "installed" || !installation.observedTreeSha256) {
+          throw new Error(
+            `The pinned Auto Research orchestrator is ${installation.status}; its Policy pack cannot be validated.`,
+          );
+        }
+        const validation = await validateResearchPolicyPack(installation.path);
+        if (validation.sourceTreeSha256 !== installation.observedTreeSha256) {
+          throw new Error(
+            "The validated Policy pack does not match the installed orchestrator tree hash.",
+          );
+        }
+        return `${validation.templateCount} pinned Top-Journal Policy templates are compatible with this CLI.`;
+      },
+      "Restore the CLI-compatible pinned Auto Research Policy pack, then rerun setup doctor; do not edit locked Skill bytes.",
+    );
   }
   const provenance = await inspectSetupProvenance(plan, installations, environment);
   for (const conflict of provenance.ambientSkillConflicts) {
@@ -4281,6 +4306,7 @@ function normalizeSetupDoctorCheck(
 
 function setupCheckComponentIds(check: SetupDoctorCheck, selected: ResearchSetupSkill[]): string[] {
   if (check.id === "live.semantic-scholar") return ["tiangong.academic-paper-download"];
+  if (check.id.startsWith("top-journal-policy-pack.")) return ["tiangong.auto-research"];
   if (check.id === "live.tiangong-unstructure") {
     return ["tiangong.document-granular-decompose"];
   }

@@ -117,7 +117,26 @@ const KNOWN_CONSTRAINTS = new Map<string, "boolean" | "integer">([
   ["requireRecallAudit", "boolean"],
   ["requireCentralDimensionsCovered", "boolean"],
   ["requireIndependentReproduction", "boolean"],
+  ["requireScientificDesignContract", "boolean"],
+  ["requireEarlyScientificReviews", "boolean"],
+  ["requireRealRecordConstructCanary", "boolean"],
 ]);
+
+const REQUIRED_TOP_JOURNAL_BOOLEAN_CONSTRAINTS = [
+  "requireScientificDesignContract",
+  "requireEarlyScientificReviews",
+  "requireRealRecordConstructCanary",
+] as const;
+
+const POLICY_PACK_CATEGORIES = [
+  { directory: "baseline", kind: "baseline" },
+  { directory: "article-types", kind: "article-type" },
+  { directory: "fields", kind: "field" },
+  { directory: "journal-classes", kind: "journal-class" },
+  { directory: "journals", kind: "exact-journal" },
+  { directory: "reviewer-rubrics", kind: "reviewer-rubric" },
+  { directory: "project", kind: "publication-brief" },
+] as const;
 
 export type ResearchPolicyStatusKind =
   | "missing"
@@ -190,6 +209,18 @@ export interface ResearchPolicyStatus {
   guidance: string;
 }
 
+export interface ResearchPolicyPackValidation {
+  schemaVersion: 1;
+  sourceTreeSha256: string;
+  templateCount: number;
+  categories: {
+    articleTypes: string[];
+    fields: string[];
+    journalClasses: string[];
+  };
+  defaults: { baseline: string; reviewers: string[]; publicationBrief: string };
+}
+
 export async function inspectResearchPolicyCatalog(sourceRoot: string): Promise<{
   schemaVersion: 1;
   sourceTreeSha256: string;
@@ -200,25 +231,91 @@ export async function inspectResearchPolicyCatalog(sourceRoot: string): Promise<
   };
   defaults: { baseline: string; reviewers: string[]; publicationBrief: string };
 }> {
+  const validation = await validateResearchPolicyPack(sourceRoot);
+  return {
+    schemaVersion: 1,
+    sourceTreeSha256: validation.sourceTreeSha256,
+    categories: validation.categories,
+    defaults: validation.defaults,
+  };
+}
+
+export async function validateResearchPolicyPack(
+  sourceRoot: string,
+): Promise<ResearchPolicyPackValidation> {
   const root = await requirePolicySourceRoot(sourceRoot);
   const policyRoot = policyTemplateRoot(root);
-  const baseline = join(policyRoot, "baseline", "top-journal.md");
-  const brief = join(policyRoot, "project", "publication-brief.md");
-  const reviewers = await markdownBasenames(join(policyRoot, "reviewer-rubrics"));
-  await Promise.all([
-    parsePolicyFile(baseline, false),
-    parsePolicyFile(brief, false),
-    ...reviewers.map((name) =>
-      parsePolicyFile(join(policyRoot, "reviewer-rubrics", `${name}.md`), false),
-    ),
-  ]);
+  const namesByDirectory = new Map<string, string[]>();
+  const ids = new Set<string>();
+  const parsedDocuments: Array<ParsedPolicyDocument & { logicalPath: string }> = [];
+  for (const category of POLICY_PACK_CATEGORIES) {
+    const names = await markdownBasenames(join(policyRoot, category.directory));
+    if (names.length === 0) {
+      throw policyError(
+        "RESEARCH_POLICY_SOURCE_INVALID",
+        `Policy category is empty: ${category.directory}`,
+      );
+    }
+    namesByDirectory.set(category.directory, names);
+    for (const name of names) {
+      const logicalPath = `${category.directory}/${name}.md`;
+      const parsed = await parsePolicyFile(join(policyRoot, logicalPath), false);
+      if (parsed.kind !== category.kind) {
+        throw policyError(
+          "RESEARCH_POLICY_INVALID",
+          `Policy kind does not match its category: ${logicalPath}`,
+        );
+      }
+      if (ids.has(parsed.id)) {
+        throw policyError(
+          "RESEARCH_POLICY_INVALID",
+          `Policy pack contains a duplicate document ID: ${parsed.id}`,
+        );
+      }
+      ids.add(parsed.id);
+      parsedDocuments.push({ ...parsed, logicalPath });
+    }
+  }
+  const baseline = parsedDocuments.find(
+    (document) => document.logicalPath === "baseline/top-journal.md",
+  );
+  if (!baseline) {
+    throw policyError(
+      "RESEARCH_POLICY_SOURCE_INVALID",
+      "Policy pack does not contain baseline/top-journal.md.",
+    );
+  }
+  if (
+    !parsedDocuments.some((document) => document.logicalPath === "project/publication-brief.md")
+  ) {
+    throw policyError(
+      "RESEARCH_POLICY_SOURCE_INVALID",
+      "Policy pack does not contain project/publication-brief.md.",
+    );
+  }
+  if (
+    !parsedDocuments.some(
+      (document) => document.logicalPath === "journals/exact-journal-template.md",
+    )
+  ) {
+    throw policyError(
+      "RESEARCH_POLICY_SOURCE_INVALID",
+      "Policy pack does not contain journals/exact-journal-template.md.",
+    );
+  }
+  assertRequiredTopJournalConstraints(
+    baseline.constraints,
+    "the pinned baseline/top-journal.md template",
+  );
+  const reviewers = namesByDirectory.get("reviewer-rubrics") ?? [];
   return {
-    schemaVersion: 1 as const,
+    schemaVersion: 1,
     sourceTreeSha256: await hashRegularTree(root),
+    templateCount: parsedDocuments.length,
     categories: {
-      articleTypes: await markdownBasenames(join(policyRoot, "article-types")),
-      fields: await markdownBasenames(join(policyRoot, "fields")),
-      journalClasses: await markdownBasenames(join(policyRoot, "journal-classes")),
+      articleTypes: namesByDirectory.get("article-types") ?? [],
+      fields: namesByDirectory.get("fields") ?? [],
+      journalClasses: namesByDirectory.get("journal-classes") ?? [],
     },
     defaults: {
       baseline: "top-journal",
@@ -635,6 +732,7 @@ export async function approveResearchPolicy(
   const expiresAt = new Date(Date.parse(approvedAt) + reviewAfterDays * 86_400_000).toISOString();
   const resolvedRules = [...new Set(documents.flatMap((document) => document.rules))].sort();
   const resolvedConstraints = mergePolicyConstraints(documents);
+  assertRequiredTopJournalConstraints(resolvedConstraints, `the resolved Policy for ${projectId}`);
   const requiredReviewers = [
     ...new Set(documents.flatMap((document) => document.requiredReviewers)),
   ].sort();
@@ -1226,6 +1324,10 @@ async function loadPolicyApproval(root: string, projectId: string): Promise<Poli
   if (sha256Text(canonicalJson(base)) !== approvalSha256) {
     throw policyError("RESEARCH_POLICY_INVALID", "Research Policy approval hash is invalid.");
   }
+  assertRequiredTopJournalConstraints(
+    approval.resolvedConstraints,
+    `the approved Policy for ${projectId}`,
+  );
   return approval;
 }
 
@@ -1302,6 +1404,20 @@ function mergePolicyConstraints(
   return Object.fromEntries(
     Object.entries(resolved).sort(([left], [right]) => left.localeCompare(right)),
   );
+}
+
+function assertRequiredTopJournalConstraints(
+  constraints: Record<string, unknown>,
+  context: string,
+): void {
+  for (const key of REQUIRED_TOP_JOURNAL_BOOLEAN_CONSTRAINTS) {
+    if (constraints[key] !== true) {
+      throw policyError(
+        "RESEARCH_POLICY_INVALID",
+        `Top-journal Policy constraint ${key} must resolve to true in ${context}.`,
+      );
+    }
+  }
 }
 
 function policyConflicts(
