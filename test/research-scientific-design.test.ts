@@ -370,6 +370,32 @@ describe("top-journal scientific design contract", () => {
     assert.equal(evaluateScientificDesign(design).readyForDesignReview, true);
   });
 
+  it("requires a closed acquisition plan that maps every required evidence role to lawful routes", async () => {
+    const raw = JSON.parse(
+      await readFile(join(fixtureRoot, "ev-r9-narrowed-valid.json"), "utf8"),
+    ) as Record<string, any>;
+    raw.acquisitionPlan = acquisitionPlanFor(
+      raw.evidenceRoles.map((role: { id: string }) => role.id),
+    );
+    const planned = parseScientificDesign(raw);
+    assert.equal(evaluateScientificDesign(planned).readyForDesignReview, true);
+
+    const unmappedRaw = structuredClone(raw);
+    unmappedRaw.acquisitionPlan.routes[0].evidenceRoleIds = ["role-central-model"];
+    unmappedRaw.acquisitionPlan.routes[1].evidenceRoleIds = ["role-central-model"];
+    const unmapped = parseScientificDesign(unmappedRaw);
+    assert.ok(
+      evaluateScientificDesign(unmapped).issueCodes.includes("EVIDENCE_ACQUISITION_ROUTE_UNMAPPED"),
+    );
+
+    const bypassRaw = structuredClone(raw);
+    bypassRaw.acquisitionPlan.stopPolicy.allAgentRoutesExhaustedBeforeHandoff = false;
+    const bypass = parseScientificDesign(bypassRaw);
+    assert.ok(
+      evaluateScientificDesign(bypass).issueCodes.includes("EVIDENCE_EXHAUSTION_POLICY_INVALID"),
+    );
+  });
+
   it("requires executable bridge, uncertainty, cluster, validation, evidence, and gap provenance plans", async () => {
     const raw = JSON.parse(
       await readFile(join(fixtureRoot, "ev-r9-narrowed-valid.json"), "utf8"),
@@ -513,4 +539,42 @@ function addJointStateBindings(raw: Record<string, any>) {
       parameterStateIds,
     }));
   }
+}
+
+function acquisitionPlanFor(evidenceRoleIds: string[]) {
+  return {
+    routes: [
+      {
+        id: "route-native-public-search",
+        evidenceRoleIds,
+        routeClass: "native-discovery",
+        executor: "agent",
+        required: true,
+        capabilityId: null,
+        activityKind: "web-search",
+        activityChannel: "codex.web",
+        downloadBackends: [],
+        accessMode: "open-public",
+        rationale: "Use the current native host public-web search before requesting paid access.",
+      },
+      {
+        id: "route-licensed-literature",
+        evidenceRoleIds,
+        routeClass: "licensed-resource",
+        executor: "user",
+        required: true,
+        capabilityId: null,
+        activityKind: null,
+        activityChannel: null,
+        downloadBackends: [],
+        accessMode: "purchase-or-subscription",
+        rationale: "Acquire indispensable licensed full text only after lawful public routes fail.",
+      },
+    ],
+    stopPolicy: {
+      allAgentRoutesExhaustedBeforeHandoff: true,
+      unresolvedRequiredEvidenceRoleBlocksDownstream: true,
+      prohibitUnreviewedSubstitution: true,
+    },
+  };
 }

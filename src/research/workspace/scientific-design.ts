@@ -27,6 +27,25 @@ export type ScientificResultClass =
   | "systematic-synthesis"
   | "method-performance";
 
+export type EvidenceAcquisitionRouteClass =
+  | "broker-capability"
+  | "native-discovery"
+  | "open-access-download"
+  | "authorized-browser"
+  | "licensed-resource"
+  | "owner-provided-resource"
+  | "external-data-request"
+  | "field-data-collection";
+
+export type EvidenceAcquisitionExecutor = "agent" | "user" | "external-party";
+
+export type EvidenceAccessMode =
+  | "open-public"
+  | "owner-authorized"
+  | "user-authorization-required"
+  | "purchase-or-subscription"
+  | "external-request";
+
 export interface ScientificDesignContract {
   schemaVersion: 1;
   projectId: string;
@@ -286,6 +305,34 @@ export interface ScientificDesignContract {
     minimumIndependentSources: number;
     minimumDatedSources: number;
   }>;
+  acquisitionPlan: {
+    routes: Array<{
+      id: string;
+      evidenceRoleIds: string[];
+      routeClass: EvidenceAcquisitionRouteClass;
+      executor: EvidenceAcquisitionExecutor;
+      required: boolean;
+      capabilityId: string | null;
+      activityKind:
+        | "web-search"
+        | "database-search"
+        | "browser-navigation"
+        | "download"
+        | "file-inspection"
+        | null;
+      activityChannel: string | null;
+      downloadBackends: Array<
+        "native-browser" | "chrome" | "cloakbrowser" | "skill-adapter" | "direct-http"
+      >;
+      accessMode: EvidenceAccessMode;
+      rationale: string;
+    }>;
+    stopPolicy: {
+      allAgentRoutesExhaustedBeforeHandoff: boolean;
+      unresolvedRequiredEvidenceRoleBlocksDownstream: boolean;
+      prohibitUnreviewedSubstitution: boolean;
+    };
+  };
   knownGaps: Array<{
     id: string;
     description: string;
@@ -499,6 +546,7 @@ export function scientificDesignSchema(): Record<string, unknown> {
       "validationPlans",
       "thresholds",
       "evidenceRoles",
+      "acquisitionPlan",
       "knownGaps",
       "uncertaintyParameters",
       "uncertaintyGroups",
@@ -1125,6 +1173,108 @@ export function scientificDesignSchema(): Record<string, unknown> {
             minimumFullText: { type: "integer", minimum: 0 },
             minimumIndependentSources: { type: "integer", minimum: 0 },
             minimumDatedSources: { type: "integer", minimum: 0 },
+          },
+        },
+      },
+      acquisitionPlan: {
+        type: "object",
+        additionalProperties: false,
+        required: ["routes", "stopPolicy"],
+        properties: {
+          routes: {
+            type: "array",
+            minItems: 1,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: [
+                "id",
+                "evidenceRoleIds",
+                "routeClass",
+                "executor",
+                "required",
+                "capabilityId",
+                "activityKind",
+                "activityChannel",
+                "downloadBackends",
+                "accessMode",
+                "rationale",
+              ],
+              properties: {
+                id: { type: "string", pattern: IDENTIFIER },
+                evidenceRoleIds: {
+                  ...identifierArray,
+                  minItems: 1,
+                },
+                routeClass: {
+                  type: "string",
+                  enum: [
+                    "broker-capability",
+                    "native-discovery",
+                    "open-access-download",
+                    "authorized-browser",
+                    "licensed-resource",
+                    "owner-provided-resource",
+                    "external-data-request",
+                    "field-data-collection",
+                  ],
+                },
+                executor: { type: "string", enum: ["agent", "user", "external-party"] },
+                required: { type: "boolean" },
+                capabilityId: { type: ["string", "null"], pattern: IDENTIFIER },
+                activityKind: {
+                  type: ["string", "null"],
+                  enum: [
+                    "web-search",
+                    "database-search",
+                    "browser-navigation",
+                    "download",
+                    "file-inspection",
+                    null,
+                  ],
+                },
+                activityChannel: { type: ["string", "null"], pattern: IDENTIFIER },
+                downloadBackends: {
+                  type: "array",
+                  uniqueItems: true,
+                  items: {
+                    type: "string",
+                    enum: [
+                      "native-browser",
+                      "chrome",
+                      "cloakbrowser",
+                      "skill-adapter",
+                      "direct-http",
+                    ],
+                  },
+                },
+                accessMode: {
+                  type: "string",
+                  enum: [
+                    "open-public",
+                    "owner-authorized",
+                    "user-authorization-required",
+                    "purchase-or-subscription",
+                    "external-request",
+                  ],
+                },
+                rationale: { type: "string", minLength: 8, maxLength: 2_000 },
+              },
+            },
+          },
+          stopPolicy: {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "allAgentRoutesExhaustedBeforeHandoff",
+              "unresolvedRequiredEvidenceRoleBlocksDownstream",
+              "prohibitUnreviewedSubstitution",
+            ],
+            properties: {
+              allAgentRoutesExhaustedBeforeHandoff: { type: "boolean" },
+              unresolvedRequiredEvidenceRoleBlocksDownstream: { type: "boolean" },
+              prohibitUnreviewedSubstitution: { type: "boolean" },
+            },
           },
         },
       },
@@ -2254,6 +2404,46 @@ export function evaluateScientificDesign(
       incompleteEvidenceRoles.map((role) => role.id),
     );
   }
+  const requiredEvidenceRoleIds = design.evidenceRoles
+    .filter((role) => role.required)
+    .map((role) => role.id);
+  const unmappedAcquisitionRoles = requiredEvidenceRoleIds.filter(
+    (roleId) =>
+      !design.acquisitionPlan.routes.some(
+        (route) => route.required && route.evidenceRoleIds.includes(roleId),
+      ) ||
+      !design.acquisitionPlan.routes.some(
+        (route) =>
+          route.required && route.executor === "agent" && route.evidenceRoleIds.includes(roleId),
+      ),
+  );
+  if (unmappedAcquisitionRoles.length) {
+    add(
+      "EVIDENCE_ACQUISITION_ROUTE_UNMAPPED",
+      "Every required evidence role must map to at least one required lawful route and one agent-executable route before paid, authorized, or external access is requested.",
+      unmappedAcquisitionRoles,
+    );
+  }
+  const invalidAcquisitionRoutes = design.acquisitionPlan.routes.filter(
+    (route) => !validAcquisitionRoute(route),
+  );
+  if (invalidAcquisitionRoutes.length) {
+    add(
+      "EVIDENCE_ACQUISITION_ROUTE_INVALID",
+      "Each acquisition route must bind one coherent executor, access mode, and immutable event selector for its route class.",
+      invalidAcquisitionRoutes.map((route) => route.id),
+    );
+  }
+  if (
+    !design.acquisitionPlan.stopPolicy.allAgentRoutesExhaustedBeforeHandoff ||
+    !design.acquisitionPlan.stopPolicy.unresolvedRequiredEvidenceRoleBlocksDownstream ||
+    !design.acquisitionPlan.stopPolicy.prohibitUnreviewedSubstitution
+  ) {
+    add(
+      "EVIDENCE_EXHAUSTION_POLICY_INVALID",
+      "The reviewed stop policy must require all plan-bound agent routes to be exhausted, block downstream work on unresolved required roles, and prohibit unreviewed substitute evidence.",
+    );
+  }
   const inconsistentEvidenceBindings = design.claims.flatMap((claim) => {
     const requiredRoleIds = new Set(
       claim.quantityIds.flatMap(
@@ -2566,6 +2756,7 @@ function assertUniqueIds(design: ScientificDesignContract): void {
     ["validationPlans", design.validationPlans.map((item) => item.id)],
     ["thresholds", design.thresholds.map((item) => item.id)],
     ["evidenceRoles", design.evidenceRoles.map((item) => item.id)],
+    ["acquisitionRoutes", design.acquisitionPlan.routes.map((item) => item.id)],
     ["knownGaps", design.knownGaps.map((item) => item.id)],
     ["uncertaintyParameters", design.uncertaintyParameters.map((item) => item.id)],
     ["uncertaintyGroups", design.uncertaintyGroups.map((item) => item.id)],
@@ -2745,6 +2936,13 @@ function assertReferences(design: ScientificDesignContract): void {
   for (const role of design.evidenceRoles) {
     requireIds(`evidenceRoles.${role.id}.claimIds`, role.claimIds, claims);
   }
+  for (const route of design.acquisitionPlan.routes) {
+    requireIds(
+      `acquisitionPlan.routes.${route.id}.evidenceRoleIds`,
+      route.evidenceRoleIds,
+      evidenceRoles,
+    );
+  }
   for (const gap of design.knownGaps) {
     for (const evidenceRef of gap.evidenceRefs) {
       const known =
@@ -2808,6 +3006,65 @@ function assertReferences(design: ScientificDesignContract): void {
     );
   }
   if (failures.length) throw scientificDesignSemanticError(failures);
+}
+
+function validAcquisitionRoute(
+  route: ScientificDesignContract["acquisitionPlan"]["routes"][number],
+): boolean {
+  const hasCapability = route.capabilityId !== null;
+  const hasActivity = route.activityKind !== null || route.activityChannel !== null;
+  const hasCompleteActivitySelector = route.activityKind !== null && route.activityChannel !== null;
+  const hasDownloads = route.downloadBackends.length > 0;
+  if (route.routeClass === "broker-capability") {
+    return (
+      route.executor === "agent" &&
+      hasCapability &&
+      !hasActivity &&
+      !hasDownloads &&
+      ["open-public", "owner-authorized"].includes(route.accessMode)
+    );
+  }
+  if (route.routeClass === "native-discovery") {
+    return (
+      route.executor === "agent" &&
+      !hasCapability &&
+      hasCompleteActivitySelector &&
+      !hasDownloads &&
+      ["open-public", "owner-authorized"].includes(route.accessMode)
+    );
+  }
+  if (route.routeClass === "open-access-download") {
+    return (
+      route.executor === "agent" &&
+      !hasCapability &&
+      !hasActivity &&
+      hasDownloads &&
+      route.downloadBackends.every((backend) =>
+        ["skill-adapter", "direct-http"].includes(backend),
+      ) &&
+      ["open-public", "owner-authorized"].includes(route.accessMode)
+    );
+  }
+  if (route.routeClass === "authorized-browser") {
+    return (
+      route.executor === "agent" &&
+      !hasCapability &&
+      !hasActivity &&
+      hasDownloads &&
+      route.downloadBackends.every((backend) =>
+        ["native-browser", "chrome", "cloakbrowser"].includes(backend),
+      ) &&
+      ["owner-authorized", "user-authorization-required"].includes(route.accessMode)
+    );
+  }
+  if (hasCapability || hasActivity || hasDownloads) return false;
+  if (route.routeClass === "licensed-resource") {
+    return route.executor === "user" && route.accessMode === "purchase-or-subscription";
+  }
+  if (route.routeClass === "owner-provided-resource") {
+    return route.executor === "user" && route.accessMode === "user-authorization-required";
+  }
+  return route.executor === "external-party" && route.accessMode === "external-request";
 }
 
 function scientificDesignSemanticError(validation: string[]): CliError {
