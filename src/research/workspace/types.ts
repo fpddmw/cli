@@ -335,6 +335,41 @@ export interface ProjectUsage {
   wallSeconds: number;
 }
 
+export type ResearchHandoffKind = "interactive-challenge" | "external-wait" | "evidence-exhausted";
+
+export interface ResearchEvidenceRouteAttempt {
+  routeId: string;
+  terminalEventHashes: string[];
+  outcome: "completed-insufficient" | "access-blocked" | "deterministic-unavailable";
+}
+
+export interface ResearchEvidenceExhaustion {
+  missingEvidenceRoleIds: string[];
+  routeAttempts: ResearchEvidenceRouteAttempt[];
+  remainingRouteIds: string[];
+}
+
+export interface ResearchAccessRequest {
+  id: string;
+  routeId: string;
+  resourceType:
+    | "database-subscription"
+    | "article-purchase"
+    | "institutional-access"
+    | "licensed-dataset"
+    | "owner-provided-material"
+    | "external-data-request"
+    | "field-data-collection";
+  resourceName: string;
+  officialLocator: string | null;
+  evidenceRoleIds: string[];
+  rationale: string;
+  alternativesTriedRouteIds: string[];
+  requestedAction: string;
+  resumeCriteria: string;
+  costStatus: "unknown" | "provider-quote-required";
+}
+
 export interface ProjectState {
   schemaVersion: 1;
   id: string;
@@ -359,10 +394,13 @@ export interface ProjectState {
   };
   handoff: {
     state: "agent-actionable" | "user-action-required" | "external-response-required";
+    kind: ResearchHandoffKind | null;
     reasonCode: string | null;
     summary: string | null;
     requestedActions: string[];
     evidenceGaps: string[];
+    exhaustion: ResearchEvidenceExhaustion | null;
+    accessRequests: ResearchAccessRequest[];
     requestedAt: string | null;
     resolvedAt: string | null;
     resolutionNote: string | null;

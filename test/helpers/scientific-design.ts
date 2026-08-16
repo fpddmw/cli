@@ -27,6 +27,14 @@ export async function scientificDesignInput(
     policyRules?: string[];
     pendingUncertainty?: boolean;
     pendingModels?: boolean;
+    optionalLicensedRoute?: boolean;
+    brokerCapabilityId?: string;
+    downloadBackend?:
+      | "native-browser"
+      | "chrome"
+      | "cloakbrowser"
+      | "skill-adapter"
+      | "direct-http";
     producerAgent?: AgentKind;
     producerSessionId?: string;
   } = {},
@@ -70,6 +78,18 @@ export async function scientificDesignInput(
       freezeBeforeGate: "research-design" | "evidence-construct" | "pilot-methods";
       states: Array<{ value: string }>;
     }>;
+    acquisitionPlan: {
+      routes: Array<{
+        id: string;
+        required: boolean;
+        routeClass: string;
+        capabilityId: string | null;
+        activityKind: string | null;
+        activityChannel: string | null;
+        downloadBackends: string[];
+        accessMode: string;
+      }>;
+    };
     knownGaps: Array<{
       id: string;
       sourceProjectId: string | null;
@@ -122,6 +142,38 @@ export async function scientificDesignInput(
     if (!disposition) throw new Error("Missing fixture model policy disposition.");
     disposition.dueGate = "pilot-methods";
     disposition.modelStructureIds = value.identity.modelStructures.map((model) => model.id);
+  }
+  if (options.optionalLicensedRoute) {
+    const route = value.acquisitionPlan.routes.find(
+      (candidate) => candidate.id === "route-licensed-literature",
+    );
+    if (!route) throw new Error("Missing fixture licensed acquisition route.");
+    route.required = false;
+  }
+  if (options.brokerCapabilityId) {
+    const route = value.acquisitionPlan.routes.find(
+      (candidate) => candidate.id === "route-native-public-search",
+    );
+    if (!route) throw new Error("Missing fixture agent acquisition route.");
+    route.routeClass = "broker-capability";
+    route.capabilityId = options.brokerCapabilityId;
+    route.activityKind = null;
+    route.activityChannel = null;
+  }
+  if (options.downloadBackend) {
+    const route = value.acquisitionPlan.routes.find(
+      (candidate) => candidate.id === "route-native-public-search",
+    );
+    if (!route) throw new Error("Missing fixture agent acquisition route.");
+    const authorizedBrowser = ["native-browser", "chrome", "cloakbrowser"].includes(
+      options.downloadBackend,
+    );
+    route.routeClass = authorizedBrowser ? "authorized-browser" : "open-access-download";
+    route.capabilityId = null;
+    route.activityKind = null;
+    route.activityChannel = null;
+    route.downloadBackends = [options.downloadBackend];
+    route.accessMode = authorizedBrowser ? "owner-authorized" : "open-public";
   }
   await stageFixtureModelSources(root, value.identity.modelStructures);
   await stageFixtureGapSources(root, value.knownGaps);

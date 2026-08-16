@@ -1146,10 +1146,13 @@ function initialEvidenceState(): ProjectState["evidenceState"] {
 function initialHandoffState(): ProjectState["handoff"] {
   return {
     state: "agent-actionable",
+    kind: null,
     reasonCode: null,
     summary: null,
     requestedActions: [],
     evidenceGaps: [],
+    exhaustion: null,
+    accessRequests: [],
     requestedAt: null,
     resolvedAt: null,
     resolutionNote: null,
@@ -1320,16 +1323,78 @@ function isProjectHandoff(value: unknown): value is ProjectState["handoff"] {
     ["agent-actionable", "user-action-required", "external-response-required"].includes(
       String(value.state),
     ) &&
+    (value.kind === null ||
+      ["interactive-challenge", "external-wait", "evidence-exhausted"].includes(
+        String(value.kind),
+      )) &&
     nullableString(value.reasonCode) &&
     nullableString(value.summary) &&
     Array.isArray(value.requestedActions) &&
     value.requestedActions.every((item) => typeof item === "string") &&
     Array.isArray(value.evidenceGaps) &&
     value.evidenceGaps.every((item) => typeof item === "string") &&
+    isEvidenceExhaustion(value.exhaustion) &&
+    Array.isArray(value.accessRequests) &&
+    value.accessRequests.every(isAccessRequest) &&
     nullableString(value.requestedAt) &&
     nullableString(value.resolvedAt) &&
     nullableString(value.resolutionNote)
   );
+}
+
+function isEvidenceExhaustion(value: unknown): boolean {
+  if (value === null) return true;
+  if (!isObject(value)) return false;
+  return (
+    Array.isArray(value.missingEvidenceRoleIds) &&
+    value.missingEvidenceRoleIds.every(isIdentifier) &&
+    Array.isArray(value.routeAttempts) &&
+    value.routeAttempts.every(
+      (attempt) =>
+        isObject(attempt) &&
+        isIdentifier(attempt.routeId) &&
+        Array.isArray(attempt.terminalEventHashes) &&
+        attempt.terminalEventHashes.every(
+          (hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash),
+        ) &&
+        ["completed-insufficient", "access-blocked", "deterministic-unavailable"].includes(
+          String(attempt.outcome),
+        ),
+    ) &&
+    Array.isArray(value.remainingRouteIds) &&
+    value.remainingRouteIds.every(isIdentifier)
+  );
+}
+
+function isAccessRequest(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  return (
+    isIdentifier(value.id) &&
+    isIdentifier(value.routeId) &&
+    [
+      "database-subscription",
+      "article-purchase",
+      "institutional-access",
+      "licensed-dataset",
+      "owner-provided-material",
+      "external-data-request",
+      "field-data-collection",
+    ].includes(String(value.resourceType)) &&
+    typeof value.resourceName === "string" &&
+    nullableString(value.officialLocator) &&
+    Array.isArray(value.evidenceRoleIds) &&
+    value.evidenceRoleIds.every(isIdentifier) &&
+    typeof value.rationale === "string" &&
+    Array.isArray(value.alternativesTriedRouteIds) &&
+    value.alternativesTriedRouteIds.every(isIdentifier) &&
+    typeof value.requestedAction === "string" &&
+    typeof value.resumeCriteria === "string" &&
+    ["unknown", "provider-quote-required"].includes(String(value.costStatus))
+  );
+}
+
+function isIdentifier(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
 }
 
 function nullableString(value: unknown): value is string | null {

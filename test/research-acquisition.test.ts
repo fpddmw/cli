@@ -17,6 +17,7 @@ import { persistBrokerEvidence } from "../src/research/workspace/evidence.js";
 import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
 import { inspectDiscoveryProgress } from "../src/research/workspace/discovery-status.js";
 import { bindEvidenceDownload } from "../src/research/workspace/downloads.js";
+import { inspectEvidenceAccessStatus } from "../src/research/workspace/evidence-exhaustion.js";
 import {
   evidenceLedgerPath,
   listEvidenceCandidates,
@@ -38,6 +39,8 @@ import {
 } from "../src/research/workspace/runtime.js";
 import { resolveContained, sha256File, workspacePaths } from "../src/research/workspace/storage.js";
 import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
+import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
+import { scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("research acquisition and evidence snapshots", () => {
   it("registers one exact artifact, ignores concurrent files, and freezes a verified snapshot", async () => {
@@ -803,6 +806,106 @@ describe("research acquisition and evidence snapshots", () => {
       ]);
     }
   });
+
+  it("binds an exact browser download to its frozen scientific acquisition route", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-scientific-download-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-scientific-download-files-"));
+    const projectId = "scientific-download-route";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      const policy = scientificPolicyBinding(projectId);
+      const design = await scientificDesignInput(root, projectId, {
+        targetJournal: policy.targetJournal,
+        downloadBackend: "native-browser",
+      });
+      const project = await initializeProject(
+        root,
+        projectId,
+        "Can the authorized browser retrieve the exact required scientific full text?",
+        undefined,
+        false,
+        undefined,
+        policy,
+        design,
+      );
+      const discover = project.packages.find((workPackage) => workPackage.id === "discover");
+      assert.ok(discover);
+      discover.status = "running";
+      discover.startedAt = new Date().toISOString();
+      project.status = "running";
+      await saveProject(root, project);
+      const candidate = await registerNativeDiscoveryCandidate({
+        root,
+        projectId,
+        value: {
+          title: "Exact publisher full text",
+          url: "https://example.test/paper",
+        },
+      });
+      discover.status = "complete";
+      discover.completedAt = new Date().toISOString();
+      const acquire = project.packages.find((workPackage) => workPackage.id === "acquire");
+      assert.ok(acquire);
+      acquire.status = "running";
+      acquire.startedAt = new Date().toISOString();
+      await saveProject(root, project);
+      const downloadPath = join(staging, "exact-paper.pdf");
+      await writeFile(downloadPath, await validPdf("exact scientific download"));
+      const baseRecord = {
+        schemaVersion: 1,
+        backend: "native-browser",
+        status: "completed",
+        path: downloadPath,
+        downloadUrl: "https://example.test/paper.pdf",
+      };
+
+      const challenged = await bindEvidenceDownload({
+        root,
+        projectId,
+        candidateId: candidate.candidate.id,
+        value: {
+          schemaVersion: 1,
+          acquisitionRouteId: "route-native-public-search",
+          backend: "native-browser",
+          status: "failed",
+          downloadUrl: "https://example.test/paper",
+          failureCode: "paywall",
+        },
+      });
+      assert.equal(challenged.status, "failed");
+      assert.deepEqual(
+        (await inspectEvidenceAccessStatus(root, projectId)).untriedRequiredAgentRouteIds,
+        ["route-native-public-search"],
+      );
+
+      await assert.rejects(
+        bindEvidenceDownload({
+          root,
+          projectId,
+          candidateId: candidate.candidate.id,
+          value: baseRecord,
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_EVIDENCE_ACQUISITION_ROUTE_INVALID",
+      );
+      const result = await bindEvidenceDownload({
+        root,
+        projectId,
+        candidateId: candidate.candidate.id,
+        value: { ...baseRecord, acquisitionRouteId: "route-native-public-search" },
+      });
+      assert.equal(result.status, "completed");
+      const access = await inspectEvidenceAccessStatus(root, projectId);
+      assert.deepEqual(access.untriedRequiredAgentRouteIds, []);
+      assert.match(access.routes[0]?.terminalEventHashes[0] ?? "", /^[a-f0-9]{64}$/);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
 });
 
 async function freezeInputOnlyProject(
@@ -912,6 +1015,26 @@ async function completedDownload(
   });
   assert.equal(result.status, "completed");
   return result as Extract<typeof result, { status: "completed" }>;
+}
+
+function scientificPolicyBinding(projectId: string): ResearchPolicyBinding {
+  return {
+    goal: "top-journal",
+    projectId,
+    articleType: "computational-modeling",
+    field: "pavement-engineering",
+    journalClass: "discipline-flagship",
+    targetJournal: "International Journal of Pavement Engineering",
+    resolvedPolicySha256: "a".repeat(64),
+    approvalSha256: "b".repeat(64),
+    verdictCeiling: "target-journal-submission-ready",
+    documents: [],
+    resolvedRules: [],
+    resolvedConstraints: {},
+    requiredReviewers: ["evidence", "methods-reproducibility", "domain-novelty", "journal-editor"],
+    approvedAt: "2026-08-14T00:00:00.000Z",
+    expiresAt: "2027-08-14T00:00:00.000Z",
+  };
 }
 
 function acquisitionValue(

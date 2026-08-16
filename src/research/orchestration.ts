@@ -28,6 +28,7 @@ import { registerEvidenceArtifact } from "./workspace/artifacts.js";
 import { exportProjectAuditBundle, verifyProjectAuditBundle } from "./workspace/audit-bundle.js";
 import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
 import { inspectDiscoveryProgress } from "./workspace/discovery-status.js";
+import { inspectEvidenceAccessStatus } from "./workspace/evidence-exhaustion.js";
 import { recordDiscoveryAssessmentBatch } from "./workspace/discovery.js";
 import { bindEvidenceDownload } from "./workspace/downloads.js";
 import { registerNativeDiscoveryCandidate } from "./workspace/evidence-ledger.js";
@@ -163,6 +164,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project abandon <project-id> --reason <text> [--workspace <path>] [--json]
   tiangong-ai research project handoff request <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project handoff resolve <project-id> --note <text> [--workspace <path>] [--json]
+  tiangong-ai research project access status <project-id> [--workspace <path>] [--json]
   tiangong-ai research project scientific review prepare <project-id> --role research-design|evidence-construct|pilot-methods --assessment <absolute-json> --reviewer-agent codex|claude --reviewer-session <opaque-id> [--workspace <path>] [--json]
   tiangong-ai research project scientific review submit <project-id> --role research-design|evidence-construct|pilot-methods --review <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project scientific status <project-id> [--workspace <path>] [--json]
@@ -756,6 +758,18 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       return 0;
     }
     throw unknownAction("research project audit", auditAction ?? "");
+  }
+  if (action === "access") {
+    const [accessAction, ...accessRest] = rest;
+    if (accessAction !== "status") {
+      throw unknownAction("research project access", accessAction ?? "");
+    }
+    const args = parseStrictArgs(accessRest, WORKSPACE_OPTIONS, "research project access status");
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(args.positionals, "research project access status");
+    const root = await workspaceFromArgs(args);
+    writeJson(io, await inspectEvidenceAccessStatus(root, projectId), args);
+    return 0;
   }
   if (action === "handoff") {
     const [handoffAction, ...handoffRest] = rest;
@@ -1573,6 +1587,9 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
         const snapshot = await inspectSnapshotForStatus(root, current.id);
         const readyPackage = nextReadyPackage(current)?.id ?? null;
         const scientificReview = await inspectScientificReviewStatus(root, current.id);
+        const evidenceAccess = current.scientificDesign
+          ? await inspectEvidenceAccessForStatus(root, current.id)
+          : null;
         const publication = current.publicationPolicy
           ? await inspectPublicationForStatus(root, current.id)
           : null;
@@ -1587,6 +1604,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
           snapshot,
           nativeStage,
           scientificReview,
+          evidenceAccess,
           publication,
           readyPackage,
           recommendedAction: projectRecommendedAction(
@@ -1607,6 +1625,22 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
   };
   writeJson(io, result, args);
   return 0;
+}
+
+async function inspectEvidenceAccessForStatus(
+  root: string,
+  projectId: string,
+): Promise<
+  Awaited<ReturnType<typeof inspectEvidenceAccessStatus>> | { status: "invalid"; code: string }
+> {
+  try {
+    return await inspectEvidenceAccessStatus(root, projectId);
+  } catch (error) {
+    return {
+      status: "invalid",
+      code: error instanceof CliError ? error.code : "RESEARCH_EVIDENCE_ACCESS_PLAN_INVALID",
+    };
+  }
 }
 
 function projectAuthority(
@@ -1691,7 +1725,13 @@ function projectRecommendedAction(
     return `Project is ${project.status}; inspect with research status --all and continue only from an authoritative project.`;
   }
   if (project.handoff.state === "user-action-required") {
-    return `User action required: ${project.handoff.summary ?? "review the requested action"} Resolve only after completion: tiangong-ai research project handoff resolve ${project.id} --note <resolution-note> --workspace ${root}`;
+    const resources = project.handoff.accessRequests.map((request) => request.resourceName);
+    const detail = resources.length ? ` Required resources: ${resources.join(", ")}.` : "";
+    const stop =
+      project.handoff.kind === "evidence-exhausted"
+        ? " Do not continue substitute searching; the plan-bound agent routes are frozen in the handoff."
+        : "";
+    return `User action required: ${project.handoff.summary ?? "review the requested action"}${detail}${stop} Resolve only after completion: tiangong-ai research project handoff resolve ${project.id} --note <resolution-note> --workspace ${root}`;
   }
   if (project.handoff.state === "external-response-required") {
     return `Waiting for an external response: ${project.handoff.summary ?? "external evidence is pending"} Do not continue substitute searching; resolve after the response is registered.`;

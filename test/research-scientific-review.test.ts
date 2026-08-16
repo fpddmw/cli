@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
 import type { CliIO } from "../src/io.js";
 import { exportProjectAuditBundle } from "../src/research/workspace/audit-bundle.js";
+import {
+  appendEvidenceLedgerEvent,
+  evidenceLedgerPath,
+} from "../src/research/workspace/evidence-ledger.js";
+import { inspectEvidenceAccessStatus } from "../src/research/workspace/evidence-exhaustion.js";
+import { appendJournalEvent } from "../src/research/workspace/journal.js";
+import { recordNativeResearchActivity } from "../src/research/workspace/native-activity.js";
 import {
   initializeProject,
   loadProject,
@@ -23,8 +30,16 @@ import {
   submitScientificReview,
   type ScientificReviewPacket,
 } from "../src/research/workspace/scientific-review.js";
-import { prepareNativeResearchStage } from "../src/research/workspace/runtime.js";
-import { sha256Text, workspacePaths, writeJsonAtomic } from "../src/research/workspace/storage.js";
+import {
+  prepareNativeResearchStage,
+  requestResearchHandoff,
+} from "../src/research/workspace/runtime.js";
+import {
+  ensureDirectory,
+  sha256Text,
+  workspacePaths,
+  writeJsonAtomic,
+} from "../src/research/workspace/storage.js";
 import type {
   ResearchPolicyBinding,
   ScientificReviewRole,
@@ -150,6 +165,338 @@ describe("top-journal early scientific reviews", () => {
         rm(fixture.root, { recursive: true, force: true }),
         rm(auditDestination, { recursive: true, force: true }),
       ]);
+    }
+  });
+
+  it("proves every planned agent route before stopping for indispensable licensed evidence", async () => {
+    const fixture = await projectFixture("scientific-evidence-exhaustion");
+    try {
+      await passResearchDesign(fixture);
+      const activeProject = await loadProject(fixture.root, fixture.projectId);
+      const discover = activeProject.packages.find((workPackage) => workPackage.id === "discover");
+      assert.ok(discover);
+      discover.status = "running";
+      discover.startedAt = new Date().toISOString();
+      activeProject.status = "running";
+      await saveProject(fixture.root, activeProject);
+
+      const initialStatus = await invokeCli([
+        "research",
+        "project",
+        "access",
+        "status",
+        fixture.projectId,
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(initialStatus.exitCode, 0, initialStatus.stderr);
+      const initialAccess = JSON.parse(initialStatus.stdout) as {
+        untriedRequiredAgentRouteIds: string[];
+        recommendedAction: string;
+        ifEvidenceStillInsufficient: string | null;
+      };
+      assert.deepEqual(initialAccess.untriedRequiredAgentRouteIds, ["route-native-public-search"]);
+      assert.equal(initialAccess.recommendedAction, "continue-plan-bound-agent-routes");
+      assert.equal(initialAccess.ifEvidenceStillInsufficient, null);
+
+      const baseRecord = {
+        schemaVersion: 2,
+        kind: "evidence-exhausted",
+        state: "user-action-required",
+        reasonCode: "licensed-evidence-required",
+        summary: "The reviewed public routes cannot supply indispensable closest-work full text.",
+        requestedActions: ["Authorize or purchase access through the official provider."],
+        evidenceGaps: ["The required closest-prior-work role remains below its full-text floor."],
+        exhaustion: {
+          missingEvidenceRoleIds: ["role-closest-work"],
+          routeAttempts: [
+            {
+              routeId: "route-native-public-search",
+              terminalEventHashes: ["a".repeat(64)],
+              outcome: "completed-insufficient",
+            },
+          ],
+          remainingRouteIds: ["route-licensed-literature"],
+        },
+        accessRequests: [
+          {
+            id: "access-licensed-literature",
+            routeId: "route-licensed-literature",
+            resourceType: "database-subscription",
+            resourceName: "Example Scholarly Literature Database",
+            officialLocator: "https://example.org/subscribe",
+            evidenceRoleIds: ["role-closest-work"],
+            rationale:
+              "The closest-work comparison requires peer-reviewed full text unavailable through the reviewed public route.",
+            alternativesTriedRouteIds: ["route-native-public-search"],
+            requestedAction:
+              "Purchase or authorize the minimum provider access needed for this paper.",
+            resumeCriteria:
+              "Resume only after an authorized session can retrieve and bind the exact full text.",
+            costStatus: "unknown",
+          },
+        ],
+      };
+      await assert.rejects(
+        requestResearchHandoff({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          value: baseRecord,
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code?: string }).code, "RESEARCH_EVIDENCE_EXHAUSTION_UNPROVEN");
+          return true;
+        },
+      );
+
+      await assert.rejects(
+        recordNativeResearchActivity({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          value: {
+            schemaVersion: 1,
+            kind: "web-search",
+            channel: "codex.web",
+            input: "an unbound search must not prove a planned route",
+            candidateIds: [],
+            resultCount: 0,
+            status: "failed",
+            challenge: "none",
+          },
+        }),
+        /acquisition route/i,
+      );
+
+      await recordNativeResearchActivity({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        value: {
+          schemaVersion: 1,
+          acquisitionRouteId: "route-native-public-search",
+          kind: "web-search",
+          channel: "codex.web",
+          input: "failed closest-prior-work query",
+          candidateIds: [],
+          resultCount: 0,
+          status: "failed",
+          challenge: "none",
+        },
+      });
+      const transientStatus = await invokeCli([
+        "research",
+        "project",
+        "access",
+        "status",
+        fixture.projectId,
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(transientStatus.exitCode, 0, transientStatus.stderr);
+      assert.deepEqual(
+        (JSON.parse(transientStatus.stdout) as { untriedRequiredAgentRouteIds: string[] })
+          .untriedRequiredAgentRouteIds,
+        ["route-native-public-search"],
+      );
+
+      await recordNativeResearchActivity({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        value: {
+          schemaVersion: 1,
+          acquisitionRouteId: "route-native-public-search",
+          kind: "web-search",
+          channel: "codex.web",
+          input: "publisher challenge that requires the human-first protocol",
+          candidateIds: [],
+          resultCount: 0,
+          status: "blocked",
+          challenge: "captcha",
+        },
+      });
+      const challengedStatus = await invokeCli([
+        "research",
+        "project",
+        "access",
+        "status",
+        fixture.projectId,
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(challengedStatus.exitCode, 0, challengedStatus.stderr);
+      assert.deepEqual(
+        (JSON.parse(challengedStatus.stdout) as { untriedRequiredAgentRouteIds: string[] })
+          .untriedRequiredAgentRouteIds,
+        ["route-native-public-search"],
+      );
+
+      await recordNativeResearchActivity({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        value: {
+          schemaVersion: 1,
+          acquisitionRouteId: "route-native-public-search",
+          kind: "web-search",
+          channel: "codex.web",
+          input: "closest prior work and full-text access",
+          candidateIds: [],
+          resultCount: 8,
+          status: "completed",
+          challenge: "none",
+        },
+      });
+      const attemptedStatus = await invokeCli([
+        "research",
+        "project",
+        "access",
+        "status",
+        fixture.projectId,
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(attemptedStatus.exitCode, 0, attemptedStatus.stderr);
+      const attemptedAccess = JSON.parse(attemptedStatus.stdout) as {
+        untriedRequiredAgentRouteIds: string[];
+        routes: Array<{ id: string; terminalEventHashes: string[] }>;
+        recommendedAction: string;
+        ifEvidenceStillInsufficient: string | null;
+      };
+      assert.deepEqual(attemptedAccess.untriedRequiredAgentRouteIds, []);
+      assert.equal(attemptedAccess.recommendedAction, "assess-required-evidence-role-coverage");
+      assert.equal(attemptedAccess.ifEvidenceStillInsufficient, "request-reviewed-access-handoff");
+      const eventHash = attemptedAccess.routes.find(
+        (route) => route.id === "route-native-public-search",
+      )?.terminalEventHashes[0];
+      assert.match(eventHash ?? "", /^[a-f0-9]{64}$/);
+      baseRecord.exhaustion.routeAttempts[0]!.terminalEventHashes = [eventHash!];
+
+      const sensitiveRecord = structuredClone(baseRecord);
+      sensitiveRecord.accessRequests[0]!.officialLocator =
+        "https://example.org/subscribe?token=DO-NOT-PERSIST";
+      await assert.rejects(
+        requestResearchHandoff({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          value: sensitiveRecord,
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code?: string }).code, "RESEARCH_PROJECT_HANDOFF_INVALID");
+          return true;
+        },
+      );
+
+      const result = await requestResearchHandoff({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        value: baseRecord,
+      });
+      assert.equal(result.status, "waiting-user");
+      assert.equal(result.handoff.kind, "evidence-exhausted");
+      assert.equal(result.handoff.accessRequests[0]?.resourceType, "database-subscription");
+      assert.deepEqual(result.handoff.exhaustion?.routeAttempts[0]?.terminalEventHashes, [
+        eventHash,
+      ]);
+      assert.doesNotMatch(
+        JSON.stringify(await loadProject(fixture.root, fixture.projectId)),
+        /DO-NOT-PERSIST|token=/i,
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("freezes exhausted evidence and requests a scope decision when no lawful route remains", async () => {
+    const fixture = await projectFixture("scientific-evidence-ceiling", {
+      optionalLicensedRoute: true,
+    });
+    try {
+      await passResearchDesign(fixture);
+      const activeProject = await loadProject(fixture.root, fixture.projectId);
+      const discover = activeProject.packages.find((workPackage) => workPackage.id === "discover");
+      assert.ok(discover);
+      discover.status = "running";
+      discover.startedAt = new Date().toISOString();
+      activeProject.status = "running";
+      await saveProject(fixture.root, activeProject);
+      const routeEvent = await appendEvidenceLedgerEvent(
+        fixture.root,
+        fixture.projectId,
+        "activity.recorded",
+        {
+          acquisitionRouteId: "route-native-public-search",
+          kind: "web-search",
+          channel: "codex.web",
+          status: "completed",
+          challenge: "none",
+        },
+      );
+      const access = await inspectEvidenceAccessStatus(fixture.root, fixture.projectId);
+      assert.equal(access.recommendedAction, "assess-required-evidence-role-coverage");
+      assert.equal(access.ifEvidenceStillInsufficient, "scope-pivot-required");
+
+      const result = await requestResearchHandoff({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        value: {
+          schemaVersion: 2,
+          kind: "evidence-exhausted",
+          state: "user-action-required",
+          reasonCode: "scope-decision-required",
+          summary: "All lawful configured routes are exhausted and the claim cannot be supported.",
+          requestedActions: ["Narrow or abandon the unsupported claim before continuing."],
+          evidenceGaps: ["The closest-work role remains below its required evidence floor."],
+          exhaustion: {
+            missingEvidenceRoleIds: ["role-closest-work"],
+            routeAttempts: [
+              {
+                routeId: "route-native-public-search",
+                terminalEventHashes: [routeEvent.hash],
+                outcome: "completed-insufficient",
+              },
+            ],
+            remainingRouteIds: [],
+          },
+          accessRequests: [],
+        },
+      });
+      assert.equal(result.status, "waiting-user");
+      assert.equal(result.handoff.kind, "evidence-exhausted");
+      assert.deepEqual(result.handoff.accessRequests, []);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when another project scope is injected into the evidence ledger", async () => {
+    const fixture = await projectFixture("scientific-evidence-scope");
+    try {
+      const ledgerPath = evidenceLedgerPath(fixture.root, fixture.projectId);
+      await ensureDirectory(dirname(ledgerPath));
+      await appendJournalEvent(ledgerPath, "activity.recorded", "unrelated-project", {
+        projectId: "unrelated-project",
+        acquisitionRouteId: "route-native-public-search",
+        kind: "web-search",
+        channel: "codex.web",
+        status: "completed",
+        challenge: "none",
+      });
+      const status = await invokeCli([
+        "research",
+        "project",
+        "access",
+        "status",
+        fixture.projectId,
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(status.exitCode, 3);
+      assert.match(status.stderr, /RESEARCH_EVIDENCE_LEDGER_INVALID/);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
     }
   });
 
@@ -831,7 +1178,11 @@ describe("top-journal early scientific reviews", () => {
 
 async function projectFixture(
   projectId: string,
-  options: { pendingUncertainty?: boolean; pendingModels?: boolean } = {},
+  options: {
+    pendingUncertainty?: boolean;
+    pendingModels?: boolean;
+    optionalLicensedRoute?: boolean;
+  } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "tiangong-scientific-review-"));
   await initializeResearchWorkspace(root, "Scientific review workflow");
@@ -847,6 +1198,9 @@ async function projectFixture(
       ? {}
       : { pendingUncertainty: options.pendingUncertainty }),
     ...(options.pendingModels === undefined ? {} : { pendingModels: options.pendingModels }),
+    ...(options.optionalLicensedRoute === undefined
+      ? {}
+      : { optionalLicensedRoute: options.optionalLicensedRoute }),
   });
   const project = await initializeProject(
     root,

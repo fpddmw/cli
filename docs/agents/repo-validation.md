@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-12
-lastReviewedCommit: 7d692de934c51178df520ccdaa212acc7dc303f0
+lastReviewedAt: 2026-08-16
+lastReviewedCommit: b8c2d6acaf44de0b9c7ea4530e54baff84ad034b
 ---
 
 # Repo Validation
@@ -264,6 +264,19 @@ additionally verify default superseded-project filtering, authoritative fork
 lineage, archive/abandon dispositions, durable user/external handoffs and
 challenge gates, and closure rejection when any bound snapshot-chain object
 drifts.
+
+Scientific route-exhaustion regressions additionally require exact route IDs on
+broker, native-host, and download events; reject unbound or selector-mismatched
+events; and verify project-scope plus hash-chain integrity before status. They
+also reject optional agent routes for required roles, unmapped required
+capabilities, and unavailable plan-bound broker capabilities. They
+prove that completed-insufficient and explicit authentication/entitlement
+blocks may close a route, while failed native work, login/MFA/CAPTCHA/security
+challenges, HTTP 422, 429, 5xx, timeouts, and cancelled downloads remain
+retry/user-intervention states. Structured handoff tests cover safe official
+locators, sensitive URL/token redaction, exact terminal hashes, purchase and
+external-request actions, empty-route scope pivots, durable status, and no
+manifest/output promotion after a failed or cancelled acquisition.
 
 Reviewer executor regression coverage verifies that a Codex reviewer receives
 exactly one external-sandbox bypass flag and no nested `--sandbox read-only`

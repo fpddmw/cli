@@ -425,6 +425,41 @@
       "minimumDatedSources": 1
     }
   ],
+  "acquisitionPlan": {
+    "routes": [
+      {
+        "id": "route-native-public-search",
+        "evidenceRoleIds": ["role-central-data", "role-closest-work"],
+        "routeClass": "native-discovery",
+        "executor": "agent",
+        "required": true,
+        "capabilityId": null,
+        "activityKind": "web-search",
+        "activityChannel": "codex.web",
+        "downloadBackends": [],
+        "accessMode": "open-public",
+        "rationale": "Use the current native host public-web search before requesting paid access."
+      },
+      {
+        "id": "route-licensed-literature",
+        "evidenceRoleIds": ["role-central-data", "role-closest-work"],
+        "routeClass": "licensed-resource",
+        "executor": "user",
+        "required": true,
+        "capabilityId": null,
+        "activityKind": null,
+        "activityChannel": null,
+        "downloadBackends": [],
+        "accessMode": "purchase-or-subscription",
+        "rationale": "Acquire indispensable licensed full text only after lawful public routes fail."
+      }
+    ],
+    "stopPolicy": {
+      "allAgentRoutesExhaustedBeforeHandoff": true,
+      "unresolvedRequiredEvidenceRoleBlocksDownstream": true,
+      "prohibitUnreviewedSubstitution": true
+    }
+  },
   "knownGaps": [
     {
       "id": "gap-powertrain-wim",
