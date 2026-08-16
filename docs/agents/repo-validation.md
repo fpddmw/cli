@@ -105,8 +105,10 @@ exact immutable commit. Unit tests remain network-free. The explicit
 `audit:research-setup-pins` gate is networked: it creates fresh deterministic
 checkouts for every Catalog source, verifies every selected source path and
 whole-tree hash, validates exact stable versions, and enforces the
-orchestrator's workspace-lock resolver/no-stale-version contract. It is required
-locally for a pin change and in release CI.
+orchestrator's workspace-lock resolver/no-stale-version contract. It also parses
+every template in the exact pinned Top-Journal Policy pack and requires its
+mandatory scientific-design, early-review, and real-record canary invariants.
+It is required locally for a pin change and in release CI.
 
 Release CI additionally sets `TIANGONG_RESEARCH_REQUIRE_SKILLS_MAIN=1`; the
 audit then requires the first-party `tiangong-ai/skills` pin to be reachable
@@ -211,10 +213,12 @@ synthesize with hash-bound sessions and reserved accounting, native broker
 fetches remain call-bounded and sanitized, and only the other-family reviewer
 CLI is launched before mechanical closure.
 `test/research-policy.test.ts` and `test/research-policy-wizard.test.ts` cover
-verified project-installed Policy source resolution, default selection and
-human completion, exact-journal requirements, explicit default acknowledgement,
+verified project-installed Policy source resolution, exhaustive bundled-template
+parsing, mandatory top-journal invariants, default selection and human
+completion, exact-journal requirements, explicit default acknowledgement,
 content/manifest tamper detection, expiry, conflict resolution, and stage
-binding. `test/research-publication-workflow.test.ts` covers mechanical
+binding. Setup doctor tests prove incompatible packs block before paid reviewer
+smoke. `test/research-publication-workflow.test.ts` covers mechanical
 top-journal assessment, owner-input trust ceilings, immutable manuscript
 generations, Policy/evidence/base-output hashes, four role-specific review
 schemas, producer/reviewer separation, append-only reviewer-session reuse

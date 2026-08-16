@@ -1531,6 +1531,65 @@ describe("research setup execution and operator safety", () => {
     }
   });
 
+  it("blocks an incompatible installed Policy pack before paid reviewer smoke", async () => {
+    const root = await temporaryDirectory();
+    const orchestrator = RESEARCH_SETUP_SKILLS.find(
+      (candidate) => candidate.id === "tiangong.auto-research",
+    )!;
+    const originalTreeSha256 = orchestrator.expectedTreeSha256;
+    let executorCalls = 0;
+    try {
+      const skillDirectory = join(root, ".agents", "skills", orchestrator.skillName);
+      await writeDoctorPolicyPack(skillDirectory, true);
+      orchestrator.expectedTreeSha256 = await hashRegularTree(skillDirectory);
+      await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [orchestrator.id],
+        acceptedLicenseIds: [orchestrator.license.id],
+        confirmNetworkDownloads: true,
+      });
+      await initializeResearchWorkspace(root, undefined, "smoke-test");
+      const report = await doctorResearchSetup(root, {
+        agentSmoke: true,
+        environment: {},
+        runner: async ({ command }) => ({
+          exitCode: 0,
+          stdout: `${command} fixture-version`,
+          stderr: "",
+        }),
+        executor: async (request) => {
+          executorCalls += 1;
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ status: "ok" }),
+            stderr: "",
+            tokens: 1,
+            inputTokens: 1,
+            cachedInputTokens: 0,
+            outputTokens: 0,
+            costUsd: 0,
+            wallSeconds: 0,
+            model: request.route.model,
+            runtime: null,
+          };
+        },
+      });
+      assert.equal(report.researchReadiness, "BLOCKED");
+      assert.equal(executorCalls, 0);
+      const check = (
+        report.checks as Array<{ id: string; status: string; detail: string; blocking: boolean }>
+      ).find((candidate) => candidate.id.includes("top-journal-policy-pack"));
+      assert.equal(check?.status, "fail");
+      assert.equal(check?.blocking, true);
+      assert.match(check?.detail ?? "", /unsupportedPinnedConstraint/);
+    } finally {
+      orchestrator.expectedTreeSha256 = originalTreeSha256;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("promotes an optional preprocessor to a project gate only when explicitly required", async () => {
     const root = await temporaryDirectory();
     try {
@@ -2249,6 +2308,46 @@ async function createEmptyPlan(root: string) {
     acceptedLicenseIds: [],
     confirmNetworkDownloads: false,
   });
+}
+
+async function writeDoctorPolicyPack(root: string, incompatible: boolean): Promise<void> {
+  const policyRoot = join(root, "assets", "research-policy", "defaults");
+  const documents: Array<[string, string, string]> = [
+    ["baseline/top-journal.md", "baseline.top-journal", "baseline"],
+    ["article-types/original-empirical.md", "article.original-empirical", "article-type"],
+    ["article-types/computational-modeling.md", "article.computational-modeling", "article-type"],
+    ["fields/engineering-computing.md", "field.engineering-computing", "field"],
+    [
+      "journal-classes/discipline-flagship.md",
+      "journal-class.discipline-flagship",
+      "journal-class",
+    ],
+    ["journals/exact-journal-template.md", "journal.exact-template", "exact-journal"],
+    ["reviewer-rubrics/evidence.md", "reviewer.evidence", "reviewer-rubric"],
+    ["project/publication-brief.md", "project.publication-brief", "publication-brief"],
+  ];
+  for (const [relative, id, kind] of documents) {
+    const path = join(policyRoot, relative);
+    await mkdir(join(path, ".."), { recursive: true });
+    const templateClass =
+      kind === "publication-brief"
+        ? "project-template"
+        : kind === "exact-journal"
+          ? "exact-journal-template"
+          : "bundled-default";
+    const unsupported =
+      incompatible && relative === "article-types/computational-modeling.md"
+        ? "\n  unsupportedPinnedConstraint: true"
+        : "";
+    const required =
+      kind === "baseline"
+        ? "\n  requireScientificDesignContract: true\n  requireEarlyScientificReviews: true\n  requireRealRecordConstructCanary: true"
+        : "";
+    await writeFile(
+      path,
+      `---\nschemaVersion: 1\nid: ${id}\nkind: ${kind}\ntemplateClass: ${templateClass}\npolicyVersion: 1\ntargetTier: top\nrules:\n  - central-claim-directly-supported\nconstraints:\n  minDirectPeerReviewedFullText: 3${required}${unsupported}\nrequiredReviewers:\n  - evidence\nreviewAfterDays: 180\n---\n\n# ${id}\n\nPolicy fixture content.\n`,
+    );
+  }
 }
 
 function errorCode(expected: string): (error: unknown) => boolean {

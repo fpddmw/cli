@@ -28,7 +28,7 @@ describe("top-journal Research Policy", () => {
       await writePolicyPack(source);
       const catalog = await inspectResearchPolicyCatalog(source);
       assert.deepEqual(catalog.categories, {
-        articleTypes: ["original-empirical"],
+        articleTypes: ["computational-modeling", "original-empirical"],
         fields: ["engineering-computing"],
         journalClasses: ["discipline-flagship"],
       });
@@ -73,6 +73,9 @@ describe("top-journal Research Policy", () => {
       assert.equal(binding.verdictCeiling, "top-journal-candidate");
       assert.equal(binding.targetJournal, null);
       assert.equal(binding.resolvedConstraints?.minDirectPeerReviewedFullText, 5);
+      assert.equal(binding.resolvedConstraints?.requireScientificDesignContract, true);
+      assert.equal(binding.resolvedConstraints?.requireEarlyScientificReviews, true);
+      assert.equal(binding.resolvedConstraints?.requireRealRecordConstructCanary, true);
 
       const manifestPath = join(
         root,
@@ -196,6 +199,89 @@ describe("top-journal Research Policy", () => {
     }
   });
 
+  it("parses every bundled template before returning the catalog", async () => {
+    const source = await temporaryDirectory();
+    try {
+      await writePolicyPack(source, { includeRequiredTopJournalConstraints: false });
+      const article = join(
+        source,
+        "assets",
+        "research-policy",
+        "defaults",
+        "article-types",
+        "computational-modeling.md",
+      );
+      await writeFile(
+        article,
+        (await readFile(article, "utf8")).replace(
+          "  minDirectPeerReviewedFullText: 5",
+          "  minDirectPeerReviewedFullText: 5\n  unsupportedPinnedConstraint: true",
+        ),
+      );
+      await assert.rejects(
+        inspectResearchPolicyCatalog(source),
+        (error: unknown) =>
+          errorCode(error) === "RESEARCH_POLICY_INVALID" &&
+          /unsupportedPinnedConstraint/.test(String(error)),
+      );
+    } finally {
+      await rm(source, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses approval when a mandatory top-journal invariant resolves false", async () => {
+    const root = await temporaryDirectory();
+    const source = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, "Policy invariant workspace");
+      await writePolicyPack(source);
+      await initializeResearchPolicy({
+        root,
+        projectId: "invalid-policy-invariant",
+        sourceRoot: source,
+        articleType: "original-empirical",
+        field: "engineering-computing",
+        journalClass: "discipline-flagship",
+      });
+      const briefPath = join(
+        root,
+        "research-policy",
+        "invalid-policy-invariant",
+        "publication-brief.md",
+      );
+      await writeFile(
+        briefPath,
+        (await readFile(briefPath, "utf8"))
+          .replace("__DEFINE_CENTRAL_QUESTION__", "Does treatment X improve outcome Y?")
+          .replace("__DEFINE_CENTRAL_CLAIM__", "Treatment X improves outcome Y.")
+          .replace("__DEFINE_CENTRAL_OUTCOME__", "Observed change in outcome Y")
+          .replace("__DEFINE_CONTRIBUTION_TYPE__", "new-empirical-estimate"),
+      );
+      const baselinePath = join(root, "research-policy", "invalid-policy-invariant", "baseline.md");
+      await writeFile(
+        baselinePath,
+        (await readFile(baselinePath, "utf8")).replace(
+          "requireScientificDesignContract: true",
+          "requireScientificDesignContract: false",
+        ),
+      );
+      await assert.rejects(
+        approveResearchPolicy(root, "invalid-policy-invariant", {
+          confirm: true,
+          acknowledgeDefaults: true,
+        }),
+        (error: unknown) =>
+          errorCode(error) === "RESEARCH_POLICY_INVALID" &&
+          /requireScientificDesignContract.*true/i.test(String(error)),
+      );
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(source, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("rejects a symlinked policy source and blocks a top-journal project without policy", async () => {
     const root = await temporaryDirectory();
     const source = await temporaryDirectory();
@@ -244,13 +330,22 @@ describe("top-journal Research Policy", () => {
   });
 });
 
-async function writePolicyPack(root: string): Promise<void> {
+async function writePolicyPack(
+  root: string,
+  options: { includeRequiredTopJournalConstraints?: boolean } = {},
+): Promise<void> {
   const policyRoot = join(root, "assets", "research-policy", "defaults");
   const documents: Array<[string, string, string, string]> = [
     ["baseline/top-journal.md", "baseline.top-journal", "baseline", "bundled-default"],
     [
       "article-types/original-empirical.md",
       "article.original-empirical",
+      "article-type",
+      "bundled-default",
+    ],
+    [
+      "article-types/computational-modeling.md",
+      "article.computational-modeling",
       "article-type",
       "bundled-default",
     ],
@@ -274,14 +369,24 @@ async function writePolicyPack(root: string): Promise<void> {
       "publication-brief",
       "project-template",
     ],
+    [
+      "journals/exact-journal-template.md",
+      "journal.exact-journal-template",
+      "exact-journal",
+      "exact-journal-template",
+    ],
   ];
   for (const [relative, id, kind, templateClass] of documents) {
     const path = join(policyRoot, relative);
     await mkdir(join(path, ".."), { recursive: true });
     const isBrief = kind === "publication-brief";
+    const requiredTopJournalConstraints =
+      kind === "baseline" && options.includeRequiredTopJournalConstraints !== false
+        ? "\n  requireScientificDesignContract: true\n  requireEarlyScientificReviews: true\n  requireRealRecordConstructCanary: true"
+        : "";
     await writeFile(
       path,
-      `---\nschemaVersion: 1\nid: ${id}\nkind: ${kind}\ntemplateClass: ${templateClass}\npolicyVersion: 1\ntargetTier: top\narticleType: original-empirical\nfield: engineering-computing\njournalClass: discipline-flagship\ntargetJournal: none\ncentralQuestion: ${isBrief ? "__DEFINE_CENTRAL_QUESTION__" : "defined"}\ncentralClaim: ${isBrief ? "__DEFINE_CENTRAL_CLAIM__" : "defined"}\ncentralOutcome: ${isBrief ? "__DEFINE_CENTRAL_OUTCOME__" : "defined"}\ncontributionType: ${isBrief ? "__DEFINE_CONTRIBUTION_TYPE__" : "defined"}\nrules:\n  - central-claim-directly-supported\nconstraints:\n  minDirectPeerReviewedFullText: ${kind === "article-type" ? 5 : 2}\nrequiredReviewers:\n  - evidence\nreviewAfterDays: 180\n---\n\n# ${id}\n\nPolicy content.\n`,
+      `---\nschemaVersion: 1\nid: ${id}\nkind: ${kind}\ntemplateClass: ${templateClass}\npolicyVersion: 1\ntargetTier: top\narticleType: original-empirical\nfield: engineering-computing\njournalClass: discipline-flagship\ntargetJournal: none\ncentralQuestion: ${isBrief ? "__DEFINE_CENTRAL_QUESTION__" : "defined"}\ncentralClaim: ${isBrief ? "__DEFINE_CENTRAL_CLAIM__" : "defined"}\ncentralOutcome: ${isBrief ? "__DEFINE_CENTRAL_OUTCOME__" : "defined"}\ncontributionType: ${isBrief ? "__DEFINE_CONTRIBUTION_TYPE__" : "defined"}\nrules:\n  - central-claim-directly-supported\nconstraints:\n  minDirectPeerReviewedFullText: ${kind === "article-type" ? 5 : 2}${requiredTopJournalConstraints}\nrequiredReviewers:\n  - evidence\nreviewAfterDays: 180\n---\n\n# ${id}\n\nPolicy content.\n`,
     );
   }
 }

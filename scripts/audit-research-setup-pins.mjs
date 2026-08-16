@@ -10,12 +10,14 @@ import {
   RESEARCH_SETUP_SOURCES,
   verifyResearchSetupRuntimeContract,
 } from "../dist/research/workspace/setup-catalog.js";
+import { validateResearchPolicyPack } from "../dist/research/workspace/research-policy.js";
 import { hashRegularTree } from "../dist/research/workspace/storage.js";
 
 const run = promisify(execFile);
 const exactStableSemver = /^\d+\.\d+\.\d+$/;
 const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const auditRoot = await mkdtemp(resolve(tmpdir(), "tiangong-research-pin-audit."));
+let policyPacksValidated = 0;
 
 try {
   if (!exactStableSemver.test(packageJson.version)) {
@@ -117,6 +119,15 @@ try {
         );
       }
       await verifyResearchSetupRuntimeContract(skillPath, skill);
+      if (skill.id === "tiangong.auto-research") {
+        const policyPack = await validateResearchPolicyPack(skillPath);
+        if (policyPack.sourceTreeSha256 !== observed) {
+          throw new Error(
+            `Setup Skill ${skill.id} Policy validation observed a different tree hash.`,
+          );
+        }
+        policyPacksValidated += 1;
+      }
     }
   }
   process.stdout.write(
@@ -126,6 +137,7 @@ try {
       installerVersion: RESEARCH_SETUP_INSTALLER.version,
       sources: RESEARCH_SETUP_SOURCES.length,
       skills: RESEARCH_SETUP_SKILLS.length,
+      policyPacksValidated,
       firstPartyMainLineageVerified: requireFirstPartyMain,
     })}\n`,
   );
