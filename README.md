@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-12
-lastReviewedCommit: ac34420a63cb02898f8c38b1c1af64f0439e862f
+lastReviewedAt: 2026-08-16
+lastReviewedCommit: b8c2d6acaf44de0b9c7ea4530e54baff84ad034b
 ---
 
 # Tiangong AI CLI
@@ -547,6 +547,42 @@ admitted UTF-8 text/JSON/HTML/CSV/Markdown derivative exists. Such a derivative
 names its registered parent and inherits that parent's canonical source URL;
 it does not invent a second network-download binding, and a conflicting URL is
 rejected.
+
+For top-journal work, the frozen scientific design maps every required evidence
+role to all applicable lawful acquisition routes in the configured environment.
+Every declared agent route for a required role is mandatory, and every required
+capability must map to an available locked broker route at preflight.
+Each broker call carries its exact `acquisition_route_id`; native activity and
+download records carry `acquisitionRouteId`. A missing or mismatched route ID is
+rejected rather than becoming evidence that a method was tried.
+
+Inspect the live, hash-verified route state before declaring a material evidence
+ceiling:
+
+```bash
+tiangong-ai research project access status gpu-resource-impact \
+  --workspace /absolute/path/to/workspace --json
+```
+
+Once all agent routes are terminal, the command first recommends assessing
+required evidence-role coverage. Its `ifEvidenceStillInsufficient` field is a
+conditional access/scope action, not a claim that purchase is always necessary.
+
+Successful broker/native/download completion, explicit broker authentication or
+entitlement denial, and validated deterministic no-OA download outcomes can be
+terminal. HTTP 422, malformed requests, configuration errors, timeouts, 429,
+5xx, cancelled downloads, and login/MFA/CAPTCHA/security challenges are not
+route exhaustion. Challenges pause immediately through an
+`interactive-challenge` handoff.
+
+Only after every required plan-bound agent route for a still-missing required
+evidence role has exact terminal event hashes may the native host submit a
+schema-v2 `evidence-exhausted` handoff. The durable handoff names each remaining
+purchase, subscription, institutional authorization, owner input, external data
+request, or field collection action with an official non-sensitive locator and
+resume criteria. Research then stops; it does not spend more budget on
+low-yield substitutes. If no lawful remaining route exists, the user must narrow
+or abandon the unsupported scope before a new reviewed generation can resume.
 
 Successful acquisition freezes an immutable evidence snapshot before analysis.
 The reviewer and mechanical closure bind and recheck the snapshot chain,

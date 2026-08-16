@@ -1735,7 +1735,8 @@ describe("research workspace CLI", () => {
         root,
         projectId: "handoff-state",
         value: {
-          schemaVersion: 1,
+          schemaVersion: 2,
+          kind: "interactive-challenge",
           state: "user-action-required",
           reasonCode: "human-challenge",
           summary: "A human must complete the publisher challenge without automation.",
@@ -1775,7 +1776,8 @@ describe("research workspace CLI", () => {
         root,
         projectId: "handoff-state",
         value: {
-          schemaVersion: 1,
+          schemaVersion: 2,
+          kind: "external-wait",
           state: "external-response-required",
           reasonCode: "official-data-request-pending",
           summary: "The public evidence ceiling is reached and an official response is pending.",

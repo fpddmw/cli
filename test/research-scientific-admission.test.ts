@@ -313,6 +313,45 @@ describe("top-journal scientific design admission", () => {
         [],
       );
 
+      const capabilityRequirements = {
+        ...requirements,
+        requiredCapabilityIds: ["database.required-source"],
+      };
+      const unmappedCapability = await evaluateProjectPreflight(
+        root,
+        "Can the EV study clear design?",
+        capabilityRequirements,
+        null,
+        { scientificDesign: dischargedDesign, publicationPolicy },
+      );
+      assert.ok(
+        unmappedCapability.gaps.includes(
+          "scientific-design-contract:required-capability-route-unmapped:database.required-source",
+        ),
+      );
+
+      const unavailableCapabilityDesign = structuredClone(dischargedDesign);
+      const unavailableRoute = unavailableCapabilityDesign.contract.acquisitionPlan.routes.find(
+        (route) => route.id === "route-native-public-search",
+      );
+      assert.ok(unavailableRoute);
+      unavailableRoute.routeClass = "broker-capability";
+      unavailableRoute.capabilityId = "database.required-source";
+      unavailableRoute.activityKind = null;
+      unavailableRoute.activityChannel = null;
+      const unavailableCapability = await evaluateProjectPreflight(
+        root,
+        "Can the EV study clear design?",
+        capabilityRequirements,
+        null,
+        { scientificDesign: unavailableCapabilityDesign, publicationPolicy },
+      );
+      assert.ok(
+        unavailableCapability.gaps.includes(
+          "scientific-design-contract:acquisition-capability-unavailable:route-native-public-search:database.required-source",
+        ),
+      );
+
       const badDesign = structuredClone(design);
       (
         badDesign.contract as unknown as {

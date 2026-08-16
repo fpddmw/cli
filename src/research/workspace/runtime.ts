@@ -21,6 +21,10 @@ import { stageEvidenceArtifacts } from "./artifacts.js";
 import { commitDiscoveryDecisions, materializeDiscoveryEvidence } from "./discovery.js";
 import { inspectDiscoveryProgress, type DiscoveryProgress } from "./discovery-status.js";
 import { downloadBindingRecordSchema } from "./downloads.js";
+import {
+  parseEvidenceExhaustionHandoff,
+  validateEvidenceExhaustionHandoff,
+} from "./evidence-exhaustion.js";
 import { loadProjectEvidenceReceipts, stageProjectEvidence } from "./evidence.js";
 import {
   appendEvidenceLedgerEvent,
@@ -87,6 +91,9 @@ import type {
   FailureKind,
   OutputRecord,
   ProjectState,
+  ResearchAccessRequest,
+  ResearchEvidenceExhaustion,
+  ResearchHandoffKind,
   ResearchProgressEvent,
   RunRecord,
   WorkPackage,
@@ -130,13 +137,35 @@ export interface WorkspaceRunResult {
   }>;
 }
 
+function identifierSetSchema(minItems: number, maxItems: number) {
+  return {
+    type: "array",
+    minItems,
+    maxItems,
+    uniqueItems: true,
+    items: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+  } as const;
+}
+
 export const researchHandoffRecordSchema = {
-  $id: "https://schemas.tiangong.ai/research/handoff-request-v1.json",
+  $id: "https://schemas.tiangong.ai/research/handoff-request-v2.json",
   type: "object",
   additionalProperties: false,
-  required: ["schemaVersion", "state", "reasonCode", "summary", "requestedActions", "evidenceGaps"],
+  required: [
+    "schemaVersion",
+    "kind",
+    "state",
+    "reasonCode",
+    "summary",
+    "requestedActions",
+    "evidenceGaps",
+  ],
   properties: {
-    schemaVersion: { type: "integer", const: 1 },
+    schemaVersion: { type: "integer", const: 2 },
+    kind: {
+      type: "string",
+      enum: ["interactive-challenge", "external-wait", "evidence-exhausted"],
+    },
     state: {
       type: "string",
       enum: ["user-action-required", "external-response-required"],
@@ -157,7 +186,92 @@ export const researchHandoffRecordSchema = {
       uniqueItems: true,
       items: { type: "string", minLength: 1, maxLength: 500 },
     },
+    exhaustion: {
+      type: "object",
+      additionalProperties: false,
+      required: ["missingEvidenceRoleIds", "routeAttempts", "remainingRouteIds"],
+      properties: {
+        missingEvidenceRoleIds: identifierSetSchema(1, 100),
+        routeAttempts: {
+          type: "array",
+          minItems: 1,
+          maxItems: 100,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["routeId", "terminalEventHashes", "outcome"],
+            properties: {
+              routeId: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+              terminalEventHashes: {
+                type: "array",
+                minItems: 1,
+                maxItems: 100,
+                uniqueItems: true,
+                items: { type: "string", pattern: "^[a-f0-9]{64}$" },
+              },
+              outcome: {
+                type: "string",
+                enum: ["completed-insufficient", "access-blocked", "deterministic-unavailable"],
+              },
+            },
+          },
+        },
+        remainingRouteIds: identifierSetSchema(0, 100),
+      },
+    },
+    accessRequests: {
+      type: "array",
+      minItems: 0,
+      maxItems: 100,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "id",
+          "routeId",
+          "resourceType",
+          "resourceName",
+          "officialLocator",
+          "evidenceRoleIds",
+          "rationale",
+          "alternativesTriedRouteIds",
+          "requestedAction",
+          "resumeCriteria",
+          "costStatus",
+        ],
+        properties: {
+          id: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+          routeId: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+          resourceType: {
+            type: "string",
+            enum: [
+              "database-subscription",
+              "article-purchase",
+              "institutional-access",
+              "licensed-dataset",
+              "owner-provided-material",
+              "external-data-request",
+              "field-data-collection",
+            ],
+          },
+          resourceName: { type: "string", minLength: 3, maxLength: 500 },
+          officialLocator: { type: ["string", "null"], format: "uri" },
+          evidenceRoleIds: identifierSetSchema(1, 100),
+          rationale: { type: "string", minLength: 8, maxLength: 2_000 },
+          alternativesTriedRouteIds: identifierSetSchema(1, 100),
+          requestedAction: { type: "string", minLength: 8, maxLength: 1_000 },
+          resumeCriteria: { type: "string", minLength: 8, maxLength: 1_000 },
+          costStatus: { type: "string", enum: ["unknown", "provider-quote-required"] },
+        },
+      },
+    },
   },
+  allOf: [
+    {
+      if: { properties: { kind: { const: "evidence-exhausted" } } },
+      then: { required: ["exhaustion", "accessRequests"] },
+    },
+  ],
 } as const;
 
 export async function runResearchWorkspace(
@@ -313,6 +427,7 @@ export interface NativeStagePacket {
     registerCandidate: { argv: string[]; recordSchema: Record<string, unknown> } | null;
     recordAssessment: { argv: string[]; recordSchema: Record<string, unknown> } | null;
     bindDownload: { argv: string[]; recordSchema: Record<string, unknown> } | null;
+    inspectAccess: { argv: string[] } | null;
     requestHandoff: { argv: string[]; recordSchema: Record<string, unknown> };
     registerArtifact: {
       argv: string[];
@@ -577,6 +692,21 @@ export async function prepareNativeResearchStage(input: {
           maxWallSeconds: config.budget.packageMaxWallSeconds[input.stage],
         },
         commands: {
+          inspectAccess: project.scientificDesign
+            ? {
+                argv: [
+                  "tiangong-ai",
+                  "research",
+                  "project",
+                  "access",
+                  "status",
+                  project.id,
+                  "--workspace",
+                  input.root,
+                  "--json",
+                ],
+              }
+            : null,
           requestHandoff: {
             argv: [
               "tiangong-ai",
@@ -812,6 +942,7 @@ export async function prepareNativeResearchStage(input: {
         rules: [
           "Current native host performs producer reasoning; the CLI does not spawn a producer.",
           "Native Web/Browser activity is visible in the evidence ledger but becomes admissible only after broker/input formalization and strict assessment.",
+          "An interactive challenge pauses immediately. A material evidence-exhausted handoff is valid only after inspectAccess proves every required plan-bound agent route with exact terminal event hashes.",
           "When the next material step requires user authorization or an external response, request a durable handoff and stop; do not keep searching low-yield substitutes.",
           "Only broker receipts or registered immutable inputs may support discover output.",
           "Only exact, structurally validated, content-addressed artifacts may support full-text acquisition claims.",
@@ -1190,6 +1321,18 @@ export async function requestResearchHandoff(input: {
         details: { state: project.handoff.state },
       });
     }
+    const evidenceHandoff =
+      value.kind === "evidence-exhausted"
+        ? await validateEvidenceExhaustionHandoff({
+            root: input.root,
+            project,
+            state: value.state,
+            value: {
+              exhaustion: value.exhaustion!,
+              accessRequests: value.accessRequests,
+            },
+          })
+        : null;
     const activePath = nativeStageSessionPath(input.root, input.projectId);
     const session = (await pathExists(activePath))
       ? await readNativeStageSession(input.root, input.projectId)
@@ -1213,10 +1356,13 @@ export async function requestResearchHandoff(input: {
     const requestedAt = new Date().toISOString();
     project.handoff = {
       state: value.state,
+      kind: value.kind,
       reasonCode: value.reasonCode,
       summary: value.summary,
       requestedActions: value.requestedActions,
       evidenceGaps: value.evidenceGaps,
+      exhaustion: evidenceHandoff?.exhaustion ?? null,
+      accessRequests: evidenceHandoff?.accessRequests ?? [],
       requestedAt,
       resolvedAt: null,
       resolutionNote: null,
@@ -1225,10 +1371,13 @@ export async function requestResearchHandoff(input: {
     await saveProject(input.root, project);
     const eventPayload = {
       state: value.state,
+      kind: value.kind,
       reasonCode: value.reasonCode,
       summary: value.summary,
       requestedActions: value.requestedActions,
       evidenceGaps: value.evidenceGaps,
+      exhaustion: evidenceHandoff?.exhaustion ?? null,
+      accessRequests: evidenceHandoff?.accessRequests ?? [],
       requestedAt,
       interruptedSessionId: session?.packet.sessionId ?? null,
       interruptedPackageId: session?.packet.packageId ?? null,
@@ -1306,20 +1455,26 @@ export async function resolveResearchHandoff(input: {
 }
 
 function parseHandoffRequest(value: Record<string, unknown>): {
+  kind: ResearchHandoffKind;
   state: "user-action-required" | "external-response-required";
   reasonCode: string;
   summary: string;
   requestedActions: string[];
   evidenceGaps: string[];
+  exhaustion: ResearchEvidenceExhaustion | null;
+  accessRequests: ResearchAccessRequest[];
 } {
   const sanitized = sanitizeResearchRecord(value, configuredResearchSecrets(process.env));
   const allowed = new Set([
     "schemaVersion",
+    "kind",
     "state",
     "reasonCode",
     "summary",
     "requestedActions",
     "evidenceGaps",
+    "exhaustion",
+    "accessRequests",
   ]);
   const requestedActions = Array.isArray(sanitized.requestedActions)
     ? sanitized.requestedActions
@@ -1327,7 +1482,10 @@ function parseHandoffRequest(value: Record<string, unknown>): {
   const evidenceGaps = Array.isArray(sanitized.evidenceGaps) ? sanitized.evidenceGaps : [];
   if (
     Object.keys(sanitized).some((key) => !allowed.has(key)) ||
-    sanitized.schemaVersion !== 1 ||
+    sanitized.schemaVersion !== 2 ||
+    !["interactive-challenge", "external-wait", "evidence-exhausted"].includes(
+      String(sanitized.kind),
+    ) ||
     !["user-action-required", "external-response-required"].includes(String(sanitized.state)) ||
     typeof sanitized.reasonCode !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(sanitized.reasonCode) ||
@@ -1350,12 +1508,42 @@ function parseHandoffRequest(value: Record<string, unknown>): {
       exitCode: 2,
     });
   }
+  const kind = sanitized.kind as ResearchHandoffKind;
+  const state = sanitized.state as "user-action-required" | "external-response-required";
+  if (
+    (kind === "interactive-challenge" && state !== "user-action-required") ||
+    (kind === "external-wait" && state !== "external-response-required")
+  ) {
+    throw new CliError("Handoff request failed validation.", {
+      code: "RESEARCH_PROJECT_HANDOFF_INVALID",
+      exitCode: 2,
+    });
+  }
+  let exhaustion: ResearchEvidenceExhaustion | null = null;
+  let accessRequests: ResearchAccessRequest[] = [];
+  if (kind === "evidence-exhausted") {
+    const parsed = parseEvidenceExhaustionHandoff(sanitized.exhaustion, sanitized.accessRequests);
+    exhaustion = parsed.exhaustion;
+    accessRequests = parsed.accessRequests;
+  } else if (
+    sanitized.exhaustion !== undefined ||
+    (sanitized.accessRequests !== undefined &&
+      (!Array.isArray(sanitized.accessRequests) || sanitized.accessRequests.length > 0))
+  ) {
+    throw new CliError("Handoff request failed validation.", {
+      code: "RESEARCH_PROJECT_HANDOFF_INVALID",
+      exitCode: 2,
+    });
+  }
   return {
-    state: sanitized.state as "user-action-required" | "external-response-required",
+    kind,
+    state,
     reasonCode: sanitized.reasonCode,
     summary: sanitized.summary.trim(),
     requestedActions: requestedActions as string[],
     evidenceGaps: evidenceGaps as string[],
+    exhaustion,
+    accessRequests,
   };
 }
 

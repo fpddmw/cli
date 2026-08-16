@@ -177,6 +177,7 @@ export async function evaluateProjectPreflight(
       options.scientificDesign.contract,
       options.publicationPolicy,
       requirements,
+      new Set(networkCapabilities.map((capability) => capability.id)),
     );
   }
   if (config.mode === "production-research" && !requirements) {
@@ -702,6 +703,7 @@ function appendScientificDesignContractGaps(
   design: ScientificDesignContract,
   policy: ResearchPolicyBinding,
   requirements: ProjectEvidenceRequirements | null,
+  availableCapabilityIds: Set<string>,
 ): void {
   const prefix = "scientific-design-contract:";
   gaps.push(...scientificDesignPolicyGaps(design, policy).map((gap) => `${prefix}${gap}`));
@@ -714,7 +716,28 @@ function appendScientificDesignContractGaps(
   }
 
   const requiredRoles = design.evidenceRoles.filter((role) => role.required);
+  const requiredRoleIds = new Set(requiredRoles.map((role) => role.id));
+  const requiredBrokerRoutes = design.acquisitionPlan.routes.filter(
+    (route) =>
+      route.required &&
+      route.executor === "agent" &&
+      route.routeClass === "broker-capability" &&
+      route.evidenceRoleIds.some((roleId) => requiredRoleIds.has(roleId)),
+  );
+  for (const route of requiredBrokerRoutes) {
+    if (route.capabilityId && !availableCapabilityIds.has(route.capabilityId)) {
+      gaps.push(`${prefix}acquisition-capability-unavailable:${route.id}:${route.capabilityId}`);
+    }
+  }
   if (requirements) {
+    const mappedCapabilityIds = new Set(
+      requiredBrokerRoutes.flatMap((route) => (route.capabilityId ? [route.capabilityId] : [])),
+    );
+    for (const capabilityId of requirements.requiredCapabilityIds ?? []) {
+      if (!mappedCapabilityIds.has(capabilityId)) {
+        gaps.push(`${prefix}required-capability-route-unmapped:${capabilityId}`);
+      }
+    }
     const mappedDimensions = new Set(requiredRoles.flatMap((role) => role.coverageDimensionIds));
     const mappedSourceTypes = new Set(requiredRoles.flatMap((role) => role.sourceTypeRequirements));
     for (const dimension of requirements.dimensions) {

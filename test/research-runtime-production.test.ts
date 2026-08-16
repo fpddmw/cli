@@ -33,6 +33,7 @@ import {
   evidenceLedgerPath,
   listEvidenceCandidates,
 } from "../src/research/workspace/evidence-ledger.js";
+import { inspectEvidenceAccessStatus } from "../src/research/workspace/evidence-exhaustion.js";
 import type { AgentExecutionRequest } from "../src/research/workspace/executor.js";
 import {
   addProjectInput,
@@ -53,12 +54,13 @@ import {
   regularTreeFiles,
   workspacePaths,
 } from "../src/research/workspace/storage.js";
-import type { ExecutionResult } from "../src/research/workspace/types.js";
+import type { ExecutionResult, ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import {
   doctorResearchWorkspace,
   initializeResearchWorkspace,
   verifyDoctorAttestation,
 } from "../src/research/workspace/workspace.js";
+import { scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("production research evidence and broker", () => {
   it("auto-selects and paginates known provider result collections", async () => {
@@ -294,6 +296,122 @@ describe("production research evidence and broker", () => {
         projectId: "native-fetch",
         sessionId: packet.sessionId,
       });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("binds a broker terminal event to one exact scientific acquisition route", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    const originalFetch = globalThis.fetch;
+    const projectId = "broker-acquisition-route";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await installNetworkCapability(root, skillParent);
+      const policy = scientificPolicyBinding(projectId);
+      const design = await scientificDesignInput(root, projectId, {
+        targetJournal: policy.targetJournal,
+        brokerCapabilityId: "method.public-source",
+      });
+      const project = await initializeProject(
+        root,
+        projectId,
+        "Can all configured broker routes retrieve the required scientific evidence?",
+        undefined,
+        false,
+        undefined,
+        policy,
+        design,
+      );
+      const discover = project.packages.find((workPackage) => workPackage.id === "discover");
+      assert.ok(discover);
+      discover.status = "running";
+      discover.startedAt = new Date().toISOString();
+      project.status = "running";
+      await saveProject(root, project);
+      await assert.rejects(
+        fetchNativeCandidateSource({
+          root,
+          projectId,
+          request: {
+            capability_id: "method.public-source",
+            url: "https://source.test/items?q=unbound",
+          },
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_EVIDENCE_ACQUISITION_ROUTE_INVALID",
+      );
+
+      globalThis.fetch = async () =>
+        new Response('{"error":"invalid request"}', {
+          status: 422,
+          headers: { "content-type": "application/json" },
+        });
+      await assert.rejects(
+        fetchNativeCandidateSource({
+          root,
+          projectId,
+          request: {
+            acquisition_route_id: "route-native-public-search",
+            capability_id: "method.public-source",
+            url: "https://source.test/items?q=invalid-request",
+          },
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_BROKER_HTTP_ERROR",
+      );
+      const invalidRequestStatus = await inspectEvidenceAccessStatus(root, projectId);
+      assert.deepEqual(invalidRequestStatus.untriedRequiredAgentRouteIds, [
+        "route-native-public-search",
+      ]);
+
+      globalThis.fetch = async () =>
+        new Response('{"error":"subscription required"}', {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        });
+      await assert.rejects(
+        fetchNativeCandidateSource({
+          root,
+          projectId,
+          request: {
+            acquisition_route_id: "route-native-public-search",
+            capability_id: "method.public-source",
+            url: "https://source.test/items?q=licensed",
+          },
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "PROVIDER_AUTHENTICATION_FAILED",
+      );
+      const blockedStatus = await inspectEvidenceAccessStatus(root, projectId);
+      assert.deepEqual(blockedStatus.untriedRequiredAgentRouteIds, []);
+      assert.equal(
+        blockedStatus.routes[0]?.terminalEvents.at(-1)?.classification,
+        "access-blocked",
+      );
+
+      globalThis.fetch = async () =>
+        new Response('{"results":[]}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      await fetchNativeCandidateSource({
+        root,
+        projectId,
+        request: {
+          acquisition_route_id: "route-native-public-search",
+          capability_id: "method.public-source",
+          url: "https://source.test/items?q=bound",
+        },
+      });
+      const access = await inspectEvidenceAccessStatus(root, projectId);
+      assert.deepEqual(access.untriedRequiredAgentRouteIds, []);
+      assert.match(access.routes[0]?.terminalEventHashes[0] ?? "", /^[a-f0-9]{64}$/);
     } finally {
       globalThis.fetch = originalFetch;
       await Promise.all([
@@ -2410,6 +2528,26 @@ async function installNetworkCapability(
     )}\n`,
   );
   await lockCapabilities(root);
+}
+
+function scientificPolicyBinding(projectId: string): ResearchPolicyBinding {
+  return {
+    goal: "top-journal",
+    projectId,
+    articleType: "computational-modeling",
+    field: "pavement-engineering",
+    journalClass: "discipline-flagship",
+    targetJournal: "International Journal of Pavement Engineering",
+    resolvedPolicySha256: "a".repeat(64),
+    approvalSha256: "b".repeat(64),
+    verdictCeiling: "target-journal-submission-ready",
+    documents: [],
+    resolvedRules: [],
+    resolvedConstraints: {},
+    requiredReviewers: ["evidence", "methods-reproducibility", "domain-novelty", "journal-editor"],
+    approvedAt: "2026-08-14T00:00:00.000Z",
+    expiresAt: "2027-08-14T00:00:00.000Z",
+  };
 }
 
 function brokerBackedExecutor(

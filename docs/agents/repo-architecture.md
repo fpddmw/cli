@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-14
-lastReviewedCommit: 6369461ca3c0866c5a37f991dac8760ea8f361a2
+lastReviewedAt: 2026-08-16
+lastReviewedCommit: b8c2d6acaf44de0b9c7ea4530e54baff84ad034b
 ---
 
 # Repo Architecture
@@ -280,6 +280,34 @@ human-only boundary, it records the activity and requests a durable
 other third party to respond, it requests `external-response-required` and
 stops substitute searching. Resolution is an explicit journaled operation;
 neither state consumes another producer attempt while waiting.
+
+A top-journal scientific design freezes a closed acquisition plan before
+discovery. Broker, native-host activity, and download events must bind one exact
+agent route ID whose class and selector match the event. The access-status
+projection verifies the workspace and per-project evidence journals, filters by
+exact project scope, and returns terminal event hashes for each route. Success
+and explicit authentication/entitlement denial may close a route; malformed or
+misconfigured requests, 422, transient/network/rate-limit failures, cancelled
+downloads, and interactive challenges may not.
+
+Access status never infers an evidence gap from route completion alone. After
+all agent routes are terminal it requires an evidence-role coverage assessment
+and exposes purchase/handoff or scope-pivot only as the conditional
+`ifEvidenceStillInsufficient` action.
+
+Preflight rejects any agent route for a required evidence role that is marked
+optional, any required capability that lacks a required broker-route mapping,
+and any plan-bound broker capability absent from the verified current lock.
+
+An `evidence-exhausted` handoff is a schema-v2, append-only stop record, not a
+retry hint. It is admitted only when every required agent route relevant to the
+cited missing required evidence roles is proven by exact terminal hashes. Its
+remaining reviewed non-agent routes become structured, sanitized access
+requests for purchase/subscription, institutional access, licensed data, owner
+input, external requests, or field collection. With no remaining lawful route,
+the only valid user action is a reviewed scope/claim pivot. Project status keeps
+the structured exhaustion proof and suppresses further substitute work until
+explicit resolution.
 
 Every brokered manifest entry carries a locked non-secret HTTPS endpoint;
 initial targets and GET redirects are checked against that endpoint scope

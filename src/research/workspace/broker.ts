@@ -4,6 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { CliError } from "../../errors.js";
+import { resolveAgentAcquisitionRoute } from "./acquisition-routes.js";
 import { loadCapabilityDeclarations, verifyCapabilities } from "./capabilities.js";
 import { loadCapabilityCredentialMap } from "./credentials.js";
 import {
@@ -163,6 +164,7 @@ export async function startCapabilityBroker(
       workspaceContextTokens: config.budget.maxBrokerContextTokens,
       workspaceMaxItems: config.budget.maxBrokerItems,
       callBudget,
+      requireAcquisitionRoute: Boolean(project?.scientificDesign),
     });
   });
   await new Promise<void>((resolvePromise, reject) => {
@@ -201,6 +203,7 @@ async function handleMcpRequest(input: {
   workspaceContextTokens: number;
   workspaceMaxItems: number;
   callBudget: BrokerCallBudget;
+  requireAcquisitionRoute: boolean;
 }): Promise<void> {
   try {
     if (input.request.method !== "POST" || input.request.url !== input.route) {
@@ -233,8 +236,17 @@ async function handleMcpRequest(input: {
             inputSchema: {
               type: "object",
               additionalProperties: false,
-              required: ["capability_id", "url"],
+              required: [
+                ...(input.requireAcquisitionRoute ? ["acquisition_route_id"] : []),
+                "capability_id",
+                "url",
+              ],
               properties: {
+                acquisition_route_id: {
+                  type: "string",
+                  description:
+                    "Exact broker-capability route ID from the frozen scientific design. Required for scientific projects.",
+                },
                 capability_id: { type: "string" },
                 credential_id: {
                   type: "string",
@@ -359,6 +371,7 @@ async function fetchCandidateSource(input: {
   onBrokerRequest?: () => void;
 }): Promise<Record<string, unknown>> {
   const capabilityId = input.arguments.capability_id;
+  const requestedAcquisitionRouteId = input.arguments.acquisition_route_id;
   const credentialId = input.arguments.credential_id;
   const rawUrl = input.arguments.url;
   const requestBody = input.arguments.request_body;
@@ -371,6 +384,12 @@ async function fetchCandidateSource(input: {
   }
   if (credentialId !== undefined && typeof credentialId !== "string") {
     throw new Error("credential_id must be a string when provided");
+  }
+  if (
+    requestedAcquisitionRouteId !== undefined &&
+    typeof requestedAcquisitionRouteId !== "string"
+  ) {
+    throw new Error("acquisition_route_id must be a string when provided");
   }
   if (
     jsonPointer !== undefined &&
@@ -419,6 +438,26 @@ async function fetchCandidateSource(input: {
       { capabilityId },
     );
   }
+  const projectPath = join(workspacePaths(input.root).projects, input.projectId, "project.json");
+  const project = (await pathExists(projectPath))
+    ? await loadProject(input.root, input.projectId)
+    : null;
+  if (!project && requestedAcquisitionRouteId !== undefined) {
+    throw new CliError("A broker acquisition route requires an initialized research project.", {
+      code: "RESEARCH_EVIDENCE_ACQUISITION_ROUTE_INVALID",
+      exitCode: 3,
+    });
+  }
+  const acquisitionRoute = project
+    ? await resolveAgentAcquisitionRoute({
+        root: input.root,
+        project,
+        routeId: requestedAcquisitionRouteId,
+        routeClasses: ["broker-capability"],
+        capabilityId,
+      })
+    : null;
+  const acquisitionRouteId = acquisitionRoute?.id ?? null;
   let target: URL;
   let encodedRequestBody: string | null;
   try {
@@ -507,6 +546,7 @@ async function fetchCandidateSource(input: {
     {
       attemptId,
       projectId: input.projectId,
+      acquisitionRouteId,
       capabilityId,
       credentialId: effectiveCredentialId,
       targetSha256: sha256Text(target.toString()),
@@ -575,6 +615,7 @@ async function fetchCandidateSource(input: {
         attemptId,
         reusedAttemptId: projectReuse.attemptId,
         projectId: input.projectId,
+        acquisitionRouteId,
         capabilityId,
         credentialId: effectiveCredentialId,
         cacheKeySha256,
@@ -591,6 +632,7 @@ async function fetchCandidateSource(input: {
       candidates.length,
       false,
       "project",
+      acquisitionRouteId,
     );
     return brokerToolResult(
       receipt,
@@ -598,6 +640,7 @@ async function fetchCandidateSource(input: {
       projectReuse.contentType,
       candidates,
       "project",
+      acquisitionRouteId,
     );
   }
   await appendJournalEvent(
@@ -607,6 +650,7 @@ async function fetchCandidateSource(input: {
     {
       attemptId,
       projectId: input.projectId,
+      acquisitionRouteId,
       capabilityId,
       credentialId: effectiveCredentialId,
       targetSha256: sha256Text(target.toString()),
@@ -672,6 +716,7 @@ async function fetchCandidateSource(input: {
           candidates.length,
           false,
           "workspace",
+          acquisitionRouteId,
         );
         return brokerToolResult(
           receipt,
@@ -679,6 +724,7 @@ async function fetchCandidateSource(input: {
           cached.contentType,
           candidates,
           "workspace",
+          acquisitionRouteId,
         );
       }
     }
@@ -732,6 +778,8 @@ async function fetchCandidateSource(input: {
         input.projectId,
         {
           attemptId,
+          projectId: input.projectId,
+          acquisitionRouteId,
           capabilityId,
           credentialId: effectiveCredentialId,
           status: response.status,
@@ -852,8 +900,16 @@ async function fetchCandidateSource(input: {
       candidates.length,
       true,
       null,
+      acquisitionRouteId,
     );
-    return brokerToolResult(receipt, context.bytes, contentType, candidates, null);
+    return brokerToolResult(
+      receipt,
+      context.bytes,
+      contentType,
+      candidates,
+      null,
+      acquisitionRouteId,
+    );
   } catch (error) {
     const reportedError = structuredBrokerFailure(error, capabilityId, effectiveCredentialId);
     const safeDetails =
@@ -866,6 +922,8 @@ async function fetchCandidateSource(input: {
       input.projectId,
       {
         attemptId,
+        projectId: input.projectId,
+        acquisitionRouteId,
         capabilityId,
         credentialId: effectiveCredentialId,
         error: bounded(
@@ -919,6 +977,7 @@ function brokerToolResult(
   contentType: string,
   candidates: Awaited<ReturnType<typeof registerBrokerCandidates>>,
   reuseScope: "project" | "workspace" | null,
+  acquisitionRouteId: string | null,
 ): Record<string, unknown> {
   const inline = contentType.includes("json") || contentType.startsWith("text/");
   return {
@@ -928,6 +987,7 @@ function brokerToolResult(
       text: inline ? context.toString("utf8") : null,
     },
     candidates,
+    acquisitionRouteId,
     networkAttempted: reuseScope === null,
     reuseScope,
   };
@@ -1057,10 +1117,12 @@ async function appendCompletedReceipt(
   candidateCount: number,
   networkAttempted: boolean,
   reuseScope: "project" | "workspace" | null,
+  acquisitionRouteId: string | null,
 ): Promise<void> {
   await appendJournalEvent(workspacePaths(root).journal, "capability.fetch.completed", projectId, {
     attemptId: receipt.attemptId,
     projectId: receipt.projectId,
+    acquisitionRouteId,
     capabilityId: receipt.capabilityId,
     credentialId: receipt.credentialId,
     status: receipt.status,
@@ -1475,7 +1537,7 @@ function brokerDiagnosticError(
 
 function brokerFailureKind(error: unknown): string {
   if (error instanceof CliError && error.code === "PROVIDER_AUTHENTICATION_FAILED") {
-    return "deterministic";
+    return "authentication";
   }
   if (error instanceof CliError && error.code === "RESEARCH_BROKER_HTTP_ERROR") {
     const status = isObject(error.details) ? error.details.status : undefined;

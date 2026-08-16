@@ -1,20 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { chmod, lstat, readFile } from "node:fs/promises";
-import { basename, join, relative, resolve, sep } from "node:path";
+import { basename, relative, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
+import { resolveAgentAcquisitionRoute } from "./acquisition-routes.js";
 import {
   appendEvidenceLedgerEvent,
   evidenceLedgerPath,
   listEvidenceCandidates,
 } from "./evidence-ledger.js";
 import { readJournal } from "./journal.js";
+import { loadProject } from "./projects.js";
 import { sanitizeResearchText, sanitizeResearchValue } from "./sanitization.js";
 import {
   canonicalJson,
   isObject,
   pathExists,
-  readJsonFile,
   resolveContained,
   sha256File,
   sha256Text,
@@ -35,6 +36,12 @@ export const downloadBindingRecordSchema = {
   required: ["schemaVersion", "backend", "status", "downloadUrl"],
   properties: {
     schemaVersion: { type: "integer", const: 1 },
+    acquisitionRouteId: {
+      type: "string",
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      description:
+        "Required for a project with a frozen scientific design; binds this event to one exact planned agent route.",
+    },
     backend: {
       type: "string",
       enum: ["native-browser", "chrome", "cloakbrowser", "skill-adapter", "direct-http"],
@@ -53,6 +60,7 @@ export interface EvidenceDownloadBinding {
   bindingId: string;
   projectId: string;
   candidateId: string;
+  acquisitionRouteId: string | null;
   backend: "native-browser" | "chrome" | "cloakbrowser" | "skill-adapter" | "direct-http";
   status: "completed";
   fileSha256: string;
@@ -78,6 +86,7 @@ export async function bindEvidenceDownload(input: {
   if (!isObject(value)) throw downloadError("Download binding input must be a JSON object.");
   const allowed = new Set([
     "schemaVersion",
+    "acquisitionRouteId",
     "backend",
     "status",
     "path",
@@ -98,6 +107,9 @@ export async function bindEvidenceDownload(input: {
   if (
     unknown.length ||
     value.schemaVersion !== 1 ||
+    (value.acquisitionRouteId !== undefined &&
+      (typeof value.acquisitionRouteId !== "string" ||
+        !IDENTIFIER.test(value.acquisitionRouteId))) ||
     !backends.includes(value.backend as (typeof backends)[number]) ||
     !statuses.includes(value.status as (typeof statuses)[number]) ||
     typeof value.downloadUrl !== "string" ||
@@ -113,7 +125,15 @@ export async function bindEvidenceDownload(input: {
   const backend = value.backend as EvidenceDownloadBinding["backend"];
   const status = value.status as "completed" | "failed" | "cancelled";
   const downloadUrl = safeDownloadUrl(value.downloadUrl);
-  await requireActiveAcquisition(input.root, input.projectId, input.candidateId);
+  const project = await requireActiveAcquisition(input.root, input.projectId, input.candidateId);
+  const acquisitionRoute = await resolveAgentAcquisitionRoute({
+    root: input.root,
+    project,
+    routeId: value.acquisitionRouteId,
+    routeClasses: ["open-access-download", "authorized-browser"],
+    downloadBackend: backend,
+  });
+  const acquisitionRouteId = acquisitionRoute?.id ?? null;
   if (status !== "completed") {
     if (value.path !== undefined) {
       throw downloadError("Failed or cancelled downloads must not claim a completed file path.");
@@ -123,6 +143,7 @@ export async function bindEvidenceDownload(input: {
     await appendEvidenceLedgerEvent(input.root, input.projectId, "download.failed", {
       eventId: `download-event-${randomUUID()}`,
       candidateId: input.candidateId,
+      acquisitionRouteId,
       backend,
       status,
       downloadUrl,
@@ -156,10 +177,11 @@ export async function bindEvidenceDownload(input: {
   const core = {
     schemaVersion: 1 as const,
     bindingId: `download-${sha256Text(
-      canonicalJson({ candidateId: input.candidateId, backend, fileSha256 }),
+      canonicalJson({ candidateId: input.candidateId, acquisitionRouteId, backend, fileSha256 }),
     ).slice(0, 24)}`,
     projectId: input.projectId,
     candidateId: input.candidateId,
+    acquisitionRouteId,
     backend,
     status: "completed" as const,
     fileSha256,
@@ -219,6 +241,7 @@ async function ensureBoundEvent(
     bindingId: binding.bindingId,
     bindingSha256: binding.bindingSha256,
     candidateId: binding.candidateId,
+    acquisitionRouteId: binding.acquisitionRouteId,
     backend: binding.backend,
     fileSha256: binding.fileSha256,
     fileBytes: binding.fileBytes,
@@ -268,6 +291,9 @@ export function parseEvidenceDownloadBinding(value: unknown): EvidenceDownloadBi
     !/^download-[0-9a-f]{24}$/.test(value.bindingId) ||
     typeof value.projectId !== "string" ||
     typeof value.candidateId !== "string" ||
+    (value.acquisitionRouteId !== null &&
+      (typeof value.acquisitionRouteId !== "string" ||
+        !IDENTIFIER.test(value.acquisitionRouteId))) ||
     !["native-browser", "chrome", "cloakbrowser", "skill-adapter", "direct-http"].includes(
       String(value.backend),
     ) ||
@@ -299,18 +325,13 @@ async function requireActiveAcquisition(
   root: string,
   projectId: string,
   candidateId: string,
-): Promise<void> {
+): Promise<Awaited<ReturnType<typeof loadProject>>> {
   const [project, candidates] = await Promise.all([
-    readJsonFile<Record<string, unknown>>(
-      join(workspacePaths(root).projects, projectId, "project.json"),
-      `Research project ${projectId}`,
-    ),
+    loadProject(root, projectId),
     listEvidenceCandidates(root, projectId),
   ]);
-  const packages = Array.isArray(project.packages) ? project.packages : [];
-  const acquire = packages.find(
+  const acquire = project.packages.find(
     (workPackage) =>
-      isObject(workPackage) &&
       workPackage.stage === "acquire" &&
       workPackage.status === "running" &&
       workPackage.executor === "producer",
@@ -321,6 +342,7 @@ async function requireActiveAcquisition(
   if (!candidates.some((candidate) => candidate.id === candidateId)) {
     throw downloadError(`Download binding refers to unknown candidate ${candidateId}.`);
   }
+  return project;
 }
 
 function requireExactExternalPath(root: string, path: string): string {

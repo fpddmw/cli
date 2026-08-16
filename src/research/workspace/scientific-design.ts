@@ -2424,6 +2424,20 @@ export function evaluateScientificDesign(
       unmappedAcquisitionRoles,
     );
   }
+  const requiredEvidenceRoleIdSet = new Set(requiredEvidenceRoleIds);
+  const optionalRelevantAgentRoutes = design.acquisitionPlan.routes.filter(
+    (route) =>
+      route.executor === "agent" &&
+      !route.required &&
+      route.evidenceRoleIds.some((roleId) => requiredEvidenceRoleIdSet.has(roleId)),
+  );
+  if (optionalRelevantAgentRoutes.length) {
+    add(
+      "EVIDENCE_ACQUISITION_AGENT_ROUTE_OPTIONAL",
+      "Every declared agent-executable route for a required evidence role must be required so evidence exhaustion cannot skip a lawful planned method.",
+      optionalRelevantAgentRoutes.map((route) => route.id),
+    );
+  }
   const invalidAcquisitionRoutes = design.acquisitionPlan.routes.filter(
     (route) => !validAcquisitionRoute(route),
   );

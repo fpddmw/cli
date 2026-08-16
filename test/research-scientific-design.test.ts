@@ -388,6 +388,15 @@ describe("top-journal scientific design contract", () => {
       evaluateScientificDesign(unmapped).issueCodes.includes("EVIDENCE_ACQUISITION_ROUTE_UNMAPPED"),
     );
 
+    const optionalAgentRaw = structuredClone(raw);
+    optionalAgentRaw.acquisitionPlan.routes[0].required = false;
+    const optionalAgent = parseScientificDesign(optionalAgentRaw);
+    assert.ok(
+      evaluateScientificDesign(optionalAgent).issueCodes.includes(
+        "EVIDENCE_ACQUISITION_AGENT_ROUTE_OPTIONAL",
+      ),
+    );
+
     const bypassRaw = structuredClone(raw);
     bypassRaw.acquisitionPlan.stopPolicy.allAgentRoutesExhaustedBeforeHandoff = false;
     const bypass = parseScientificDesign(bypassRaw);

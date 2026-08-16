@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 
+import { resolveAgentAcquisitionRoute } from "./acquisition-routes.js";
 import { appendEvidenceLedgerEvent, listEvidenceCandidates } from "./evidence-ledger.js";
+import { loadProject } from "./projects.js";
 import { sanitizeResearchValue } from "./sanitization.js";
-import { canonicalJson, isObject, readJsonFile, sha256Text, workspacePaths } from "./storage.js";
+import { canonicalJson, isObject, sha256Text } from "./storage.js";
 import { StructuredOutputError } from "./schemas.js";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -24,6 +25,12 @@ export const nativeActivityRecordSchema = {
   ],
   properties: {
     schemaVersion: { type: "integer", const: 1 },
+    acquisitionRouteId: {
+      type: "string",
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      description:
+        "Required for a project with a frozen scientific design; binds this event to one exact planned agent route.",
+    },
     kind: {
       type: "string",
       enum: ["web-search", "database-search", "browser-navigation", "download", "file-inspection"],
@@ -63,6 +70,7 @@ export const nativeActivityRecordSchema = {
 export interface NativeActivityReceipt {
   activityId: string;
   projectId: string;
+  acquisitionRouteId: string | null;
   stage: "discover" | "acquire";
   kind: string;
   channel: string;
@@ -83,6 +91,7 @@ export async function recordNativeResearchActivity(input: {
   if (!isObject(value)) throw activityError("Native activity record must be a JSON object.");
   const allowed = new Set([
     "schemaVersion",
+    "acquisitionRouteId",
     "kind",
     "channel",
     "input",
@@ -95,6 +104,9 @@ export async function recordNativeResearchActivity(input: {
   if (
     unknown.length ||
     value.schemaVersion !== 1 ||
+    (value.acquisitionRouteId !== undefined &&
+      (typeof value.acquisitionRouteId !== "string" ||
+        !IDENTIFIER.test(value.acquisitionRouteId))) ||
     ![
       "web-search",
       "database-search",
@@ -132,19 +144,14 @@ export async function recordNativeResearchActivity(input: {
   if (value.challenge !== "none" && value.status !== "blocked") {
     throw activityError("A native challenge must be recorded with blocked status.");
   }
-  const project = await readJsonFile<Record<string, unknown>>(
-    join(workspacePaths(input.root).projects, input.projectId, "project.json"),
-    `Research project ${input.projectId}`,
-  );
-  const packages = Array.isArray(project.packages) ? project.packages : [];
-  const active = packages.find(
+  const project = await loadProject(input.root, input.projectId);
+  const active = project.packages.find(
     (workPackage) =>
-      isObject(workPackage) &&
       (workPackage.stage === "discover" || workPackage.stage === "acquire") &&
       workPackage.status === "running" &&
       workPackage.executor === "producer",
   );
-  if (!isObject(active) || (active.stage !== "discover" && active.stage !== "acquire")) {
+  if (!active || (active.stage !== "discover" && active.stage !== "acquire")) {
     throw activityError(
       "Native activity may be recorded only during an active discover or acquire stage.",
     );
@@ -157,6 +164,19 @@ export async function recordNativeResearchActivity(input: {
   ) {
     throw activityError(`Native ${kind} activity is not valid during ${stage}.`);
   }
+  const route = await resolveAgentAcquisitionRoute({
+    root: input.root,
+    project,
+    routeId: value.acquisitionRouteId,
+    routeClasses: ["native-discovery"],
+    activityKind: value.kind as
+      | "web-search"
+      | "database-search"
+      | "browser-navigation"
+      | "download"
+      | "file-inspection",
+    activityChannel: value.channel,
+  });
   const candidateIds = value.candidateIds as string[];
   const known = new Set(
     (await listEvidenceCandidates(input.root, input.projectId)).map((candidate) => candidate.id),
@@ -169,6 +189,7 @@ export async function recordNativeResearchActivity(input: {
   const receipt: NativeActivityReceipt = {
     activityId: `activity-${randomUUID()}`,
     projectId: input.projectId,
+    acquisitionRouteId: route?.id ?? null,
     stage,
     kind,
     channel: value.channel,
