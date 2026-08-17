@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-16
-lastReviewedCommit: b8c2d6acaf44de0b9c7ea4530e54baff84ad034b
+lastReviewedAt: 2026-08-17
+lastReviewedCommit: d14c542100d6e1efdd82798c2d92e68a5bc3bba2
 ---
 
 # Repo Architecture
@@ -45,10 +45,20 @@ storage writes, queueing, and document status transitions.
   command router and edge-search source configuration.
 - `src/research/orchestration.ts` and `src/research/setup-command.ts`: strict
   parsing for setup, context, workspace, capability, project, status, and run
-  commands. Bare `research setup` is the interactive TTY Wizard; the remaining
-  setup actions are deterministic automation surfaces. Wizard presentation is
-  semantic and TTY-aware, with plain output for `NO_COLOR`, dumb terminals, and
-  JSON mode; styling never changes plan or command contracts.
+  commands. Bare `research setup` first checks the fixed workspace-local
+  declarative file and otherwise enters the interactive TTY Wizard; explicit
+  `setup wizard` always chooses the human path. The remaining setup actions are
+  deterministic automation surfaces. Wizard presentation is semantic and
+  TTY-aware, with plain output for `NO_COLOR`, dumb terminals, and JSON mode;
+  styling never changes plan or command contracts.
+- `src/research/workspace/setup-declarative.ts`: closed-schema YAML intake,
+  no-overwrite example generation, fixed-path discovery, owner-only literal env
+  intake, semantic configuration hashing, immutable-plan binding/reuse, and
+  mandatory full readiness execution. It carries non-secret plan inputs into
+  the existing setup/apply/doctor implementation rather than defining a second
+  setup protocol. Parent-directory scanning, shell expansion, YAML aliases,
+  secret persistence in plans, implicit replacement, and Wizard fallback after
+  a declaration error are forbidden.
 - `src/research/workspace/**`: the versioned research workspace protocol. It
   owns context classification, immutable input admission, capability policy
   locks, a separately sourced external Skill ecosystem catalog, immutable setup

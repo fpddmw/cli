@@ -587,6 +587,10 @@ export interface WorkspacePaths {
   setupPlan: string;
   setupState: string;
   setupReport: string;
+  setupDeclaration: string;
+  setupDeclarationEnv: string;
+  setupDeclarationEnvExample: string;
+  setupDeclarationBinding: string;
   setupConfig: string;
   setupAdapterEnv: string;
   setupSources: string;

@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-16
-lastReviewedCommit: b8c2d6acaf44de0b9c7ea4530e54baff84ad034b
+lastReviewedAt: 2026-08-17
+lastReviewedCommit: d14c542100d6e1efdd82798c2d92e68a5bc3bba2
 ---
 
 # Repo Validation
@@ -122,6 +122,15 @@ source-specific retry provenance, project/global Skill conflicts, symlinked
 ambient CLI resolution, legacy PATH-wrapper detection, the generated
 recovery-only Skill, and verified cleanup after the full orchestrator is
 available. These cases must remain network-free inside `npm run test:clean`.
+
+`test/research-setup-declarative.test.ts` covers public no-overwrite template
+initialization, fixed workspace-only discovery, strict duplicate/alias/unknown
+YAML rejection, owner-only non-symlink env intake, undeclared and conflicting
+variable rejection, secret non-persistence, mandatory live/reviewer checks,
+semantic-hash plan reuse, explicit replacement with archived bindings, and
+non-zero apply/status/doctor results until overall readiness is complete. The
+suite uses injected setup operations for provider-free execution and must not
+contact a real provider or reviewer service.
 
 ## Release Flow
 

@@ -415,7 +415,7 @@ export async function executeResearchSetupWizard(input: {
       const value = await applyResearchSetupPlan(workspacePaths(workspace).setupPlan, {
         environment: input.environment,
       });
-      return { exitCode: value.state.status === "blocked" ? 3 : 0, value };
+      return { exitCode: value.state.status === "ready" ? 0 : 3, value };
     }
     if (existingAction === "cancel") throw wizardCancelled("resume");
   }
@@ -585,8 +585,8 @@ export async function executeResearchSetupWizard(input: {
 
     prompt.note("5. Verification options", "section");
     const liveChecks = await prompt.confirm(
-      "Run live provider checks after installation? This uses network/quota but does not run model agents.",
-      false,
+      "Run live provider checks after installation? Required for complete setup readiness; this uses network/quota but does not run model agents.",
+      true,
     );
     const allowSyntheticUnstructureUpload =
       liveChecks && selected.some((skill) => skill.id === "tiangong.document-granular-decompose")
@@ -596,13 +596,19 @@ export async function executeResearchSetupWizard(input: {
           )
         : false;
     const agentSmoke = await prompt.confirm(
-      "Run the independent reviewer CLI smoke after installation? This may consume paid model quota.",
-      false,
+      "Run the independent reviewer CLI agent smoke after installation? Required for complete setup readiness and may consume paid model quota.",
+      true,
     );
     const confirmAgentSmokeCost = agentSmoke
       ? await prompt.confirm("I explicitly authorize the agent smoke-check cost", false)
       : false;
     if (agentSmoke && !confirmAgentSmokeCost) throw wizardCancelled("agent-smoke-confirmation");
+    if (!liveChecks || !agentSmoke) {
+      prompt.note(
+        "Setup can be applied, but it will remain incomplete and return a non-zero status until live provider checks and the independent reviewer smoke both pass.",
+        "warning",
+      );
+    }
 
     const missingRequiredCredentialIds = requiredCredentialIds(
       selected.map((skill) => skill.id).filter(Boolean),
@@ -731,7 +737,7 @@ export async function executeResearchSetupWizard(input: {
     const value = await applyResearchSetupPlan(workspacePaths(workspace).setupPlan, {
       environment: credentials.applyEnvironment,
     });
-    return { exitCode: value.state.status === "blocked" ? 3 : 0, value };
+    return { exitCode: value.state.status === "ready" ? 0 : 3, value };
   } finally {
     credentials.clear();
   }

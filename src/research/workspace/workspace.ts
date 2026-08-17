@@ -201,7 +201,7 @@ export async function initializeResearchWorkspace(
   );
   await writeFile(
     join(paths.control, ".gitignore"),
-    ".env\nsetup-adapters.env\nsetup-sources/\nsetup.lock\nlocks/\nruntime/\n",
+    ".env\nsetup.env\nsetup-adapters.env\nsetup-sources/\nsetup.lock\nlocks/\nruntime/\n",
     "utf8",
   );
   await appendJournalEvent(paths.journal, "workspace.initialized", workspaceId, {
@@ -225,6 +225,11 @@ export async function initializeResearchWorkspace(
 
 async function requireSetupOnlyControlDirectory(control: string): Promise<void> {
   const allowedFiles = new Set([
+    ".gitignore",
+    "setup.yaml",
+    "setup.env",
+    "setup.env.example",
+    "setup-declaration.json",
     "setup-plan.json",
     "setup-state.json",
     "setup-report.json",
@@ -274,7 +279,12 @@ async function validateSetupHistoryDirectory(root: string): Promise<void> {
     }
     const generationPath = join(root, generation.name);
     const files = await readdir(generationPath, { withFileTypes: true });
-    const allowed = new Set(["setup-plan.json", "setup-state.json", "setup-report.json"]);
+    const allowed = new Set([
+      "setup-plan.json",
+      "setup-state.json",
+      "setup-report.json",
+      "setup-declaration.json",
+    ]);
     if (
       files.length === 0 ||
       files.some((file) => !allowed.has(file.name) || !file.isFile() || file.isSymbolicLink())
