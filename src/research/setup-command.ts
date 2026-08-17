@@ -97,8 +97,10 @@ Safety defaults:
   bounded stdin, or named owner environment variables; values are never printed.
   Every selected Skill requires its displayed license id and an explicit
   network-download confirmation; an empty smoke-test plan requires neither.
-  Declarative setup never scans parent directories. Its setup.env is optional,
-  owner-only (0600), literal, and may contain only names referenced by setup.yaml.
+  Declarative setup never scans parent directories. Its YAML explicitly lists
+  every catalog Skill, credential, and setting; omission is invalid. setup.env
+  is optional, owner-only (0600), literal, and exposes every credential name.
+  Disabled credentials must remain empty and are never selected by presence.
   Declarative apply always runs live provider checks and independent reviewer
   smoke; setup succeeds only when overallReadiness is READY.
 `;

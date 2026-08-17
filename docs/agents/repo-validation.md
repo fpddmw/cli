@@ -124,13 +124,17 @@ recovery-only Skill, and verified cleanup after the full orchestrator is
 available. These cases must remain network-free inside `npm run test:clean`.
 
 `test/research-setup-declarative.test.ts` covers public no-overwrite template
-initialization, fixed workspace-only discovery, strict duplicate/alias/unknown
-YAML rejection, owner-only non-symlink env intake, undeclared and conflicting
-variable rejection, secret non-persistence, mandatory live/reviewer checks,
-semantic-hash plan reuse, explicit replacement with archived bindings, and
-non-zero apply/status/doctor results until overall readiness is complete. The
-suite uses injected setup operations for provider-free execution and must not
-contact a real provider or reviewer service.
+initialization, v1 declaration rejection, complete explicit catalog
+materialization, fixed workspace-only
+discovery, removal of the earlier implicit credential map, strict
+duplicate/alias/unknown/incomplete YAML rejection, catalog-metadata drift,
+owner-only non-symlink env intake, disabled optional credential behavior,
+undeclared and conflicting variable rejection, secret non-persistence,
+mandatory live/reviewer checks, semantic-hash plan reuse, explicit replacement
+with archived bindings, and non-zero apply/status/doctor results until overall
+readiness is complete. The suite uses injected setup operations for
+provider-free execution and must not contact a real provider or reviewer
+service.
 
 ## Release Flow
 

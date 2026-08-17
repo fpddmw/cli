@@ -131,13 +131,6 @@ export function formatResearchSetupWizardNote(
   return `\n${styledGlyph} ${styledFirst}${body}\n`;
 }
 
-const DEFAULT_CREDENTIAL_ENVIRONMENT: Record<string, string> = {
-  "brave.search.api-key": "BRAVE_API_KEY",
-  "tiangong.sci.api-key": "TIANGONG_SCI_APIKEY",
-  "tiangong.unstructure.auth-token": "UNSTRUCTURED_AUTH_TOKEN",
-  "semantic-scholar.api-key": "SEMANTIC_SCHOLAR_API_KEY",
-};
-
 const MAX_CREDENTIAL_STDIN_BYTES = 64 * 1024;
 
 function credentialStdinIds(value: string | undefined): string[] {
@@ -809,7 +802,7 @@ async function collectCredentialSources(
     configured: boolean;
   }> = [];
   for (const credential of definitions) {
-    const defaultEnvironmentName = DEFAULT_CREDENTIAL_ENVIRONMENT[credential.id]!;
+    const defaultEnvironmentName = credential.defaultEnvironmentName;
     const present =
       Buffer.byteLength(environment[defaultEnvironmentName] ?? "", "utf8") >=
       credential.minimumUtf8Bytes;

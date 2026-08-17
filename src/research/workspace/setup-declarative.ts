@@ -16,6 +16,13 @@ import {
   sanitizeResearchText,
   sanitizeResearchValue,
 } from "./sanitization.js";
+import {
+  RESEARCH_SETUP_CREDENTIALS,
+  RESEARCH_SETUP_SETTINGS,
+  RESEARCH_SETUP_SKILLS,
+  type ResearchSetupCredential,
+  type ResearchSetupSetting,
+} from "./setup-catalog.js";
 import { exactResearchCliCommand } from "./setup-invocation.js";
 import {
   applyResearchSetupPlan,
@@ -43,9 +50,36 @@ const MAX_DECLARATION_BYTES = 256 * 1024;
 const MAX_DECLARATION_ENV_BYTES = 64 * 1024;
 const MAX_DECLARATION_ENV_VALUE_BYTES = 16 * 1024;
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const BRAVE_SKILL_IDS = new Set(
+  RESEARCH_SETUP_SKILLS.filter((skill) => skill.sourceId === "brave-search-skills").map(
+    (skill) => skill.id,
+  ),
+);
+
+type DeclarationRequirement = "required" | "conditional" | "optional";
+type DeclarativeEvidenceProfile = "none" | "brave-baseline" | "brave-context" | "brave-media";
+
+interface DeclarationSkillChoice {
+  enabled: boolean;
+  licenseId: string;
+}
+
+interface DeclarationCredentialChoice {
+  requirement: DeclarationRequirement;
+  appliesTo: string[];
+  enabled: boolean;
+  environment: string;
+}
+
+interface DeclarationSettingChoice {
+  requirement: DeclarationRequirement;
+  appliesTo: string[];
+  enabled: boolean;
+  value: string | null;
+}
 
 interface ResearchSetupDeclaration {
-  schemaVersion: 1;
+  schemaVersion: 2;
   kind: "tiangong-research-setup";
   workspace: {
     name?: string;
@@ -56,12 +90,11 @@ interface ResearchSetupDeclaration {
     agents: Array<"codex" | "claude-code">;
   };
   selection: {
-    evidenceProfile: "none" | "brave-baseline" | "brave-context" | "brave-media";
-    skillIds: string[];
+    skills: Record<string, DeclarationSkillChoice>;
   };
   acceptedLicenseIds: string[];
-  credentialEnvironment: Record<string, string>;
-  settings: Record<string, string>;
+  credentials: Record<string, DeclarationCredentialChoice>;
+  settings: Record<string, DeclarationSettingChoice>;
   agentRoutes: Partial<ResearchSetupAgentRoutePlan> &
     Pick<ResearchSetupAgentRoutePlan, "producerAgent" | "reviewerAgent">;
   verification: {
@@ -93,9 +126,10 @@ export interface LoadedResearchSetupDeclaration {
   environment: NodeJS.ProcessEnv;
   publicSummary: {
     mode: ResearchMode;
-    evidenceProfile: ResearchSetupDeclaration["selection"]["evidenceProfile"];
+    evidenceProfile: DeclarativeEvidenceProfile;
     selectedSkillIds: string[];
-    credentialIds: string[];
+    enabledCredentialIds: string[];
+    declaredCredentialIds: string[];
     verification: ResearchSetupDeclaration["verification"];
     environmentFileUsed: boolean;
   };
@@ -149,16 +183,11 @@ export async function initializeResearchSetupDeclaration(workspace: string): Pro
   }
 
   await ensureDirectory(paths.control);
-  await writeNewTextFile(paths.setupDeclaration, declarationTemplate(root), 0o644);
+  const declaration = defaultDeclaration(root);
+  await writeNewTextFile(paths.setupDeclaration, declarationTemplate(declaration), 0o644);
   await writeNewTextFile(
     paths.setupDeclarationEnvExample,
-    [
-      "# Copy this file to setup.env, fill only variables referenced by setup.yaml,",
-      "# then run chmod 600 .tiangong-research/setup.env before setup.",
-      "# Values are imported into the existing owner-only logical credential stores.",
-      "BRAVE_API_KEY=",
-      "",
-    ].join("\n"),
+    declarationEnvironmentExample(declaration),
     0o600,
   );
   await writeNewTextFile(resolve(paths.control, ".gitignore"), "setup.env\n", 0o644);
@@ -249,11 +278,15 @@ export async function loadResearchSetupDeclaration(input: {
     label: "Declarative setup YAML",
   });
   const declaration = parseResearchSetupDeclaration(configurationText);
+  validateExplicitCatalogDeclaration(declaration);
   validateRequiredVerification(declaration);
+  const resolvedSelection = resolveDeclarationSelection(declaration);
   const configurationSha256 = sha256Text(canonicalJson(declaration));
   const sourceEnvironment = input.environment ?? process.env;
   const environment = { ...sourceEnvironment };
-  const referencedNames = new Set(Object.values(declaration.credentialEnvironment));
+  const referencedNames = new Set(
+    Object.values(declaration.credentials).map((credential) => credential.environment),
+  );
 
   if (discovered.environmentPath) {
     const fileEnvironment = await readDeclarationEnvironment(discovered.environmentPath);
@@ -264,7 +297,7 @@ export async function loadResearchSetupDeclaration(input: {
         step: "declarative-environment",
         reason: "The setup environment file contains variables not referenced by setup.yaml.",
         minimumAction:
-          "Keep only environment variable names explicitly bound by credentialEnvironment.",
+          "Keep only environment variable names explicitly listed by setup.yaml credentials.",
         retryArgs: ["research", "setup", "--workspace", root, "--json"],
         exitCode: 2,
         diagnostics: { undeclaredVariableCount: undeclared.length },
@@ -287,16 +320,43 @@ export async function loadResearchSetupDeclaration(input: {
     }
   }
 
+  for (const [credentialId, credential] of Object.entries(declaration.credentials)) {
+    if (
+      !credential.enabled &&
+      Buffer.byteLength(environment[credential.environment] ?? "", "utf8") > 0
+    ) {
+      throw declarationError({
+        code: "RESEARCH_SETUP_DECLARATION_ENV_INVALID",
+        step: "declarative-environment",
+        reason: `A disabled credential has a non-empty configured value: ${credentialId}.`,
+        minimumAction:
+          "Enable the credential explicitly in setup.yaml or remove its value from setup.env and the owner environment.",
+        retryArgs: ["research", "setup", "--workspace", root, "--json"],
+        exitCode: 2,
+        diagnostics: { disabledCredentialId: credentialId },
+      });
+    }
+  }
+
+  const credentialEnvironment: Record<string, string> = {};
+  for (const [credentialId, credential] of Object.entries(declaration.credentials)) {
+    if (credential.enabled) credentialEnvironment[credentialId] = credential.environment;
+  }
+  const settings: Record<string, string> = {};
+  for (const [settingId, setting] of Object.entries(declaration.settings)) {
+    if (setting.enabled) settings[settingId] = setting.value!;
+  }
+
   const planInput: LoadedResearchSetupDeclaration["planInput"] = {
     ...(declaration.workspace.name === undefined ? {} : { name: declaration.workspace.name }),
     mode: declaration.workspace.mode,
-    evidenceProfile: declarationEvidenceProfile(declaration.selection.evidenceProfile),
-    skillIds: [...declaration.selection.skillIds],
+    evidenceProfile: resolvedSelection.planEvidenceProfile,
+    skillIds: [...resolvedSelection.nonBraveSkillIds],
     scope: declaration.install.scope,
     agents: [...declaration.install.agents],
     acceptedLicenseIds: [...declaration.acceptedLicenseIds],
-    credentialEnvironment: { ...declaration.credentialEnvironment },
-    settings: { ...declaration.settings },
+    credentialEnvironment,
+    settings,
     agentRoutes: structuredClone(declaration.agentRoutes),
     liveChecks: declaration.verification.live,
     allowSyntheticUnstructureUpload: declaration.verification.allowSyntheticUnstructureUpload,
@@ -316,9 +376,10 @@ export async function loadResearchSetupDeclaration(input: {
     environment,
     publicSummary: {
       mode: declaration.workspace.mode,
-      evidenceProfile: declaration.selection.evidenceProfile,
-      selectedSkillIds: [...declaration.selection.skillIds],
-      credentialIds: Object.keys(declaration.credentialEnvironment).sort(),
+      evidenceProfile: resolvedSelection.declarativeEvidenceProfile,
+      selectedSkillIds: [...resolvedSelection.selectedSkillIds],
+      enabledCredentialIds: Object.keys(credentialEnvironment).sort(),
+      declaredCredentialIds: Object.keys(declaration.credentials).sort(),
       verification: { ...declaration.verification },
       environmentFileUsed: discovered.environmentPath !== null,
     },
@@ -611,19 +672,52 @@ async function writeNewTextFile(path: string, content: string, mode: number): Pr
   }
 }
 
-function declarationTemplate(root: string): string {
-  const value: ResearchSetupDeclaration = {
-    schemaVersion: 1,
+function defaultDeclaration(root: string): ResearchSetupDeclaration {
+  const enabledSkillIds = new Set(
+    RESEARCH_SETUP_SKILLS.filter((skill) => skill.defaultSelected).map((skill) => skill.id),
+  );
+  return {
+    schemaVersion: 2,
     kind: "tiangong-research-setup",
     workspace: { name: basename(root), mode: "production-research" },
     install: { scope: "project", agents: ["codex"] },
     selection: {
-      evidenceProfile: "brave-baseline",
-      skillIds: ["tiangong.auto-research"],
+      skills: Object.fromEntries(
+        RESEARCH_SETUP_SKILLS.map((skill) => [
+          skill.id,
+          {
+            enabled: enabledSkillIds.has(skill.id),
+            licenseId: skill.license.id,
+          },
+        ]),
+      ),
     },
     acceptedLicenseIds: [],
-    credentialEnvironment: { "brave.search.api-key": "BRAVE_API_KEY" },
-    settings: {},
+    credentials: Object.fromEntries(
+      RESEARCH_SETUP_CREDENTIALS.map((credential) => [
+        credential.id,
+        {
+          requirement: declarationRequirement(credential, enabledSkillIds),
+          appliesTo: [...credential.requiredBy],
+          enabled:
+            credential.required &&
+            credential.requiredBy.some((skillId) => enabledSkillIds.has(skillId)),
+          environment: credential.defaultEnvironmentName,
+        },
+      ]),
+    ),
+    settings: Object.fromEntries(
+      RESEARCH_SETUP_SETTINGS.map((setting) => [
+        setting.id,
+        {
+          requirement: declarationRequirement(setting, enabledSkillIds),
+          appliesTo: [...setting.requiredBy],
+          enabled:
+            setting.required && setting.requiredBy.some((skillId) => enabledSkillIds.has(skillId)),
+          value: setting.defaultValue,
+        },
+      ]),
+    ),
     agentRoutes: {
       producerAgent: "codex",
       reviewerAgent: "claude",
@@ -644,14 +738,47 @@ function declarationTemplate(root: string): string {
     },
     replaceExistingPlan: false,
   };
+}
+
+function declarationTemplate(value: ResearchSetupDeclaration): string {
   return [
-    "# Review every selection, license, endpoint, model, price, and confirmation.",
-    "# This file contains no secret values. Put only referenced variable values in",
-    "# owner-only setup.env, or provide the same named variables through the environment.",
+    "# Every current catalog Skill, credential, and setting is explicit below.",
+    "# Review each enabled flag, license, endpoint, model, price, and confirmation.",
+    "# This file contains no secret values. Credential values belong only in owner-only",
+    "# setup.env, the same named owner environment variables, or the logical stores.",
     "# Set confirmations to true only after the human owner accepts each action/cost.",
     stringify(value, { lineWidth: 0 }).trimEnd(),
     "",
   ].join("\n");
+}
+
+function declarationEnvironmentExample(declaration: ResearchSetupDeclaration): string {
+  return [
+    "# Copy this file to setup.env and run chmod 600 .tiangong-research/setup.env.",
+    "# Every catalog credential is visible. Leave disabled optional values empty.",
+    "# A non-empty disabled value is rejected instead of being used implicitly.",
+    "# Values are imported into owner-only logical stores and never into setup.yaml.",
+    ...RESEARCH_SETUP_CREDENTIALS.flatMap((definition) => {
+      const choice = declaration.credentials[definition.id]!;
+      return [
+        "",
+        `# ${definition.id}: ${choice.requirement}; enabled=${String(choice.enabled)}`,
+        `${choice.environment}=`,
+      ];
+    }),
+    "",
+  ].join("\n");
+}
+
+function declarationRequirement(
+  input: { required: boolean; requiredBy: readonly string[] },
+  selectedSkillIds: ReadonlySet<string>,
+): DeclarationRequirement {
+  if (!input.required) return "optional";
+  if (input.requiredBy.length === 0) return "required";
+  return input.requiredBy.some((skillId) => selectedSkillIds.has(skillId))
+    ? "required"
+    : "conditional";
 }
 
 function requireAbsoluteDeclarationPath(path: string, option: string): string {
@@ -668,13 +795,200 @@ function requireAbsoluteDeclarationPath(path: string, option: string): string {
   return resolve(path);
 }
 
-function declarationEvidenceProfile(
-  value: ResearchSetupDeclaration["selection"]["evidenceProfile"],
-): ResearchSetupPlanInput["evidenceProfile"] {
-  if (value === "none") return value;
-  if (value === "brave-baseline") return EXTERNAL_SKILL_PROFILE;
-  if (value === "brave-context") return EXTERNAL_SKILL_CONTEXT_PROFILE;
-  return EXTERNAL_SKILL_MEDIA_PROFILE;
+function resolveDeclarationSelection(declaration: ResearchSetupDeclaration): {
+  selectedSkillIds: string[];
+  nonBraveSkillIds: string[];
+  declarativeEvidenceProfile: DeclarativeEvidenceProfile;
+  planEvidenceProfile: ResearchSetupPlanInput["evidenceProfile"];
+} {
+  const selectedSkillIds = RESEARCH_SETUP_SKILLS.filter(
+    (skill) => declaration.selection.skills[skill.id]!.enabled,
+  ).map((skill) => skill.id);
+  const enabledBraveIds = selectedSkillIds.filter((skillId) => BRAVE_SKILL_IDS.has(skillId));
+  const profiles: Array<{
+    declarative: DeclarativeEvidenceProfile;
+    plan: ResearchSetupPlanInput["evidenceProfile"];
+    skillIds: string[];
+  }> = [
+    { declarative: "none", plan: "none", skillIds: [] },
+    {
+      declarative: "brave-baseline",
+      plan: EXTERNAL_SKILL_PROFILE,
+      skillIds: ["brave.web-search", "brave.news-search"],
+    },
+    {
+      declarative: "brave-context",
+      plan: EXTERNAL_SKILL_CONTEXT_PROFILE,
+      skillIds: ["brave.web-search", "brave.news-search", "brave.llm-context"],
+    },
+    {
+      declarative: "brave-media",
+      plan: EXTERNAL_SKILL_MEDIA_PROFILE,
+      skillIds: [
+        "brave.web-search",
+        "brave.news-search",
+        "brave.llm-context",
+        "brave.images-search",
+        "brave.videos-search",
+      ],
+    },
+  ];
+  const matched = profiles.find((profile) => sameStringSet(enabledBraveIds, profile.skillIds));
+  if (!matched) {
+    throw invalidDeclaration(
+      "Enabled Brave Skills must form one complete supported evidence profile.",
+      {
+        enabledBraveSkillIds: enabledBraveIds,
+        supportedProfiles: profiles.map((profile) => ({
+          id: profile.declarative,
+          skillIds: profile.skillIds,
+        })),
+      },
+    );
+  }
+  return {
+    selectedSkillIds,
+    nonBraveSkillIds: selectedSkillIds.filter((skillId) => !BRAVE_SKILL_IDS.has(skillId)),
+    declarativeEvidenceProfile: matched.declarative,
+    planEvidenceProfile: matched.plan,
+  };
+}
+
+function validateExplicitCatalogDeclaration(declaration: ResearchSetupDeclaration): void {
+  const problems: Array<{ path: string; rule: string }> = [];
+  validateExactRecordKeys(
+    declaration.selection.skills,
+    RESEARCH_SETUP_SKILLS.map((skill) => skill.id),
+    "/selection/skills",
+    problems,
+  );
+  validateExactRecordKeys(
+    declaration.credentials,
+    RESEARCH_SETUP_CREDENTIALS.map((credential) => credential.id),
+    "/credentials",
+    problems,
+  );
+  validateExactRecordKeys(
+    declaration.settings,
+    RESEARCH_SETUP_SETTINGS.map((setting) => setting.id),
+    "/settings",
+    problems,
+  );
+
+  const selectedSkillIds = new Set(
+    RESEARCH_SETUP_SKILLS.filter((skill) => declaration.selection.skills[skill.id]?.enabled).map(
+      (skill) => skill.id,
+    ),
+  );
+  for (const skill of RESEARCH_SETUP_SKILLS) {
+    const choice = declaration.selection.skills[skill.id];
+    if (choice && choice.licenseId !== skill.license.id) {
+      problems.push({ path: `/selection/skills/${skill.id}/licenseId`, rule: "catalog-drift" });
+    }
+  }
+
+  const environmentOwners = new Map<string, string>();
+  for (const definition of RESEARCH_SETUP_CREDENTIALS) {
+    const choice = declaration.credentials[definition.id];
+    if (!choice) continue;
+    validateCatalogChoiceMetadata(
+      `/credentials/${definition.id}`,
+      choice,
+      definition,
+      selectedSkillIds,
+      problems,
+    );
+    const applies = definition.requiredBy.some((skillId) => selectedSkillIds.has(skillId));
+    if (definition.required && choice.enabled !== applies) {
+      problems.push({
+        path: `/credentials/${definition.id}/enabled`,
+        rule: applies ? "required-when-selected" : "disabled-when-unused",
+      });
+    } else if (!definition.required && !applies && choice.enabled) {
+      problems.push({
+        path: `/credentials/${definition.id}/enabled`,
+        rule: "disabled-when-unused",
+      });
+    }
+    const priorOwner = environmentOwners.get(choice.environment);
+    if (priorOwner) {
+      problems.push({
+        path: `/credentials/${definition.id}/environment`,
+        rule: "duplicate-environment-name",
+      });
+    } else {
+      environmentOwners.set(choice.environment, definition.id);
+    }
+  }
+
+  for (const definition of RESEARCH_SETUP_SETTINGS) {
+    const choice = declaration.settings[definition.id];
+    if (!choice) continue;
+    validateCatalogChoiceMetadata(
+      `/settings/${definition.id}`,
+      choice,
+      definition,
+      selectedSkillIds,
+      problems,
+    );
+    const applies = definition.requiredBy.some((skillId) => selectedSkillIds.has(skillId));
+    if (definition.required && choice.enabled !== applies) {
+      problems.push({
+        path: `/settings/${definition.id}/enabled`,
+        rule: applies ? "required-when-selected" : "disabled-when-unused",
+      });
+    } else if (!definition.required && !applies && choice.enabled) {
+      problems.push({
+        path: `/settings/${definition.id}/enabled`,
+        rule: "disabled-when-unused",
+      });
+    }
+    if (choice.enabled && (choice.value === null || choice.value.length === 0)) {
+      problems.push({ path: `/settings/${definition.id}/value`, rule: "enabled-value-required" });
+    }
+  }
+
+  if (problems.length) {
+    throw invalidDeclaration(
+      "The declarative setup must explicitly and exactly match the current catalog.",
+      { catalogProblems: problems.slice(0, 32), catalogProblemCount: problems.length },
+    );
+  }
+  resolveDeclarationSelection(declaration);
+}
+
+function validateCatalogChoiceMetadata(
+  path: string,
+  choice: DeclarationCredentialChoice | DeclarationSettingChoice,
+  definition: ResearchSetupCredential | ResearchSetupSetting,
+  selectedSkillIds: ReadonlySet<string>,
+  problems: Array<{ path: string; rule: string }>,
+): void {
+  if (choice.requirement !== declarationRequirement(definition, selectedSkillIds)) {
+    problems.push({ path: `${path}/requirement`, rule: "catalog-drift" });
+  }
+  if (!sameStringSet(choice.appliesTo, definition.requiredBy)) {
+    problems.push({ path: `${path}/appliesTo`, rule: "catalog-drift" });
+  }
+}
+
+function validateExactRecordKeys(
+  value: Record<string, unknown>,
+  expectedKeys: readonly string[],
+  path: string,
+  problems: Array<{ path: string; rule: string }>,
+): void {
+  const expected = new Set(expectedKeys);
+  for (const key of expectedKeys) {
+    if (!Object.hasOwn(value, key)) problems.push({ path: `${path}/${key}`, rule: "missing" });
+  }
+  for (const key of Object.keys(value)) {
+    if (!expected.has(key)) problems.push({ path: `${path}/${key}`, rule: "unknown" });
+  }
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value) => right.includes(value));
 }
 
 function invalidDeclaration(reason: string, diagnostics?: Record<string, unknown>): CliError {
@@ -787,7 +1101,7 @@ const declarationSchema = {
     "install",
     "selection",
     "acceptedLicenseIds",
-    "credentialEnvironment",
+    "credentials",
     "settings",
     "agentRoutes",
     "verification",
@@ -795,7 +1109,7 @@ const declarationSchema = {
     "replaceExistingPlan",
   ],
   properties: {
-    schemaVersion: { const: 1 },
+    schemaVersion: { const: 2 },
     kind: { const: "tiangong-research-setup" },
     workspace: {
       type: "object",
@@ -824,16 +1138,22 @@ const declarationSchema = {
     selection: {
       type: "object",
       additionalProperties: false,
-      required: ["evidenceProfile", "skillIds"],
+      required: ["skills"],
       properties: {
-        evidenceProfile: {
-          enum: ["none", "brave-baseline", "brave-context", "brave-media"],
-        },
-        skillIds: {
-          type: "array",
-          maxItems: 64,
-          uniqueItems: true,
-          items: { type: "string", minLength: 1, maxLength: 200 },
+        skills: {
+          type: "object",
+          minProperties: 1,
+          maxProperties: 64,
+          propertyNames: { type: "string", minLength: 1, maxLength: 200 },
+          additionalProperties: {
+            type: "object",
+            additionalProperties: false,
+            required: ["enabled", "licenseId"],
+            properties: {
+              enabled: { type: "boolean" },
+              licenseId: { type: "string", minLength: 1, maxLength: 200 },
+            },
+          },
         },
       },
     },
@@ -843,17 +1163,49 @@ const declarationSchema = {
       uniqueItems: true,
       items: { type: "string", minLength: 1, maxLength: 200 },
     },
-    credentialEnvironment: {
+    credentials: {
       type: "object",
+      minProperties: 1,
       maxProperties: 64,
       propertyNames: { type: "string", minLength: 1, maxLength: 200 },
-      additionalProperties: { type: "string", pattern: ENVIRONMENT_NAME.source },
+      additionalProperties: {
+        type: "object",
+        additionalProperties: false,
+        required: ["requirement", "appliesTo", "enabled", "environment"],
+        properties: {
+          requirement: { enum: ["required", "conditional", "optional"] },
+          appliesTo: {
+            type: "array",
+            maxItems: 64,
+            uniqueItems: true,
+            items: { type: "string", minLength: 1, maxLength: 200 },
+          },
+          enabled: { type: "boolean" },
+          environment: { type: "string", pattern: ENVIRONMENT_NAME.source },
+        },
+      },
     },
     settings: {
       type: "object",
+      minProperties: 1,
       maxProperties: 64,
       propertyNames: { type: "string", minLength: 1, maxLength: 200 },
-      additionalProperties: { type: "string", maxLength: 4096 },
+      additionalProperties: {
+        type: "object",
+        additionalProperties: false,
+        required: ["requirement", "appliesTo", "enabled", "value"],
+        properties: {
+          requirement: { enum: ["required", "conditional", "optional"] },
+          appliesTo: {
+            type: "array",
+            maxItems: 64,
+            uniqueItems: true,
+            items: { type: "string", minLength: 1, maxLength: 200 },
+          },
+          enabled: { type: "boolean" },
+          value: { type: ["string", "null"], maxLength: 4096 },
+        },
+      },
     },
     agentRoutes: {
       type: "object",

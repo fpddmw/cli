@@ -247,10 +247,12 @@ tiangong-ai research setup init \
 
 This no-overwrite command creates:
 
-- `.tiangong-research/setup.yaml`: non-secret selections, settings, license
-  acceptances, agent routes, verification choices, and explicit confirmations;
-- `.tiangong-research/setup.env.example`: credential variable names with empty
-  values; copy it to `setup.env` only when a file-based secret source is needed;
+- `.tiangong-research/setup.yaml`: every current catalog Skill, credential, and
+  setting with explicit enabled/disabled state, plus license acceptances, agent
+  routes, verification choices, and confirmations;
+- `.tiangong-research/setup.env.example`: every catalog credential variable
+  name with an empty value and matching requirement/enabled comments; copy it
+  to `setup.env` only when a file-based secret source is needed;
 - `.tiangong-research/.gitignore`: excludes `setup.env`.
 
 Review the catalog, edit `setup.yaml`, and never put a key or token in it. For a
@@ -259,8 +261,8 @@ file-based credential source:
 ```bash
 cp .tiangong-research/setup.env.example .tiangong-research/setup.env
 chmod 600 .tiangong-research/setup.env
-# Edit setup.env locally; use only NAME=value entries referenced by
-# credentialEnvironment in setup.yaml.
+# Edit setup.env locally. Keep disabled optional entries empty unless their
+# corresponding credentials.<id>.enabled flag is explicitly changed to true.
 ```
 
 Then run the ordinary command:
@@ -277,14 +279,25 @@ readiness failure. Use absolute `--config` and `--env-file` paths only for an
 explicit alternative. Use `research setup wizard` to explicitly choose the
 interactive path even when a declaration exists.
 
-The YAML parser rejects duplicate keys, aliases, anchors, custom/unknown
-fields, and incomplete verification. `setup.env` must be a regular non-symlink
-file, no larger than 64 KiB, owner-only on POSIX, and may contain only referenced
-variable names. It is read as literal data without shell expansion. A differing
-value in the ambient environment and `setup.env` is an error; setup never
-chooses between them silently. Secret values are imported into the existing
-owner-only logical stores before downloads and never enter the YAML, immutable
-plan, declaration binding, output, report, or journal.
+The closed YAML declaration is `schemaVersion: 2`; the removed v1 shape is not
+migrated or accepted. It requires `selection.skills`, `credentials`, and
+`settings` to contain exactly all current catalog entries. Skill entries expose
+`enabled` and the catalog license ID. Credential and setting entries expose the
+catalog- and current-selection-derived `requirement`, catalog `appliesTo`, and
+an explicit `enabled` choice;
+optional omission is not a configuration state. Missing, extra, or drifted
+catalog metadata, incomplete Brave profile combinations, a disabled required
+entry, or an enabled setting without a value fails before network access.
+
+`setup.env` must be a regular non-symlink file, no larger than 64 KiB,
+owner-only on POSIX, and may contain only credential variable names declared by
+the YAML. Empty values keep disabled options visible without selecting them. A
+non-empty value for a disabled credential is rejected; enable it in YAML or
+remove the value. The file is read as literal data without shell expansion. A
+differing value in the ambient environment and `setup.env` is also an error;
+setup never chooses between them silently. Enabled secret values are imported
+into the existing owner-only logical stores before downloads and never enter
+the YAML, immutable plan, declaration binding, output, report, or journal.
 
 The semantic YAML hash is bound to the immutable plan. Re-running unchanged
 configuration reuses that exact plan and reruns all verification. A changed
