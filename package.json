@@ -1,6 +1,6 @@
 {
   "name": "@tiangong-ai/cli",
-  "version": "0.0.38",
+  "version": "0.0.39",
   "description": "Tiangong AI command-line interface.",
   "repository": {
     "type": "git",

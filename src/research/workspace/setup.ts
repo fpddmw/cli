@@ -218,6 +218,7 @@ export interface ResearchSetupPlanInput {
   confirmGlobalMutation?: boolean;
   confirmAgentSmokeCost?: boolean;
   replacePlan?: boolean;
+  declarativeConfigurationSha256?: string;
   environment?: NodeJS.ProcessEnv;
   targetRoots?: Partial<Record<ResearchSetupAgent, string>>;
 }
@@ -292,6 +293,19 @@ export async function createResearchSetupPlan(
   const scope = input.scope ?? "project";
   const agents = normalizeAgents(input.agents ?? ["codex"]);
   const agentRoutes = normalizeAgentRoutes(input.agentRoutes);
+  if (
+    input.declarativeConfigurationSha256 !== undefined &&
+    !/^[0-9a-f]{64}$/.test(input.declarativeConfigurationSha256)
+  ) {
+    throw setupError({
+      code: "RESEARCH_SETUP_DECLARATION_INVALID",
+      step: "declarative-configuration",
+      reason: "The declarative setup configuration digest is malformed.",
+      minimumAction: "Regenerate or reload the workspace-local setup.yaml file.",
+      retryCommand: "tiangong-ai research setup --help",
+      exitCode: 2,
+    });
+  }
   if (
     !input.confirmNetworkDownloads &&
     input.skillIds.length + BRAVE_PROFILE_SKILLS[input.evidenceProfile].length
@@ -471,6 +485,20 @@ export async function createResearchSetupPlan(
       : null;
     await writeJsonAtomic(paths.setupPlan, plan, 0o444);
     await writeJsonAtomic(paths.setupState, initialSetupState(plan.planSha256));
+    if (input.declarativeConfigurationSha256) {
+      await writeJsonAtomic(
+        paths.setupDeclarationBinding,
+        {
+          schemaVersion: 1,
+          kind: "tiangong-research-setup-declaration-binding",
+          configurationSha256: input.declarativeConfigurationSha256,
+          planSha256: plan.planSha256,
+        },
+        0o444,
+      );
+    } else {
+      await rm(paths.setupDeclarationBinding, { force: true });
+    }
     if (priorPlanSha256 && (await pathExists(paths.marker))) {
       await appendJournalEvent(paths.journal, "research.setup.plan.replaced", "workspace", {
         priorPlanSha256,
@@ -4202,6 +4230,7 @@ async function archiveSetupGeneration(root: string): Promise<string> {
     [paths.setupPlan, "setup-plan.json"],
     [paths.setupState, "setup-state.json"],
     [paths.setupReport, "setup-report.json"],
+    [paths.setupDeclarationBinding, "setup-declaration.json"],
   ] as const;
   for (const [source, name] of files) {
     if (!(await pathExists(source))) continue;

@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-16
-lastReviewedCommit: ecf72d5a4b8f34139de3f5718900a41c6bf32dce
+lastReviewedAt: 2026-08-17
+lastReviewedCommit: d14c542100d6e1efdd82798c2d92e68a5bc3bba2
 ---
 
 # Tiangong AI CLI
@@ -234,6 +234,72 @@ preflight and owner-only storage run before downloads. Project-local copy is
 the default; global writes, network downloads, live provider checks, synthetic
 document uploads, and paid agent smokes each require their applicable
 confirmation.
+
+### Declarative setup
+
+For repeatable provisioning without a TTY, generate a safe workspace-local
+template:
+
+```bash
+tiangong-ai research setup init \
+  --workspace /absolute/path/to/workspace --json
+```
+
+This no-overwrite command creates:
+
+- `.tiangong-research/setup.yaml`: non-secret selections, settings, license
+  acceptances, agent routes, verification choices, and explicit confirmations;
+- `.tiangong-research/setup.env.example`: credential variable names with empty
+  values; copy it to `setup.env` only when a file-based secret source is needed;
+- `.tiangong-research/.gitignore`: excludes `setup.env`.
+
+Review the catalog, edit `setup.yaml`, and never put a key or token in it. For a
+file-based credential source:
+
+```bash
+cp .tiangong-research/setup.env.example .tiangong-research/setup.env
+chmod 600 .tiangong-research/setup.env
+# Edit setup.env locally; use only NAME=value entries referenced by
+# credentialEnvironment in setup.yaml.
+```
+
+Then run the ordinary command:
+
+```bash
+tiangong-ai research setup \
+  --workspace /absolute/path/to/workspace --json
+```
+
+Bare setup checks only the fixed workspace-local `setup.yaml`; it never scans a
+parent directory. When the file exists, setup is fully non-interactive and does
+not fall back to the Wizard after a parse, schema, permission, credential, or
+readiness failure. Use absolute `--config` and `--env-file` paths only for an
+explicit alternative. Use `research setup wizard` to explicitly choose the
+interactive path even when a declaration exists.
+
+The YAML parser rejects duplicate keys, aliases, anchors, custom/unknown
+fields, and incomplete verification. `setup.env` must be a regular non-symlink
+file, no larger than 64 KiB, owner-only on POSIX, and may contain only referenced
+variable names. It is read as literal data without shell expansion. A differing
+value in the ambient environment and `setup.env` is an error; setup never
+chooses between them silently. Secret values are imported into the existing
+owner-only logical stores before downloads and never enter the YAML, immutable
+plan, declaration binding, output, report, or journal.
+
+The semantic YAML hash is bound to the immutable plan. Re-running unchanged
+configuration reuses that exact plan and reruns all verification. A changed
+declaration stops until the owner reviews it and sets
+`replaceExistingPlan: true`; the prior plan and declaration binding are archived
+before replacement.
+
+Declarative setup requires live provider checks and the independent reviewer
+CLI agent smoke, including explicit cost authorization. Interactive setup
+recommends both by default while retaining explicit quota/cost consent. Apply,
+status, doctor, and the Wizard return success only when
+`overallReadiness=READY`; skipped checks, warnings, missing dependencies, and
+optional selected-component failures remain visible as a non-zero incomplete
+setup instead of a false success. The native producer is still not launched as
+a child process.
 
 If the full orchestrator was selected, accepted apply creates a separate
 project-local `tiangong-auto-research-recovery` Skill after credentials are

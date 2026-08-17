@@ -12,6 +12,11 @@ import {
 } from "./workspace/external-skills.js";
 import { inspectResearchSetupCatalog } from "./workspace/setup-catalog.js";
 import {
+  discoverResearchSetupDeclaration,
+  executeResearchSetupDeclaration,
+  initializeResearchSetupDeclaration,
+} from "./workspace/setup-declarative.js";
+import {
   applyResearchSetupPlan,
   checkResearchSetupUpdates,
   createResearchSetupPlan,
@@ -38,14 +43,18 @@ const WORKSPACE_OPTIONS = { ...COMMON_OPTIONS, workspace: "string" } as const;
 
 export async function runResearchSetupCommand(argv: string[], io: CliIO): Promise<number> {
   const [action, ...rest] = argv;
-  if (!action || action === "wizard" || action.startsWith("-")) {
-    return runResearchSetupWizard(action === "wizard" ? rest : argv, io);
+  if (!action || action.startsWith("-")) {
+    return runSetupEntry(argv, io);
+  }
+  if (action === "wizard") {
+    return runResearchSetupWizard(rest, io);
   }
   if (action === "--help" || action === "-h" || action === "help") {
     write(io.stdout, researchSetupHelp());
     return 0;
   }
   if (action === "catalog") return runCatalog(rest, io);
+  if (action === "init") return runDeclarationInit(rest, io);
   if (action === "plan") return runPlan(rest, io);
   if (action === "apply") return runApply(rest, io);
   if (action === "status") return runStatus(rest, io);
@@ -63,8 +72,12 @@ export async function runResearchSetupCommand(argv: string[], io: CliIO): Promis
 
 export function researchSetupHelp(): string {
   return `Research setup commands:
-  tiangong-ai research setup
-      Interactive, user-initiated setup Wizard (TTY required).
+  tiangong-ai research setup [--workspace <absolute-path>] [--config <absolute-yaml>] [--env-file <absolute-owner-only-env>] [--json]
+      Auto-runs a discovered .tiangong-research/setup.yaml declaration; otherwise starts the interactive Wizard.
+  tiangong-ai research setup wizard [--workspace <absolute-path>] [--credential-stdin <logical-id[,logical-id...]>] [--json]
+      Explicitly start the interactive, user-initiated setup Wizard (TTY required).
+  tiangong-ai research setup init [--workspace <absolute-path>] [--json]
+      Create no-overwrite setup.yaml and setup.env.example templates.
   tiangong-ai research setup catalog [--workspace <absolute-path>] [--scope project|global] [--agents codex,claude-code] [--json]
   tiangong-ai research setup plan --workspace <absolute-path> --mode smoke-test|production-research --evidence-profile none|brave-baseline|brave-context|brave-media [--skills <csv>] [--scope project|global] [--agents <csv>] [--accept-license <csv>] [--settings <absolute-json>] [--credential-env <absolute-json>] [--agent-routes <absolute-json>] [--confirm-network-downloads] [--confirm-global] [--live] [--allow-synthetic-unstructure-upload] [--agent-smoke --confirm-agent-smoke-cost] [--replace-plan] [--json]
   tiangong-ai research setup apply [--plan <absolute-json>] [--workspace <absolute-path>] [--skip-doctor] [--json]
@@ -84,7 +97,71 @@ Safety defaults:
   bounded stdin, or named owner environment variables; values are never printed.
   Every selected Skill requires its displayed license id and an explicit
   network-download confirmation; an empty smoke-test plan requires neither.
+  Declarative setup never scans parent directories. Its setup.env is optional,
+  owner-only (0600), literal, and may contain only names referenced by setup.yaml.
+  Declarative apply always runs live provider checks and independent reviewer
+  smoke; setup succeeds only when overallReadiness is READY.
 `;
+}
+
+async function runSetupEntry(argv: string[], io: CliIO): Promise<number> {
+  const args = parseStrictArgs(
+    argv,
+    {
+      ...WORKSPACE_OPTIONS,
+      config: "string",
+      "env-file": "string",
+      "credential-stdin": "string",
+    },
+    "research setup",
+  );
+  if (strictBoolean(args, "help")) return writeSetupHelp(io);
+  rejectPositionals(args.positionals, "research setup");
+  const workspace = workspaceArgument(args);
+  const configurationPath = strictString(args, "config");
+  const environmentPath = strictString(args, "env-file");
+  const credentialStdin = strictString(args, "credential-stdin");
+  const discovered = await discoverResearchSetupDeclaration(workspace, {
+    ...(configurationPath === undefined ? {} : { configurationPath }),
+    ...(environmentPath === undefined ? {} : { environmentPath }),
+  });
+  if (discovered) {
+    if (credentialStdin) {
+      throw invalidSetupArgument(
+        "--credential-stdin belongs to the Wizard and cannot be combined with declarative setup.",
+      );
+    }
+    const result = await executeResearchSetupDeclaration({
+      workspace,
+      configurationPath: discovered.configurationPath,
+      ...(discovered.environmentPath === null
+        ? {}
+        : { environmentPath: discovered.environmentPath }),
+      environment: io.env,
+    });
+    writeSetupJson(io, result, args);
+    return result.exitCode;
+  }
+  if (configurationPath || environmentPath) {
+    throw new CliError("Declarative setup was requested but setup.yaml was not found.", {
+      code: "RESEARCH_SETUP_DECLARATION_NOT_FOUND",
+      exitCode: 2,
+      details: {
+        step: "declarative-discovery",
+        minimumAction: "Run research setup init or remove --config/--env-file to use the Wizard.",
+      },
+    });
+  }
+  return runResearchSetupWizard(argv, io);
+}
+
+async function runDeclarationInit(argv: string[], io: CliIO): Promise<number> {
+  const args = parseStrictArgs(argv, WORKSPACE_OPTIONS, "research setup init");
+  if (strictBoolean(args, "help")) return writeSetupHelp(io);
+  rejectPositionals(args.positionals, "research setup init");
+  const result = await initializeResearchSetupDeclaration(workspaceArgument(args));
+  writeSetupJson(io, result, args);
+  return 0;
 }
 
 async function runCatalog(argv: string[], io: CliIO): Promise<number> {
@@ -185,7 +262,7 @@ async function runApply(argv: string[], io: CliIO): Promise<number> {
     { environment: io.env, skipDoctor: strictBoolean(args, "skip-doctor") },
   );
   writeSetupJson(io, result, args);
-  return result.state.status === "blocked" ? 3 : 0;
+  return result.state.status === "ready" ? 0 : 3;
 }
 
 async function runStatus(argv: string[], io: CliIO): Promise<number> {
@@ -194,7 +271,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
   rejectPositionals(args.positionals, "research setup status");
   const result = await inspectResearchSetupStatus(workspaceArgument(args), io.env);
   writeSetupJson(io, result, args);
-  return result.state.status === "blocked" ? 3 : 0;
+  return result.state.status === "ready" ? 0 : 3;
 }
 
 async function runDoctor(argv: string[], io: CliIO): Promise<number> {
@@ -234,7 +311,7 @@ async function runDoctor(argv: string[], io: CliIO): Promise<number> {
     environment: io.env,
   });
   writeSetupJson(io, result, args);
-  return result.readiness === "READY" ? 0 : 3;
+  return result.overallReadiness === "READY" ? 0 : 3;
 }
 
 async function runCredential(argv: string[], io: CliIO): Promise<number> {
