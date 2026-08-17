@@ -54,11 +54,17 @@ storage writes, queueing, and document status transitions.
 - `src/research/workspace/setup-declarative.ts`: closed-schema YAML intake,
   no-overwrite example generation, fixed-path discovery, owner-only literal env
   intake, semantic configuration hashing, immutable-plan binding/reuse, and
-  mandatory full readiness execution. It carries non-secret plan inputs into
-  the existing setup/apply/doctor implementation rather than defining a second
-  setup protocol. Parent-directory scanning, shell expansion, YAML aliases,
-  secret persistence in plans, implicit replacement, and Wizard fallback after
-  a declaration error are forbidden.
+  mandatory full readiness execution. The declaration materializes every
+  current catalog Skill, credential, and setting with exact catalog metadata
+  plus an explicit enabled/disabled state. The env example likewise exposes
+  every credential name with an empty placeholder; disabled non-empty values
+  are rejected rather than selected implicitly. It carries only enabled,
+  non-secret plan inputs into the existing setup/apply/doctor implementation
+  rather than defining a second setup protocol. Only declaration schema v2 is
+  accepted; the removed v1 shape has no migration path. Parent-directory scanning,
+  shell expansion, omitted optional catalog entries, YAML aliases, secret
+  persistence in plans, implicit replacement, and Wizard fallback after a
+  declaration error are forbidden.
 - `src/research/workspace/**`: the versioned research workspace protocol. It
   owns context classification, immutable input admission, capability policy
   locks, a separately sourced external Skill ecosystem catalog, immutable setup

@@ -85,6 +85,7 @@ export interface ResearchSetupCredential {
   provider: string;
   requiredBy: string[];
   required: boolean;
+  defaultEnvironmentName: string;
   storage: "broker" | "adapter";
   adapterEnvironmentName: string | null;
   obtainAt: string;
@@ -114,7 +115,7 @@ export const RESEARCH_SETUP_SELECTION_GUIDANCE = {
 } as const;
 
 const BRAVE_COMMIT = "3e088af66eb61f1c207c22b2be0278ca8744d1d1";
-const TIANGONG_SKILLS_COMMIT = "29598568e966c4d6ae019d1c7bd6946d3390b277";
+const TIANGONG_SKILLS_COMMIT = "a42a310422cdcf40136e6aeb39cb8e55b85b9a88";
 const ANTHROPIC_SKILLS_COMMIT = "f17010c9bb483898c1d9c9f42dde2b3a98889434";
 const PPT_MASTER_COMMIT = "4343bd8bfc91e79dfb9680681a378476cc38a280";
 
@@ -240,7 +241,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "tiangong-auto-research",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "tiangong-auto-research",
-    expectedTreeSha256: "d84b65e862917b3c45239957395f4266258a4a03989e06fc6326042419fef780",
+    expectedTreeSha256: "7e3fdd3e9047f7831dd3a76fc72e6b2b492ea9fc75ff61cdc06c2deafe3aa131",
     tier: "orchestrator",
     role: "orchestrator",
     purpose:
@@ -552,6 +553,7 @@ export const RESEARCH_SETUP_CREDENTIALS: readonly ResearchSetupCredential[] = [
       (skill) => skill.sourceId === "brave-search-skills",
     ).map((skill) => skill.id),
     required: true,
+    defaultEnvironmentName: "BRAVE_API_KEY",
     storage: "broker",
     adapterEnvironmentName: null,
     obtainAt: "https://api.search.brave.com/app/keys",
@@ -563,6 +565,7 @@ export const RESEARCH_SETUP_CREDENTIALS: readonly ResearchSetupCredential[] = [
     provider: "Tiangong SCI Search",
     requiredBy: ["tiangong.kb-sci-search"],
     required: true,
+    defaultEnvironmentName: "TIANGONG_SCI_APIKEY",
     storage: "broker",
     adapterEnvironmentName: null,
     obtainAt: "Ask the owner of the selected Tiangong SCI deployment.",
@@ -574,6 +577,7 @@ export const RESEARCH_SETUP_CREDENTIALS: readonly ResearchSetupCredential[] = [
     provider: "Tiangong Report Search",
     requiredBy: ["tiangong.kb-report-search"],
     required: true,
+    defaultEnvironmentName: "TIANGONG_REPORT_APIKEY",
     storage: "broker",
     adapterEnvironmentName: null,
     obtainAt: "Ask the owner of the selected Tiangong report deployment.",
@@ -585,6 +589,7 @@ export const RESEARCH_SETUP_CREDENTIALS: readonly ResearchSetupCredential[] = [
     provider: "Tiangong Patent Search",
     requiredBy: ["tiangong.kb-patent-search"],
     required: true,
+    defaultEnvironmentName: "TIANGONG_PATENT_APIKEY",
     storage: "broker",
     adapterEnvironmentName: null,
     obtainAt: "Ask the owner of the selected Tiangong patent deployment.",
@@ -596,6 +601,7 @@ export const RESEARCH_SETUP_CREDENTIALS: readonly ResearchSetupCredential[] = [
     provider: "Tiangong Unstructure",
     requiredBy: ["tiangong.document-granular-decompose"],
     required: true,
+    defaultEnvironmentName: "UNSTRUCTURED_AUTH_TOKEN",
     storage: "adapter",
     adapterEnvironmentName: "UNSTRUCTURED_AUTH_TOKEN",
     obtainAt: "Ask the owner of the selected Unstructure deployment.",
@@ -607,6 +613,7 @@ export const RESEARCH_SETUP_CREDENTIALS: readonly ResearchSetupCredential[] = [
     provider: "Semantic Scholar Academic Graph API",
     requiredBy: ["tiangong.academic-paper-download"],
     required: false,
+    defaultEnvironmentName: "SEMANTIC_SCHOLAR_API_KEY",
     storage: "adapter",
     adapterEnvironmentName: "SEMANTIC_SCHOLAR_API_KEY",
     obtainAt: "https://www.semanticscholar.org/product/api",

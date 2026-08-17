@@ -12,8 +12,14 @@ import {
 import { platform, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
+import { stringify } from "yaml";
 
 import { runCli } from "../src/cli.js";
+import {
+  RESEARCH_SETUP_CREDENTIALS,
+  RESEARCH_SETUP_SETTINGS,
+  RESEARCH_SETUP_SKILLS,
+} from "../src/research/workspace/setup-catalog.js";
 import {
   discoverResearchSetupDeclaration,
   executeResearchSetupDeclaration,
@@ -35,12 +41,30 @@ describe("declarative research setup", () => {
       const envExample = await readFile(created.environmentExamplePath, "utf8");
       const ignore = await readFile(join(root, ".tiangong-research", ".gitignore"), "utf8");
 
+      assert.match(yaml, /schemaVersion: 2/);
       assert.match(yaml, /kind: tiangong-research-setup/);
       assert.match(yaml, /mode: production-research/);
       assert.match(yaml, /networkDownloads: false/);
       assert.match(yaml, /agentSmokeCost: false/);
       assert.match(yaml, /acceptedLicenseIds:\s*\[\]/);
       assert.doesNotMatch(yaml, /owner-secret|example-secret/i);
+      for (const skill of RESEARCH_SETUP_SKILLS) {
+        assert.match(yaml, new RegExp(`${escapeRegExp(skill.id)}:`));
+      }
+      for (const credential of RESEARCH_SETUP_CREDENTIALS) {
+        assert.match(yaml, new RegExp(`${escapeRegExp(credential.id)}:`));
+        assert.match(
+          envExample,
+          new RegExp(`^${escapeRegExp(defaultCredentialEnvironment(credential.id))}=$`, "m"),
+        );
+      }
+      for (const setting of RESEARCH_SETUP_SETTINGS) {
+        assert.match(yaml, new RegExp(`${escapeRegExp(setting.id)}:`));
+      }
+      assert.match(yaml, /brave\.search\.api-key:[\s\S]*requirement: required/);
+      assert.match(yaml, /tiangong\.sci\.api-key:[\s\S]*requirement: conditional/);
+      assert.match(yaml, /semantic-scholar\.api-key:[\s\S]*requirement: optional/);
+      assert.match(yaml, /semantic-scholar\.api-key:[\s\S]*enabled: false/);
       assert.match(envExample, /^BRAVE_API_KEY=$/m);
       assert.match(ignore, /^setup\.env$/m);
 
@@ -122,10 +146,160 @@ describe("declarative research setup", () => {
         loaded.planInput.credentialEnvironment?.["brave.search.api-key"],
         "BRAVE_API_KEY",
       );
+      assert.equal(loaded.planInput.credentialEnvironment?.["semantic-scholar.api-key"], undefined);
       assert.equal(loaded.environment.BRAVE_API_KEY, secret);
       assert.match(loaded.configurationSha256, /^[0-9a-f]{64}$/);
       assert.equal(JSON.stringify(loaded.planInput).includes(secret), false);
       assert.equal(JSON.stringify(loaded.publicSummary).includes(secret), false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires every catalog option and its selection-derived metadata to be explicit", async () => {
+    const root = await temporaryDirectory();
+    try {
+      const missingOptionalCredential = validDeclarationValue();
+      delete missingOptionalCredential.credentials["semantic-scholar.api-key"];
+      await assert.rejects(
+        loadResearchSetupDeclaration({
+          workspace: root,
+          configurationPath: await writeConfiguration(
+            root,
+            stringify(missingOptionalCredential, { lineWidth: 0 }),
+          ),
+        }),
+        errorCode("RESEARCH_SETUP_DECLARATION_INVALID"),
+      );
+
+      const driftedRequirement = validDeclarationValue();
+      driftedRequirement.credentials["semantic-scholar.api-key"]!.requirement = "conditional";
+      await writeFile(
+        workspacePaths(root).setupDeclaration,
+        stringify(driftedRequirement, { lineWidth: 0 }),
+        "utf8",
+      );
+      await assert.rejects(
+        loadResearchSetupDeclaration({ workspace: root }),
+        errorCode("RESEARCH_SETUP_DECLARATION_INVALID"),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps optional credentials explicit but disabled until the owner enables them", async () => {
+    const root = await temporaryDirectory();
+    const braveSecret = "declarative-brave-owner-secret";
+    const semanticScholarSecret = "declarative-semantic-scholar-secret";
+    try {
+      const configurationPath = await writeConfiguration(root, validDeclaration());
+      const environmentPath = await writeEnvironment(
+        root,
+        `BRAVE_API_KEY=${braveSecret}\nSEMANTIC_SCHOLAR_API_KEY=\n`,
+      );
+      const disabled = await loadResearchSetupDeclaration({
+        workspace: root,
+        configurationPath,
+        environmentPath,
+        environment: {},
+      });
+      assert.equal(
+        disabled.planInput.credentialEnvironment?.["semantic-scholar.api-key"],
+        undefined,
+      );
+
+      await writeFile(
+        environmentPath,
+        `BRAVE_API_KEY=${braveSecret}\nSEMANTIC_SCHOLAR_API_KEY=${semanticScholarSecret}\n`,
+        { mode: 0o600 },
+      );
+      await assert.rejects(
+        loadResearchSetupDeclaration({
+          workspace: root,
+          configurationPath,
+          environmentPath,
+          environment: {},
+        }),
+        errorCode("RESEARCH_SETUP_DECLARATION_ENV_INVALID"),
+      );
+
+      const enabledValue = validDeclarationValue();
+      enabledValue.selection.skills["tiangong.academic-paper-download"]!.enabled = true;
+      enabledValue.credentials["semantic-scholar.api-key"]!.enabled = true;
+      await writeFile(configurationPath, stringify(enabledValue, { lineWidth: 0 }), "utf8");
+      const enabled = await loadResearchSetupDeclaration({
+        workspace: root,
+        configurationPath,
+        environmentPath,
+        environment: {},
+      });
+      assert.equal(
+        enabled.planInput.credentialEnvironment?.["semantic-scholar.api-key"],
+        "SEMANTIC_SCHOLAR_API_KEY",
+      );
+      assert.equal(enabled.environment.SEMANTIC_SCHOLAR_API_KEY, semanticScholarSecret);
+      assert.equal(JSON.stringify(enabled.planInput).includes(semanticScholarSecret), false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects the removed implicit credentialEnvironment schema", async () => {
+    const root = await temporaryDirectory();
+    try {
+      const oldSchema = `schemaVersion: 1
+kind: tiangong-research-setup
+workspace:
+  mode: production-research
+install:
+  scope: project
+  agents: [codex]
+selection:
+  evidenceProfile: brave-baseline
+  skillIds: [tiangong.auto-research]
+acceptedLicenseIds: []
+credentialEnvironment:
+  brave.search.api-key: BRAVE_API_KEY
+settings: {}
+agentRoutes:
+  producerAgent: codex
+  reviewerAgent: claude
+verification:
+  live: true
+  allowSyntheticUnstructureUpload: false
+  agentSmoke: true
+confirmations:
+  networkDownloads: false
+  globalMutation: false
+  agentSmokeCost: true
+replaceExistingPlan: false
+`;
+      await assert.rejects(
+        loadResearchSetupDeclaration({
+          workspace: root,
+          configurationPath: await writeConfiguration(root, oldSchema),
+        }),
+        errorCode("RESEARCH_SETUP_DECLARATION_INVALID"),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects declaration schema v1 without migration", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await assert.rejects(
+        loadResearchSetupDeclaration({
+          workspace: root,
+          configurationPath: await writeConfiguration(
+            root,
+            validDeclaration().replace("schemaVersion: 2", "schemaVersion: 1"),
+          ),
+        }),
+        errorCode("RESEARCH_SETUP_DECLARATION_INVALID"),
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -182,7 +356,7 @@ describe("declarative research setup", () => {
 
   it("rejects duplicate, aliased, unknown, and incomplete declarations without echoing secrets", async () => {
     const cases = [
-      validDeclaration().replace("schemaVersion: 1", "schemaVersion: 1\nschemaVersion: 1"),
+      validDeclaration().replace("schemaVersion: 2", "schemaVersion: 2\nschemaVersion: 2"),
       validDeclaration().replace(
         "workspace:\n",
         "shared: &shared production-research\nworkspace:\n",
@@ -394,48 +568,109 @@ describe("declarative research setup", () => {
 });
 
 function validDeclaration(): string {
-  return `schemaVersion: 1
-kind: tiangong-research-setup
-workspace:
-  name: Declarative Research
-  mode: production-research
-install:
-  scope: project
-  agents:
-    - codex
-selection:
-  evidenceProfile: brave-baseline
-  skillIds:
-    - tiangong.auto-research
-acceptedLicenseIds:
-  - brave-search-skills:MIT
-  - tiangong-ai-skills:MIT
-credentialEnvironment:
-  brave.search.api-key: BRAVE_API_KEY
-settings: {}
-agentRoutes:
-  producerAgent: codex
-  reviewerAgent: claude
-  producerModel: gpt-test-producer
-  reviewerModel: claude-test-reviewer
-  producerPricing:
-    inputUsdPerMillionTokens: 1
-    cachedInputUsdPerMillionTokens: 0.1
-    outputUsdPerMillionTokens: 2
-  reviewerPricing:
-    inputUsdPerMillionTokens: 1
-    cachedInputUsdPerMillionTokens: 0.1
-    outputUsdPerMillionTokens: 2
-verification:
-  live: true
-  allowSyntheticUnstructureUpload: false
-  agentSmoke: true
-confirmations:
-  networkDownloads: true
-  globalMutation: false
-  agentSmokeCost: true
-replaceExistingPlan: false
-`;
+  return stringify(validDeclarationValue(), { lineWidth: 0 });
+}
+
+function validDeclarationValue() {
+  const enabledSkillIds = new Set([
+    "tiangong.auto-research",
+    "brave.web-search",
+    "brave.news-search",
+  ]);
+  return {
+    schemaVersion: 2 as const,
+    kind: "tiangong-research-setup" as const,
+    workspace: {
+      name: "Declarative Research",
+      mode: "production-research" as const,
+    },
+    install: { scope: "project" as const, agents: ["codex" as const] },
+    selection: {
+      skills: Object.fromEntries(
+        RESEARCH_SETUP_SKILLS.map((skill) => [
+          skill.id,
+          { enabled: enabledSkillIds.has(skill.id), licenseId: skill.license.id },
+        ]),
+      ),
+    },
+    acceptedLicenseIds: ["brave-search-skills:MIT", "tiangong-ai-skills:MIT"],
+    credentials: Object.fromEntries(
+      RESEARCH_SETUP_CREDENTIALS.map((credential) => [
+        credential.id,
+        {
+          requirement: !credential.required
+            ? ("optional" as const)
+            : credential.requiredBy.some((skillId) => enabledSkillIds.has(skillId))
+              ? ("required" as const)
+              : ("conditional" as const),
+          appliesTo: [...credential.requiredBy],
+          enabled:
+            credential.required &&
+            credential.requiredBy.some((skillId) => enabledSkillIds.has(skillId)),
+          environment: defaultCredentialEnvironment(credential.id),
+        },
+      ]),
+    ),
+    settings: Object.fromEntries(
+      RESEARCH_SETUP_SETTINGS.map((setting) => [
+        setting.id,
+        {
+          requirement: !setting.required
+            ? ("optional" as const)
+            : setting.requiredBy.some((skillId) => enabledSkillIds.has(skillId))
+              ? ("required" as const)
+              : ("conditional" as const),
+          appliesTo: [...setting.requiredBy],
+          enabled:
+            setting.required && setting.requiredBy.some((skillId) => enabledSkillIds.has(skillId)),
+          value: setting.defaultValue,
+        },
+      ]),
+    ),
+    agentRoutes: {
+      producerAgent: "codex" as const,
+      reviewerAgent: "claude" as const,
+      producerModel: "gpt-test-producer",
+      reviewerModel: "claude-test-reviewer",
+      producerPricing: {
+        inputUsdPerMillionTokens: 1,
+        cachedInputUsdPerMillionTokens: 0.1,
+        outputUsdPerMillionTokens: 2,
+      },
+      reviewerPricing: {
+        inputUsdPerMillionTokens: 1,
+        cachedInputUsdPerMillionTokens: 0.1,
+        outputUsdPerMillionTokens: 2,
+      },
+    },
+    verification: {
+      live: true,
+      allowSyntheticUnstructureUpload: false,
+      agentSmoke: true,
+    },
+    confirmations: {
+      networkDownloads: true,
+      globalMutation: false,
+      agentSmokeCost: true,
+    },
+    replaceExistingPlan: false,
+  };
+}
+
+function defaultCredentialEnvironment(credentialId: string): string {
+  const names: Record<string, string> = {
+    "brave.search.api-key": "BRAVE_API_KEY",
+    "tiangong.sci.api-key": "TIANGONG_SCI_APIKEY",
+    "tiangong.report.api-key": "TIANGONG_REPORT_APIKEY",
+    "tiangong.patent.api-key": "TIANGONG_PATENT_APIKEY",
+    "tiangong.unstructure.auth-token": "UNSTRUCTURED_AUTH_TOKEN",
+    "semantic-scholar.api-key": "SEMANTIC_SCHOLAR_API_KEY",
+  };
+  return names[credentialId]!;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function writeConfiguration(root: string, value: string): Promise<string> {
