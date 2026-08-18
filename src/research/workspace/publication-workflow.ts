@@ -211,6 +211,11 @@ export interface PublicationStatus {
   projectId: string;
   generationSha256: string | null;
   manuscriptSha256: string | null;
+  submissionPackageSha256: string | null;
+  submissionRoles: PublicationSubmissionRole[];
+  contentSnapshotSha256: string | null;
+  inferenceSnapshotSha256: string | null;
+  claimEvidenceGraphSha256: string | null;
   generationStatus: "waiting-for-base-research" | "not-started" | "manuscript-frozen" | "invalid";
   reviewState: "not-started" | "partial" | "complete";
   requiredReviewRoles: PublicationReviewRole[];
@@ -897,6 +902,11 @@ export async function inspectPublicationStatus(
       projectId,
       generationSha256: null,
       manuscriptSha256: null,
+      submissionPackageSha256: null,
+      submissionRoles: [],
+      contentSnapshotSha256: null,
+      inferenceSnapshotSha256: null,
+      claimEvidenceGraphSha256: null,
       generationStatus: "waiting-for-base-research",
       reviewState: "not-started",
       requiredReviewRoles: requiredReviewRoles(project.publicationPolicy!),
@@ -916,6 +926,11 @@ export async function inspectPublicationStatus(
       projectId,
       generationSha256: null,
       manuscriptSha256: null,
+      submissionPackageSha256: null,
+      submissionRoles: [],
+      contentSnapshotSha256: null,
+      inferenceSnapshotSha256: null,
+      claimEvidenceGraphSha256: null,
       generationStatus: "not-started",
       reviewState: "not-started",
       requiredReviewRoles: REQUIRED_REVIEW_ROLES,
@@ -949,6 +964,11 @@ export async function inspectPublicationStatus(
     projectId,
     generationSha256: generation.generationSha256,
     manuscriptSha256: generation.manuscript.sha256,
+    submissionPackageSha256: generation.submissionPackage.packageSha256,
+    submissionRoles: generation.submissionPackage.files.map((file) => file.role),
+    contentSnapshotSha256: generation.submissionPackage.contentSnapshot.sha256,
+    inferenceSnapshotSha256: generation.submissionPackage.inferenceSnapshot.sha256,
+    claimEvidenceGraphSha256: generation.submissionPackage.claimEvidenceGraph.sha256,
     generationStatus: "manuscript-frozen",
     reviewState,
     requiredReviewRoles: generation.requiredReviewRoles,

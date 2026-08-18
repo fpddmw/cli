@@ -119,7 +119,20 @@ describe("top-journal publication workflow", () => {
         "--json",
       ]);
       assert.equal(status.exitCode, 0);
-      assert.equal(JSON.parse(status.stdout).reviewState, "not-started");
+      const publicationStatus = JSON.parse(status.stdout);
+      assert.equal(publicationStatus.reviewState, "not-started");
+      assert.match(publicationStatus.submissionPackageSha256, /^[a-f0-9]{64}$/);
+      assert.deepEqual(publicationStatus.submissionRoles.sort(), [
+        "code-availability",
+        "cover-letter",
+        "data-availability",
+        "reporting-checklist",
+        "source-data",
+        "title-page",
+      ]);
+      assert.match(publicationStatus.contentSnapshotSha256, /^[a-f0-9]{64}$/);
+      assert.match(publicationStatus.inferenceSnapshotSha256, /^[a-f0-9]{64}$/);
+      assert.match(publicationStatus.claimEvidenceGraphSha256, /^[a-f0-9]{64}$/);
 
       const workspaceStatus = await invokeCli([
         "research",
