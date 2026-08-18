@@ -4669,11 +4669,12 @@ async function nativeStageBinding(
   const paths = workspacePaths(root);
   const outputRoot = join(projectRoot(root, project.id), "outputs");
   const outputs: OutputRecord[] = [];
+  const stageOwnedOutputs = new Set(workPackage.expectedOutputs);
   if (await pathExists(outputRoot)) {
     for (const path of await regularTreeFiles(outputRoot)) {
-      outputs.push(
-        await fileRecord(path, relative(projectRoot(root, project.id), path).replaceAll("\\", "/")),
-      );
+      const logicalPath = relative(projectRoot(root, project.id), path).replaceAll("\\", "/");
+      if (stageOwnedOutputs.has(logicalPath)) continue;
+      outputs.push(await fileRecord(path, logicalPath));
     }
   }
   return sha256Text(

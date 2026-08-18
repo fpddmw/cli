@@ -424,6 +424,26 @@ describe("research acquisition and evidence snapshots", () => {
         hostAgent: "codex",
       });
       const blockingGap = "One indispensable licensed source still requires user authorization.";
+      const partiallyPromotedOutput = join(
+        workspacePaths(root).projects,
+        projectId,
+        "outputs",
+        "acquisition.json",
+      );
+      const partiallyPromoted = acquisitionValue(candidate.id, "source-1") as {
+        decisions: Array<Record<string, unknown>>;
+      };
+      await writeFile(
+        partiallyPromotedOutput,
+        JSON.stringify({
+          ...partiallyPromoted,
+          decisions: partiallyPromoted.decisions.map((decision) => ({
+            ...decision,
+            artifacts: [],
+          })),
+          gaps: [blockingGap],
+        }),
+      );
       await recordNativeResearchActivity({
         root,
         projectId,
