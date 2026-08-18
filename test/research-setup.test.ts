@@ -1423,6 +1423,8 @@ describe("research setup execution and operator safety", () => {
     const secret = "semantic-scholar-rate-limit-secret";
     let providerCalls = 0;
     const sleeps: number[] = [];
+    const providerUrls: string[] = [];
+    const providerKeys: Array<string | null> = [];
     const skill = RESEARCH_SETUP_SKILLS.find(
       (candidate) => candidate.id === "tiangong.academic-paper-download",
     )!;
@@ -1442,6 +1444,12 @@ describe("research setup execution and operator safety", () => {
         confirmNetworkDownloads: true,
       });
       await initializeResearchWorkspace(root, undefined, "smoke-test");
+      await setResearchSetupCredentialFromEnvironment({
+        workspace: root,
+        credentialId: "semantic-scholar.api-key",
+        environmentName: "OWNER_S2_VALUE",
+        environment: { OWNER_S2_VALUE: secret },
+      });
       const report = await doctorResearchSetup(root, {
         live: true,
         environment: { OWNER_S2_VALUE: secret },
@@ -1457,8 +1465,10 @@ describe("research setup execution and operator safety", () => {
           }
           return { exitCode: 0, stdout: `${command} fixture-version\n`, stderr: "" };
         },
-        fetcher: async () => {
+        fetcher: async (input, init) => {
           providerCalls += 1;
+          providerUrls.push(String(input));
+          providerKeys.push(new Headers(init?.headers).get("x-api-key"));
           return new Response(`{"token":"${secret}"}`, {
             status: 429,
             headers: { "content-type": "application/json", "retry-after": "7" },
@@ -1467,6 +1477,11 @@ describe("research setup execution and operator safety", () => {
         sleeper: async (milliseconds) => void sleeps.push(milliseconds),
       });
       assert.equal(providerCalls, 2);
+      assert.deepEqual(providerUrls, [
+        "https://api.semanticscholar.org/graph/v1/paper/DOI:10.1038/s41586-020-2649-2?fields=paperId",
+        "https://api.semanticscholar.org/graph/v1/paper/DOI:10.1038/s41586-020-2649-2?fields=paperId",
+      ]);
+      assert.deepEqual(providerKeys, [secret, secret]);
       assert.deepEqual(sleeps, [5_000]);
       assert.equal(report.researchReadiness, "READY");
       assert.equal(report.acquisitionReadiness, "DEGRADED");

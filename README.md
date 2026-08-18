@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-08-18
-lastReviewedCommit: 9205e1b06678ef79042bee89bd3bca3fa77af515
+lastReviewedCommit: 34a5c2a3af26fc56e9c9dc94fcbdabd91a6dd1d8
 ---
 
 # Tiangong AI CLI

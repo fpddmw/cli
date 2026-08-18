@@ -5052,7 +5052,7 @@ async function appendSemanticScholarLiveCheck(
   const headers = new Headers({ Accept: "application/json" });
   if (apiKey) headers.set("x-api-key", apiKey);
   const url =
-    "https://api.semanticscholar.org/graph/v1/paper/search?query=reproducible%20research&limit=1&fields=paperId";
+    "https://api.semanticscholar.org/graph/v1/paper/DOI:10.1038/s41586-020-2649-2?fields=paperId";
   try {
     let response!: Response;
     let retryAfterSeconds: number | null = null;
