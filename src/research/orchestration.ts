@@ -63,6 +63,7 @@ import {
   publicationReviewSchema,
   submitPublicationReview,
   type PublicationReviewRole,
+  type PublicationSubmissionRole,
   type PublicationStatus,
 } from "./workspace/publication-workflow.js";
 import {
@@ -98,7 +99,7 @@ import {
   submitScientificReview,
   type ScientificReviewStatus,
 } from "./workspace/scientific-review.js";
-import { pathExists, sha256Text, workspacePaths } from "./workspace/storage.js";
+import { isObject, pathExists, sha256Text, workspacePaths } from "./workspace/storage.js";
 import type {
   ProjectEvidenceRequirements,
   ProjectInput,
@@ -155,7 +156,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research policy validate <project-id> [--workspace <path>] [--json]
   tiangong-ai research policy approve <project-id> --confirm [--acknowledge-defaults] [--workspace <path>] [--json]
   tiangong-ai research policy resolve <project-id> [--workspace <path>] [--json]
-  tiangong-ai research publication freeze <project-id> --manuscript <absolute-file> --assessment <absolute-json> --producer-agent codex|claude --producer-session <opaque-id> [--supplements <absolute-json-array>] [--workspace <path>] [--json]
+  tiangong-ai research publication freeze <project-id> --manuscript <absolute-file> --assessment <absolute-json> --submission <absolute-json> --producer-agent codex|claude --producer-session <opaque-id> [--supplements <absolute-json-array>] [--workspace <path>] [--json]
   tiangong-ai research publication review prepare <project-id> --role evidence|methods-reproducibility|domain-novelty|journal-editor --reviewer-agent codex|claude --reviewer-session <opaque-id> [--workspace <path>] [--json]
   tiangong-ai research publication review submit <project-id> --role evidence|methods-reproducibility|domain-novelty|journal-editor --review <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research publication status <project-id> [--workspace <path>] [--json]
@@ -208,6 +209,7 @@ async function runPublication(argv: string[], io: CliIO): Promise<number> {
         manuscript: "string",
         assessment: "string",
         supplements: "string",
+        submission: "string",
         "producer-agent": "string",
         "producer-session": "string",
       },
@@ -218,9 +220,10 @@ async function runPublication(argv: string[], io: CliIO): Promise<number> {
     const manuscriptPath = strictString(args, "manuscript");
     const assessmentPath = strictString(args, "assessment");
     const producerSessionId = strictString(args, "producer-session");
-    if (!manuscriptPath || !assessmentPath || !producerSessionId) {
+    const submissionPath = strictString(args, "submission");
+    if (!manuscriptPath || !assessmentPath || !submissionPath || !producerSessionId) {
       throw new CliError(
-        "research publication freeze requires --manuscript, --assessment, --producer-agent, and --producer-session.",
+        "research publication freeze requires --manuscript, --assessment, --submission, --producer-agent, and --producer-session.",
         { code: "RESEARCH_PUBLICATION_ARGUMENT_REQUIRED", exitCode: 2 },
       );
     }
@@ -234,6 +237,7 @@ async function runPublication(argv: string[], io: CliIO): Promise<number> {
         manuscriptPath,
         assessmentPath,
         supplementPaths: supplementsPath ? await readAbsolutePathArray(supplementsPath) : [],
+        submissionFiles: await readSubmissionFiles(submissionPath),
         producerAgent: publicationAgent(strictString(args, "producer-agent"), "producer"),
         producerSessionId,
       }),
@@ -2205,6 +2209,34 @@ async function readAbsolutePathArray(path: string, option = "supplements"): Prom
     });
   }
   return value;
+}
+
+async function readSubmissionFiles(
+  path: string,
+): Promise<Array<{ role: PublicationSubmissionRole; path: string }>> {
+  const value = await readBoundedJsonRecord(
+    path,
+    "--submission",
+    "RESEARCH_PUBLICATION_SUBMISSION_PACKAGE_INVALID",
+  );
+  if (
+    value.schemaVersion !== 1 ||
+    !Array.isArray(value.files) ||
+    value.files.some(
+      (file) =>
+        !isObject(file) ||
+        typeof file.role !== "string" ||
+        typeof file.path !== "string" ||
+        !isAbsolute(file.path) ||
+        resolve(file.path) !== file.path,
+    )
+  ) {
+    throw new CliError(
+      "--submission must declare schemaVersion 1 and role/path entries with absolute canonical paths.",
+      { code: "RESEARCH_PUBLICATION_SUBMISSION_PACKAGE_INVALID", exitCode: 2 },
+    );
+  }
+  return value.files as Array<{ role: PublicationSubmissionRole; path: string }>;
 }
 
 function integerOption(value: string | undefined, fallback: number, label: string): number {
