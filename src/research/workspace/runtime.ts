@@ -1075,7 +1075,7 @@ export async function submitNativeResearchStage(input: {
         details: { state: project.handoff.state, reasonCode: project.handoff.reasonCode },
       });
     }
-    await assertNoUnresolvedNativeChallenge(input.root, project.id);
+    await assertNoUnresolvedNativeChallenge(input.root, project.id, session.packet.stage, raw);
     const workPackage = packageById(project, session.packet.packageId);
     if (workPackage.status !== "running" || workPackage.executor !== "producer") {
       throw new CliError("The bound native producer package is no longer running.", {
@@ -1235,7 +1235,12 @@ export async function submitNativeResearchStage(input: {
   });
 }
 
-async function assertNoUnresolvedNativeChallenge(root: string, projectId: string): Promise<void> {
+async function assertNoUnresolvedNativeChallenge(
+  root: string,
+  projectId: string,
+  stage: NativeStagePacket["stage"],
+  rawOutput: string,
+): Promise<void> {
   const events = await readJournal(evidenceLedgerPath(root, projectId));
   const lastChallengeIndex = events.findLastIndex(
     (event) =>
@@ -1246,6 +1251,10 @@ async function assertNoUnresolvedNativeChallenge(root: string, projectId: string
   if (lastChallengeIndex < 0) return;
   const lastResolutionIndex = events.findLastIndex((event) => event.type === "handoff.resolved");
   if (lastResolutionIndex < lastChallengeIndex) {
+    if (stage === "acquire") {
+      const output = parseStructuredStageOutput("acquire", rawOutput).value;
+      if (Array.isArray(output.gaps) && output.gaps.length > 0) return;
+    }
     throw new CliError(
       "A login, MFA, CAPTCHA, paywall, security, or authorization challenge requires a durable user handoff before stage submission.",
       {

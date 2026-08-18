@@ -424,6 +424,20 @@ describe("research acquisition and evidence snapshots", () => {
         hostAgent: "codex",
       });
       const blockingGap = "One indispensable licensed source still requires user authorization.";
+      await recordNativeResearchActivity({
+        root,
+        projectId,
+        value: {
+          schemaVersion: 1,
+          kind: "browser-navigation",
+          channel: "browser-handoff",
+          input: "publisher route returned a security challenge",
+          candidateIds: [candidate.id],
+          resultCount: 0,
+          status: "blocked",
+          challenge: "security-warning",
+        },
+      });
       const acquireOutput = join(staging, "acquire.json");
       await writeFile(
         acquireOutput,
