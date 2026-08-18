@@ -96,6 +96,8 @@ describe("top-journal publication workflow", () => {
         fixture.manuscript,
         "--assessment",
         fixture.assessment,
+        "--submission",
+        fixture.submissionManifest,
         "--producer-agent",
         "codex",
         "--producer-session",
@@ -117,7 +119,20 @@ describe("top-journal publication workflow", () => {
         "--json",
       ]);
       assert.equal(status.exitCode, 0);
-      assert.equal(JSON.parse(status.stdout).reviewState, "not-started");
+      const publicationStatus = JSON.parse(status.stdout);
+      assert.equal(publicationStatus.reviewState, "not-started");
+      assert.match(publicationStatus.submissionPackageSha256, /^[a-f0-9]{64}$/);
+      assert.deepEqual(publicationStatus.submissionRoles.sort(), [
+        "code-availability",
+        "cover-letter",
+        "data-availability",
+        "reporting-checklist",
+        "source-data",
+        "title-page",
+      ]);
+      assert.match(publicationStatus.contentSnapshotSha256, /^[a-f0-9]{64}$/);
+      assert.match(publicationStatus.inferenceSnapshotSha256, /^[a-f0-9]{64}$/);
+      assert.match(publicationStatus.claimEvidenceGraphSha256, /^[a-f0-9]{64}$/);
 
       const workspaceStatus = await invokeCli([
         "research",
@@ -157,11 +172,21 @@ describe("top-journal publication workflow", () => {
         manuscriptPath: fixture.manuscript,
         assessmentPath: fixture.assessment,
         supplementPaths: [fixture.supplement],
+        submissionFiles: fixture.submissionFiles,
         producerAgent: "codex",
         producerSessionId: "native-codex-session-1",
       });
       assert.match(frozen.generationSha256, /^[a-f0-9]{64}$/);
       assert.equal(frozen.status, "manuscript-frozen");
+      assert.deepEqual(frozen.submissionPackage.files.map((file) => file.role).sort(), [
+        "code-availability",
+        "cover-letter",
+        "data-availability",
+        "reporting-checklist",
+        "source-data",
+        "title-page",
+      ]);
+      assert.match(frozen.submissionPackage.packageSha256, /^[a-f0-9]{64}$/);
 
       for (const role of REVIEW_ROLES) {
         const reviewerSessionId = `independent-${role}-session`;
@@ -169,7 +194,7 @@ describe("top-journal publication workflow", () => {
           root: fixture.root,
           projectId: fixture.projectId,
           role,
-          reviewerAgent: role === "journal-editor" ? "claude" : "codex",
+          reviewerAgent: "claude",
           reviewerSessionId,
         });
         assert.equal(packet.manuscript.sha256, frozen.manuscript.sha256);
@@ -213,6 +238,7 @@ describe("top-journal publication workflow", () => {
         manuscriptPath: fixture.manuscript,
         assessmentPath: fixture.assessment,
         supplementPaths: [],
+        submissionFiles: fixture.submissionFiles,
         producerAgent: "codex",
         producerSessionId,
       });
@@ -264,6 +290,89 @@ describe("top-journal publication workflow", () => {
     }
   });
 
+  it("rejects an incomplete submission package and manuscript before paid review", async () => {
+    const fixture = await publicationFixture("submission-completeness");
+    try {
+      await assert.rejects(
+        freezePublicationManuscript({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          manuscriptPath: fixture.manuscript,
+          assessmentPath: fixture.assessment,
+          supplementPaths: [],
+          submissionFiles: fixture.submissionFiles.filter(
+            (file) => file.role !== "reporting-checklist",
+          ),
+          producerAgent: "codex",
+          producerSessionId: "missing-package-role-session",
+        }),
+        (error: unknown) =>
+          (error as { code?: string }).code === "RESEARCH_PUBLICATION_SUBMISSION_PACKAGE_INVALID",
+      );
+      await writeFile(
+        fixture.manuscript,
+        "# Final manuscript\n\nA result without required sections.\n",
+      );
+      await assert.rejects(
+        freezePublicationManuscript({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          manuscriptPath: fixture.manuscript,
+          assessmentPath: fixture.assessment,
+          supplementPaths: [],
+          submissionFiles: fixture.submissionFiles,
+          producerAgent: "codex",
+          producerSessionId: "incomplete-manuscript-session",
+        }),
+        (error: unknown) =>
+          (error as { code?: string }).code === "RESEARCH_PUBLICATION_MANUSCRIPT_INCOMPLETE",
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an internally hash-valid but semantically disconnected Claim-Evidence Graph", async () => {
+    const fixture = await publicationFixture("submission-graph-binding");
+    try {
+      const graphPath = join(
+        workspacePaths(fixture.root).projects,
+        fixture.projectId,
+        "outputs",
+        "claim-evidence-graph.json",
+      );
+      const graph = JSON.parse(await readFile(graphPath, "utf8")) as Record<string, unknown> & {
+        edges: Array<Record<string, unknown>>;
+      };
+      const { graphSha256: _discarded, ...graphCore } = graph;
+      graphCore.edges = graph.edges.map((edge) =>
+        edge.type === "finding-supported-by-atom"
+          ? { ...edge, from: "finding:unrelated-finding" }
+          : edge,
+      );
+      await writeJsonAtomic(graphPath, {
+        ...graphCore,
+        graphSha256: sha256Text(canonicalJson(graphCore)),
+      });
+      await assert.rejects(
+        freezePublicationManuscript({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          manuscriptPath: fixture.manuscript,
+          assessmentPath: fixture.assessment,
+          supplementPaths: [],
+          submissionFiles: fixture.submissionFiles,
+          producerAgent: "codex",
+          producerSessionId: "disconnected-graph-session",
+        }),
+        (error: unknown) =>
+          (error as { code?: string }).code === "RESEARCH_PUBLICATION_SUBMISSION_BINDING_INVALID",
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects producer/reviewer identity reuse and reviewer session reuse", async () => {
     const fixture = await publicationFixture("review-independence");
     try {
@@ -273,9 +382,21 @@ describe("top-journal publication workflow", () => {
         manuscriptPath: fixture.manuscript,
         assessmentPath: fixture.assessment,
         supplementPaths: [],
+        submissionFiles: fixture.submissionFiles,
         producerAgent: "codex",
         producerSessionId: "native-producer-session",
       });
+      await assert.rejects(
+        preparePublicationReview({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          role: "evidence",
+          reviewerAgent: "codex",
+          reviewerSessionId: "different-session-same-agent-family",
+        }),
+        (error: unknown) =>
+          (error as { code?: string }).code === "RESEARCH_PUBLICATION_REVIEW_NOT_INDEPENDENT",
+      );
       await assert.rejects(
         preparePublicationReview({
           root: fixture.root,
@@ -326,6 +447,7 @@ describe("top-journal publication workflow", () => {
         manuscriptPath: fixture.manuscript,
         assessmentPath: fixture.assessment,
         supplementPaths: [],
+        submissionFiles: fixture.submissionFiles,
         producerAgent: "codex",
         producerSessionId: "native-policy-bound-producer",
       });
@@ -360,6 +482,7 @@ describe("top-journal publication workflow", () => {
         manuscriptPath: fixture.manuscript,
         assessmentPath: fixture.assessment,
         supplementPaths: [],
+        submissionFiles: fixture.submissionFiles,
         producerAgent: "codex",
         producerSessionId: "native-generation-one",
       });
@@ -382,13 +505,17 @@ describe("top-journal publication workflow", () => {
         reviewPath,
       });
 
-      await writeFile(fixture.manuscript, "# Revised final manuscript\n\nMaterial revision.\n");
+      await writeFile(
+        fixture.manuscript,
+        `${await readFile(fixture.manuscript, "utf8")}\nMaterial revision.\n`,
+      );
       const second = await freezePublicationManuscript({
         root: fixture.root,
         projectId: fixture.projectId,
         manuscriptPath: fixture.manuscript,
         assessmentPath: fixture.assessment,
         supplementPaths: [],
+        submissionFiles: fixture.submissionFiles,
         producerAgent: "codex",
         producerSessionId: "native-generation-two",
       });
@@ -425,6 +552,7 @@ describe("top-journal publication workflow", () => {
         manuscriptPath: fixture.manuscript,
         assessmentPath: fixture.assessment,
         supplementPaths: [],
+        submissionFiles: fixture.submissionFiles,
         producerAgent: "codex",
         producerSessionId: "native-blocked-assessment",
       });
@@ -568,10 +696,220 @@ async function publicationFixture(
   await passEvidenceConstructGate(root, projectId);
   await passPilotMethodsGate(root, projectId);
   project = await loadProject(root, projectId);
-  await writeJsonAtomic(join(outputRoot, "analysis.json"), {
-    schemaVersion: 1,
-    findings: [],
+  const designClaim = designInput.design.contract.claims.find(
+    (claim) => claim.id === "claim-discrepancy",
+  )!;
+  const evidenceAtomCore = {
+    schemaVersion: 1 as const,
+    projectId,
+    sourceId: "peer-1",
+    candidateId: "peer-1",
+    artifactId: "artifact-peer-1-text",
+    artifactSha256: "8".repeat(64),
+    locator: { kind: "line-range" as const, startLine: 10, endLine: 12 },
+    excerpt: "The independently reproduced central outcome was one unit.",
+    excerptSha256: sha256Text("The independently reproduced central outcome was one unit."),
+    statement: "The independently reproduced central outcome was one unit.",
+    evidenceRoleIds: ["role-central-model"],
+    coverageDimensionIds: ["central-model-definitions"],
+    evidenceFunction: "support",
+    scope: "Synthetic publication workflow fixture.",
     limitations: [],
+  };
+  const evidenceAtom = {
+    ...evidenceAtomCore,
+    atomId: `atom-${sha256Text(canonicalJson(evidenceAtomCore)).slice(0, 24)}`,
+    atomSha256: sha256Text(canonicalJson(evidenceAtomCore)),
+    registeredAt: "2026-08-12T00:00:01.000Z",
+  };
+  const contentCore = {
+    schemaVersion: 1,
+    kind: "tiangong-evidence-content-snapshot",
+    snapshotId: "content-snapshot-final",
+    projectId,
+    acquisitionSnapshotId: snapshot.snapshotId,
+    acquisitionSnapshotSha256: snapshotSha256,
+    createdAt: "2026-08-12T00:00:01.000Z",
+    ledgerHead: "6".repeat(64),
+    decompositions: [],
+    atoms: [evidenceAtom],
+    sourceCoverage: [
+      {
+        sourceId: "peer-1",
+        atomIds: [evidenceAtom.atomId],
+        evidenceRoleIds: evidenceAtom.evidenceRoleIds,
+        coverageDimensionIds: evidenceAtom.coverageDimensionIds,
+        evidenceFunctions: [evidenceAtom.evidenceFunction],
+      },
+    ],
+    roleCoverage: [
+      {
+        roleId: "role-central-model",
+        sourceIds: ["peer-1"],
+        fullTextSourceIds: ["peer-1"],
+        datedSourceIds: ["peer-1"],
+        coverageDimensionIds: ["central-model-definitions"],
+        sourceTypes: ["journal-article"],
+        decision: "pass",
+        gaps: [],
+      },
+    ],
+    gate: {
+      decision: "pass",
+      reasons: [],
+      requiredDecompositionArtifactIds: [],
+      missingDecompositionArtifactIds: [],
+      acceptedFullTextSourceIds: [],
+      sourcesWithoutAtoms: snapshotSources
+        .map((source) => source.id)
+        .filter((sourceId) => sourceId !== "peer-1"),
+    },
+  };
+  const contentSnapshot = {
+    ...contentCore,
+    snapshotSha256: sha256Text(canonicalJson(contentCore)),
+  };
+  await writeJsonAtomic(join(outputRoot, "content-snapshot.json"), contentSnapshot);
+  const evidenceGate = project.scientificDesign!.gates["evidence-construct"];
+  const inferenceCore = {
+    schemaVersion: 1,
+    kind: "tiangong-inference-snapshot",
+    snapshotId: "inference-snapshot-final",
+    projectId,
+    createdAt: "2026-08-12T00:00:02.000Z",
+    ledgerHead: "7".repeat(64),
+    acquisitionSnapshot: { snapshotId: snapshot.snapshotId, snapshotSha256 },
+    contentSnapshot: {
+      snapshotId: contentSnapshot.snapshotId,
+      snapshotSha256: contentSnapshot.snapshotSha256,
+    },
+    scientificReview: {
+      designSha256: project.scientificDesign!.designSha256,
+      packetSha256: evidenceGate.packetSha256,
+      assessmentSha256: evidenceGate.assessmentSha256,
+      reviewSha256: evidenceGate.reviewSha256,
+    },
+    policySha256: policy.resolvedPolicySha256,
+    sources: snapshotSources.map((source) => ({ ...source, title: source.id })),
+    atoms: [evidenceAtom],
+    claims: designInput.design.contract.claims,
+    designEdges: designInput.design.contract.edges,
+    artifactSha256s: [],
+    implementationArtifactSha256s: designInput.design.contract.identity.modelStructures.map(
+      (model) => model.implementationArtifactSha256,
+    ),
+    environmentLockSha256s: designInput.design.contract.identity.modelStructures.map(
+      (model) => model.environmentLockSha256,
+    ),
+    gate: { decision: "pass", reasons: [] },
+  };
+  const inferenceSnapshot = {
+    ...inferenceCore,
+    snapshotSha256: sha256Text(canonicalJson(inferenceCore)),
+  };
+  await writeJsonAtomic(join(outputRoot, "inference-snapshot.json"), inferenceSnapshot);
+  const analysis = {
+    schemaVersion: 2,
+    inferenceSnapshotSha256: inferenceSnapshot.snapshotSha256,
+    analysisRun: {
+      id: "publication-fixture-run",
+      mode: "computational",
+      status: "reproduced",
+      implementationSha256s: inferenceCore.implementationArtifactSha256s,
+      environmentSha256s: inferenceCore.environmentLockSha256s,
+      inputArtifactSha256s: [],
+      command: "python analysis.py --seed 42",
+      randomSeed: "42",
+      limitations: [],
+    },
+    findings: [
+      {
+        id: "finding-central",
+        statement: "The independently reproduced central outcome was one unit.",
+        evidence: ["peer-1"],
+        evidenceAtomIds: [evidenceAtom.atomId],
+        claimIds: [designClaim.id],
+        analysisArtifactSha256s: [],
+        uncertainty: "The synthetic fixture does not estimate sampling uncertainty.",
+        applicability: "Applies only to the synthetic publication workflow fixture.",
+      },
+    ],
+    limitations: [],
+  };
+  await writeJsonAtomic(join(outputRoot, "analysis.json"), analysis);
+  const graphCore = {
+    schemaVersion: 1,
+    kind: "tiangong-claim-evidence-graph",
+    graphId: "claim-graph-final",
+    projectId,
+    createdAt: "2026-08-12T00:00:03.000Z",
+    inferenceSnapshotSha256: inferenceSnapshot.snapshotSha256,
+    analysisSha256: sha256Text(`${JSON.stringify(analysis, null, 2)}\n`),
+    analysisRunId: analysis.analysisRun.id,
+    nodes: [
+      {
+        id: "analysis-run:publication-fixture-run",
+        type: "analysis-run",
+        label: "publication-fixture-run",
+        sha256: null,
+      },
+      {
+        id: "finding:finding-central",
+        type: "finding",
+        label: analysis.findings[0]!.statement,
+        sha256: sha256Text(canonicalJson(analysis.findings[0])),
+      },
+      {
+        id: `atom:${evidenceAtom.atomId}`,
+        type: "atom",
+        label: evidenceAtom.statement,
+        sha256: evidenceAtom.atomSha256,
+      },
+      {
+        id: "source:peer-1",
+        type: "source",
+        label: "peer-1",
+        sha256: sha256Text(
+          canonicalJson(inferenceCore.sources.find((source) => source.id === "peer-1")),
+        ),
+      },
+      {
+        id: `design-claim:${designClaim.id}`,
+        type: "design-claim",
+        label: designClaim.statement,
+        sha256: sha256Text(canonicalJson(designClaim)),
+      },
+    ],
+    edges: [
+      {
+        id: "edge-finding-atom",
+        type: "finding-supported-by-atom",
+        from: "finding:finding-central",
+        to: `atom:${evidenceAtom.atomId}`,
+      },
+      {
+        id: "edge-atom-source",
+        type: "atom-derived-from-source",
+        from: `atom:${evidenceAtom.atomId}`,
+        to: "source:peer-1",
+      },
+      {
+        id: "edge-finding-claim",
+        type: "finding-addresses-design-claim",
+        from: "finding:finding-central",
+        to: `design-claim:${designClaim.id}`,
+      },
+      {
+        id: "edge-finding-run",
+        type: "finding-produced-by-analysis-run",
+        from: "finding:finding-central",
+        to: "analysis-run:publication-fixture-run",
+      },
+    ],
+  };
+  await writeJsonAtomic(join(outputRoot, "claim-evidence-graph.json"), {
+    ...graphCore,
+    graphSha256: sha256Text(canonicalJson(graphCore)),
   });
   await writeFile(join(outputRoot, "report.md"), "# Frozen research report\n");
   await writeJsonAtomic(join(outputRoot, "closure.json"), {
@@ -597,10 +935,55 @@ async function publicationFixture(
   const manuscript = join(root, "final-manuscript.md");
   const supplement = join(root, "supplement.csv");
   const assessment = join(root, "publication-assessment.json");
-  await writeFile(manuscript, "# Final manuscript\n\nObserved central outcome.\n");
+  const submissionFiles = [
+    { role: "cover-letter", path: join(root, "cover-letter.md") },
+    { role: "title-page", path: join(root, "title-page.md") },
+    { role: "reporting-checklist", path: join(root, "reporting-checklist.md") },
+    { role: "data-availability", path: join(root, "data-availability.md") },
+    { role: "code-availability", path: join(root, "code-availability.md") },
+    { role: "source-data", path: supplement },
+  ];
+  const submissionManifest = join(root, "submission-package.json");
+  await writeFile(
+    manuscript,
+    [
+      "# Observed central outcome in a validated study",
+      "## Abstract",
+      "The independently reproduced central outcome was one unit.",
+      "## Introduction",
+      "This study tests the declared central claim.",
+      "## Methods",
+      "We executed the frozen computational analysis with seed 42.",
+      "## Results",
+      "The central outcome was one unit.",
+      "## Discussion",
+      "The result applies only to this synthetic fixture.",
+      "## Data availability",
+      "The frozen source-data file accompanies this submission.",
+      "## Code availability",
+      "The command and environment hashes are recorded in the reproducibility manifest.",
+      "## References",
+      "1. Peer-reviewed fixture source.",
+      "",
+    ].join("\n\n"),
+  );
   await writeFile(supplement, "measure,value\noutcome,1\n");
+  for (const file of submissionFiles.filter((file) => file.path !== supplement)) {
+    await writeFile(file.path, `# ${file.role}\n\nComplete submission material for review.\n`);
+  }
+  await writeJsonAtomic(submissionManifest, { schemaVersion: 1, files: submissionFiles });
   await writeJsonAtomic(assessment, publicationAssessment(assessmentOverride));
-  return { root, projectId, policy, manuscript, supplement, assessment, snapshotSha256 };
+  return {
+    root,
+    projectId,
+    policy,
+    manuscript,
+    supplement,
+    assessment,
+    submissionFiles,
+    submissionManifest,
+    snapshotSha256,
+  };
 }
 
 async function createApprovedPublicationPolicy(

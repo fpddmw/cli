@@ -158,24 +158,26 @@ export async function recordNativeResearchActivity(input: {
   }
   const stage = active.stage;
   const kind = String(value.kind);
-  if (
-    (stage === "discover" && ["download", "file-inspection"].includes(kind)) ||
-    (stage === "acquire" && ["web-search", "database-search"].includes(kind))
-  ) {
+  if (stage === "discover" && ["download", "file-inspection"].includes(kind)) {
     throw activityError(`Native ${kind} activity is not valid during ${stage}.`);
   }
+  const discoveryActivity = ["web-search", "database-search"].includes(kind);
+  const routeClasses = discoveryActivity
+    ? (["native-discovery"] as const)
+    : kind === "browser-navigation"
+      ? (["authorized-browser"] as const)
+      : (["open-access-download", "authorized-browser"] as const);
   const route = await resolveAgentAcquisitionRoute({
     root: input.root,
     project,
     routeId: value.acquisitionRouteId,
-    routeClasses: ["native-discovery"],
-    activityKind: value.kind as
-      | "web-search"
-      | "database-search"
-      | "browser-navigation"
-      | "download"
-      | "file-inspection",
-    activityChannel: value.channel,
+    routeClasses: [...routeClasses],
+    ...(discoveryActivity
+      ? {
+          activityKind: value.kind as "web-search" | "database-search",
+          activityChannel: value.channel,
+        }
+      : {}),
   });
   const candidateIds = value.candidateIds as string[];
   const known = new Set(

@@ -570,6 +570,34 @@ export async function forkProject(
       );
       await saveProject(root, project);
     }
+    if (inheritedStages.includes("analyze")) {
+      const { freezeClaimEvidenceGraph, freezeInferenceSnapshot } = await import("./inference.js");
+      const inference = await freezeInferenceSnapshot(root, targetProjectId);
+      const analysisPath = join(targetRoot, "outputs", "analysis.json");
+      const analysis = await readJsonFile<Record<string, unknown>>(
+        analysisPath,
+        `Inherited analysis for ${targetProjectId}`,
+      );
+      analysis.inferenceSnapshotSha256 = inference.snapshotSha256;
+      await writeJsonAtomic(analysisPath, analysis);
+      await freezeClaimEvidenceGraph(root, targetProjectId, analysis);
+      const priorAnalysisIndex = inheritedOutputs.findIndex(
+        (record) => record.path === "outputs/analysis.json",
+      );
+      const reboundAnalysis = await fileRecord(analysisPath, "outputs/analysis.json");
+      if (priorAnalysisIndex >= 0) inheritedOutputs[priorAnalysisIndex] = reboundAnalysis;
+      else inheritedOutputs.push(reboundAnalysis);
+      inheritedOutputs.push(
+        await fileRecord(
+          join(targetRoot, "outputs", "inference-snapshot.json"),
+          "outputs/inference-snapshot.json",
+        ),
+        await fileRecord(
+          join(targetRoot, "outputs", "claim-evidence-graph.json"),
+          "outputs/claim-evidence-graph.json",
+        ),
+      );
+    }
     source.lineage.supersededBy = targetProjectId;
     source.evidenceState.staleReason = `Superseded by recovery fork ${targetProjectId}.`;
     refreshProject(source);

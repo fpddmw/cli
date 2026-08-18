@@ -2638,18 +2638,39 @@ function deterministicExecutor(): PackageExecutor {
       return execution(JSON.stringify(await acquisitionValue(request)));
     }
     if (stage === "analyze") {
-      const evidence = JSON.parse(
-        await readFile(join(request.projectRoot, "outputs", "evidence-snapshot.json"), "utf8"),
-      ) as { sources: Array<{ id: string }> };
-      const sourceId = evidence.sources[0]?.id ?? "source-1";
+      const inference = JSON.parse(
+        await readFile(join(request.projectRoot, "outputs", "inference-snapshot.json"), "utf8"),
+      ) as {
+        snapshotSha256: string;
+        sources: Array<{ id: string }>;
+        atoms: Array<{ atomId: string; sourceId: string }>;
+        artifactSha256s: string[];
+      };
+      const sourceId = inference.sources[0]?.id ?? "source-1";
+      const atomId = inference.atoms.find((atom) => atom.sourceId === sourceId)?.atomId;
       return execution(
         JSON.stringify({
-          schemaVersion: 1,
+          schemaVersion: 2,
+          inferenceSnapshotSha256: inference.snapshotSha256,
+          analysisRun: {
+            id: "deterministic-analysis-run",
+            mode: "qualitative",
+            status: "not-applicable",
+            implementationSha256s: [],
+            environmentSha256s: [],
+            inputArtifactSha256s: inference.artifactSha256s.slice(0, 1),
+            command: null,
+            randomSeed: null,
+            limitations: [],
+          },
           findings: [
             {
               id: "finding-1",
               statement: "The admitted evidence supports a bounded finding.",
               evidence: [sourceId],
+              evidenceAtomIds: atomId ? [atomId] : [],
+              claimIds: [],
+              analysisArtifactSha256s: [],
               uncertainty: "Limited to admitted evidence.",
               applicability: "Declared question.",
             },

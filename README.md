@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-08-18
-lastReviewedCommit: 9205e1b06678ef79042bee89bd3bca3fa77af515
+lastReviewedCommit: 34a5c2a3af26fc56e9c9dc94fcbdabd91a6dd1d8
 ---
 
 # Tiangong AI CLI
@@ -417,14 +417,17 @@ tiangong-ai research project init top-journal-paper \
   --workspace /absolute/path/to/workspace --json
 ```
 
-The base evidence lifecycle remains
-`discover -> acquire -> analyze -> synthesize -> review -> close`, authored in
-the current interactive Codex or Claude Code host. A fresh independent reviewer
+The base evidence lifecycle remains producer-authored in the current interactive
+Codex or Claude Code host, but its frozen control sequence is now
+`discover -> acquire -> typed decomposition/atoms -> content freeze -> inference freeze -> analyze -> Claim-Evidence Graph -> synthesize -> review -> close`.
+A fresh independent reviewer
 must first pass three hash-bound scientific gates: `research-design` before
 discovery, a real-record and outcome-blind `evidence-construct` canary after
-acquisition freezes the evidence snapshot, and `pilot-methods` after that
-canary and before analysis. Evidence-construct coverage may cite only frozen
-snapshot source IDs and states. Its JSON canary artifacts are promoted and
+acquisition and typed-content freeze, and `pilot-methods` after that canary and
+before analysis. Acquisition always freezes its exact result, including honest
+gaps; a stopped acquisition/content gate prevents inference without discarding
+the acquired evidence. Evidence-construct coverage may cite only frozen
+snapshot source IDs and exact content atoms. Its JSON canary artifacts are promoted and
 content-addressed through `--canary-artifacts`; reviewer prose cannot override
 an invented ID, unbound digest, or other mechanical failure.
 
@@ -457,14 +460,23 @@ audit manifest separately records the raw stored packet-file digest. This keeps
 packet identity and byte-level transfer verification explicit rather than
 overloading one hash with both meanings.
 
-After base closure, the current native host writes a final manuscript and
-schema-valid publication assessment. `research publication freeze` then
-content-addresses the Policy, scientific design and early reviews, evidence
-snapshot, base outputs, manuscript, assessment, and supplements.
+After base closure, the current native host writes a final Markdown/plain-text
+manuscript, schema-valid publication assessment, and an explicit submission
+manifest. The manuscript must contain Abstract, Introduction, Methods, Results,
+Discussion, Data availability, Code availability, and References. The
+submission manifest must bind distinct absolute files for cover letter, title
+page, reporting checklist, data availability, code availability, and source
+data; figure/table index, extended data, and supplementary methods are optional.
+`research publication freeze` then content-addresses the Policy, scientific
+design and early reviews, acquisition/content/inference snapshots, reproduced
+analysis, Claim-Evidence Graph, base outputs, manuscript, assessment,
+supplements, role-complete submission files, and reproducibility manifest.
 Exactly four fresh independent sessions review that frozen generation:
 evidence, methods/reproducibility, domain/novelty, and journal-editor. A revised
-manuscript invalidates prior reviews; reviewer-session reuse is rejected from
-the append-only journal even if mutable cache state is removed. The raw opaque
+manuscript invalidates prior reviews. Every reviewer must use the configured
+agent family that differs from the native producer; changing only the session
+ID is not independent. Reviewer-session reuse is rejected from the append-only
+journal even if mutable cache state is removed. The raw opaque
 producer/reviewer session identifiers are accepted only at the command boundary;
 generation, packet, review, journal, and closure objects persist only their
 SHA-256 bindings.
@@ -474,6 +486,7 @@ tiangong-ai research schema show publication-assessment --json
 tiangong-ai research publication freeze top-journal-paper \
   --manuscript /absolute/path/to/final-manuscript.md \
   --assessment /absolute/path/to/publication-assessment.json \
+  --submission /absolute/path/to/submission-package.json \
   --producer-agent codex --producer-session OPAQUE_NATIVE_SESSION \
   --workspace /absolute/path/to/workspace --json
 tiangong-ai research publication status top-journal-paper \
@@ -486,9 +499,13 @@ The CLI returns a mechanically bounded ceiling:
 it. None of these states predicts or guarantees editorial acceptance.
 
 Before external handoff or archival, export and independently verify a portable
-audit directory. It contains the selected project, portable copies of admitted
+audit directory. Export first revalidates the semantic acquisition, content,
+inference, graph, and publication objects; a copied but stale/tampered chain is
+rejected. Its manifest exposes their intrinsic IDs and hashes under
+`researchChain`. It contains the selected project, portable copies of admitted
 inputs, formal evidence and artifact bytes, Policy/design/review objects,
-outputs, environment fingerprints, and journal proofs. Credentials, setup
+outputs, environment fingerprints, and safe hash-preserving journal proof
+derivatives. Credentials, setup
 sources, browser profiles, native active state, capsules, unrelated projects,
 and host-specific absolute paths are excluded.
 
@@ -673,9 +690,19 @@ resume criteria. Research then stops; it does not spend more budget on
 low-yield substitutes. If no lawful remaining route exists, the user must narrow
 or abandon the unsupported scope before a new reviewed generation can resume.
 
-Successful acquisition freezes an immutable evidence snapshot before analysis.
-The reviewer and mechanical closure bind and recheck the snapshot chain,
-ledger, receipts, selected artifacts, excerpts, analysis, and report. Refresh a
+Acquisition freezes an immutable evidence snapshot even when lawful retrieval
+ends with explicit gaps. Before inference, decompose every acquired PDF,
+spreadsheet, archive, or structured file into exact lineage-bound producer-
+readable artifacts; register line-range or JSON-Pointer evidence atoms; then
+freeze `content-snapshot.json`. `research status --json` exposes acquisition,
+content, inference, and graph state under `evidencePipeline` and does not direct
+the operator to analysis while content preparation is missing or stopped.
+Only passing acquisition/content gates and required scientific reviews can
+freeze `inference-snapshot.json`. Analyze schema v2 binds that exact snapshot,
+a reproduced analysis run, source IDs, atom IDs, and design claim IDs; the CLI
+then creates `claim-evidence-graph.json` mechanically. The reviewer and
+mechanical closure bind and recheck the full chain, ledger, receipts, selected
+artifacts, excerpts, analysis, graph, and report. Refresh a
 closed result with `research project addendum SOURCE --to TARGET`; the original
 closure remains unchanged, the child snapshot records a mechanical delta, and
 default status hides the superseded project (`research status --all` shows full

@@ -74,6 +74,12 @@ export interface EvidenceSnapshot {
     linkedCandidateIds: string[];
   };
   coverage: Record<string, unknown>;
+  gaps: string[];
+  inferenceGate: {
+    decision: "pass" | "stop";
+    coverageDecision: "pass" | "insufficient";
+    reasons: string[];
+  };
   limitations: string[];
   delta: {
     addedSourceIds: string[];
@@ -202,11 +208,6 @@ export async function freezeEvidenceSnapshot(
   const audit = parseMaterializedAcquisitionAudit(
     JSON.parse(await readFile(acquisitionPath, "utf8")),
   );
-  if (audit.gaps.length) {
-    throw snapshotError("Acquisition audit retains unresolved blocking gaps.", {
-      gaps: audit.gaps,
-    });
-  }
   const decisions = new Map(audit.decisions.map((decision) => [decision.sourceId, decision]));
   const includedSources = (evidence.sources as Array<Record<string, unknown>>).flatMap((source) => {
     const sourceId = String(source.id);
@@ -244,11 +245,12 @@ export async function freezeEvidenceSnapshot(
     includedSources,
     isObject(evidence.coverage) ? evidence.coverage : {},
   );
-  if (coverage.decision !== "pass") {
-    throw snapshotError("Evidence snapshot does not satisfy the reviewed coverage gate.", {
-      gaps: coverage.gaps,
-    });
-  }
+  const inferenceReasons = [...new Set([...audit.gaps, ...coverage.gaps])];
+  const inferenceGate = {
+    decision: (inferenceReasons.length ? "stop" : "pass") as "pass" | "stop",
+    coverageDecision: coverage.decision,
+    reasons: inferenceReasons,
+  };
   const selectedArtifactIds = new Set(
     audit.decisions
       .filter((decision) => decision.status !== "rejected")
@@ -329,6 +331,8 @@ export async function freezeEvidenceSnapshot(
       ].sort(),
     },
     coverage,
+    gaps: audit.gaps,
+    inferenceGate,
     limitations: [
       ...(evidence.limitations as string[]),
       ...audit.limitations,
@@ -364,6 +368,8 @@ export async function freezeEvidenceSnapshot(
     sourceCount: includedSources.length,
     artifactCount: artifacts.length,
     coverage,
+    gaps: audit.gaps,
+    inferenceGate,
   });
   project.evidenceState.currentSnapshotId = snapshot.snapshotId;
   project.evidenceState.currentSnapshotSha256 = snapshot.snapshotSha256;
@@ -461,6 +467,26 @@ export async function loadCurrentEvidenceSnapshot(
     if (!current || canonicalJson(current) !== canonicalJson(artifact)) {
       throw snapshotError(`Snapshot artifact binding drifted: ${artifact.artifactId}.`);
     }
+  }
+  return snapshot;
+}
+
+export async function loadInferenceReadyEvidenceSnapshot(
+  root: string,
+  projectId: string,
+): Promise<EvidenceSnapshot> {
+  const snapshot = await loadCurrentEvidenceSnapshot(root, projectId);
+  if (snapshot.inferenceGate.decision !== "pass") {
+    throw new CliError("Formal inference is blocked by the frozen evidence gate.", {
+      code: "RESEARCH_INFERENCE_GATE_BLOCKED",
+      exitCode: 3,
+      details: {
+        snapshotId: snapshot.snapshotId,
+        snapshotSha256: snapshot.snapshotSha256,
+        coverageDecision: snapshot.inferenceGate.coverageDecision,
+        reasons: snapshot.inferenceGate.reasons,
+      },
+    });
   }
   return snapshot;
 }
@@ -635,6 +661,9 @@ function parseEvidenceSnapshot(value: unknown): EvidenceSnapshot {
     !Array.isArray(value.artifacts) ||
     !isActivitySummary(value.activitySummary) ||
     !isObject(value.coverage) ||
+    !Array.isArray(value.gaps) ||
+    value.gaps.some((gap) => typeof gap !== "string") ||
+    !isInferenceGate(value.inferenceGate) ||
     !Array.isArray(value.limitations) ||
     value.limitations.some((limitation) => typeof limitation !== "string") ||
     !isObject(value.delta) ||
@@ -645,6 +674,17 @@ function parseEvidenceSnapshot(value: unknown): EvidenceSnapshot {
     throw snapshotError("Evidence snapshot is malformed.");
   }
   return value as unknown as EvidenceSnapshot;
+}
+
+function isInferenceGate(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    ["pass", "stop"].includes(String(value.decision)) &&
+    ["pass", "insufficient"].includes(String(value.coverageDecision)) &&
+    Array.isArray(value.reasons) &&
+    value.reasons.every((reason) => typeof reason === "string") &&
+    (value.decision === "pass" ? value.reasons.length === 0 : value.reasons.length > 0)
+  );
 }
 
 function isActivitySummary(value: unknown): boolean {

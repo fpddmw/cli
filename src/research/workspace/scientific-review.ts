@@ -161,6 +161,8 @@ interface EvidenceConstructSource {
 interface EvidenceConstructContext {
   sources: Map<string, EvidenceConstructSource>;
   canaryArtifactSha256s: Set<string>;
+  contentGate: { decision: "pass" | "stop"; reasons: string[] } | null;
+  contentRoleSourceIds: Map<string, Set<string>>;
 }
 
 interface ScientificFutureGateObligation {
@@ -878,6 +880,13 @@ function evaluateAssessment(
   } else if (role === "evidence-construct") {
     const value = assessment as EvidenceConstructAssessment;
     const canary = value.constructCanary;
+    if (evidenceContext?.contentGate?.decision === "stop") {
+      add(
+        "EVIDENCE_CONTENT_GATE_STOPPED",
+        "The frozen typed-content snapshot found blocking decomposition, atom, or evidence-role gaps.",
+        evidenceContext.contentGate.reasons,
+      );
+    }
     if (
       !canary.usesRealRecords ||
       !canary.outcomeBlind ||
@@ -957,6 +966,17 @@ function evaluateAssessment(
       const unknownIds = [...referencedIds].filter(
         (sourceId) => !evidenceContext?.sources.has(sourceId),
       );
+      const atomBoundRoleSources = evidenceContext?.contentRoleSourceIds.get(required.id);
+      if (
+        atomBoundRoleSources &&
+        [...independentIds].some((sourceId) => !atomBoundRoleSources.has(sourceId))
+      ) {
+        add(
+          "EVIDENCE_ROLE_ATOM_BINDING_INVALID",
+          "Evidence-role coverage may use only sources with exact atoms assigned to that role in the typed-content snapshot.",
+          [required.id],
+        );
+      }
       if (unknownIds.length) {
         add(
           "EVIDENCE_SOURCE_ID_UNKNOWN",
@@ -1344,6 +1364,12 @@ async function stageInputRecords(
     });
   }
   const relativeOutputs = ["outputs/acquisition.json", "outputs/evidence-snapshot.json"];
+  if (
+    role === "evidence-construct" &&
+    (await pathExists(join(projectRoot, "outputs", "content-snapshot.json")))
+  ) {
+    relativeOutputs.push("outputs/content-snapshot.json");
+  }
   const stageOutputs = await Promise.all(
     relativeOutputs.map(async (relativePath) => {
       const sourceLocator = `projects/${project.id}/${relativePath}`;
@@ -1506,6 +1532,68 @@ async function assessmentEvidenceContext(
         : [],
     });
   }
+  const contentRecord = stageInputs.find(
+    (record) =>
+      record.purpose === "stage-output" &&
+      record.sourceLocator === `projects/${project.id}/outputs/content-snapshot.json`,
+  );
+  let contentGate: EvidenceConstructContext["contentGate"] = null;
+  const contentRoleSourceIds = new Map<string, Set<string>>();
+  if (contentRecord) {
+    const contentSnapshot = await readExactJson(
+      resolveContained(workspacePaths(root).control, contentRecord.path),
+      "Evidence content snapshot",
+      "RESEARCH_SCIENTIFIC_GATE_INVALID",
+    );
+    if (
+      !isObject(contentSnapshot) ||
+      contentSnapshot.schemaVersion !== 1 ||
+      contentSnapshot.kind !== "tiangong-evidence-content-snapshot" ||
+      contentSnapshot.projectId !== project.id ||
+      contentSnapshot.acquisitionSnapshotId !== snapshotId ||
+      contentSnapshot.acquisitionSnapshotSha256 !== snapshotSha256 ||
+      typeof contentSnapshot.snapshotSha256 !== "string" ||
+      !new RegExp(SHA256_PATTERN).test(contentSnapshot.snapshotSha256) ||
+      !isObject(contentSnapshot.gate) ||
+      !["pass", "stop"].includes(String(contentSnapshot.gate.decision)) ||
+      !Array.isArray(contentSnapshot.gate.reasons) ||
+      contentSnapshot.gate.reasons.some((reason) => typeof reason !== "string") ||
+      !Array.isArray(contentSnapshot.roleCoverage)
+    ) {
+      throw scientificGateError("Evidence content snapshot is malformed for review.", role);
+    }
+    const { snapshotSha256: contentSnapshotSha256, ...contentCore } = contentSnapshot;
+    const immutableContentSnapshot = resolveContained(
+      workspacePaths(root).projects,
+      `${project.id}/evidence/content-snapshots/${contentSnapshotSha256}.json`,
+    );
+    const contentBytes = normalizedJson(contentSnapshot);
+    if (
+      sha256Text(canonicalJson(contentCore)) !== contentSnapshotSha256 ||
+      !(await pathExists(immutableContentSnapshot)) ||
+      (await readFile(immutableContentSnapshot, "utf8")) !== contentBytes
+    ) {
+      throw scientificGateError(
+        "Evidence-construct review requires the current immutable content snapshot binding.",
+        role,
+      );
+    }
+    contentGate = {
+      decision: contentSnapshot.gate.decision as "pass" | "stop",
+      reasons: contentSnapshot.gate.reasons as string[],
+    };
+    for (const coverage of contentSnapshot.roleCoverage) {
+      if (
+        !isObject(coverage) ||
+        typeof coverage.roleId !== "string" ||
+        !Array.isArray(coverage.sourceIds) ||
+        coverage.sourceIds.some((sourceId) => typeof sourceId !== "string")
+      ) {
+        throw scientificGateError("Evidence content role coverage is malformed for review.", role);
+      }
+      contentRoleSourceIds.set(coverage.roleId, new Set(coverage.sourceIds as string[]));
+    }
+  }
   return {
     sources,
     canaryArtifactSha256s: new Set(
@@ -1513,6 +1601,8 @@ async function assessmentEvidenceContext(
         .filter((record) => record.purpose === "construct-canary")
         .map((record) => record.sha256),
     ),
+    contentGate,
+    contentRoleSourceIds,
   };
 }
 

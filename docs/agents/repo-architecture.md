@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-08-18
-lastReviewedCommit: 9205e1b06678ef79042bee89bd3bca3fa77af515
+lastReviewedCommit: 34a5c2a3af26fc56e9c9dc94fcbdabd91a6dd1d8
 ---
 
 # Repo Architecture
@@ -89,7 +89,12 @@ storage writes, queueing, and document status transitions.
   closeout, native Web/Browser activity receipts whose sensitive inputs are
   retained only by hash, exact download-event binding, and explicit exact-file
   artifact registration with PDF/ZIP/OpenXML validation,
-  acquisition audits, immutable parent/delta evidence snapshots, addendum
+  acquisition audits that freeze both success and honest gaps, immutable
+  parent/delta evidence snapshots, exact-lineage artifact decomposition,
+  line-range/JSON-Pointer evidence atoms, typed-content coverage snapshots,
+  separate inference-stop gates, immutable inference snapshots, schema-v2
+  reproducible analysis runs, and mechanically generated Claim-Evidence Graphs,
+  addendum
   supersession, one authoritative project lineage with explicit
   archive/abandon dispositions, and default historical-project filtering,
   hash-bound native-host producer stage prepare/submit/abort, one-shot native
@@ -130,16 +135,22 @@ storage writes, queueing, and document status transitions.
   real-record construct-canary artifacts, pilot-methods invariants, complete-lifecycle
   review/revision reservations, and target-specific reapproval for every
   authoritative fork or addendum generation,
-  mechanical publication assessment, immutable final-manuscript generations,
-  append-only fresh-session enforcement across four independent reviewer
-  roles, hash-only persistence for producer/reviewer session identifiers, and a
-  separate publication closure whose language cannot exceed the approved Policy
-  ceiling. It can export and independently verify an immutable portable audit
-  directory containing exact project inputs, evidence/artifact bytes,
-  Policy/design/review objects, environment fingerprints, and journal proofs,
+  mechanical publication assessment, required manuscript sections, explicit
+  role-complete submission-file manifests, immutable final-manuscript
+  generations that bind content/inference/graph/reproducibility objects,
+  append-only fresh-session and configured other-agent-family enforcement
+  across four independent reviewer roles, hash-only persistence for
+  producer/reviewer session identifiers, and a separate publication closure
+  whose language cannot exceed the approved Policy ceiling. It can export and
+  independently verify an immutable portable audit directory only after
+  semantically revalidating the acquisition/content/inference/graph/publication
+  chain. The manifest names that chain alongside exact project inputs,
+  evidence/artifact bytes, Policy/design/review objects, environment
+  fingerprints, and sanitized hash-preserving journal proofs,
   while excluding credentials, ephemeral/native state, unrelated projects, and
-  host paths. Top-level status distinguishes active base research from invalid
-  scientific or publication state.
+  host paths. Top-level status exposes the acquisition, typed-content,
+  inference, and graph chain and distinguishes active base research from
+  invalid scientific or publication state.
 - `src/education/**`: education search command handling and source specs for
   course, education, and textbook edge-search functions.
 - `src/edge-search.ts`: shared edge-search forwarding helper. It derives
@@ -263,23 +274,32 @@ the exact selected file and download event before artifact registration,
 requires derived text to name its parent artifact, and lets that derivative
 inherit only the parent's canonical source URL instead of fabricating a second
 download binding; a conflicting URL is rejected. Acquisition then produces a
-complete source audit and verified immutable snapshot. The top-journal
-evidence-construct canary runs against that snapshot, binds its exact external
-JSON artifact bytes without retaining host paths, and rejects invented source
-IDs or asserted full-text/date states before the methods pilot. Analysis starts
-only after both reviews pass. Later
+complete source audit and verified immutable snapshot even when its separate
+inference gate stops on honest gaps. Every acquired binary/data artifact is
+then dispositioned through an exact decomposition record; producer-readable
+derivatives support line-range or JSON-Pointer atoms whose source, artifact,
+role, dimension, scope, and limitations are hash-bound in a typed-content
+snapshot. The top-journal evidence-construct canary runs against those frozen
+objects, binds its exact external JSON artifact bytes without retaining host
+paths, and rejects invented source IDs, unbound atoms, or asserted
+full-text/date states before the methods pilot. Only passing acquisition,
+content, construct, and pilot gates create the immutable inference snapshot.
+Analysis v2 binds one reproducible run plus exact source/atom/design-claim IDs;
+the CLI generates the Claim-Evidence Graph mechanically before synthesis. Later
 producer packets contain bounded, hash-verified prior artifacts. The platform
 `sandbox-exec`/Bubblewrap capsule is used for the independently launched
 reviewer CLI; that adapter disables shell, unified-exec, filesystem, and
 undeclared integrations.
 
 Final manuscript authoring follows the same native-host boundary. The CLI
-validates and freezes the native artifact but does not author it or launch a
-nested producer. The base research reviewer remains a CLI-isolated other-family
-reviewer; the final publication gate adds four role-specific, fresh reviewer
-sessions bound to one frozen manuscript generation. Base closure and
-publication closure are distinct objects and neither implies journal
-acceptance.
+validates required manuscript sections and a distinct-file submission manifest,
+then freezes the native artifact, required cover/title/checklist/availability/
+source-data files, inference chain, Claim-Evidence Graph, and reproducibility
+manifest; it does not author them or launch a nested producer. The base research
+reviewer remains a CLI-isolated other-family reviewer. Every one of the four
+role-specific final reviewers must use that configured family, a fresh session,
+and the same frozen generation. Base closure and publication closure are
+distinct objects and neither implies journal acceptance.
 
 Top-journal scientific reasoning follows that same boundary. The current native
 host authors the design and the three bounded gate assessments. The CLI rejects

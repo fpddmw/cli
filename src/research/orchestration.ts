@@ -27,6 +27,12 @@ import { fetchNativeCandidateSource } from "./workspace/broker.js";
 import { registerEvidenceArtifact } from "./workspace/artifacts.js";
 import { exportProjectAuditBundle, verifyProjectAuditBundle } from "./workspace/audit-bundle.js";
 import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
+import {
+  freezeEvidenceContentSnapshot,
+  loadCurrentEvidenceContentSnapshot,
+  recordArtifactDecomposition,
+  registerEvidenceAtom,
+} from "./workspace/content-evidence.js";
 import { inspectDiscoveryProgress } from "./workspace/discovery-status.js";
 import { inspectEvidenceAccessStatus } from "./workspace/evidence-exhaustion.js";
 import { recordDiscoveryAssessmentBatch } from "./workspace/discovery.js";
@@ -34,6 +40,10 @@ import { bindEvidenceDownload } from "./workspace/downloads.js";
 import { registerNativeDiscoveryCandidate } from "./workspace/evidence-ledger.js";
 import { recordNativeResearchActivity } from "./workspace/native-activity.js";
 import { readAndVerifyProjectInputPlan } from "./workspace/input-plan.js";
+import {
+  loadCurrentClaimEvidenceGraph,
+  loadCurrentInferenceSnapshot,
+} from "./workspace/inference.js";
 import {
   addProjectInput,
   createProjectAddendum,
@@ -57,6 +67,7 @@ import {
   publicationReviewSchema,
   submitPublicationReview,
   type PublicationReviewRole,
+  type PublicationSubmissionRole,
   type PublicationStatus,
 } from "./workspace/publication-workflow.js";
 import {
@@ -92,7 +103,7 @@ import {
   submitScientificReview,
   type ScientificReviewStatus,
 } from "./workspace/scientific-review.js";
-import { pathExists, sha256Text, workspacePaths } from "./workspace/storage.js";
+import { isObject, pathExists, sha256Text, workspacePaths } from "./workspace/storage.js";
 import type {
   ProjectEvidenceRequirements,
   ProjectInput,
@@ -149,7 +160,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research policy validate <project-id> [--workspace <path>] [--json]
   tiangong-ai research policy approve <project-id> --confirm [--acknowledge-defaults] [--workspace <path>] [--json]
   tiangong-ai research policy resolve <project-id> [--workspace <path>] [--json]
-  tiangong-ai research publication freeze <project-id> --manuscript <absolute-file> --assessment <absolute-json> --producer-agent codex|claude --producer-session <opaque-id> [--supplements <absolute-json-array>] [--workspace <path>] [--json]
+  tiangong-ai research publication freeze <project-id> --manuscript <absolute-file> --assessment <absolute-json> --submission <absolute-json> --producer-agent codex|claude --producer-session <opaque-id> [--supplements <absolute-json-array>] [--workspace <path>] [--json]
   tiangong-ai research publication review prepare <project-id> --role evidence|methods-reproducibility|domain-novelty|journal-editor --reviewer-agent codex|claude --reviewer-session <opaque-id> [--workspace <path>] [--json]
   tiangong-ai research publication review submit <project-id> --role evidence|methods-reproducibility|domain-novelty|journal-editor --review <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research publication status <project-id> [--workspace <path>] [--json]
@@ -179,6 +190,10 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project evidence assessment record <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence download bind <project-id> --candidate <id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence artifact register <project-id> --candidate <id> --path <absolute-file> [--download-binding <id> | --derived-from-artifact <id>] [--media-type <type>] [--source-url <https-url>] [--license <declared-license>] [--license-url <https-url>] [--host-type <type>] [--article-version <version>] [--workspace <path>] [--json]
+  tiangong-ai research project evidence decomposition record <project-id> --record <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence atom register <project-id> --record <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence content freeze <project-id> [--workspace <path>] [--json]
+  tiangong-ai research project evidence content status <project-id> [--workspace <path>] [--json]
   tiangong-ai research schema show <discover|acquire|analyze|synthesize|review|doctor|scientific-design|scientific-assessment-research-design|scientific-assessment-evidence-construct|scientific-assessment-pilot-methods|scientific-review-research-design|scientific-review-evidence-construct|scientific-review-pilot-methods|publication-assessment|publication-review-evidence|publication-review-methods-reproducibility|publication-review-domain-novelty|publication-review-journal-editor> [--compatibility claude-code] [--json]
   tiangong-ai research status [--project <project-id>] [--all] [--workspace <absolute-path>] [--json]
   tiangong-ai research run [--project <project-id>] [--max-parallel <1-8>] [--max-cycles <1-100>] [--dry-run] [--progress-jsonl] [--workspace <absolute-path>] [--json]
@@ -198,6 +213,7 @@ async function runPublication(argv: string[], io: CliIO): Promise<number> {
         manuscript: "string",
         assessment: "string",
         supplements: "string",
+        submission: "string",
         "producer-agent": "string",
         "producer-session": "string",
       },
@@ -208,9 +224,10 @@ async function runPublication(argv: string[], io: CliIO): Promise<number> {
     const manuscriptPath = strictString(args, "manuscript");
     const assessmentPath = strictString(args, "assessment");
     const producerSessionId = strictString(args, "producer-session");
-    if (!manuscriptPath || !assessmentPath || !producerSessionId) {
+    const submissionPath = strictString(args, "submission");
+    if (!manuscriptPath || !assessmentPath || !submissionPath || !producerSessionId) {
       throw new CliError(
-        "research publication freeze requires --manuscript, --assessment, --producer-agent, and --producer-session.",
+        "research publication freeze requires --manuscript, --assessment, --submission, --producer-agent, and --producer-session.",
         { code: "RESEARCH_PUBLICATION_ARGUMENT_REQUIRED", exitCode: 2 },
       );
     }
@@ -224,6 +241,7 @@ async function runPublication(argv: string[], io: CliIO): Promise<number> {
         manuscriptPath,
         assessmentPath,
         supplementPaths: supplementsPath ? await readAbsolutePathArray(supplementsPath) : [],
+        submissionFiles: await readSubmissionFiles(submissionPath),
         producerAgent: publicationAgent(strictString(args, "producer-agent"), "producer"),
         producerSessionId,
       }),
@@ -1199,6 +1217,96 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       writeJson(io, result, args);
       return 0;
     }
+    if (evidenceAction === "decomposition") {
+      const [decompositionAction, ...decompositionRest] = evidenceRest;
+      if (decompositionAction !== "record") {
+        throw unknownAction("research project evidence decomposition", decompositionAction ?? "");
+      }
+      const args = parseStrictArgs(
+        decompositionRest,
+        { ...WORKSPACE_OPTIONS, record: "string" },
+        "research project evidence decomposition record",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(
+        args.positionals,
+        "research project evidence decomposition record",
+      );
+      const recordPath = strictString(args, "record");
+      if (!recordPath) {
+        throw new CliError("decomposition record requires --record.", {
+          code: "RESEARCH_DECOMPOSITION_INVALID",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      const record = await readBoundedJsonRecord(
+        recordPath,
+        "--record",
+        "RESEARCH_DECOMPOSITION_INVALID",
+      );
+      const result = await withWorkspaceLock(root, "research.decomposition.record", () =>
+        recordArtifactDecomposition({ root, projectId, value: record }),
+      );
+      writeJson(io, result, args);
+      return 0;
+    }
+    if (evidenceAction === "atom") {
+      const [atomAction, ...atomRest] = evidenceRest;
+      if (atomAction !== "register") {
+        throw unknownAction("research project evidence atom", atomAction ?? "");
+      }
+      const args = parseStrictArgs(
+        atomRest,
+        { ...WORKSPACE_OPTIONS, record: "string" },
+        "research project evidence atom register",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project evidence atom register");
+      const recordPath = strictString(args, "record");
+      if (!recordPath) {
+        throw new CliError("atom register requires --record.", {
+          code: "RESEARCH_EVIDENCE_ATOM_INVALID",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      const record = await readBoundedJsonRecord(
+        recordPath,
+        "--record",
+        "RESEARCH_EVIDENCE_ATOM_INVALID",
+      );
+      const result = await withWorkspaceLock(root, "research.evidence-atom.register", () =>
+        registerEvidenceAtom({ root, projectId, value: record }),
+      );
+      writeJson(io, result, args);
+      return 0;
+    }
+    if (evidenceAction === "content") {
+      const [contentAction, ...contentRest] = evidenceRest;
+      if (contentAction !== "freeze" && contentAction !== "status") {
+        throw unknownAction("research project evidence content", contentAction ?? "");
+      }
+      const args = parseStrictArgs(
+        contentRest,
+        WORKSPACE_OPTIONS,
+        `research project evidence content ${contentAction}`,
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(
+        args.positionals,
+        `research project evidence content ${contentAction}`,
+      );
+      const root = await workspaceFromArgs(args);
+      const result =
+        contentAction === "freeze"
+          ? await withWorkspaceLock(root, "research.evidence-content.freeze", () =>
+              freezeEvidenceContentSnapshot(root, projectId),
+            )
+          : await loadCurrentEvidenceContentSnapshot(root, projectId);
+      writeJson(io, result, args);
+      return 0;
+    }
     if (evidenceAction !== "fetch") {
       throw unknownAction("research project evidence", evidenceAction ?? "");
     }
@@ -1596,7 +1704,8 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
       projects.map(async (project) => {
         const current = refreshProject(project);
         const nativeStage = await inspectNativeResearchStage(root, current);
-        const snapshot = await inspectSnapshotForStatus(root, current.id);
+        const evidencePipeline = await inspectEvidencePipelineForStatus(root, current);
+        const snapshot = evidencePipeline.acquisition;
         const readyPackage = nextReadyPackage(current)?.id ?? null;
         const scientificReview = await inspectScientificReviewStatus(root, current.id);
         const evidenceAccess = current.scientificDesign
@@ -1614,6 +1723,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
           handoff: current.handoff,
           evidenceState: current.evidenceState,
           snapshot,
+          evidencePipeline,
           nativeStage,
           scientificReview,
           evidenceAccess,
@@ -1625,6 +1735,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
             readyPackage,
             nativeStage,
             scientificReview,
+            evidencePipeline,
             publication,
           ),
           usage: current.usage,
@@ -1637,6 +1748,106 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
   };
   writeJson(io, result, args);
   return 0;
+}
+
+interface EvidencePipelineStageStatus {
+  status: "absent" | "verified" | "blocked" | "invalid";
+  code?: string;
+  gate?: { decision: "pass" | "stop"; reasons: string[] };
+  [key: string]: unknown;
+}
+
+interface EvidencePipelineStatus {
+  acquisition: EvidencePipelineStageStatus;
+  content: EvidencePipelineStageStatus;
+  inference: EvidencePipelineStageStatus;
+  claimGraph: EvidencePipelineStageStatus;
+}
+
+async function inspectEvidencePipelineForStatus(
+  root: string,
+  project: Awaited<ReturnType<typeof loadProject>>,
+): Promise<EvidencePipelineStatus> {
+  const projectRoot = join(workspacePaths(root).projects, project.id);
+  const acquisition = await inspectSnapshotForStatus(root, project.id);
+  const contentPath = join(projectRoot, "outputs", "content-snapshot.json");
+  let content: EvidencePipelineStageStatus = { status: "absent" };
+  if (await pathExists(contentPath)) {
+    try {
+      const snapshot = await loadCurrentEvidenceContentSnapshot(root, project.id);
+      content = {
+        status: "verified",
+        snapshotId: snapshot.snapshotId,
+        snapshotSha256: snapshot.snapshotSha256,
+        decompositionCount: snapshot.decompositions.length,
+        atomCount: snapshot.atoms.length,
+        sourceCount: snapshot.sourceCoverage.length,
+        roleCount: snapshot.roleCoverage.length,
+        insufficientRoleIds: snapshot.roleCoverage
+          .filter((role) => role.decision === "insufficient")
+          .map((role) => role.roleId),
+        gate: snapshot.gate,
+      };
+    } catch (error) {
+      content = {
+        status: "invalid",
+        code: error instanceof CliError ? error.code : "RESEARCH_EVIDENCE_CONTENT_SNAPSHOT_INVALID",
+      };
+    }
+  }
+  const inferencePath = join(projectRoot, "outputs", "inference-snapshot.json");
+  let inference: EvidencePipelineStageStatus = { status: "absent" };
+  if (await pathExists(inferencePath)) {
+    try {
+      const snapshot = await loadCurrentInferenceSnapshot(root, project.id);
+      inference = {
+        status: "verified",
+        snapshotId: snapshot.snapshotId,
+        snapshotSha256: snapshot.snapshotSha256,
+        sourceCount: snapshot.sources.length,
+        atomCount: snapshot.atoms.length,
+        claimCount: snapshot.claims.length,
+        artifactCount: snapshot.artifactSha256s.length,
+        gate: snapshot.gate,
+      };
+    } catch (error) {
+      inference = {
+        status: "invalid",
+        code: error instanceof CliError ? error.code : "RESEARCH_INFERENCE_SNAPSHOT_INVALID",
+      };
+    }
+  } else if (acquisition.gate?.decision === "stop") {
+    inference = { status: "blocked", gate: acquisition.gate };
+  } else if (content.gate?.decision === "stop") {
+    inference = { status: "blocked", gate: content.gate };
+  } else if (project.scientificDesign && content.status !== "verified") {
+    inference = {
+      status: "blocked",
+      code: "RESEARCH_EVIDENCE_CONTENT_SNAPSHOT_REQUIRED",
+    };
+  }
+  const graphPath = join(projectRoot, "outputs", "claim-evidence-graph.json");
+  let claimGraph: EvidencePipelineStageStatus = { status: "absent" };
+  if (await pathExists(graphPath)) {
+    try {
+      const graph = await loadCurrentClaimEvidenceGraph(root, project.id);
+      claimGraph = {
+        status: "verified",
+        graphId: graph.graphId,
+        graphSha256: graph.graphSha256,
+        analysisSha256: graph.analysisSha256,
+        analysisRunId: graph.analysisRunId,
+        nodeCount: graph.nodes.length,
+        edgeCount: graph.edges.length,
+      };
+    } catch (error) {
+      claimGraph = {
+        status: "invalid",
+        code: error instanceof CliError ? error.code : "RESEARCH_CLAIM_EVIDENCE_GRAPH_INVALID",
+      };
+    }
+  }
+  return { acquisition, content, inference, claimGraph };
 }
 
 async function inspectEvidenceAccessForStatus(
@@ -1680,7 +1891,7 @@ function projectAuthority(
 async function inspectSnapshotForStatus(
   root: string,
   projectId: string,
-): Promise<Record<string, unknown>> {
+): Promise<EvidencePipelineStageStatus> {
   const currentPath = join(
     workspacePaths(root).projects,
     projectId,
@@ -1697,6 +1908,8 @@ async function inspectSnapshotForStatus(
       parentSnapshotId: snapshot.parentSnapshotId,
       sourceCount: snapshot.sources.length,
       artifactCount: snapshot.artifacts.length,
+      gapCount: snapshot.gaps.length,
+      gate: snapshot.inferenceGate,
       delta: snapshot.delta,
     };
   } catch (error) {
@@ -1728,6 +1941,7 @@ function projectRecommendedAction(
   readyPackage: string | null,
   nativeStage: Awaited<ReturnType<typeof inspectNativeResearchStage>>,
   scientificReview: ScientificReviewStatus,
+  evidencePipeline: EvidencePipelineStatus,
   publication: PublicationStatus | { generationStatus: "invalid"; code: string } | null,
 ): string {
   if (project.lineage.supersededBy) {
@@ -1753,6 +1967,23 @@ function projectRecommendedAction(
   }
   if (nativeStage.status === "active") {
     return nativeStage.recommendedAction ?? "Resume the active native stage.";
+  }
+  if (readyPackage === "analyze") {
+    if (evidencePipeline.content.status === "absent") {
+      return `Decompose every acquired full-text/data artifact, register exact evidence atoms, then freeze typed content: tiangong-ai research project evidence content freeze ${project.id} --workspace ${root}`;
+    }
+    if (evidencePipeline.content.status === "invalid") {
+      return `Typed evidence content is invalid (${evidencePipeline.content.code ?? "unknown"}); repair exact decomposition/atom bindings before analysis.`;
+    }
+    if (evidencePipeline.content.gate?.decision === "stop") {
+      return "Typed evidence coverage is insufficient; complete lawful gap filling or request a scope/access handoff instead of starting inference.";
+    }
+    if (evidencePipeline.acquisition.gate?.decision === "stop") {
+      return "Frozen acquisition gaps block inference; request a scope/access handoff after all acquired content is decomposed instead of continuing substitute search.";
+    }
+    if (evidencePipeline.inference.status === "invalid") {
+      return `Inference snapshot is invalid (${evidencePipeline.inference.code ?? "unknown"}); repair its frozen upstream bindings before analysis.`;
+    }
   }
   if (scientificReview.nextGate) {
     const gate = scientificReview.nextGate;
@@ -2105,6 +2336,34 @@ async function readAbsolutePathArray(path: string, option = "supplements"): Prom
     });
   }
   return value;
+}
+
+async function readSubmissionFiles(
+  path: string,
+): Promise<Array<{ role: PublicationSubmissionRole; path: string }>> {
+  const value = await readBoundedJsonRecord(
+    path,
+    "--submission",
+    "RESEARCH_PUBLICATION_SUBMISSION_PACKAGE_INVALID",
+  );
+  if (
+    value.schemaVersion !== 1 ||
+    !Array.isArray(value.files) ||
+    value.files.some(
+      (file) =>
+        !isObject(file) ||
+        typeof file.role !== "string" ||
+        typeof file.path !== "string" ||
+        !isAbsolute(file.path) ||
+        resolve(file.path) !== file.path,
+    )
+  ) {
+    throw new CliError(
+      "--submission must declare schemaVersion 1 and role/path entries with absolute canonical paths.",
+      { code: "RESEARCH_PUBLICATION_SUBMISSION_PACKAGE_INVALID", exitCode: 2 },
+    );
+  }
+  return value.files as Array<{ role: PublicationSubmissionRole; path: string }>;
 }
 
 function integerOption(value: string | undefined, fallback: number, label: string): number {

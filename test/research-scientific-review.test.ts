@@ -247,6 +247,39 @@ describe("top-journal early scientific reviews", () => {
     }
   });
 
+  it("binds the typed content snapshot and cannot pass a stopped content gate", async () => {
+    const fixture = await projectFixture("scientific-content-gate-stop");
+    try {
+      await passResearchDesign(fixture);
+      await completePackage(fixture, "discover", "evidence.json");
+      await acquiredEvidenceFixture(fixture);
+      await stoppedContentSnapshotFixture(fixture);
+      const assessmentPath = join(fixture.root, "content-gate-assessment.json");
+      await writeJsonAtomic(
+        assessmentPath,
+        evidenceAssessment(fixture.designSha256, fixture.design, true),
+      );
+      const packet = await prepareScientificReview({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        role: "evidence-construct",
+        assessmentPath,
+        reviewerAgent: "claude",
+        reviewerSessionId: "content-gate-reviewer",
+      });
+      assert.ok(packet.mechanicalAssessment.issueCodes.includes("EVIDENCE_CONTENT_GATE_STOPPED"));
+      assert.ok(
+        packet.stageInputs.some(
+          (record) =>
+            record.sourceLocator === `projects/${fixture.projectId}/outputs/content-snapshot.json`,
+        ),
+      );
+      assert.equal(packet.mechanicalAssessment.canPass, false);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("revalidates promoted construct-canary bytes before downstream inference", async () => {
     const fixture = await projectFixture("scientific-canary-tamper");
     try {
@@ -1562,6 +1595,8 @@ function evidenceSnapshotFixture(
       linkedCandidateIds: [],
     },
     coverage: {},
+    gaps: [],
+    inferenceGate: { decision: "pass", coverageDecision: "pass", reasons: [] },
     limitations: [],
     delta: {
       addedSourceIds: ["known-source"],
@@ -1573,6 +1608,49 @@ function evidenceSnapshotFixture(
     },
   };
   return { ...core, snapshotSha256: sha256Text(canonicalJson(core)) };
+}
+
+async function stoppedContentSnapshotFixture(
+  fixture: Awaited<ReturnType<typeof projectFixture>>,
+): Promise<void> {
+  const acquisition = evidenceSnapshotFixture(
+    fixture.projectId,
+    evidenceSnapshotSources(fixture.design),
+  );
+  const core = {
+    schemaVersion: 1,
+    kind: "tiangong-evidence-content-snapshot",
+    snapshotId: "content-snapshot-test",
+    projectId: fixture.projectId,
+    acquisitionSnapshotId: acquisition.snapshotId,
+    acquisitionSnapshotSha256: acquisition.snapshotSha256,
+    createdAt: "2026-08-18T00:01:00.000Z",
+    ledgerHead: "6".repeat(64),
+    decompositions: [],
+    atoms: [],
+    sourceCoverage: [],
+    roleCoverage: [],
+    gate: {
+      decision: "stop",
+      reasons: ["closest-work full text remains insufficient"],
+      requiredDecompositionArtifactIds: [],
+      missingDecompositionArtifactIds: [],
+      acceptedFullTextSourceIds: [],
+      sourcesWithoutAtoms: [],
+    },
+  };
+  const snapshot = { ...core, snapshotSha256: sha256Text(canonicalJson(core)) };
+  const projectRoot = join(workspacePaths(fixture.root).projects, fixture.projectId);
+  const outputPath = join(projectRoot, "outputs", "content-snapshot.json");
+  const immutablePath = join(
+    projectRoot,
+    "evidence",
+    "content-snapshots",
+    `${snapshot.snapshotSha256}.json`,
+  );
+  await ensureDirectory(dirname(immutablePath));
+  await writeJsonAtomic(outputPath, snapshot);
+  await writeJsonAtomic(immutablePath, snapshot);
 }
 
 function researchDesignAssessment(designSha256: string) {

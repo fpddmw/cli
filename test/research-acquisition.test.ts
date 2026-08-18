@@ -6,13 +6,22 @@ import { describe, it } from "node:test";
 
 import { PDFDocument } from "pdf-lib";
 
+import { runCli } from "../src/cli.js";
 import { CliError } from "../src/errors.js";
+import type { CliIO } from "../src/io.js";
 import {
   loadCurrentEvidenceSnapshot,
   loadImmutableEvidenceSnapshotChain,
 } from "../src/research/workspace/acquisition.js";
 import { registerEvidenceArtifact } from "../src/research/workspace/artifacts.js";
+import { exportProjectAuditBundle } from "../src/research/workspace/audit-bundle.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
+import {
+  freezeEvidenceContentSnapshot,
+  loadCurrentEvidenceContentSnapshot,
+  recordArtifactDecomposition,
+  registerEvidenceAtom,
+} from "../src/research/workspace/content-evidence.js";
 import { persistBrokerEvidence } from "../src/research/workspace/evidence.js";
 import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
 import { inspectDiscoveryProgress } from "../src/research/workspace/discovery-status.js";
@@ -46,6 +55,11 @@ describe("research acquisition and evidence snapshots", () => {
   it("registers one exact artifact, ignores concurrent files, and freezes a verified snapshot", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-acquisition-test-"));
     const staging = await mkdtemp(join(tmpdir(), "tiangong-acquisition-files-"));
+    const auditDestination = join(
+      tmpdir(),
+      `tiangong-acquisition-audit-${process.pid}-${Date.now()}`,
+    );
+    const invalidAuditDestination = `${auditDestination}-invalid`;
     try {
       await initializeResearchWorkspace(root, undefined);
       await lockCapabilities(root);
@@ -234,6 +248,63 @@ describe("research acquisition and evidence snapshots", () => {
       assert.equal(snapshot.artifacts.length, 2);
       assert.equal(snapshot.coverage.decision, "pass");
       assert.equal(snapshot.parentSnapshotId, null);
+      const preContentStatus = await invokeCli([
+        "research",
+        "status",
+        "--project",
+        "artifact-project",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(preContentStatus.exitCode, 0, preContentStatus.stderr);
+      const preContentProject = JSON.parse(preContentStatus.stdout).projects[0];
+      assert.equal(preContentProject.evidencePipeline.acquisition.status, "verified");
+      assert.equal(preContentProject.evidencePipeline.content.status, "absent");
+      assert.match(preContentProject.recommendedAction, /content|decompos/i);
+      const decomposition = await recordArtifactDecomposition({
+        root,
+        projectId: "artifact-project",
+        value: {
+          schemaVersion: 1,
+          sourceArtifactId: artifact.artifactId,
+          status: "complete",
+          parser: { id: "test.exact-text", version: "1.0.0" },
+          outputArtifactIds: [textArtifact.artifactId],
+          contentClasses: ["fulltext"],
+          limitations: [],
+        },
+      });
+      assert.equal(decomposition.sourceArtifactId, artifact.artifactId);
+      const atom = await registerEvidenceAtom({
+        root,
+        projectId: "artifact-project",
+        value: {
+          schemaVersion: 1,
+          atomId: "exact-source.definition.1",
+          sourceId: "exact-source",
+          candidateId: candidate.id,
+          artifactId: textArtifact.artifactId,
+          locator: { kind: "line-range", startLine: 1, endLine: 1 },
+          statement: "The selected artifact is the exact acquired source derivative.",
+          evidenceRoleIds: [],
+          coverageDimensionIds: ["research-question"],
+          evidenceFunction: "definition",
+          scope: "This atom is used only to prove exact content binding.",
+          limitations: [],
+        },
+      });
+      assert.equal(atom.excerpt, "selected exact text derivative");
+      assert.match(atom.excerptSha256, /^[a-f0-9]{64}$/);
+      const contentSnapshot = await freezeEvidenceContentSnapshot(root, "artifact-project");
+      assert.equal(contentSnapshot.gate.decision, "pass");
+      assert.equal(contentSnapshot.decompositions.length, 1);
+      assert.equal(contentSnapshot.atoms.length, 1);
+      assert.deepEqual(contentSnapshot.sourceCoverage[0]?.atomIds, [atom.atomId]);
+      assert.equal(
+        (await loadCurrentEvidenceContentSnapshot(root, "artifact-project")).snapshotSha256,
+        contentSnapshot.snapshotSha256,
+      );
       const evidencePath = join(
         workspacePaths(root).projects,
         "artifact-project",
@@ -255,12 +326,120 @@ describe("research acquisition and evidence snapshots", () => {
         hostAgent: "codex",
       });
       assert.match(analyze.prompt, /selected exact text derivative/);
-      assert.match(analyze.prompt, new RegExp(textArtifact.sha256));
-      await abortNativeResearchStage({
+      assert.match(analyze.prompt, new RegExp(atom.atomId));
+      const inferenceSnapshot = JSON.parse(
+        await readFile(
+          join(
+            workspacePaths(root).projects,
+            "artifact-project",
+            "outputs",
+            "inference-snapshot.json",
+          ),
+          "utf8",
+        ),
+      ) as { snapshotId: string; snapshotSha256: string };
+      const analysisOutput = join(staging, "analysis.json");
+      await writeFile(
+        analysisOutput,
+        JSON.stringify({
+          schemaVersion: 2,
+          inferenceSnapshotSha256: inferenceSnapshot.snapshotSha256,
+          analysisRun: {
+            id: "analysis-run-1",
+            mode: "qualitative",
+            status: "not-applicable",
+            implementationSha256s: [],
+            environmentSha256s: [],
+            inputArtifactSha256s: [textArtifact.sha256],
+            command: null,
+            randomSeed: null,
+            limitations: ["Deterministic binding fixture; no computation was required."],
+          },
+          findings: [
+            {
+              id: "finding-1",
+              statement: "The selected artifact is exact and content-addressed.",
+              evidence: ["exact-source"],
+              evidenceAtomIds: [atom.atomId],
+              claimIds: [],
+              analysisArtifactSha256s: [],
+              uncertainty: "Limited to the exact fixture artifact.",
+              applicability: "Artifact lineage validation only.",
+            },
+          ],
+          limitations: [],
+        }),
+      );
+      await submitNativeResearchStage({
         root,
         projectId: "artifact-project",
         sessionId: analyze.sessionId,
+        outputPath: analysisOutput,
+        confirmedModel: analyze.expectedModel,
       });
+      const graph = JSON.parse(
+        await readFile(
+          join(
+            workspacePaths(root).projects,
+            "artifact-project",
+            "outputs",
+            "claim-evidence-graph.json",
+          ),
+          "utf8",
+        ),
+      ) as {
+        graphId: string;
+        graphSha256: string;
+        inferenceSnapshotSha256: string;
+        edges: Array<{ type: string }>;
+      };
+      assert.equal(graph.inferenceSnapshotSha256, inferenceSnapshot.snapshotSha256);
+      assert.ok(graph.edges.some((edge) => edge.type === "finding-supported-by-atom"));
+      assert.ok(graph.edges.some((edge) => edge.type === "atom-derived-from-source"));
+      const completeEvidenceStatus = await invokeCli([
+        "research",
+        "status",
+        "--project",
+        "artifact-project",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(completeEvidenceStatus.exitCode, 0, completeEvidenceStatus.stderr);
+      const completeEvidenceProject = JSON.parse(completeEvidenceStatus.stdout).projects[0];
+      assert.equal(completeEvidenceProject.evidencePipeline.content.status, "verified");
+      assert.equal(completeEvidenceProject.evidencePipeline.content.atomCount, 1);
+      assert.equal(completeEvidenceProject.evidencePipeline.inference.status, "verified");
+      assert.equal(completeEvidenceProject.evidencePipeline.claimGraph.status, "verified");
+      assert.ok(completeEvidenceProject.evidencePipeline.claimGraph.edgeCount >= 2);
+      const audit = await exportProjectAuditBundle({
+        root,
+        projectId: "artifact-project",
+        destination: auditDestination,
+      });
+      assert.equal(audit.researchChain.acquisitionSnapshot?.id, snapshot.snapshotId);
+      assert.equal(audit.researchChain.contentSnapshot?.id, contentSnapshot.snapshotId);
+      assert.equal(audit.researchChain.inferenceSnapshot?.id, inferenceSnapshot.snapshotId);
+      assert.equal(audit.researchChain.claimEvidenceGraph?.id, graph.graphId);
+      const graphPath = join(
+        workspacePaths(root).projects,
+        "artifact-project",
+        "outputs",
+        "claim-evidence-graph.json",
+      );
+      const originalGraph = await readFile(graphPath);
+      await chmod(graphPath, 0o600);
+      await writeFile(graphPath, '{"tampered":true}\n');
+      await assert.rejects(
+        exportProjectAuditBundle({
+          root,
+          projectId: "artifact-project",
+          destination: invalidAuditDestination,
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_CLAIM_EVIDENCE_GRAPH_INVALID",
+      );
+      await writeFile(graphPath, originalGraph);
 
       const objectPath = resolveContained(workspacePaths(root).control, artifact.locator);
       await chmod(objectPath, 0o600);
@@ -273,6 +452,8 @@ describe("research acquisition and evidence snapshots", () => {
       await Promise.all([
         rm(root, { recursive: true, force: true }),
         rm(staging, { recursive: true, force: true }),
+        rm(auditDestination, { recursive: true, force: true }),
+        rm(invalidAuditDestination, { recursive: true, force: true }),
       ]);
     }
   });
@@ -379,6 +560,115 @@ describe("research acquisition and evidence snapshots", () => {
       );
       const projectFiles = await readFile(workspacePaths(root).journal, "utf8");
       assert.doesNotMatch(projectFiles, /must-not-persist/);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("freezes an honest acquisition snapshot with gaps and stops inference separately", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-acquisition-gaps-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-acquisition-gaps-files-"));
+    const projectId = "acquisition-with-gaps";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      await initializeProject(root, projectId, "Evaluate a source without hiding access gaps.");
+      const input = join(staging, "source.txt");
+      await writeFile(input, "stable source evidence\n");
+      await addProjectInput(root, projectId, input, "primary");
+      const discover = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const [candidate] = await listEvidenceCandidates(root, projectId);
+      assert.ok(candidate);
+      await recordAdmission(root, projectId, candidate.id, "source-1");
+      const discoverOutput = join(staging, "discover.json");
+      await writeFile(discoverOutput, JSON.stringify(discoveryValue(candidate.id, "source-1")));
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: discover.sessionId,
+        outputPath: discoverOutput,
+        confirmedModel: discover.expectedModel,
+      });
+
+      const acquire = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      const blockingGap = "One indispensable licensed source still requires user authorization.";
+      const partiallyPromotedOutput = join(
+        workspacePaths(root).projects,
+        projectId,
+        "outputs",
+        "acquisition.json",
+      );
+      const partiallyPromoted = acquisitionValue(candidate.id, "source-1") as {
+        decisions: Array<Record<string, unknown>>;
+      };
+      await writeFile(
+        partiallyPromotedOutput,
+        JSON.stringify({
+          ...partiallyPromoted,
+          decisions: partiallyPromoted.decisions.map((decision) => ({
+            ...decision,
+            artifacts: [],
+          })),
+          gaps: [blockingGap],
+        }),
+      );
+      await recordNativeResearchActivity({
+        root,
+        projectId,
+        value: {
+          schemaVersion: 1,
+          kind: "browser-navigation",
+          channel: "browser-handoff",
+          input: "publisher route returned a security challenge",
+          candidateIds: [candidate.id],
+          resultCount: 0,
+          status: "blocked",
+          challenge: "security-warning",
+        },
+      });
+      const acquireOutput = join(staging, "acquire.json");
+      await writeFile(
+        acquireOutput,
+        JSON.stringify({
+          ...acquisitionValue(candidate.id, "source-1"),
+          gaps: [blockingGap],
+        }),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: acquire.sessionId,
+        outputPath: acquireOutput,
+        confirmedModel: acquire.expectedModel,
+      });
+
+      const snapshot = (await loadCurrentEvidenceSnapshot(root, projectId)) as unknown as {
+        gaps: string[];
+        inferenceGate: { decision: string; reasons: string[] };
+      };
+      assert.deepEqual(snapshot.gaps, [blockingGap]);
+      assert.equal(snapshot.inferenceGate.decision, "stop");
+      assert.ok(snapshot.inferenceGate.reasons.includes(blockingGap));
+      await assert.rejects(
+        prepareNativeResearchStage({ root, projectId, stage: "analyze", hostAgent: "codex" }),
+        (error: unknown) =>
+          error instanceof CliError &&
+          error.code === "RESEARCH_INFERENCE_GATE_BLOCKED" &&
+          Array.isArray((error.details as { reasons?: unknown[] } | undefined)?.reasons),
+      );
     } finally {
       await Promise.all([
         rm(root, { recursive: true, force: true }),
@@ -906,6 +1196,73 @@ describe("research acquisition and evidence snapshots", () => {
       ]);
     }
   });
+
+  it("records plan-bound native Web gap filling during acquire", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-scientific-gap-fill-"));
+    const projectId = "scientific-gap-fill";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      const policy = scientificPolicyBinding(projectId);
+      const design = await scientificDesignInput(root, projectId, {
+        targetJournal: policy.targetJournal,
+      });
+      const project = await initializeProject(
+        root,
+        projectId,
+        "Can native Web close an exact acquisition gap for an admitted source?",
+        undefined,
+        false,
+        undefined,
+        policy,
+        design,
+      );
+      const discover = project.packages.find((workPackage) => workPackage.id === "discover");
+      assert.ok(discover);
+      discover.status = "running";
+      discover.startedAt = new Date().toISOString();
+      project.status = "running";
+      await saveProject(root, project);
+      const candidate = await registerNativeDiscoveryCandidate({
+        root,
+        projectId,
+        value: {
+          title: "Existing admitted source with a stale download URL",
+          url: "https://example.test/stale-source",
+        },
+      });
+      discover.status = "complete";
+      discover.completedAt = new Date().toISOString();
+      const acquire = project.packages.find((workPackage) => workPackage.id === "acquire");
+      assert.ok(acquire);
+      acquire.status = "running";
+      acquire.startedAt = new Date().toISOString();
+      await saveProject(root, project);
+
+      const receipt = await recordNativeResearchActivity({
+        root,
+        projectId,
+        value: {
+          schemaVersion: 1,
+          acquisitionRouteId: "route-native-public-search",
+          kind: "web-search",
+          channel: "codex.web",
+          input: "exact title plus institutional repository alternative URL",
+          candidateIds: [candidate.candidate.id],
+          resultCount: 1,
+          status: "completed",
+          challenge: "none",
+        },
+      });
+      assert.equal(receipt.stage, "acquire");
+      assert.equal(receipt.acquisitionRouteId, "route-native-public-search");
+      const access = await inspectEvidenceAccessStatus(root, projectId);
+      assert.deepEqual(access.untriedRequiredAgentRouteIds, []);
+      assert.equal(access.routes[0]?.exhausted, true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 async function freezeInputOnlyProject(
@@ -1118,4 +1475,16 @@ function crc32(input: Buffer): number {
     }
   }
   return (crc ^ 0xffffffff) >>> 0;
+}
+
+async function invokeCli(argv: string[]) {
+  let stdout = "";
+  let stderr = "";
+  const io: CliIO = {
+    env: {},
+    stdout: { write: (chunk) => ((stdout += chunk), true) },
+    stderr: { write: (chunk) => ((stderr += chunk), true) },
+  };
+  const exitCode = await runCli(argv, io);
+  return { exitCode, stdout, stderr };
 }

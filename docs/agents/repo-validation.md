@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-08-18
-lastReviewedCommit: 9205e1b06678ef79042bee89bd3bca3fa77af515
+lastReviewedCommit: 34a5c2a3af26fc56e9c9dc94fcbdabd91a6dd1d8
 ---
 
 # Repo Validation
@@ -233,10 +233,18 @@ content/manifest tamper detection, expiry, conflict resolution, and stage
 binding. Setup doctor tests prove incompatible packs block before paid reviewer
 smoke. `test/research-publication-workflow.test.ts` covers mechanical
 top-journal assessment, owner-input trust ceilings, immutable manuscript
-generations, Policy/evidence/base-output hashes, four role-specific review
-schemas, producer/reviewer separation, append-only reviewer-session reuse
-rejection, raw-session non-persistence, active-base-research status, revision
-invalidation, and publication closure language ceilings.
+generations, required manuscript sections, complete distinct-file submission
+roles, content/inference/analysis/Claim-Evidence Graph topology bindings,
+reproducibility manifests, Policy/evidence/base-output hashes, four
+role-specific review schemas, configured other-family producer/reviewer
+separation, append-only reviewer-session reuse rejection, raw-session
+non-persistence, active-base-research status, revision invalidation, package
+status projection, and publication closure language ceilings.
+`test/research-acquisition.test.ts` additionally covers honest acquisition
+freeze with a separate inference stop, exact decomposition lineage, evidence
+atoms, typed-content snapshots, inference snapshots, generated Claim-Evidence
+Graphs, operator-visible `evidencePipeline` status, semantic audit-chain export,
+safe journal-proof derivatives, and pre-export tamper rejection.
 `test/research-scientific-design.test.ts` uses the EV pavement-model R9 failure
 as a fixed regression for truth-role confusion, non-independent validation,
 effective-sample inflation, quantity/threshold overclaim, closest-work

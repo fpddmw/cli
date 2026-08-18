@@ -5,11 +5,15 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 
 import { CliError } from "../../errors.js";
 import { loadEvidenceArtifactRecords } from "./artifacts.js";
+import { loadCurrentEvidenceSnapshot } from "./acquisition.js";
 import { verifyCapabilities } from "./capabilities.js";
+import { loadCurrentEvidenceContentSnapshot } from "./content-evidence.js";
 import { loadProjectEvidenceReceipts } from "./evidence.js";
+import { loadCurrentClaimEvidenceGraph, loadCurrentInferenceSnapshot } from "./inference.js";
 import { readJournal, verifyJournal } from "./journal.js";
 import { loadProject } from "./projects.js";
-import { sanitizeResearchText } from "./sanitization.js";
+import { inspectPublicationStatus } from "./publication-workflow.js";
+import { sanitizeResearchText, sanitizeResearchValue } from "./sanitization.js";
 import {
   canonicalJson,
   ensureDirectory,
@@ -49,6 +53,19 @@ export interface ProjectAuditManifest {
     capabilityLockSha256: string | null;
     sourceWorkspacePathSha256: string;
   };
+  researchChain: {
+    acquisitionSnapshot: AuditChainBinding | null;
+    contentSnapshot: AuditChainBinding | null;
+    inferenceSnapshot: AuditChainBinding | null;
+    analysisRun: AuditChainBinding | null;
+    claimEvidenceGraph: AuditChainBinding | null;
+    publication: {
+      generationSha256: string;
+      manuscriptSha256: string;
+      submissionPackageSha256: string;
+      closureSha256: string | null;
+    } | null;
+  };
   locatorRoots: {
     project: "project";
     workspaceObjects: "workspace-objects";
@@ -57,6 +74,11 @@ export interface ProjectAuditManifest {
   exclusions: string[];
   files: Array<{ path: string; sha256: string; bytes: number }>;
   manifestSha256: string;
+}
+
+interface AuditChainBinding {
+  id: string;
+  sha256: string;
 }
 
 export async function exportProjectAuditBundle(input: {
@@ -91,6 +113,7 @@ export async function exportProjectAuditBundle(input: {
       };
 
       const projectRoot = join(paths.projects, project.id);
+      const researchChain = await loadVerifiedResearchChain(input.root, project);
       const projectFiles = await regularTreeFiles(projectRoot).catch((error) => {
         throw auditError("Project tree contains a non-portable entry.", error);
       });
@@ -178,9 +201,12 @@ export async function exportProjectAuditBundle(input: {
         {
           schemaVersion: 1,
           workspaceJournalHead: journal.head,
-          events: journalEvents.filter(
-            (event) => event.scope === project.id || containsExactString(event.payload, project.id),
-          ),
+          events: journalEvents
+            .filter(
+              (event) =>
+                event.scope === project.id || containsExactString(event.payload, project.id),
+            )
+            .map(portableJournalEvent),
         },
         0o444,
       );
@@ -211,6 +237,7 @@ export async function exportProjectAuditBundle(input: {
           capabilityLockSha256,
           sourceWorkspacePathSha256: sha256Text(resolve(input.root)),
         },
+        researchChain,
         locatorRoots: {
           project: "project" as const,
           workspaceObjects: "workspace-objects" as const,
@@ -238,6 +265,71 @@ export async function exportProjectAuditBundle(input: {
       throw error;
     }
   });
+}
+
+function portableJournalEvent(event: Awaited<ReturnType<typeof readJournal>>[number]) {
+  const onceSanitized = sanitizeResearchValue(event.payload);
+  const payload = JSON.parse(sanitizeResearchText(JSON.stringify(onceSanitized))) as Record<
+    string,
+    unknown
+  >;
+  return {
+    schemaVersion: 1,
+    sequence: event.sequence,
+    timestamp: event.timestamp,
+    type: event.type,
+    scope: event.scope,
+    payload,
+    sourcePayloadSha256: sha256Text(canonicalJson(event.payload)),
+    sourcePreviousHash: event.previousHash,
+    sourceEventHash: event.hash,
+  };
+}
+
+async function loadVerifiedResearchChain(
+  root: string,
+  project: ProjectState,
+): Promise<ProjectAuditManifest["researchChain"]> {
+  const projectRoot = join(workspacePaths(root).projects, project.id);
+  const outputPath = (name: string) => join(projectRoot, "outputs", name);
+  const acquisition = (await pathExists(outputPath("evidence-snapshot.json")))
+    ? await loadCurrentEvidenceSnapshot(root, project.id)
+    : null;
+  const content = (await pathExists(outputPath("content-snapshot.json")))
+    ? await loadCurrentEvidenceContentSnapshot(root, project.id)
+    : null;
+  const inference = (await pathExists(outputPath("inference-snapshot.json")))
+    ? await loadCurrentInferenceSnapshot(root, project.id)
+    : null;
+  const graph = (await pathExists(outputPath("claim-evidence-graph.json")))
+    ? await loadCurrentClaimEvidenceGraph(root, project.id)
+    : null;
+  const publicationCurrent = join(projectRoot, "publication", "current.json");
+  const publication = (await pathExists(publicationCurrent))
+    ? await inspectPublicationStatus(root, project.id)
+    : null;
+  return {
+    acquisitionSnapshot: acquisition
+      ? { id: acquisition.snapshotId, sha256: acquisition.snapshotSha256 }
+      : null,
+    contentSnapshot: content ? { id: content.snapshotId, sha256: content.snapshotSha256 } : null,
+    inferenceSnapshot: inference
+      ? { id: inference.snapshotId, sha256: inference.snapshotSha256 }
+      : null,
+    analysisRun: graph ? { id: graph.analysisRunId, sha256: graph.analysisSha256 } : null,
+    claimEvidenceGraph: graph ? { id: graph.graphId, sha256: graph.graphSha256 } : null,
+    publication:
+      publication?.generationSha256 &&
+      publication.manuscriptSha256 &&
+      publication.submissionPackageSha256
+        ? {
+            generationSha256: publication.generationSha256,
+            manuscriptSha256: publication.manuscriptSha256,
+            submissionPackageSha256: publication.submissionPackageSha256,
+            closureSha256: publication.closureSha256,
+          }
+        : null,
+  };
 }
 
 export async function verifyProjectAuditBundle(
@@ -365,10 +457,13 @@ async function assertPortableTextFiles(root: string, forbiddenRoot?: string): Pr
       });
     }
     if (sanitizeResearchText(text) !== text) {
-      throw new CliError("Audit bundle contains credential-like or sensitive text.", {
-        code: "RESEARCH_AUDIT_BUNDLE_SENSITIVE",
-        exitCode: 3,
-      });
+      throw new CliError(
+        `Audit bundle contains credential-like or sensitive text in ${relative(root, path).split(sep).join("/")}.`,
+        {
+          code: "RESEARCH_AUDIT_BUNDLE_SENSITIVE",
+          exitCode: 3,
+        },
+      );
     }
   }
 }
@@ -404,6 +499,7 @@ function parseManifest(value: unknown): ProjectAuditManifest {
     typeof value.createdAt !== "string" ||
     !isObject(value.authority) ||
     !isObject(value.sourceBindings) ||
+    !validResearchChain(value.researchChain) ||
     !isObject(value.locatorRoots) ||
     value.locatorRoots.project !== "project" ||
     value.locatorRoots.workspaceObjects !== "workspace-objects" ||
@@ -439,6 +535,41 @@ function parseManifest(value: unknown): ProjectAuditManifest {
     throw auditError("Audit manifest file paths must be unique and byte-order sorted.");
   }
   return value as unknown as ProjectAuditManifest;
+}
+
+function validResearchChain(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  for (const key of [
+    "acquisitionSnapshot",
+    "contentSnapshot",
+    "inferenceSnapshot",
+    "analysisRun",
+    "claimEvidenceGraph",
+  ]) {
+    const binding = value[key];
+    if (
+      binding !== null &&
+      (!isObject(binding) ||
+        typeof binding.id !== "string" ||
+        typeof binding.sha256 !== "string" ||
+        !SHA256.test(binding.sha256))
+    ) {
+      return false;
+    }
+  }
+  const publication = value.publication;
+  return (
+    publication === null ||
+    (isObject(publication) &&
+      typeof publication.generationSha256 === "string" &&
+      SHA256.test(publication.generationSha256) &&
+      typeof publication.manuscriptSha256 === "string" &&
+      SHA256.test(publication.manuscriptSha256) &&
+      typeof publication.submissionPackageSha256 === "string" &&
+      SHA256.test(publication.submissionPackageSha256) &&
+      (publication.closureSha256 === null ||
+        (typeof publication.closureSha256 === "string" && SHA256.test(publication.closureSha256))))
+  );
 }
 
 function safePathOrNull(value: string): string | null {

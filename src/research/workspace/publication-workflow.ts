@@ -25,7 +25,7 @@ import {
   writeJsonAtomic,
 } from "./storage.js";
 import type { AgentKind, ProjectState, ResearchPolicyBinding } from "./types.js";
-import { withWorkspaceLock } from "./workspace.js";
+import { loadWorkspaceConfig, withWorkspaceLock } from "./workspace.js";
 
 export type PublicationReviewRole =
   | "evidence"
@@ -56,11 +56,53 @@ const EDITOR_DECISIONS = new Set([
   "desk-reject",
 ]);
 
+export type PublicationSubmissionRole =
+  | "cover-letter"
+  | "title-page"
+  | "reporting-checklist"
+  | "data-availability"
+  | "code-availability"
+  | "source-data"
+  | "figure-table-index"
+  | "extended-data"
+  | "supplementary-methods";
+
+const REQUIRED_SUBMISSION_ROLES: PublicationSubmissionRole[] = [
+  "cover-letter",
+  "title-page",
+  "reporting-checklist",
+  "data-availability",
+  "code-availability",
+  "source-data",
+];
+
+const SUBMISSION_ROLES = new Set<PublicationSubmissionRole>([
+  ...REQUIRED_SUBMISSION_ROLES,
+  "figure-table-index",
+  "extended-data",
+  "supplementary-methods",
+]);
+
 interface FrozenFile {
   logicalName: string;
   sha256: string;
   bytes: number;
   objectLocator: string;
+}
+
+interface FrozenSubmissionFile extends FrozenFile {
+  role: PublicationSubmissionRole;
+}
+
+interface PublicationSubmissionPackage {
+  schemaVersion: 1;
+  requiredRoles: PublicationSubmissionRole[];
+  files: FrozenSubmissionFile[];
+  contentSnapshot: FrozenFile;
+  inferenceSnapshot: FrozenFile;
+  claimEvidenceGraph: FrozenFile;
+  reproducibilityManifest: FrozenFile;
+  packageSha256: string;
 }
 
 interface PublicationGeneration {
@@ -93,6 +135,7 @@ interface PublicationGeneration {
   manuscript: FrozenFile;
   assessment: FrozenFile;
   supplements: FrozenFile[];
+  submissionPackage: PublicationSubmissionPackage;
   assessmentResult: TopJournalAssessmentResult;
   requiredReviewRoles: PublicationReviewRole[];
 }
@@ -142,6 +185,7 @@ export interface PublicationReviewPacket {
   manuscript: FrozenFile;
   assessment: FrozenFile;
   supplements: FrozenFile[];
+  submissionPackage: PublicationSubmissionPackage;
   mechanicalAssessment: TopJournalAssessmentResult;
   instructions: string[];
   packetSha256: string;
@@ -167,6 +211,11 @@ export interface PublicationStatus {
   projectId: string;
   generationSha256: string | null;
   manuscriptSha256: string | null;
+  submissionPackageSha256: string | null;
+  submissionRoles: PublicationSubmissionRole[];
+  contentSnapshotSha256: string | null;
+  inferenceSnapshotSha256: string | null;
+  claimEvidenceGraphSha256: string | null;
   generationStatus: "waiting-for-base-research" | "not-started" | "manuscript-frozen" | "invalid";
   reviewState: "not-started" | "partial" | "complete";
   requiredReviewRoles: PublicationReviewRole[];
@@ -191,6 +240,7 @@ export interface PublicationClosure {
   manuscript: FrozenFile;
   assessment: FrozenFile;
   supplements: FrozenFile[];
+  submissionPackage: PublicationSubmissionPackage;
   reviews: Array<{
     role: PublicationReviewRole;
     packetSha256: string;
@@ -406,11 +456,24 @@ export async function freezePublicationManuscript(input: {
   manuscriptPath: string;
   assessmentPath: string;
   supplementPaths: string[];
+  submissionFiles?: Array<{ role: PublicationSubmissionRole; path: string }>;
   producerAgent: AgentKind;
   producerSessionId: string;
 }): Promise<PublicationGeneration & { status: "manuscript-frozen" }> {
   return withWorkspaceLock(input.root, "research.publication.freeze", async () => {
     const project = await requireClosedTopJournalProject(input.root, input.projectId);
+    const config = await loadWorkspaceConfig(input.root);
+    if (config.producer.agent !== input.producerAgent) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_PRODUCER_MISMATCH",
+        "Publication generation must be frozen by the configured native producer agent family.",
+        3,
+        {
+          configuredProducer: config.producer.agent,
+          requestedProducer: input.producerAgent,
+        },
+      );
+    }
     await assertScientificGateForStage(input.root, project, "close");
     const producerSessionId = requireSessionId(input.producerSessionId, "producer");
     const producerSessionSha256 = sha256Text(producerSessionId);
@@ -423,6 +486,7 @@ export async function freezePublicationManuscript(input: {
     const assessmentValue = parsePublicationAssessment(
       JSON.parse(await readRegularTextFile(input.assessmentPath, "publication assessment")),
     );
+    await validateSubmissionManuscript(input.manuscriptPath);
     const projectRoot = projectDirectory(input.root, project.id);
     const outputRoot = join(projectRoot, "outputs");
     const snapshotValue = await readJsonFile<Record<string, unknown>>(
@@ -435,6 +499,13 @@ export async function freezePublicationManuscript(input: {
       "Base research closure",
     );
     assertBaseClosure(project, closureValue, snapshotSha256);
+    const submissionBindings = await validateSubmissionBindings(
+      outputRoot,
+      project.id,
+      String(snapshotValue.snapshotId),
+      snapshotSha256,
+      project.publicationPolicy!.resolvedPolicySha256,
+    );
 
     const manuscript = await storePublicationObject(
       input.root,
@@ -453,6 +524,39 @@ export async function freezePublicationManuscript(input: {
       supplements.push(
         await storePublicationObject(input.root, project.id, path, `supplement-${index + 1}`),
       );
+    }
+    const declaredSubmissionFiles = input.submissionFiles ?? [];
+    const declaredRoles = declaredSubmissionFiles.map((file) => file.role);
+    const missingSubmissionRoles = REQUIRED_SUBMISSION_ROLES.filter(
+      (role) => !declaredRoles.includes(role),
+    );
+    if (
+      missingSubmissionRoles.length ||
+      new Set(declaredRoles).size !== declaredRoles.length ||
+      new Set(declaredSubmissionFiles.map((file) => resolve(file.path))).size !==
+        declaredSubmissionFiles.length ||
+      declaredSubmissionFiles.some((file) => !SUBMISSION_ROLES.has(file.role))
+    ) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_SUBMISSION_PACKAGE_INVALID",
+        "Submission package roles must be explicit, unique, complete, and bound to distinct files.",
+        3,
+        { missingSubmissionRoles },
+      );
+    }
+    const submissionFiles: FrozenSubmissionFile[] = [];
+    for (const file of declaredSubmissionFiles.sort((left, right) =>
+      left.role.localeCompare(right.role),
+    )) {
+      submissionFiles.push({
+        role: file.role,
+        ...(await storePublicationObject(
+          input.root,
+          project.id,
+          file.path,
+          `submission-${file.role}`,
+        )),
+      });
     }
     const evidenceSnapshot = await storePublicationObject(
       input.root,
@@ -484,6 +588,62 @@ export async function freezePublicationManuscript(input: {
         true,
       ),
     };
+    const contentSnapshot = await storePublicationObject(
+      input.root,
+      project.id,
+      join(outputRoot, "content-snapshot.json"),
+      "content-snapshot",
+      true,
+    );
+    const inferenceSnapshot = await storePublicationObject(
+      input.root,
+      project.id,
+      join(outputRoot, "inference-snapshot.json"),
+      "inference-snapshot",
+      true,
+    );
+    const claimEvidenceGraph = await storePublicationObject(
+      input.root,
+      project.id,
+      join(outputRoot, "claim-evidence-graph.json"),
+      "claim-evidence-graph",
+      true,
+    );
+    const analysisValue = submissionBindings.analysis;
+    const reproducibilityPath = join(outputRoot, "submission-reproducibility.json");
+    await writeJsonAtomic(reproducibilityPath, {
+      schemaVersion: 1,
+      kind: "tiangong-submission-reproducibility",
+      projectId: project.id,
+      analysisRun: isObject(analysisValue.analysisRun) ? analysisValue.analysisRun : null,
+      bindings: {
+        evidenceSnapshotSha256: evidenceSnapshot.sha256,
+        contentSnapshotSha256: contentSnapshot.sha256,
+        inferenceSnapshotSha256: inferenceSnapshot.sha256,
+        claimEvidenceGraphSha256: claimEvidenceGraph.sha256,
+        analysisSha256: baseResearch.analysis.sha256,
+      },
+    });
+    const reproducibilityManifest = await storePublicationObject(
+      input.root,
+      project.id,
+      reproducibilityPath,
+      "reproducibility-manifest",
+      true,
+    );
+    const submissionPackageCore = {
+      schemaVersion: 1 as const,
+      requiredRoles: REQUIRED_SUBMISSION_ROLES,
+      files: submissionFiles,
+      contentSnapshot,
+      inferenceSnapshot,
+      claimEvidenceGraph,
+      reproducibilityManifest,
+    };
+    const submissionPackage: PublicationSubmissionPackage = {
+      ...submissionPackageCore,
+      packageSha256: sha256Text(canonicalJson(submissionPackageCore)),
+    };
     const assessmentResult = evaluateTopJournalAssessment({
       policy: project.publicationPolicy!,
       evidenceSnapshot: snapshotValue as never,
@@ -507,6 +667,7 @@ export async function freezePublicationManuscript(input: {
       manuscript,
       assessment,
       supplements,
+      submissionPackage,
       assessmentResult,
       requiredReviewRoles: requiredReviewRoles(project.publicationPolicy!),
     };
@@ -537,6 +698,7 @@ export async function freezePublicationManuscript(input: {
         manuscriptSha256: manuscript.sha256,
         assessmentSha256: assessment.sha256,
         evidenceSnapshotSha256: snapshotSha256,
+        submissionPackageSha256: submissionPackage.packageSha256,
         policySha256: project.publicationPolicy!.resolvedPolicySha256,
         producerAgent: input.producerAgent,
         mechanicalIssueCodes: assessmentResult.issueCodes,
@@ -556,6 +718,24 @@ export async function preparePublicationReview(input: {
   return withWorkspaceLock(input.root, "research.publication.review.prepare", async () => {
     const project = await requireClosedTopJournalProject(input.root, input.projectId);
     const generation = await loadCurrentGeneration(input.root, project.id);
+    const config = await loadWorkspaceConfig(input.root);
+    if (input.reviewerAgent === generation.producer.agent) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_REVIEW_NOT_INDEPENDENT",
+        "Publication review must use a different agent family from the native producer.",
+      );
+    }
+    if (config.reviewer.agent !== input.reviewerAgent) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_REVIEWER_MISMATCH",
+        "Publication review must use the configured independent reviewer route.",
+        3,
+        {
+          configuredReviewer: config.reviewer.agent,
+          requestedReviewer: input.reviewerAgent,
+        },
+      );
+    }
     const sessionId = requireSessionId(input.reviewerSessionId, "reviewer");
     if (!generation.requiredReviewRoles.includes(input.role)) {
       throw publicationError(
@@ -618,6 +798,7 @@ export async function preparePublicationReview(input: {
       manuscript: generation.manuscript,
       assessment: generation.assessment,
       supplements: generation.supplements,
+      submissionPackage: generation.submissionPackage,
       mechanicalAssessment: generation.assessmentResult,
       instructions: reviewInstructions(input.role),
     };
@@ -721,6 +902,11 @@ export async function inspectPublicationStatus(
       projectId,
       generationSha256: null,
       manuscriptSha256: null,
+      submissionPackageSha256: null,
+      submissionRoles: [],
+      contentSnapshotSha256: null,
+      inferenceSnapshotSha256: null,
+      claimEvidenceGraphSha256: null,
       generationStatus: "waiting-for-base-research",
       reviewState: "not-started",
       requiredReviewRoles: requiredReviewRoles(project.publicationPolicy!),
@@ -740,6 +926,11 @@ export async function inspectPublicationStatus(
       projectId,
       generationSha256: null,
       manuscriptSha256: null,
+      submissionPackageSha256: null,
+      submissionRoles: [],
+      contentSnapshotSha256: null,
+      inferenceSnapshotSha256: null,
+      claimEvidenceGraphSha256: null,
       generationStatus: "not-started",
       reviewState: "not-started",
       requiredReviewRoles: REQUIRED_REVIEW_ROLES,
@@ -773,6 +964,11 @@ export async function inspectPublicationStatus(
     projectId,
     generationSha256: generation.generationSha256,
     manuscriptSha256: generation.manuscript.sha256,
+    submissionPackageSha256: generation.submissionPackage.packageSha256,
+    submissionRoles: generation.submissionPackage.files.map((file) => file.role),
+    contentSnapshotSha256: generation.submissionPackage.contentSnapshot.sha256,
+    inferenceSnapshotSha256: generation.submissionPackage.inferenceSnapshot.sha256,
+    claimEvidenceGraphSha256: generation.submissionPackage.claimEvidenceGraph.sha256,
     generationStatus: "manuscript-frozen",
     reviewState,
     requiredReviewRoles: generation.requiredReviewRoles,
@@ -823,6 +1019,7 @@ export async function closePublication(
       manuscript: generation.manuscript,
       assessment: generation.assessment,
       supplements: generation.supplements,
+      submissionPackage: generation.submissionPackage,
       reviews: reviews.map((entry) => ({
         role: entry.role,
         packetSha256: entry.packet.packetSha256,
@@ -927,6 +1124,273 @@ function assertBaseClosure(
       "The base research closure does not bind the current evidence snapshot and approved policy.",
     );
   }
+}
+
+async function validateSubmissionManuscript(path: string): Promise<void> {
+  const canonical = requireAbsolutePath(path, "manuscript");
+  if (![".md", ".txt"].includes(extname(canonical).toLowerCase())) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_MANUSCRIPT_INCOMPLETE",
+      "The submission manuscript source must be Markdown or plain text for deterministic section validation.",
+      3,
+    );
+  }
+  const content = await readRegularTextFile(canonical, "submission manuscript");
+  const headings = [...content.matchAll(/^#{1,6}\s+(.+?)\s*$/gmu)].map((match) =>
+    (match[1] ?? "")
+      .trim()
+      .toLowerCase()
+      .replaceAll(/[^a-z0-9]+/gu, " ")
+      .trim(),
+  );
+  const required = [
+    { id: "abstract", aliases: ["abstract"] },
+    { id: "introduction", aliases: ["introduction"] },
+    { id: "methods", aliases: ["methods", "materials and methods"] },
+    { id: "results", aliases: ["results"] },
+    { id: "discussion", aliases: ["discussion"] },
+    { id: "data-availability", aliases: ["data availability", "data availability statement"] },
+    { id: "code-availability", aliases: ["code availability", "code availability statement"] },
+    { id: "references", aliases: ["references", "bibliography"] },
+  ];
+  const missingSections = required
+    .filter((section) => !section.aliases.some((alias) => headings.includes(alias)))
+    .map((section) => section.id);
+  if (missingSections.length) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_MANUSCRIPT_INCOMPLETE",
+      "The manuscript is missing required submission sections.",
+      3,
+      { missingSections },
+    );
+  }
+}
+
+async function validateSubmissionBindings(
+  outputRoot: string,
+  projectId: string,
+  evidenceSnapshotId: string,
+  evidenceSnapshotSha256: string,
+  policySha256: string,
+): Promise<{
+  analysis: Record<string, unknown>;
+}> {
+  const [content, inference, analysis, graph] = await Promise.all([
+    readJsonFile<Record<string, unknown>>(
+      join(outputRoot, "content-snapshot.json"),
+      "Frozen content snapshot",
+    ),
+    readJsonFile<Record<string, unknown>>(
+      join(outputRoot, "inference-snapshot.json"),
+      "Frozen inference snapshot",
+    ),
+    readJsonFile<Record<string, unknown>>(join(outputRoot, "analysis.json"), "Frozen analysis"),
+    readJsonFile<Record<string, unknown>>(
+      join(outputRoot, "claim-evidence-graph.json"),
+      "Frozen Claim-Evidence Graph",
+    ),
+  ]);
+  const contentGate = isObject(content.gate) ? content.gate : {};
+  const inferenceGate = isObject(inference.gate) ? inference.gate : {};
+  const acquisition = isObject(inference.acquisitionSnapshot) ? inference.acquisitionSnapshot : {};
+  const contentBinding = isObject(inference.contentSnapshot) ? inference.contentSnapshot : {};
+  const graphNodes = Array.isArray(graph.nodes) ? graph.nodes.filter(isObject) : [];
+  const graphEdges = Array.isArray(graph.edges) ? graph.edges.filter(isObject) : [];
+  const contentAtoms = Array.isArray(content.atoms) ? content.atoms.filter(isObject) : [];
+  const inferenceAtoms = Array.isArray(inference.atoms) ? inference.atoms.filter(isObject) : [];
+  const inferenceSources = Array.isArray(inference.sources)
+    ? inference.sources.filter(isObject)
+    : [];
+  const inferenceClaims = Array.isArray(inference.claims) ? inference.claims.filter(isObject) : [];
+  const findings = Array.isArray(analysis.findings) ? analysis.findings.filter(isObject) : [];
+  const analysisRun = isObject(analysis.analysisRun) ? analysis.analysisRun : {};
+  const nodeById = new Map(
+    graphNodes.flatMap((node) =>
+      typeof node.id === "string"
+        ? ([[node.id, node]] as Array<[string, Record<string, unknown>]>)
+        : [],
+    ),
+  );
+  const edgeBindings = new Set(
+    graphEdges.flatMap((edge) =>
+      typeof edge.type === "string" && typeof edge.from === "string" && typeof edge.to === "string"
+        ? [`${edge.type}:${edge.from}:${edge.to}`]
+        : [],
+    ),
+  );
+  if (
+    !hashBoundSnapshot(content, "snapshotSha256") ||
+    !hashBoundSnapshot(inference, "snapshotSha256") ||
+    !hashBoundSnapshot(graph, "graphSha256") ||
+    content.kind !== "tiangong-evidence-content-snapshot" ||
+    content.projectId !== projectId ||
+    content.acquisitionSnapshotId !== evidenceSnapshotId ||
+    content.acquisitionSnapshotSha256 !== evidenceSnapshotSha256 ||
+    contentGate.decision !== "pass" ||
+    inference.kind !== "tiangong-inference-snapshot" ||
+    inference.projectId !== projectId ||
+    inferenceGate.decision !== "pass" ||
+    acquisition.snapshotId !== evidenceSnapshotId ||
+    acquisition.snapshotSha256 !== evidenceSnapshotSha256 ||
+    contentBinding.snapshotId !== content.snapshotId ||
+    contentBinding.snapshotSha256 !== content.snapshotSha256 ||
+    canonicalJson(inferenceAtoms) !== canonicalJson(contentAtoms) ||
+    inference.policySha256 !== policySha256 ||
+    analysis.schemaVersion !== 2 ||
+    analysis.inferenceSnapshotSha256 !== inference.snapshotSha256 ||
+    analysisRun.status !== "reproduced" ||
+    typeof analysisRun.id !== "string" ||
+    findings.length === 0 ||
+    graph.kind !== "tiangong-claim-evidence-graph" ||
+    graph.projectId !== projectId ||
+    graph.inferenceSnapshotSha256 !== inference.snapshotSha256 ||
+    graph.analysisSha256 !== (await sha256File(join(outputRoot, "analysis.json"))) ||
+    graph.analysisRunId !== analysisRun.id ||
+    nodeById.size !== graphNodes.length ||
+    new Set(graphEdges.flatMap((edge) => (typeof edge.id === "string" ? [edge.id] : []))).size !==
+      graphEdges.length ||
+    graphEdges.some(
+      (edge) =>
+        typeof edge.from !== "string" ||
+        typeof edge.to !== "string" ||
+        !nodeById.has(edge.from) ||
+        !nodeById.has(edge.to),
+    ) ||
+    !validClaimEvidenceTopology({
+      findings,
+      analysisRunId: analysisRun.id,
+      atoms: inferenceAtoms,
+      sources: inferenceSources,
+      claims: inferenceClaims,
+      nodeById,
+      edgeBindings,
+    })
+  ) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_SUBMISSION_BINDING_INVALID",
+      "The submission package does not bind passing content/inference gates, a reproduced analysis, and a complete Claim–Evidence Graph.",
+      3,
+    );
+  }
+  return { analysis };
+}
+
+function hashBoundSnapshot(value: Record<string, unknown>, hashKey: string): boolean {
+  const recorded = value[hashKey];
+  if (typeof recorded !== "string" || !/^[a-f0-9]{64}$/u.test(recorded)) return false;
+  const core = { ...value };
+  delete core[hashKey];
+  return sha256Text(canonicalJson(core)) === recorded;
+}
+
+function validClaimEvidenceTopology(input: {
+  findings: Array<Record<string, unknown>>;
+  analysisRunId: string;
+  atoms: Array<Record<string, unknown>>;
+  sources: Array<Record<string, unknown>>;
+  claims: Array<Record<string, unknown>>;
+  nodeById: Map<string, Record<string, unknown>>;
+  edgeBindings: Set<string>;
+}): boolean {
+  const atomById = objectMap(input.atoms, "atomId");
+  const sourceById = objectMap(input.sources, "id");
+  const claimById = objectMap(input.claims, "id");
+  const runNodeId = `analysis-run:${input.analysisRunId}`;
+  const runNode = input.nodeById.get(runNodeId);
+  if (!runNode || runNode.type !== "analysis-run" || runNode.label !== input.analysisRunId) {
+    return false;
+  }
+  for (const finding of input.findings) {
+    if (
+      typeof finding.id !== "string" ||
+      typeof finding.statement !== "string" ||
+      !nonEmptyStringArray(finding.evidence) ||
+      !nonEmptyStringArray(finding.evidenceAtomIds) ||
+      !nonEmptyStringArray(finding.claimIds)
+    ) {
+      return false;
+    }
+    const findingNodeId = `finding:${finding.id}`;
+    const findingNode = input.nodeById.get(findingNodeId);
+    if (
+      !findingNode ||
+      findingNode.type !== "finding" ||
+      findingNode.label !== finding.statement ||
+      findingNode.sha256 !== sha256Text(canonicalJson(finding)) ||
+      !input.edgeBindings.has(`finding-produced-by-analysis-run:${findingNodeId}:${runNodeId}`)
+    ) {
+      return false;
+    }
+    const atomSourceIds = new Set<string>();
+    for (const atomId of finding.evidenceAtomIds) {
+      const atom = atomById.get(atomId);
+      if (
+        !atom ||
+        typeof atom.sourceId !== "string" ||
+        typeof atom.statement !== "string" ||
+        typeof atom.atomSha256 !== "string"
+      ) {
+        return false;
+      }
+      const source = sourceById.get(atom.sourceId);
+      const atomNodeId = `atom:${atomId}`;
+      const sourceNodeId = `source:${atom.sourceId}`;
+      const atomNode = input.nodeById.get(atomNodeId);
+      const sourceNode = input.nodeById.get(sourceNodeId);
+      if (
+        !source ||
+        !atomNode ||
+        atomNode.type !== "atom" ||
+        atomNode.label !== atom.statement ||
+        atomNode.sha256 !== atom.atomSha256 ||
+        !sourceNode ||
+        sourceNode.type !== "source" ||
+        sourceNode.label !== atom.sourceId ||
+        sourceNode.sha256 !== sha256Text(canonicalJson(source)) ||
+        !input.edgeBindings.has(`finding-supported-by-atom:${findingNodeId}:${atomNodeId}`) ||
+        !input.edgeBindings.has(`atom-derived-from-source:${atomNodeId}:${sourceNodeId}`)
+      ) {
+        return false;
+      }
+      atomSourceIds.add(atom.sourceId);
+    }
+    if (finding.evidence.some((sourceId) => !atomSourceIds.has(sourceId))) return false;
+    for (const claimId of finding.claimIds) {
+      const claim = claimById.get(claimId);
+      const claimNodeId = `design-claim:${claimId}`;
+      const claimNode = input.nodeById.get(claimNodeId);
+      if (
+        !claim ||
+        !claimNode ||
+        claimNode.type !== "design-claim" ||
+        claimNode.label !== (typeof claim.statement === "string" ? claim.statement : claimId) ||
+        claimNode.sha256 !== sha256Text(canonicalJson(claim)) ||
+        !input.edgeBindings.has(`finding-addresses-design-claim:${findingNodeId}:${claimNodeId}`)
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function objectMap(
+  values: Array<Record<string, unknown>>,
+  idKey: string,
+): Map<string, Record<string, unknown>> {
+  return new Map(
+    values.flatMap((value) =>
+      typeof value[idKey] === "string"
+        ? ([[value[idKey], value]] as Array<[string, Record<string, unknown>]>)
+        : [],
+    ),
+  );
+}
+
+function nonEmptyStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === "string")
+  );
 }
 
 function policySummary(policy: ResearchPolicyBinding): PublicationGeneration["policy"] {
@@ -1038,6 +1502,34 @@ async function loadCurrentGeneration(
       "The publication generation failed its content hash binding.",
     );
   }
+  if (
+    !isObject(generation.submissionPackage) ||
+    generation.submissionPackage.schemaVersion !== 1 ||
+    !Array.isArray(generation.submissionPackage.requiredRoles) ||
+    !Array.isArray(generation.submissionPackage.files) ||
+    generation.submissionPackage.requiredRoles.some(
+      (role) => !REQUIRED_SUBMISSION_ROLES.includes(role as PublicationSubmissionRole),
+    ) ||
+    REQUIRED_SUBMISSION_ROLES.some(
+      (role) => !generation.submissionPackage.requiredRoles.includes(role),
+    ) ||
+    generation.submissionPackage.files.some(
+      (file) => !isObject(file) || !SUBMISSION_ROLES.has(file.role as PublicationSubmissionRole),
+    ) ||
+    typeof generation.submissionPackage.packageSha256 !== "string"
+  ) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_STATE_INVALID",
+      "The publication submission package is invalid.",
+    );
+  }
+  const { packageSha256, ...submissionPackageCore } = generation.submissionPackage;
+  if (sha256Text(canonicalJson(submissionPackageCore)) !== packageSha256) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_STATE_INVALID",
+      "The publication submission package hash binding is invalid.",
+    );
+  }
   await verifyFrozenFiles(root, projectId, [
     generation.manuscript,
     generation.assessment,
@@ -1046,6 +1538,11 @@ async function loadCurrentGeneration(
     generation.baseResearch.analysis,
     generation.baseResearch.report,
     ...generation.supplements,
+    ...generation.submissionPackage.files,
+    generation.submissionPackage.contentSnapshot,
+    generation.submissionPackage.inferenceSnapshot,
+    generation.submissionPackage.claimEvidenceGraph,
+    generation.submissionPackage.reproducibilityManifest,
   ]);
   return generation;
 }
@@ -1395,7 +1892,7 @@ function boundedStatement(verdict: PublicationReadinessVerdict): string {
 
 function reviewInstructions(role: PublicationReviewRole): string[] {
   return [
-    "Review only the exact content-addressed manuscript, supplements, evidence snapshot, base research outputs, and policy in this packet.",
+    "Review only the exact content-addressed manuscript, role-complete submission package, evidence and inference snapshots, Claim–Evidence Graph, reproducibility manifest, base research outputs, and policy in this packet.",
     "Use a fresh independent reviewer session; do not inherit producer reasoning or an earlier manuscript review.",
     "Do not upgrade the mechanical assessment or policy verdict ceiling.",
     role === "journal-editor"

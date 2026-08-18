@@ -286,19 +286,64 @@ const acquisitionAuditSchema: JsonSchema = {
 };
 
 const analysisSchema: JsonSchema = {
-  $id: "https://schemas.tiangong.ai/research/analysis-v1.json",
+  $id: "https://schemas.tiangong.ai/research/analysis-v2.json",
   type: "object",
   additionalProperties: false,
-  required: ["schemaVersion", "findings", "limitations"],
+  required: ["schemaVersion", "inferenceSnapshotSha256", "analysisRun", "findings", "limitations"],
   properties: {
-    schemaVersion: { type: "integer", const: 1 },
+    schemaVersion: { type: "integer", const: 2 },
+    inferenceSnapshotSha256: { type: "string", pattern: SHA256 },
+    analysisRun: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "id",
+        "mode",
+        "status",
+        "implementationSha256s",
+        "environmentSha256s",
+        "inputArtifactSha256s",
+        "command",
+        "randomSeed",
+        "limitations",
+      ],
+      properties: {
+        id: { type: "string", pattern: IDENTIFIER },
+        mode: { type: "string", enum: ["qualitative", "computational", "mixed"] },
+        status: { type: "string", enum: ["reproduced", "not-applicable"] },
+        implementationSha256s: {
+          type: "array",
+          items: { type: "string", pattern: SHA256 },
+        },
+        environmentSha256s: {
+          type: "array",
+          items: { type: "string", pattern: SHA256 },
+        },
+        inputArtifactSha256s: {
+          type: "array",
+          items: { type: "string", pattern: SHA256 },
+        },
+        command: { type: ["string", "null"] },
+        randomSeed: { type: ["string", "null"] },
+        limitations: { type: "array", items: { type: "string" } },
+      },
+    },
     findings: {
       type: "array",
       minItems: 1,
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["id", "statement", "evidence", "uncertainty", "applicability"],
+        required: [
+          "id",
+          "statement",
+          "evidence",
+          "evidenceAtomIds",
+          "claimIds",
+          "analysisArtifactSha256s",
+          "uncertainty",
+          "applicability",
+        ],
         properties: {
           id: { type: "string", pattern: IDENTIFIER },
           statement: nonEmptyString,
@@ -306,6 +351,18 @@ const analysisSchema: JsonSchema = {
             type: "array",
             minItems: 1,
             items: { type: "string", pattern: IDENTIFIER },
+          },
+          evidenceAtomIds: {
+            type: "array",
+            items: { type: "string", pattern: IDENTIFIER },
+          },
+          claimIds: {
+            type: "array",
+            items: { type: "string", pattern: IDENTIFIER },
+          },
+          analysisArtifactSha256s: {
+            type: "array",
+            items: { type: "string", pattern: SHA256 },
           },
           uncertainty: nonEmptyString,
           applicability: nonEmptyString,
@@ -559,10 +616,32 @@ function assertUniqueStringCollections(stage: StructuredStage, value: Record<str
     }
   }
   if (stage === "analyze") {
+    const analysisRun = isObject(value.analysisRun) ? value.analysisRun : {};
+    collections.push({
+      path: "/analysisRun/implementationSha256s",
+      value: analysisRun.implementationSha256s,
+    });
+    collections.push({
+      path: "/analysisRun/environmentSha256s",
+      value: analysisRun.environmentSha256s,
+    });
+    collections.push({
+      path: "/analysisRun/inputArtifactSha256s",
+      value: analysisRun.inputArtifactSha256s,
+    });
     const findings = Array.isArray(value.findings) ? value.findings : [];
     for (const [index, finding] of findings.entries()) {
       if (isObject(finding)) {
         collections.push({ path: `/findings/${index}/evidence`, value: finding.evidence });
+        collections.push({
+          path: `/findings/${index}/evidenceAtomIds`,
+          value: finding.evidenceAtomIds,
+        });
+        collections.push({ path: `/findings/${index}/claimIds`, value: finding.claimIds });
+        collections.push({
+          path: `/findings/${index}/analysisArtifactSha256s`,
+          value: finding.analysisArtifactSha256s,
+        });
       }
     }
   }
