@@ -181,7 +181,7 @@ describe("top-journal publication workflow", () => {
           root: fixture.root,
           projectId: fixture.projectId,
           role,
-          reviewerAgent: role === "journal-editor" ? "claude" : "codex",
+          reviewerAgent: "claude",
           reviewerSessionId,
         });
         assert.equal(packet.manuscript.sha256, frozen.manuscript.sha256);
@@ -373,6 +373,17 @@ describe("top-journal publication workflow", () => {
         producerAgent: "codex",
         producerSessionId: "native-producer-session",
       });
+      await assert.rejects(
+        preparePublicationReview({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          role: "evidence",
+          reviewerAgent: "codex",
+          reviewerSessionId: "different-session-same-agent-family",
+        }),
+        (error: unknown) =>
+          (error as { code?: string }).code === "RESEARCH_PUBLICATION_REVIEW_NOT_INDEPENDENT",
+      );
       await assert.rejects(
         preparePublicationReview({
           root: fixture.root,

@@ -25,7 +25,7 @@ import {
   writeJsonAtomic,
 } from "./storage.js";
 import type { AgentKind, ProjectState, ResearchPolicyBinding } from "./types.js";
-import { withWorkspaceLock } from "./workspace.js";
+import { loadWorkspaceConfig, withWorkspaceLock } from "./workspace.js";
 
 export type PublicationReviewRole =
   | "evidence"
@@ -457,6 +457,18 @@ export async function freezePublicationManuscript(input: {
 }): Promise<PublicationGeneration & { status: "manuscript-frozen" }> {
   return withWorkspaceLock(input.root, "research.publication.freeze", async () => {
     const project = await requireClosedTopJournalProject(input.root, input.projectId);
+    const config = await loadWorkspaceConfig(input.root);
+    if (config.producer.agent !== input.producerAgent) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_PRODUCER_MISMATCH",
+        "Publication generation must be frozen by the configured native producer agent family.",
+        3,
+        {
+          configuredProducer: config.producer.agent,
+          requestedProducer: input.producerAgent,
+        },
+      );
+    }
     await assertScientificGateForStage(input.root, project, "close");
     const producerSessionId = requireSessionId(input.producerSessionId, "producer");
     const producerSessionSha256 = sha256Text(producerSessionId);
@@ -701,6 +713,24 @@ export async function preparePublicationReview(input: {
   return withWorkspaceLock(input.root, "research.publication.review.prepare", async () => {
     const project = await requireClosedTopJournalProject(input.root, input.projectId);
     const generation = await loadCurrentGeneration(input.root, project.id);
+    const config = await loadWorkspaceConfig(input.root);
+    if (input.reviewerAgent === generation.producer.agent) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_REVIEW_NOT_INDEPENDENT",
+        "Publication review must use a different agent family from the native producer.",
+      );
+    }
+    if (config.reviewer.agent !== input.reviewerAgent) {
+      throw publicationError(
+        "RESEARCH_PUBLICATION_REVIEWER_MISMATCH",
+        "Publication review must use the configured independent reviewer route.",
+        3,
+        {
+          configuredReviewer: config.reviewer.agent,
+          requestedReviewer: input.reviewerAgent,
+        },
+      );
+    }
     const sessionId = requireSessionId(input.reviewerSessionId, "reviewer");
     if (!generation.requiredReviewRoles.includes(input.role)) {
       throw publicationError(
