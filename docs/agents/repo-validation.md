@@ -252,6 +252,8 @@ lifecycle reservations, and target-specific fork generations.
 `test/research-scientific-review.test.ts` covers the ordered research-design,
 real-record evidence-construct, and pilot-methods gates; other-family/fresh
 reviewer sessions; closed assessment/review schemas; mechanical precedence;
+post-acquisition snapshot source/full-text/date binding; exact promoted canary
+artifact binding; rejection of invented evidence IDs and unbound digests;
 stage-time hash revalidation; machine-visible future obligations before their
 due gate and blocking errors at that gate; and the invariant that 200,000
 resamples of four independent structures still provide four independent

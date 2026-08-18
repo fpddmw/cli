@@ -1,6 +1,6 @@
 import { Ajv2020, type ErrorObject, type ValidateFunction } from "ajv/dist/2020.js";
 import { lstat, readFile } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { appendJournalEvent, verifyJournal } from "./journal.js";
@@ -150,6 +150,19 @@ interface ScientificMechanicalIssue {
   objectIds: string[];
 }
 
+interface EvidenceConstructSource {
+  id: string;
+  sourceType: string | null;
+  publicationDate: string | null;
+  fullTextAvailable: boolean;
+  coverageDimensions: string[];
+}
+
+interface EvidenceConstructContext {
+  sources: Map<string, EvidenceConstructSource>;
+  canaryArtifactSha256s: Set<string>;
+}
+
 interface ScientificFutureGateObligation {
   code:
     | "UNCERTAINTY_STATE_VALUES_NOT_FROZEN"
@@ -164,7 +177,12 @@ interface ScientificReviewStageInput {
   path: string;
   sha256: string;
   bytes: number;
-  purpose: "inherited-gap" | "model-implementation" | "model-environment-lock" | "stage-output";
+  purpose:
+    | "construct-canary"
+    | "inherited-gap"
+    | "model-implementation"
+    | "model-environment-lock"
+    | "stage-output";
   ownerId: string;
   sourceLocator: string;
   hashBasis: "raw-file-bytes";
@@ -449,6 +467,7 @@ export async function prepareScientificReview(input: {
   assessmentPath: string;
   reviewerAgent: AgentKind;
   reviewerSessionId: string;
+  canaryArtifactPaths?: string[];
 }): Promise<ScientificReviewPacket> {
   return withWorkspaceLock(input.root, "research.scientific-review.prepare", async () => {
     const paths = workspacePaths(input.root);
@@ -522,7 +541,14 @@ export async function prepareScientificReview(input: {
         exitCode: 3,
       });
     }
-    const stageInputs = await stageInputRecords(input.root, project, input.role, design);
+    const stageInputs = await stageInputRecords(
+      input.root,
+      project,
+      input.role,
+      design,
+      assessment,
+      input.canaryArtifactPaths ?? [],
+    );
     const assessmentSha256 = exactJsonSha256(assessment);
     const assessmentLocator = `projects/${project.id}/scientific/assessments/${input.role}/${assessmentSha256}.json`;
     await writeImmutableJson(join(paths.control, assessmentLocator), assessment);
@@ -547,6 +573,7 @@ export async function prepareScientificReview(input: {
       design,
       project.evidenceRequirements,
       project.publicationPolicy,
+      await assessmentEvidenceContext(input.root, project, input.role, stageInputs),
     );
     const futureGateObligations = scientificFutureGateObligations(design, input.role);
     const packetCore = {
@@ -722,6 +749,7 @@ export async function assertScientificGateForStage(
       design,
       project.evidenceRequirements,
       project.publicationPolicy!,
+      await assessmentEvidenceContext(root, project, role, packet.stageInputs),
     ).map((issue) => issue.code);
     if (
       packet.assessment.sha256 !== gate.assessmentSha256 ||
@@ -771,6 +799,7 @@ function evaluateAssessment(
   design: ScientificDesignContract,
   requirements: ProjectState["evidenceRequirements"],
   policy: NonNullable<ProjectState["publicationPolicy"]>,
+  evidenceContext: EvidenceConstructContext | null = null,
 ): ScientificMechanicalIssue[] {
   const issues = new Map<string, ScientificMechanicalIssue>();
   const add = (code: string, message: string, objectIds: string[] = []) => {
@@ -858,9 +887,34 @@ function evaluateAssessment(
     ) {
       add("CANARY_NOT_REAL", "Construct canary must use real records without inspecting outcomes.");
     }
+    const declaredCanarySha256s = new Set(canary.artifactSha256s);
+    if (
+      !evidenceContext ||
+      declaredCanarySha256s.size !== canary.artifactSha256s.length ||
+      declaredCanarySha256s.size !== evidenceContext.canaryArtifactSha256s.size ||
+      [...declaredCanarySha256s].some(
+        (sha256) => !evidenceContext.canaryArtifactSha256s.has(sha256),
+      )
+    ) {
+      add(
+        "CANARY_ARTIFACT_UNBOUND",
+        "Every construct-canary digest must bind one exact promoted artifact and no undeclared artifact is permitted.",
+      );
+    }
     const centralEdges = design.edges
       .filter((edge) => edge.role === "central")
       .map((edge) => edge.id);
+    const knownEdgeIds = new Set(design.edges.map((edge) => edge.id));
+    const unknownCanaryEdgeIds = [...canary.constructedEdgeIds, ...canary.failedEdgeIds].filter(
+      (edgeId) => !knownEdgeIds.has(edgeId),
+    );
+    if (unknownCanaryEdgeIds.length) {
+      add(
+        "CANARY_EDGE_ID_UNKNOWN",
+        "Construct-canary edge IDs must exist in the frozen scientific design.",
+        [...new Set(unknownCanaryEdgeIds)],
+      );
+    }
     const unconstructed = centralEdges.filter(
       (edgeId) =>
         !canary.constructedEdgeIds.includes(edgeId) || canary.failedEdgeIds.includes(edgeId),
@@ -872,12 +926,85 @@ function evaluateAssessment(
         unconstructed,
       );
     }
+    const expectedRoleIds = new Set(
+      design.evidenceRoles.filter((item) => item.required).map((item) => item.id),
+    );
+    const providedRoleIds = value.evidenceRoleCoverage.map((coverage) => coverage.roleId);
+    if (
+      new Set(providedRoleIds).size !== providedRoleIds.length ||
+      providedRoleIds.some((roleId) => !expectedRoleIds.has(roleId))
+    ) {
+      add(
+        "EVIDENCE_ROLE_COVERAGE_INVALID",
+        "Evidence-role coverage must contain only distinct required roles from the frozen design.",
+      );
+    }
+    const allIndependentSourceIds = new Set<string>();
+    const allFullTextSourceIds = new Set<string>();
+    const allDatedSourceIds = new Set<string>();
     for (const required of design.evidenceRoles.filter((item) => item.required)) {
       const coverage = value.evidenceRoleCoverage.find((item) => item.roleId === required.id);
+      const independentIds = new Set(coverage?.independentSourceIds ?? []);
+      const fullTextIds = new Set(coverage?.fullTextSourceIds ?? []);
+      const datedIds = new Set(coverage?.datedSourceIds ?? []);
+      const peerReviewedIds = new Set(coverage?.peerReviewedSourceIds ?? []);
+      const referencedIds = new Set([
+        ...independentIds,
+        ...fullTextIds,
+        ...datedIds,
+        ...peerReviewedIds,
+      ]);
+      const unknownIds = [...referencedIds].filter(
+        (sourceId) => !evidenceContext?.sources.has(sourceId),
+      );
+      if (unknownIds.length) {
+        add(
+          "EVIDENCE_SOURCE_ID_UNKNOWN",
+          "Evidence-role coverage may reference only source IDs from the frozen post-acquisition snapshot.",
+          unknownIds,
+        );
+      }
+      const knownIndependent = [...independentIds].filter((sourceId) =>
+        evidenceContext?.sources.has(sourceId),
+      );
+      const validFullText = [...fullTextIds].filter(
+        (sourceId) => evidenceContext?.sources.get(sourceId)?.fullTextAvailable === true,
+      );
+      const validDated = [...datedIds].filter((sourceId) =>
+        Boolean(evidenceContext?.sources.get(sourceId)?.publicationDate),
+      );
+      const validPeerReviewed = [...peerReviewedIds].filter((sourceId) => {
+        const source = evidenceContext?.sources.get(sourceId);
+        return source?.fullTextAvailable === true;
+      });
+      for (const sourceId of knownIndependent) allIndependentSourceIds.add(sourceId);
+      for (const sourceId of validFullText) allFullTextSourceIds.add(sourceId);
+      for (const sourceId of validDated) allDatedSourceIds.add(sourceId);
+      if ([...fullTextIds].some((sourceId) => !validFullText.includes(sourceId))) {
+        add(
+          "EVIDENCE_SOURCE_FULLTEXT_INVALID",
+          "A claimed full-text source is not producer-readable in the frozen evidence snapshot.",
+          [required.id],
+        );
+      }
+      if ([...datedIds].some((sourceId) => !validDated.includes(sourceId))) {
+        add(
+          "EVIDENCE_SOURCE_DATE_INVALID",
+          "A claimed dated source has no publication date in the frozen evidence snapshot.",
+          [required.id],
+        );
+      }
+      if ([...peerReviewedIds].some((sourceId) => !validPeerReviewed.includes(sourceId))) {
+        add(
+          "EVIDENCE_SOURCE_PEER_REVIEW_INVALID",
+          "A claimed peer-reviewed source must be full text in the frozen evidence snapshot; the independent reviewer verifies its publication status.",
+          [required.id],
+        );
+      }
       if (
         !coverage ||
-        new Set(coverage.fullTextSourceIds).size < required.minimumFullText ||
-        new Set(coverage.independentSourceIds).size < required.minimumIndependentSources
+        new Set(validFullText).size < required.minimumFullText ||
+        new Set(knownIndependent).size < required.minimumIndependentSources
       ) {
         add(
           "EVIDENCE_ROLE_FULLTEXT_INSUFFICIENT",
@@ -885,7 +1012,7 @@ function evaluateAssessment(
           [required.id],
         );
       }
-      if (!coverage || new Set(coverage.datedSourceIds).size < required.minimumDatedSources) {
+      if (!coverage || new Set(validDated).size < required.minimumDatedSources) {
         add(
           "EVIDENCE_ROLE_DATED_INSUFFICIENT",
           "A required evidence role lacks its frozen dated-source minimum.",
@@ -894,7 +1021,7 @@ function evaluateAssessment(
       }
       if (
         required.peerReviewedRequired &&
-        (!coverage || new Set(coverage.peerReviewedSourceIds).size < required.minimumFullText)
+        (!coverage || new Set(validPeerReviewed).size < required.minimumFullText)
       ) {
         add(
           "EVIDENCE_ROLE_PEER_REVIEWED_INSUFFICIENT",
@@ -902,7 +1029,18 @@ function evaluateAssessment(
           [required.id],
         );
       }
-      const dimensions = new Set(coverage?.dimensionIds ?? []);
+      const dimensions = new Set(
+        knownIndependent.flatMap(
+          (sourceId) => evidenceContext?.sources.get(sourceId)?.coverageDimensions ?? [],
+        ),
+      );
+      if (coverage?.dimensionIds.some((dimension) => !dimensions.has(dimension))) {
+        add(
+          "EVIDENCE_ROLE_DIMENSION_CLAIM_INVALID",
+          "Declared role dimensions must be supported by the role's frozen snapshot sources.",
+          [required.id],
+        );
+      }
       if (required.coverageDimensionIds.some((dimension) => !dimensions.has(dimension))) {
         add(
           "EVIDENCE_ROLE_DIMENSION_UNCOVERED",
@@ -910,7 +1048,19 @@ function evaluateAssessment(
           [required.id],
         );
       }
-      const sourceTypes = new Set(coverage?.sourceTypes ?? []);
+      const sourceTypes = new Set(
+        knownIndependent.flatMap((sourceId) => {
+          const sourceType = evidenceContext?.sources.get(sourceId)?.sourceType;
+          return sourceType ? [sourceType] : [];
+        }),
+      );
+      if (coverage?.sourceTypes.some((sourceType) => !sourceTypes.has(sourceType))) {
+        add(
+          "EVIDENCE_ROLE_SOURCE_TYPE_CLAIM_INVALID",
+          "Declared role source types must be present among the role's frozen snapshot sources.",
+          [required.id],
+        );
+      }
       if (required.sourceTypeRequirements.some((sourceType) => !sourceTypes.has(sourceType))) {
         add(
           "EVIDENCE_ROLE_SOURCE_TYPE_UNCOVERED",
@@ -919,8 +1069,6 @@ function evaluateAssessment(
         );
       }
       if (coverage) {
-        const independentIds = new Set(coverage.independentSourceIds);
-        const fullTextIds = new Set(coverage.fullTextSourceIds);
         if (
           coverage.fullTextSourceIds.some((sourceId) => !independentIds.has(sourceId)) ||
           coverage.datedSourceIds.some((sourceId) => !independentIds.has(sourceId)) ||
@@ -936,15 +1084,6 @@ function evaluateAssessment(
         }
       }
     }
-    const allIndependentSourceIds = new Set(
-      value.evidenceRoleCoverage.flatMap((coverage) => coverage.independentSourceIds),
-    );
-    const allFullTextSourceIds = new Set(
-      value.evidenceRoleCoverage.flatMap((coverage) => coverage.fullTextSourceIds),
-    );
-    const allDatedSourceIds = new Set(
-      value.evidenceRoleCoverage.flatMap((coverage) => coverage.datedSourceIds),
-    );
     if (allIndependentSourceIds.size < requirements.minSources) {
       add(
         "EVIDENCE_UNIQUE_SOURCE_COVERAGE_INSUFFICIENT",
@@ -966,7 +1105,7 @@ function evaluateAssessment(
     if (!value.closestWorkDispositionComplete) {
       add(
         "CLOSEST_WORK_DISPOSITION_INCOMPLETE",
-        "Closest prior work must be obtained, compared, and dispositioned before acquisition.",
+        "Closest prior work must be obtained, compared, and dispositioned before analysis.",
       );
     }
     if (!value.centralEvidenceFitsContext) {
@@ -1101,6 +1240,8 @@ async function stageInputRecords(
   project: ProjectState,
   role: ScientificReviewRole,
   design: ScientificDesignContract,
+  assessment: ScientificGateAssessment,
+  canaryArtifactPaths: string[],
 ): Promise<ScientificReviewStageInput[]> {
   const paths = workspacePaths(root);
   const projectRoot = join(paths.projects, project.id);
@@ -1193,7 +1334,7 @@ async function stageInputRecords(
     }
     return records;
   }
-  const requiredPackage = role === "evidence-construct" ? "discover" : "acquire";
+  const requiredPackage = "acquire";
   const packageState = project.packages.find((item) => item.id === requiredPackage);
   if (packageState?.status !== "complete") {
     throw new CliError(`Scientific ${role} review requires completed ${requiredPackage}.`, {
@@ -1202,11 +1343,8 @@ async function stageInputRecords(
       details: { role, requiredPackage, status: packageState?.status ?? null },
     });
   }
-  const relativeOutputs =
-    role === "evidence-construct"
-      ? ["outputs/evidence.json"]
-      : ["outputs/acquisition.json", "outputs/evidence-snapshot.json"];
-  return Promise.all(
+  const relativeOutputs = ["outputs/acquisition.json", "outputs/evidence-snapshot.json"];
+  const stageOutputs = await Promise.all(
     relativeOutputs.map(async (relativePath) => {
       const sourceLocator = `projects/${project.id}/${relativePath}`;
       return {
@@ -1218,6 +1356,164 @@ async function stageInputRecords(
       };
     }),
   );
+  if (role !== "evidence-construct") {
+    if (canaryArtifactPaths.length)
+      throw canaryArtifactError("Only evidence-construct accepts canary artifacts.");
+    return stageOutputs;
+  }
+  const expectedSha256s = new Set(
+    (assessment as EvidenceConstructAssessment).constructCanary.artifactSha256s,
+  );
+  const seenSha256s = new Set<string>();
+  const canaryRecords: ScientificReviewStageInput[] = [];
+  const controlRoot = resolve(paths.control);
+  for (const selected of canaryArtifactPaths) {
+    if (!isAbsolute(selected) || resolve(selected) !== selected) {
+      throw canaryArtifactError("Canary artifact paths must be absolute and canonical.");
+    }
+    const sourcePath = resolve(selected);
+    const relation = relative(controlRoot, sourcePath);
+    if (sourcePath === controlRoot || (!relation.startsWith(`..${sep}`) && relation !== "..")) {
+      throw canaryArtifactError("Canary artifacts must originate outside .tiangong-research.");
+    }
+    const info = await lstat(sourcePath).catch(() => undefined);
+    if (
+      !info?.isFile() ||
+      info.isSymbolicLink() ||
+      info.size < 2 ||
+      info.size > MAX_SCIENTIFIC_REVIEW_BYTES
+    ) {
+      throw canaryArtifactError("Canary artifacts must be bounded regular non-symlink files.");
+    }
+    const sourceBytes = await readFile(sourcePath, "utf8");
+    let value: unknown;
+    try {
+      value = JSON.parse(sourceBytes) as unknown;
+    } catch {
+      throw canaryArtifactError("Canary artifacts must contain reviewable JSON.");
+    }
+    if (containsSensitiveCanaryField(value)) {
+      throw canaryArtifactError("Canary artifacts cannot contain credential-like fields.");
+    }
+    const sha256 = await sha256File(sourcePath);
+    if (!expectedSha256s.has(sha256)) {
+      throw canaryArtifactError("A supplied canary artifact is not declared by the assessment.");
+    }
+    if (seenSha256s.has(sha256)) {
+      throw canaryArtifactError("Canary artifacts must have distinct content hashes.");
+    }
+    seenSha256s.add(sha256);
+    const locator = `projects/${project.id}/scientific/canary-artifacts/evidence-construct/${sha256}.json`;
+    const promoted = resolveContained(paths.control, locator);
+    if (await pathExists(promoted)) {
+      const promotedInfo = await lstat(promoted).catch(() => undefined);
+      if (
+        !promotedInfo?.isFile() ||
+        promotedInfo.isSymbolicLink() ||
+        promotedInfo.size !== info.size ||
+        (await sha256File(promoted)) !== sha256
+      ) {
+        throw scientificGateError(
+          "A promoted construct-canary artifact failed its immutable binding.",
+          role,
+        );
+      }
+    } else {
+      await writeTextAtomic(promoted, sourceBytes);
+    }
+    canaryRecords.push({
+      path: locator,
+      sha256,
+      bytes: info.size,
+      purpose: "construct-canary",
+      ownerId: "evidence-construct",
+      sourceLocator: `native-canary:${sha256}`,
+      hashBasis: "raw-file-bytes",
+    });
+  }
+  return [...stageOutputs, ...canaryRecords];
+}
+
+async function assessmentEvidenceContext(
+  root: string,
+  project: ProjectState,
+  role: ScientificReviewRole,
+  stageInputs: ScientificReviewStageInput[],
+): Promise<EvidenceConstructContext | null> {
+  if (role !== "evidence-construct") return null;
+  const snapshotRecord = stageInputs.find(
+    (record) =>
+      record.purpose === "stage-output" &&
+      record.sourceLocator === `projects/${project.id}/outputs/evidence-snapshot.json`,
+  );
+  if (!snapshotRecord) {
+    throw scientificGateError(
+      "Evidence-construct review requires the frozen post-acquisition evidence snapshot.",
+      role,
+    );
+  }
+  const snapshot = await readExactJson(
+    resolveContained(workspacePaths(root).control, snapshotRecord.path),
+    "Evidence snapshot",
+    "RESEARCH_SCIENTIFIC_GATE_INVALID",
+  );
+  if (
+    !isObject(snapshot) ||
+    snapshot.schemaVersion !== 1 ||
+    snapshot.kind !== "tiangong-evidence-snapshot" ||
+    snapshot.projectId !== project.id ||
+    !Array.isArray(snapshot.sources)
+  ) {
+    throw scientificGateError("Evidence snapshot is malformed for scientific review.", role);
+  }
+  const snapshotSha256 = typeof snapshot.snapshotSha256 === "string" ? snapshot.snapshotSha256 : "";
+  const snapshotId = typeof snapshot.snapshotId === "string" ? snapshot.snapshotId : "";
+  const { snapshotSha256: _recordedSnapshotSha256, ...snapshotCore } = snapshot;
+  const immutableSnapshot = resolveContained(
+    workspacePaths(root).projects,
+    `${project.id}/evidence/snapshots/${snapshotSha256}.json`,
+  );
+  const snapshotBytes = normalizedJson(snapshot);
+  if (
+    !new RegExp(SHA256_PATTERN).test(snapshotSha256) ||
+    !snapshotId ||
+    sha256Text(canonicalJson(snapshotCore)) !== snapshotSha256 ||
+    project.evidenceState.currentSnapshotId !== snapshotId ||
+    project.evidenceState.currentSnapshotSha256 !== snapshotSha256 ||
+    !(await pathExists(immutableSnapshot)) ||
+    (await readFile(immutableSnapshot, "utf8")) !== snapshotBytes
+  ) {
+    throw scientificGateError(
+      "Evidence-construct review requires the current immutable evidence snapshot binding.",
+      role,
+    );
+  }
+  const sources = new Map<string, EvidenceConstructSource>();
+  for (const item of snapshot.sources) {
+    if (!isObject(item) || typeof item.id !== "string" || !item.id) {
+      throw scientificGateError("Evidence snapshot contains a malformed source.", role);
+    }
+    if (sources.has(item.id)) {
+      throw scientificGateError("Evidence snapshot contains duplicate source IDs.", role);
+    }
+    sources.set(item.id, {
+      id: item.id,
+      sourceType: typeof item.sourceType === "string" ? item.sourceType : null,
+      publicationDate: typeof item.publicationDate === "string" ? item.publicationDate : null,
+      fullTextAvailable: item.fullTextAvailable === true,
+      coverageDimensions: Array.isArray(item.coverageDimensions)
+        ? item.coverageDimensions.filter((value): value is string => typeof value === "string")
+        : [],
+    });
+  }
+  return {
+    sources,
+    canaryArtifactSha256s: new Set(
+      stageInputs
+        .filter((record) => record.purpose === "construct-canary")
+        .map((record) => record.sha256),
+    ),
+  };
 }
 
 async function loadBoundScientificDesign(
@@ -1563,6 +1859,7 @@ function isScientificReviewPacket(
         Number.isSafeInteger(record.bytes) &&
         record.bytes >= 0 &&
         [
+          "construct-canary",
           "inherited-gap",
           "model-implementation",
           "model-environment-lock",
@@ -1634,8 +1931,38 @@ function requiredGateRoles(
     "pilot-methods",
   ];
   if (stage === "discover") return ordered.slice(0, 1);
-  if (stage === "acquire") return ordered.slice(0, 2);
+  if (stage === "acquire") return ordered.slice(0, 1);
   return ordered;
+}
+
+function containsSensitiveCanaryField(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsSensitiveCanaryField);
+  if (typeof value === "string") {
+    return (
+      /\b(?:authorization|cookie|set-cookie)\b\s*[:=]/iu.test(value) ||
+      /\bbearer\s+[A-Za-z0-9._~+/=-]+/iu.test(value) ||
+      /[?&](?:access[_-]?token|api[_-]?key|apikey|auth|authorization|cookie|credential|key|password|secret|session(?:[_-]?id)?|sig|signature|token)=/iu.test(
+        value,
+      )
+    );
+  }
+  if (!isObject(value)) return false;
+  return Object.entries(value).some(
+    ([key, item]) =>
+      (/^(?:access[_-]?token|api[_-]?key|apikey|auth|authorization|cookie|credential|key|password|secret|session(?:[_-]?id)?|sig|signature|token)$/iu.test(
+        key,
+      ) &&
+        item !== null &&
+        item !== "") ||
+      containsSensitiveCanaryField(item),
+  );
+}
+
+function canaryArtifactError(message: string): CliError {
+  return new CliError(message, {
+    code: "RESEARCH_SCIENTIFIC_CANARY_ARTIFACT_INVALID",
+    exitCode: 3,
+  });
 }
 
 function reviewInstructions(role: ScientificReviewRole): string[] {

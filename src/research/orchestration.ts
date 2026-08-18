@@ -165,7 +165,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project handoff request <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project handoff resolve <project-id> --note <text> [--workspace <path>] [--json]
   tiangong-ai research project access status <project-id> [--workspace <path>] [--json]
-  tiangong-ai research project scientific review prepare <project-id> --role research-design|evidence-construct|pilot-methods --assessment <absolute-json> --reviewer-agent codex|claude --reviewer-session <opaque-id> [--workspace <path>] [--json]
+  tiangong-ai research project scientific review prepare <project-id> --role research-design|evidence-construct|pilot-methods --assessment <absolute-json> [--canary-artifacts <absolute-json-array>] --reviewer-agent codex|claude --reviewer-session <opaque-id> [--workspace <path>] [--json]
   tiangong-ai research project scientific review submit <project-id> --role research-design|evidence-construct|pilot-methods --review <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project scientific status <project-id> [--workspace <path>] [--json]
   tiangong-ai research project audit export <project-id> --output <absolute-new-directory> [--workspace <path>] [--json]
@@ -845,6 +845,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
           ...WORKSPACE_OPTIONS,
           role: "string",
           assessment: "string",
+          "canary-artifacts": "string",
           "reviewer-agent": "string",
           "reviewer-session": "string",
         },
@@ -864,15 +865,26 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         );
       }
       const root = await workspaceFromArgs(args);
+      const role = scientificReviewRole(strictString(args, "role"));
+      const canaryArtifactsFile = strictString(args, "canary-artifacts");
+      if (canaryArtifactsFile && role !== "evidence-construct") {
+        throw new CliError("--canary-artifacts is valid only for evidence-construct.", {
+          code: "RESEARCH_SCIENTIFIC_REVIEW_ARGUMENT_INVALID",
+          exitCode: 2,
+        });
+      }
       writeJson(
         io,
         await prepareScientificReview({
           root,
           projectId,
-          role: scientificReviewRole(strictString(args, "role")),
+          role,
           assessmentPath,
           reviewerAgent: publicationAgent(strictString(args, "reviewer-agent"), "reviewer"),
           reviewerSessionId,
+          canaryArtifactPaths: canaryArtifactsFile
+            ? await readAbsolutePathArray(canaryArtifactsFile, "canary-artifacts")
+            : [],
         }),
         args,
       );
@@ -1748,7 +1760,9 @@ function projectRecommendedAction(
       return `Scientific ${gate.role} review stopped the project; inspect the frozen review and request user or external action instead of continuing.`;
     }
     const schema = `scientific-assessment-${gate.role}`;
-    return `Use the native producer App to create a bounded ${gate.role} assessment from schema ${schema}, then prepare an independent review: tiangong-ai research project scientific review prepare ${project.id} --role ${gate.role} --assessment <absolute-json> --reviewer-agent <codex|claude> --reviewer-session <fresh-opaque-id> --workspace ${root}`;
+    const canaryOption =
+      gate.role === "evidence-construct" ? " --canary-artifacts <absolute-json-array>" : "";
+    return `Use the native producer App to create a bounded ${gate.role} assessment from schema ${schema}, then prepare an independent review: tiangong-ai research project scientific review prepare ${project.id} --role ${gate.role} --assessment <absolute-json>${canaryOption} --reviewer-agent <codex|claude> --reviewer-session <fresh-opaque-id> --workspace ${root}`;
   }
   if (project.status === "complete") {
     if (project.publicationPolicy) {
@@ -2053,18 +2067,22 @@ function publicationAgent(value: string | undefined, label: string): "codex" | "
   });
 }
 
-async function readAbsolutePathArray(path: string): Promise<string[]> {
+async function readAbsolutePathArray(path: string, option = "supplements"): Promise<string[]> {
+  const code =
+    option === "supplements"
+      ? "RESEARCH_PUBLICATION_FILE_INVALID"
+      : "RESEARCH_SCIENTIFIC_CANARY_ARTIFACT_INVALID";
   if (!isAbsolute(path)) {
-    throw new CliError("--supplements must be an absolute JSON file path.", {
-      code: "RESEARCH_PUBLICATION_FILE_INVALID",
+    throw new CliError(`--${option} must be an absolute JSON file path.`, {
+      code,
       exitCode: 2,
     });
   }
   const selected = resolve(path);
   const info = await lstat(selected).catch(() => undefined);
   if (!info?.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) {
-    throw new CliError("--supplements must be a bounded regular non-symlink JSON file.", {
-      code: "RESEARCH_PUBLICATION_FILE_INVALID",
+    throw new CliError(`--${option} must be a bounded regular non-symlink JSON file.`, {
+      code,
       exitCode: 2,
     });
   }
@@ -2072,8 +2090,8 @@ async function readAbsolutePathArray(path: string): Promise<string[]> {
   try {
     value = JSON.parse(await readFile(selected, "utf8")) as unknown;
   } catch {
-    throw new CliError("--supplements contains invalid JSON.", {
-      code: "RESEARCH_PUBLICATION_FILE_INVALID",
+    throw new CliError(`--${option} contains invalid JSON.`, {
+      code,
       exitCode: 2,
     });
   }
@@ -2081,8 +2099,8 @@ async function readAbsolutePathArray(path: string): Promise<string[]> {
     !Array.isArray(value) ||
     value.some((item) => typeof item !== "string" || !isAbsolute(item) || resolve(item) !== item)
   ) {
-    throw new CliError("--supplements must contain an array of absolute canonical paths.", {
-      code: "RESEARCH_PUBLICATION_FILE_INVALID",
+    throw new CliError(`--${option} must contain an array of absolute canonical paths.`, {
+      code,
       exitCode: 2,
     });
   }

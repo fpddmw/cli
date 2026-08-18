@@ -35,7 +35,9 @@ import {
   requestResearchHandoff,
 } from "../src/research/workspace/runtime.js";
 import {
+  canonicalJson,
   ensureDirectory,
+  sha256File,
   sha256Text,
   workspacePaths,
   writeJsonAtomic,
@@ -148,7 +150,7 @@ describe("top-journal early scientific reviews", () => {
       assert.equal(nextReadyPackage(project)?.id, "discover");
       assert.deepEqual(nextScientificGate(project), {
         role: "evidence-construct",
-        blocksPackage: "acquire",
+        blocksPackage: "analyze",
         status: "pending",
       });
       await assertScientificGateForStage(fixture.root, project, "discover");
@@ -165,6 +167,175 @@ describe("top-journal early scientific reviews", () => {
         rm(fixture.root, { recursive: true, force: true }),
         rm(auditDestination, { recursive: true, force: true }),
       ]);
+    }
+  });
+
+  it("lets acquisition create the frozen full-text universe before evidence-construct review", async () => {
+    const fixture = await projectFixture("scientific-evidence-after-acquire");
+    try {
+      await passResearchDesign(fixture);
+      await completePackage(fixture, "discover", "evidence.json");
+
+      const project = await loadProject(fixture.root, fixture.projectId);
+      assert.equal(nextReadyPackage(project)?.id, "acquire");
+      assert.deepEqual(nextScientificGate(project), {
+        role: "evidence-construct",
+        blocksPackage: "analyze",
+        status: "pending",
+      });
+
+      const assessmentPath = join(fixture.root, "premature-evidence-construct.json");
+      await writeJsonAtomic(
+        assessmentPath,
+        evidenceAssessment(fixture.designSha256, fixture.design, true),
+      );
+      await assert.rejects(
+        prepareScientificReview({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          role: "evidence-construct",
+          assessmentPath,
+          reviewerAgent: "claude",
+          reviewerSessionId: "premature-evidence-reviewer",
+        }),
+        (error: unknown) => {
+          assert.equal(
+            (error as { code?: string }).code,
+            "RESEARCH_SCIENTIFIC_REVIEW_PREREQUISITE_MISSING",
+          );
+          return true;
+        },
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not accept invented evidence IDs or an unbound construct-canary digest", async () => {
+    const fixture = await projectFixture("scientific-evidence-bindings");
+    try {
+      await passResearchDesign(fixture);
+      await completePackage(fixture, "discover", "evidence.json");
+      await acquiredEvidenceFixture(fixture, [
+        {
+          id: "known-source",
+          sourceType: "journal-article",
+          publicationDate: "2025-01-01",
+          fullTextAvailable: true,
+          coverageDimensions: [],
+        },
+      ]);
+
+      const assessmentPath = join(fixture.root, "invented-evidence-assessment.json");
+      await writeJsonAtomic(
+        assessmentPath,
+        evidenceAssessment(fixture.designSha256, fixture.design, true),
+      );
+      const packet = await prepareScientificReview({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        role: "evidence-construct",
+        assessmentPath,
+        reviewerAgent: "claude",
+        reviewerSessionId: "invented-evidence-reviewer",
+      });
+      assert.ok(packet.mechanicalAssessment.issueCodes.includes("EVIDENCE_SOURCE_ID_UNKNOWN"));
+      assert.ok(packet.mechanicalAssessment.issueCodes.includes("CANARY_ARTIFACT_UNBOUND"));
+      assert.equal(packet.mechanicalAssessment.canPass, false);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("revalidates promoted construct-canary bytes before downstream inference", async () => {
+    const fixture = await projectFixture("scientific-canary-tamper");
+    try {
+      await passResearchDesign(fixture);
+      await completePackage(fixture, "discover", "evidence.json");
+      await passEvidenceConstruct(fixture);
+      const project = await loadProject(fixture.root, fixture.projectId);
+      const assessmentSha256 =
+        project.scientificDesign?.gates["evidence-construct"].assessmentSha256;
+      assert.ok(assessmentSha256);
+      const assessment = JSON.parse(
+        await readFile(
+          join(
+            workspacePaths(fixture.root).projects,
+            fixture.projectId,
+            "scientific",
+            "assessments",
+            "evidence-construct",
+            `${assessmentSha256}.json`,
+          ),
+          "utf8",
+        ),
+      ) as { constructCanary: { artifactSha256s: string[] } };
+      const canarySha256 = assessment.constructCanary.artifactSha256s[0]!;
+      await writeFile(
+        join(
+          workspacePaths(fixture.root).projects,
+          fixture.projectId,
+          "scientific",
+          "canary-artifacts",
+          "evidence-construct",
+          `${canarySha256}.json`,
+        ),
+        '{"tampered":true}\n',
+      );
+      await assert.rejects(
+        assertScientificGateForStage(fixture.root, project, "analyze"),
+        (error: unknown) => {
+          assert.equal((error as { code?: string }).code, "RESEARCH_SCIENTIFIC_GATE_INVALID");
+          return true;
+        },
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects credential-like fields before promoting a construct-canary artifact", async () => {
+    const fixture = await projectFixture("scientific-canary-sensitive");
+    const secret = "do-not-persist-canary-secret";
+    try {
+      await passResearchDesign(fixture);
+      await completePackage(fixture, "discover", "evidence.json");
+      await acquiredEvidenceFixture(fixture);
+      const canaryPath = join(fixture.root, "sensitive-canary.json");
+      await writeJsonAtomic(canaryPath, {
+        schemaVersion: 1,
+        apiKey: secret,
+        rowIds: ["row-1"],
+      });
+      const assessmentPath = join(fixture.root, "sensitive-canary-assessment.json");
+      await writeJsonAtomic(
+        assessmentPath,
+        evidenceAssessment(
+          fixture.designSha256,
+          fixture.design,
+          true,
+          await sha256File(canaryPath),
+        ),
+      );
+      await assert.rejects(
+        prepareScientificReview({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          role: "evidence-construct",
+          assessmentPath,
+          reviewerAgent: "claude",
+          reviewerSessionId: "sensitive-canary-reviewer",
+          canaryArtifactPaths: [canaryPath],
+        }),
+        (error: unknown) => {
+          const typed = error as { code?: string; message?: string };
+          assert.equal(typed.code, "RESEARCH_SCIENTIFIC_CANARY_ARTIFACT_INVALID");
+          assert.doesNotMatch(JSON.stringify(typed), new RegExp(secret));
+          return true;
+        },
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
     }
   });
 
@@ -542,10 +713,12 @@ describe("top-journal early scientific reviews", () => {
         reviewPath,
       });
       await completePackage(fixture, "discover", "evidence.json");
+      await acquiredEvidenceFixture(fixture);
+      const canary = await canaryArtifactFixture(fixture, "future-freeze");
       const evidencePath = join(fixture.root, "future-freeze-evidence-assessment.json");
       await writeJsonAtomic(
         evidencePath,
-        evidenceAssessment(fixture.designSha256, fixture.design, true),
+        evidenceAssessment(fixture.designSha256, fixture.design, true, canary.sha256),
       );
       const duePacket = await prepareScientificReview({
         root: fixture.root,
@@ -554,6 +727,7 @@ describe("top-journal early scientific reviews", () => {
         assessmentPath: evidencePath,
         reviewerAgent: "claude",
         reviewerSessionId: "future-freeze-evidence-reviewer",
+        canaryArtifactPaths: [canary.path],
       });
       assert.ok(
         duePacket.mechanicalAssessment.issueCodes.includes("UNCERTAINTY_STATE_VALUES_NOT_FROZEN"),
@@ -614,16 +788,6 @@ describe("top-journal early scientific reviews", () => {
       });
       await completePackage(fixture, "discover", "evidence.json");
       await passEvidenceConstruct(fixture);
-      await completePackage(fixture, "acquire", "acquisition.json");
-      await writeJsonAtomic(
-        join(
-          workspacePaths(fixture.root).projects,
-          fixture.projectId,
-          "outputs",
-          "evidence-snapshot.json",
-        ),
-        { schemaVersion: 1, snapshotSha256: "e".repeat(64) },
-      );
       const pilotPath = join(fixture.root, "future-model-pilot-assessment.json");
       await writeJsonAtomic(pilotPath, pilotAssessment(fixture.designSha256, fixture.design));
       const duePacket = await prepareScientificReview({
@@ -771,6 +935,7 @@ describe("top-journal early scientific reviews", () => {
     try {
       await passResearchDesign(fixture);
       await completePackage(fixture, "discover", "evidence.json");
+      await acquiredEvidenceFixture(fixture);
       const assessmentPath = join(fixture.root, "evidence-construct-invalid.json");
       const invalidAssessment = evidenceAssessment(fixture.designSha256, fixture.design, false);
       await writeJsonAtomic(assessmentPath, invalidAssessment);
@@ -808,10 +973,11 @@ describe("top-journal early scientific reviews", () => {
       assert.equal(submitted.status, "revision-required");
       assert.equal(nextReadyPackage(await loadProject(fixture.root, fixture.projectId)), undefined);
 
+      const canary = await canaryArtifactFixture(fixture, "revised");
       const validAssessmentPath = join(fixture.root, "evidence-construct-valid.json");
       await writeJsonAtomic(
         validAssessmentPath,
-        evidenceAssessment(fixture.designSha256, fixture.design, true),
+        evidenceAssessment(fixture.designSha256, fixture.design, true, canary.sha256),
       );
       const revisedPacket = await prepareScientificReview({
         root: fixture.root,
@@ -820,6 +986,7 @@ describe("top-journal early scientific reviews", () => {
         assessmentPath: validAssessmentPath,
         reviewerAgent: "claude",
         reviewerSessionId: "evidence-reviewer-revised-session",
+        canaryArtifactPaths: [canary.path],
       });
       const revisedReviewPath = join(fixture.root, "evidence-review-valid.json");
       await writeJsonAtomic(
@@ -837,10 +1004,13 @@ describe("top-journal early scientific reviews", () => {
         ).status,
         "passed",
       );
-      assert.equal(
-        nextReadyPackage(await loadProject(fixture.root, fixture.projectId))?.id,
-        "acquire",
-      );
+      const revisedProject = await loadProject(fixture.root, fixture.projectId);
+      assert.equal(nextReadyPackage(revisedProject), undefined);
+      assert.deepEqual(nextScientificGate(revisedProject), {
+        role: "pilot-methods",
+        blocksPackage: "analyze",
+        status: "pending",
+      });
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }
@@ -862,10 +1032,32 @@ describe("top-journal early scientific reviews", () => {
         publicationDateTo: "2026-08-15",
       };
       await saveProject(fixture.root, project);
-      const assessment = evidenceAssessment(fixture.designSha256, fixture.design, true);
       const sharedIndependent = Array.from({ length: 6 }, (_, index) => `shared-${index}`);
       const sharedFullText = sharedIndependent.slice(0, 6);
       const sharedDated = sharedIndependent.slice(0, 4);
+      const sourceTypes = [
+        ...new Set(fixture.design.evidenceRoles.flatMap((role) => role.sourceTypeRequirements)),
+      ];
+      const dimensions = [
+        ...new Set(fixture.design.evidenceRoles.flatMap((role) => role.coverageDimensionIds)),
+      ];
+      await acquiredEvidenceFixture(
+        fixture,
+        sharedIndependent.map((id, index) => ({
+          id,
+          sourceType: sourceTypes[index % sourceTypes.length],
+          publicationDate: "2025-01-01",
+          fullTextAvailable: true,
+          coverageDimensions: dimensions,
+        })),
+      );
+      const canary = await canaryArtifactFixture(fixture, "shared-sources");
+      const assessment = evidenceAssessment(
+        fixture.designSha256,
+        fixture.design,
+        true,
+        canary.sha256,
+      );
       for (const coverage of assessment.evidenceRoleCoverage) {
         coverage.independentSourceIds = sharedIndependent;
         coverage.fullTextSourceIds = sharedFullText;
@@ -881,6 +1073,7 @@ describe("top-journal early scientific reviews", () => {
         assessmentPath,
         reviewerAgent: "claude",
         reviewerSessionId: "evidence-reviewer-reused-source-session",
+        canaryArtifactPaths: [canary.path],
       });
       assert.deepEqual(
         new Set(packet.mechanicalAssessment.issueCodes),
@@ -901,16 +1094,6 @@ describe("top-journal early scientific reviews", () => {
       await passResearchDesign(fixture);
       await completePackage(fixture, "discover", "evidence.json");
       await passEvidenceConstruct(fixture);
-      await completePackage(fixture, "acquire", "acquisition.json");
-      await writeJsonAtomic(
-        join(
-          workspacePaths(fixture.root).projects,
-          fixture.projectId,
-          "outputs",
-          "evidence-snapshot.json",
-        ),
-        { schemaVersion: 1, snapshotSha256: "e".repeat(64) },
-      );
 
       const invalidPath = join(fixture.root, "pilot-invalid.json");
       await writeJsonAtomic(
@@ -1242,10 +1425,12 @@ async function passResearchDesign(fixture: Awaited<ReturnType<typeof projectFixt
 }
 
 async function passEvidenceConstruct(fixture: Awaited<ReturnType<typeof projectFixture>>) {
+  await acquiredEvidenceFixture(fixture);
+  const canary = await canaryArtifactFixture(fixture, "passing");
   const assessmentPath = join(fixture.root, `${fixture.projectId}-evidence-assessment.json`);
   await writeJsonAtomic(
     assessmentPath,
-    evidenceAssessment(fixture.designSha256, fixture.design, true),
+    evidenceAssessment(fixture.designSha256, fixture.design, true, canary.sha256),
   );
   const packet = await prepareScientificReview({
     root: fixture.root,
@@ -1254,6 +1439,7 @@ async function passEvidenceConstruct(fixture: Awaited<ReturnType<typeof projectF
     assessmentPath,
     reviewerAgent: "claude",
     reviewerSessionId: `${fixture.projectId}-evidence-reviewer`,
+    canaryArtifactPaths: [canary.path],
   });
   const reviewPath = join(fixture.root, `${fixture.projectId}-evidence-review.json`);
   await writeJsonAtomic(
@@ -1284,6 +1470,111 @@ async function completePackage(
   await saveProject(fixture.root, project);
 }
 
+async function acquiredEvidenceFixture(
+  fixture: Awaited<ReturnType<typeof projectFixture>>,
+  sources = evidenceSnapshotSources(fixture.design),
+) {
+  await completePackage(fixture, "acquire", "acquisition.json");
+  const snapshot = evidenceSnapshotFixture(fixture.projectId, sources);
+  const outputPath = join(
+    workspacePaths(fixture.root).projects,
+    fixture.projectId,
+    "outputs",
+    "evidence-snapshot.json",
+  );
+  const immutablePath = join(
+    workspacePaths(fixture.root).projects,
+    fixture.projectId,
+    "evidence",
+    "snapshots",
+    `${snapshot.snapshotSha256}.json`,
+  );
+  await ensureDirectory(dirname(immutablePath));
+  await writeJsonAtomic(outputPath, snapshot);
+  await writeJsonAtomic(immutablePath, snapshot);
+  const project = await loadProject(fixture.root, fixture.projectId);
+  project.evidenceState.currentSnapshotId = snapshot.snapshotId;
+  project.evidenceState.currentSnapshotSha256 = snapshot.snapshotSha256;
+  await saveProject(fixture.root, project);
+}
+
+async function canaryArtifactFixture(
+  fixture: Awaited<ReturnType<typeof projectFixture>>,
+  suffix: string,
+) {
+  const path = join(fixture.root, `${fixture.projectId}-${suffix}-construct-canary.json`);
+  await writeJsonAtomic(path, {
+    schemaVersion: 1,
+    projectId: fixture.projectId,
+    outcomeBlind: true,
+    rowIds: Array.from({ length: 10 }, (_, index) => `row-${index}`),
+    constructedEdgeIds: fixture.design.edges
+      .filter((edge) => edge.role === "central")
+      .map((edge) => edge.id),
+  });
+  return { path, sha256: await sha256File(path) };
+}
+
+function evidenceSnapshotSources(design: Awaited<ReturnType<typeof projectFixture>>["design"]) {
+  return design.evidenceRoles.flatMap((role, roleIndex) =>
+    Array.from({ length: role.minimumIndependentSources }, (_, index) => ({
+      id: `source-${roleIndex}-${index}`,
+      sourceType:
+        role.sourceTypeRequirements[index % role.sourceTypeRequirements.length] ?? "academic-paper",
+      publicationDate: "2025-01-01",
+      fullTextAvailable: true,
+      coverageDimensions: [...role.coverageDimensionIds],
+    })),
+  );
+}
+
+function evidenceSnapshotFixture(
+  projectId: string,
+  sources: Array<Record<string, unknown>> = [
+    {
+      id: "known-source",
+      sourceType: "journal-article",
+      publicationDate: "2025-01-01",
+      fullTextAvailable: true,
+      coverageDimensions: [],
+    },
+  ],
+) {
+  const core = {
+    schemaVersion: 1,
+    kind: "tiangong-evidence-snapshot",
+    snapshotId: "snapshot-test",
+    parentSnapshotId: null,
+    parentSnapshotSha256: null,
+    projectId,
+    questionSha256: "2".repeat(64),
+    createdAt: "2026-08-18T00:00:00.000Z",
+    ledgerHead: "3".repeat(64),
+    evidenceRecord: { path: "outputs/evidence.json", sha256: "4".repeat(64) },
+    acquisitionRecord: { path: "outputs/acquisition.json", sha256: "5".repeat(64) },
+    receipts: [],
+    artifacts: [],
+    sources,
+    activitySummary: {
+      total: 0,
+      byKind: {},
+      blockedChallenges: 0,
+      linkedCandidateIds: [],
+    },
+    coverage: {},
+    limitations: [],
+    delta: {
+      addedSourceIds: ["known-source"],
+      changedSourceIds: [],
+      removedSourceIds: [],
+      unchangedSourceIds: [],
+      addedArtifactIds: [],
+      removedArtifactIds: [],
+    },
+  };
+  return { ...core, snapshotSha256: sha256Text(canonicalJson(core)) };
+}
+
 function researchDesignAssessment(designSha256: string) {
   return {
     schemaVersion: 1,
@@ -1308,6 +1599,7 @@ function evidenceAssessment(
   designSha256: string,
   design: Awaited<ReturnType<typeof projectFixture>>["design"],
   valid: boolean,
+  canarySha256 = "c".repeat(64),
 ) {
   return {
     schemaVersion: 1,
@@ -1325,7 +1617,7 @@ function evidenceAssessment(
       failedEdgeIds: valid
         ? []
         : design.edges.filter((edge) => edge.role === "central").map((edge) => edge.id),
-      artifactSha256s: valid ? ["c".repeat(64)] : [],
+      artifactSha256s: valid ? [canarySha256] : [],
     },
     evidenceRoleCoverage: design.evidenceRoles.map((role, roleIndex) => ({
       roleId: role.id,

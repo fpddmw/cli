@@ -422,8 +422,11 @@ The base evidence lifecycle remains
 the current interactive Codex or Claude Code host. A fresh independent reviewer
 must first pass three hash-bound scientific gates: `research-design` before
 discovery, a real-record and outcome-blind `evidence-construct` canary after
-discovery and before acquisition, and `pilot-methods` after acquisition and
-before analysis. Reviewer prose cannot override a mechanical failure.
+acquisition freezes the evidence snapshot, and `pilot-methods` after that
+canary and before analysis. Evidence-construct coverage may cite only frozen
+snapshot source IDs and states. Its JSON canary artifacts are promoted and
+content-addressed through `--canary-artifacts`; reviewer prose cannot override
+an invented ID, unbound digest, or other mechanical failure.
 
 ```bash
 tiangong-ai research schema show scientific-assessment-research-design --json
@@ -439,8 +442,10 @@ tiangong-ai research project scientific review submit top-journal-paper \
   --workspace /absolute/path/to/workspace --json
 ```
 
-Repeat the same prepare/submit route for `evidence-construct` and
-`pilot-methods` at their stage boundaries. A top-journal fork or addendum is a
+Repeat the same prepare/submit route for `evidence-construct`, adding an
+owner-reviewed JSON array of absolute canonical canary paths with
+`--canary-artifacts /absolute/path/to/canary-paths.json`, and then for
+`pilot-methods` at its stage boundary. A top-journal fork or addendum is a
 new authoritative generation and therefore requires a target-specific approved
 Policy, design, and fresh native producer session; it cannot inherit scientific
 approval from a superseded generation.

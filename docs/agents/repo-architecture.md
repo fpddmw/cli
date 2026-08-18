@@ -125,8 +125,9 @@ storage writes, queueing, and document status transitions.
   pending freeze states, exact joint uncertainty state mappings, continuous
   decision-consequence graphs, Policy-owned future-gate obligations, exact
   Policy/design/session bindings, three ordered independent scientific review
-  gates at discovery/acquisition/analysis boundaries,
-  real-record construct-canary and pilot-methods invariants, complete-lifecycle
+  gates at discovery and post-acquisition analysis boundaries,
+  frozen-snapshot source/full-text/date revalidation, exact promoted
+  real-record construct-canary artifacts, pilot-methods invariants, complete-lifecycle
   review/revision reservations, and target-specific reapproval for every
   authoritative fork or addendum generation,
   mechanical publication assessment, immutable final-manuscript generations,
@@ -262,8 +263,11 @@ the exact selected file and download event before artifact registration,
 requires derived text to name its parent artifact, and lets that derivative
 inherit only the parent's canonical source URL instead of fabricating a second
 download binding; a conflicting URL is rejected. Acquisition then produces a
-complete source audit, and analysis starts only after a verified immutable
-snapshot. Later
+complete source audit and verified immutable snapshot. The top-journal
+evidence-construct canary runs against that snapshot, binds its exact external
+JSON artifact bytes without retaining host paths, and rejects invented source
+IDs or asserted full-text/date states before the methods pilot. Analysis starts
+only after both reviews pass. Later
 producer packets contain bounded, hash-verified prior artifacts. The platform
 `sandbox-exec`/Bubblewrap capsule is used for the independently launched
 reviewer CLI; that adapter disables shell, unified-exec, filesystem, and
