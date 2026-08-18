@@ -14,6 +14,7 @@ import {
   loadImmutableEvidenceSnapshotChain,
 } from "../src/research/workspace/acquisition.js";
 import { registerEvidenceArtifact } from "../src/research/workspace/artifacts.js";
+import { exportProjectAuditBundle } from "../src/research/workspace/audit-bundle.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import {
   freezeEvidenceContentSnapshot,
@@ -54,6 +55,11 @@ describe("research acquisition and evidence snapshots", () => {
   it("registers one exact artifact, ignores concurrent files, and freezes a verified snapshot", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-acquisition-test-"));
     const staging = await mkdtemp(join(tmpdir(), "tiangong-acquisition-files-"));
+    const auditDestination = join(
+      tmpdir(),
+      `tiangong-acquisition-audit-${process.pid}-${Date.now()}`,
+    );
+    const invalidAuditDestination = `${auditDestination}-invalid`;
     try {
       await initializeResearchWorkspace(root, undefined);
       await lockCapabilities(root);
@@ -331,7 +337,7 @@ describe("research acquisition and evidence snapshots", () => {
           ),
           "utf8",
         ),
-      ) as { snapshotSha256: string };
+      ) as { snapshotId: string; snapshotSha256: string };
       const analysisOutput = join(staging, "analysis.json");
       await writeFile(
         analysisOutput,
@@ -381,7 +387,12 @@ describe("research acquisition and evidence snapshots", () => {
           ),
           "utf8",
         ),
-      ) as { inferenceSnapshotSha256: string; edges: Array<{ type: string }> };
+      ) as {
+        graphId: string;
+        graphSha256: string;
+        inferenceSnapshotSha256: string;
+        edges: Array<{ type: string }>;
+      };
       assert.equal(graph.inferenceSnapshotSha256, inferenceSnapshot.snapshotSha256);
       assert.ok(graph.edges.some((edge) => edge.type === "finding-supported-by-atom"));
       assert.ok(graph.edges.some((edge) => edge.type === "atom-derived-from-source"));
@@ -401,6 +412,34 @@ describe("research acquisition and evidence snapshots", () => {
       assert.equal(completeEvidenceProject.evidencePipeline.inference.status, "verified");
       assert.equal(completeEvidenceProject.evidencePipeline.claimGraph.status, "verified");
       assert.ok(completeEvidenceProject.evidencePipeline.claimGraph.edgeCount >= 2);
+      const audit = await exportProjectAuditBundle({
+        root,
+        projectId: "artifact-project",
+        destination: auditDestination,
+      });
+      assert.equal(audit.researchChain.acquisitionSnapshot?.id, snapshot.snapshotId);
+      assert.equal(audit.researchChain.contentSnapshot?.id, contentSnapshot.snapshotId);
+      assert.equal(audit.researchChain.inferenceSnapshot?.id, inferenceSnapshot.snapshotId);
+      assert.equal(audit.researchChain.claimEvidenceGraph?.id, graph.graphId);
+      const graphPath = join(
+        workspacePaths(root).projects,
+        "artifact-project",
+        "outputs",
+        "claim-evidence-graph.json",
+      );
+      const originalGraph = await readFile(graphPath);
+      await chmod(graphPath, 0o600);
+      await writeFile(graphPath, '{"tampered":true}\n');
+      await assert.rejects(
+        exportProjectAuditBundle({
+          root,
+          projectId: "artifact-project",
+          destination: invalidAuditDestination,
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_CLAIM_EVIDENCE_GRAPH_INVALID",
+      );
+      await writeFile(graphPath, originalGraph);
 
       const objectPath = resolveContained(workspacePaths(root).control, artifact.locator);
       await chmod(objectPath, 0o600);
@@ -413,6 +452,8 @@ describe("research acquisition and evidence snapshots", () => {
       await Promise.all([
         rm(root, { recursive: true, force: true }),
         rm(staging, { recursive: true, force: true }),
+        rm(auditDestination, { recursive: true, force: true }),
+        rm(invalidAuditDestination, { recursive: true, force: true }),
       ]);
     }
   });
