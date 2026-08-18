@@ -6,7 +6,9 @@ import { describe, it } from "node:test";
 
 import { PDFDocument } from "pdf-lib";
 
+import { runCli } from "../src/cli.js";
 import { CliError } from "../src/errors.js";
+import type { CliIO } from "../src/io.js";
 import {
   loadCurrentEvidenceSnapshot,
   loadImmutableEvidenceSnapshotChain,
@@ -240,6 +242,20 @@ describe("research acquisition and evidence snapshots", () => {
       assert.equal(snapshot.artifacts.length, 2);
       assert.equal(snapshot.coverage.decision, "pass");
       assert.equal(snapshot.parentSnapshotId, null);
+      const preContentStatus = await invokeCli([
+        "research",
+        "status",
+        "--project",
+        "artifact-project",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(preContentStatus.exitCode, 0, preContentStatus.stderr);
+      const preContentProject = JSON.parse(preContentStatus.stdout).projects[0];
+      assert.equal(preContentProject.evidencePipeline.acquisition.status, "verified");
+      assert.equal(preContentProject.evidencePipeline.content.status, "absent");
+      assert.match(preContentProject.recommendedAction, /content|decompos/i);
       const decomposition = await recordArtifactDecomposition({
         root,
         projectId: "artifact-project",
@@ -369,6 +385,22 @@ describe("research acquisition and evidence snapshots", () => {
       assert.equal(graph.inferenceSnapshotSha256, inferenceSnapshot.snapshotSha256);
       assert.ok(graph.edges.some((edge) => edge.type === "finding-supported-by-atom"));
       assert.ok(graph.edges.some((edge) => edge.type === "atom-derived-from-source"));
+      const completeEvidenceStatus = await invokeCli([
+        "research",
+        "status",
+        "--project",
+        "artifact-project",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(completeEvidenceStatus.exitCode, 0, completeEvidenceStatus.stderr);
+      const completeEvidenceProject = JSON.parse(completeEvidenceStatus.stdout).projects[0];
+      assert.equal(completeEvidenceProject.evidencePipeline.content.status, "verified");
+      assert.equal(completeEvidenceProject.evidencePipeline.content.atomCount, 1);
+      assert.equal(completeEvidenceProject.evidencePipeline.inference.status, "verified");
+      assert.equal(completeEvidenceProject.evidencePipeline.claimGraph.status, "verified");
+      assert.ok(completeEvidenceProject.evidencePipeline.claimGraph.edgeCount >= 2);
 
       const objectPath = resolveContained(workspacePaths(root).control, artifact.locator);
       await chmod(objectPath, 0o600);
@@ -1402,4 +1434,16 @@ function crc32(input: Buffer): number {
     }
   }
   return (crc ^ 0xffffffff) >>> 0;
+}
+
+async function invokeCli(argv: string[]) {
+  let stdout = "";
+  let stderr = "";
+  const io: CliIO = {
+    env: {},
+    stdout: { write: (chunk) => ((stdout += chunk), true) },
+    stderr: { write: (chunk) => ((stderr += chunk), true) },
+  };
+  const exitCode = await runCli(argv, io);
+  return { exitCode, stdout, stderr };
 }

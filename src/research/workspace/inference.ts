@@ -378,6 +378,52 @@ export async function freezeClaimEvidenceGraph(
   return graph;
 }
 
+export async function loadCurrentClaimEvidenceGraph(
+  root: string,
+  projectId: string,
+): Promise<ClaimEvidenceGraph> {
+  const projectRoot = join(workspacePaths(root).projects, projectId);
+  const currentPath = join(projectRoot, "outputs", "claim-evidence-graph.json");
+  if (!(await pathExists(currentPath))) {
+    throw inferenceError(
+      "Claim-Evidence Graph has not been frozen.",
+      "RESEARCH_CLAIM_EVIDENCE_GRAPH_REQUIRED",
+    );
+  }
+  const graph = parseClaimEvidenceGraph(JSON.parse(await readFile(currentPath, "utf8")));
+  const { graphSha256, ...withoutHash } = graph;
+  if (sha256Text(canonicalJson(withoutHash)) !== graphSha256) {
+    throw inferenceError(
+      "Claim-Evidence Graph hash binding is invalid.",
+      "RESEARCH_CLAIM_EVIDENCE_GRAPH_INVALID",
+    );
+  }
+  const immutablePath = resolveContained(projectRoot, `evidence/claim-graphs/${graphSha256}.json`);
+  if (
+    !(await pathExists(immutablePath)) ||
+    (await sha256File(immutablePath)) !== (await sha256File(currentPath))
+  ) {
+    throw inferenceError(
+      "Claim-Evidence Graph is not bound to its immutable copy.",
+      "RESEARCH_CLAIM_EVIDENCE_GRAPH_INVALID",
+    );
+  }
+  const inference = await loadCurrentInferenceSnapshot(root, projectId);
+  const analysisPath = join(projectRoot, "outputs", "analysis.json");
+  if (
+    graph.projectId !== projectId ||
+    graph.inferenceSnapshotSha256 !== inference.snapshotSha256 ||
+    !(await pathExists(analysisPath)) ||
+    graph.analysisSha256 !== (await sha256File(analysisPath))
+  ) {
+    throw inferenceError(
+      "Claim-Evidence Graph upstream bindings are stale.",
+      "RESEARCH_CLAIM_EVIDENCE_GRAPH_STALE",
+    );
+  }
+  return graph;
+}
+
 async function persistSnapshot(
   root: string,
   projectId: string,
@@ -433,6 +479,56 @@ function parseInferenceSnapshot(value: unknown): InferenceSnapshot {
     throw inferenceError("Inference snapshot is malformed.", "RESEARCH_INFERENCE_SNAPSHOT_INVALID");
   }
   return value as unknown as InferenceSnapshot;
+}
+
+function parseClaimEvidenceGraph(value: unknown): ClaimEvidenceGraph {
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    value.kind !== "tiangong-claim-evidence-graph" ||
+    typeof value.graphId !== "string" ||
+    typeof value.graphSha256 !== "string" ||
+    !SHA256.test(value.graphSha256) ||
+    typeof value.projectId !== "string" ||
+    typeof value.createdAt !== "string" ||
+    !Number.isFinite(Date.parse(value.createdAt)) ||
+    typeof value.inferenceSnapshotSha256 !== "string" ||
+    !SHA256.test(value.inferenceSnapshotSha256) ||
+    typeof value.analysisSha256 !== "string" ||
+    !SHA256.test(value.analysisSha256) ||
+    typeof value.analysisRunId !== "string" ||
+    !Array.isArray(value.nodes) ||
+    !Array.isArray(value.edges) ||
+    value.nodes.some(
+      (node) =>
+        !isObject(node) ||
+        typeof node.id !== "string" ||
+        !["source", "atom", "design-claim", "finding", "analysis-run"].includes(
+          String(node.type),
+        ) ||
+        typeof node.label !== "string" ||
+        !(node.sha256 === null || (typeof node.sha256 === "string" && SHA256.test(node.sha256))),
+    ) ||
+    value.edges.some(
+      (edge) =>
+        !isObject(edge) ||
+        typeof edge.id !== "string" ||
+        ![
+          "finding-supported-by-atom",
+          "atom-derived-from-source",
+          "finding-addresses-design-claim",
+          "finding-produced-by-analysis-run",
+        ].includes(String(edge.type)) ||
+        typeof edge.from !== "string" ||
+        typeof edge.to !== "string",
+    )
+  ) {
+    throw inferenceError(
+      "Claim-Evidence Graph is malformed.",
+      "RESEARCH_CLAIM_EVIDENCE_GRAPH_INVALID",
+    );
+  }
+  return value as unknown as ClaimEvidenceGraph;
 }
 
 function shaArray(value: unknown): value is string[] {

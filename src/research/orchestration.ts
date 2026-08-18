@@ -41,6 +41,10 @@ import { registerNativeDiscoveryCandidate } from "./workspace/evidence-ledger.js
 import { recordNativeResearchActivity } from "./workspace/native-activity.js";
 import { readAndVerifyProjectInputPlan } from "./workspace/input-plan.js";
 import {
+  loadCurrentClaimEvidenceGraph,
+  loadCurrentInferenceSnapshot,
+} from "./workspace/inference.js";
+import {
   addProjectInput,
   createProjectAddendum,
   initializeProject,
@@ -1700,7 +1704,8 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
       projects.map(async (project) => {
         const current = refreshProject(project);
         const nativeStage = await inspectNativeResearchStage(root, current);
-        const snapshot = await inspectSnapshotForStatus(root, current.id);
+        const evidencePipeline = await inspectEvidencePipelineForStatus(root, current);
+        const snapshot = evidencePipeline.acquisition;
         const readyPackage = nextReadyPackage(current)?.id ?? null;
         const scientificReview = await inspectScientificReviewStatus(root, current.id);
         const evidenceAccess = current.scientificDesign
@@ -1718,6 +1723,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
           handoff: current.handoff,
           evidenceState: current.evidenceState,
           snapshot,
+          evidencePipeline,
           nativeStage,
           scientificReview,
           evidenceAccess,
@@ -1729,6 +1735,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
             readyPackage,
             nativeStage,
             scientificReview,
+            evidencePipeline,
             publication,
           ),
           usage: current.usage,
@@ -1741,6 +1748,106 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
   };
   writeJson(io, result, args);
   return 0;
+}
+
+interface EvidencePipelineStageStatus {
+  status: "absent" | "verified" | "blocked" | "invalid";
+  code?: string;
+  gate?: { decision: "pass" | "stop"; reasons: string[] };
+  [key: string]: unknown;
+}
+
+interface EvidencePipelineStatus {
+  acquisition: EvidencePipelineStageStatus;
+  content: EvidencePipelineStageStatus;
+  inference: EvidencePipelineStageStatus;
+  claimGraph: EvidencePipelineStageStatus;
+}
+
+async function inspectEvidencePipelineForStatus(
+  root: string,
+  project: Awaited<ReturnType<typeof loadProject>>,
+): Promise<EvidencePipelineStatus> {
+  const projectRoot = join(workspacePaths(root).projects, project.id);
+  const acquisition = await inspectSnapshotForStatus(root, project.id);
+  const contentPath = join(projectRoot, "outputs", "content-snapshot.json");
+  let content: EvidencePipelineStageStatus = { status: "absent" };
+  if (await pathExists(contentPath)) {
+    try {
+      const snapshot = await loadCurrentEvidenceContentSnapshot(root, project.id);
+      content = {
+        status: "verified",
+        snapshotId: snapshot.snapshotId,
+        snapshotSha256: snapshot.snapshotSha256,
+        decompositionCount: snapshot.decompositions.length,
+        atomCount: snapshot.atoms.length,
+        sourceCount: snapshot.sourceCoverage.length,
+        roleCount: snapshot.roleCoverage.length,
+        insufficientRoleIds: snapshot.roleCoverage
+          .filter((role) => role.decision === "insufficient")
+          .map((role) => role.roleId),
+        gate: snapshot.gate,
+      };
+    } catch (error) {
+      content = {
+        status: "invalid",
+        code: error instanceof CliError ? error.code : "RESEARCH_EVIDENCE_CONTENT_SNAPSHOT_INVALID",
+      };
+    }
+  }
+  const inferencePath = join(projectRoot, "outputs", "inference-snapshot.json");
+  let inference: EvidencePipelineStageStatus = { status: "absent" };
+  if (await pathExists(inferencePath)) {
+    try {
+      const snapshot = await loadCurrentInferenceSnapshot(root, project.id);
+      inference = {
+        status: "verified",
+        snapshotId: snapshot.snapshotId,
+        snapshotSha256: snapshot.snapshotSha256,
+        sourceCount: snapshot.sources.length,
+        atomCount: snapshot.atoms.length,
+        claimCount: snapshot.claims.length,
+        artifactCount: snapshot.artifactSha256s.length,
+        gate: snapshot.gate,
+      };
+    } catch (error) {
+      inference = {
+        status: "invalid",
+        code: error instanceof CliError ? error.code : "RESEARCH_INFERENCE_SNAPSHOT_INVALID",
+      };
+    }
+  } else if (acquisition.gate?.decision === "stop") {
+    inference = { status: "blocked", gate: acquisition.gate };
+  } else if (content.gate?.decision === "stop") {
+    inference = { status: "blocked", gate: content.gate };
+  } else if (project.scientificDesign && content.status !== "verified") {
+    inference = {
+      status: "blocked",
+      code: "RESEARCH_EVIDENCE_CONTENT_SNAPSHOT_REQUIRED",
+    };
+  }
+  const graphPath = join(projectRoot, "outputs", "claim-evidence-graph.json");
+  let claimGraph: EvidencePipelineStageStatus = { status: "absent" };
+  if (await pathExists(graphPath)) {
+    try {
+      const graph = await loadCurrentClaimEvidenceGraph(root, project.id);
+      claimGraph = {
+        status: "verified",
+        graphId: graph.graphId,
+        graphSha256: graph.graphSha256,
+        analysisSha256: graph.analysisSha256,
+        analysisRunId: graph.analysisRunId,
+        nodeCount: graph.nodes.length,
+        edgeCount: graph.edges.length,
+      };
+    } catch (error) {
+      claimGraph = {
+        status: "invalid",
+        code: error instanceof CliError ? error.code : "RESEARCH_CLAIM_EVIDENCE_GRAPH_INVALID",
+      };
+    }
+  }
+  return { acquisition, content, inference, claimGraph };
 }
 
 async function inspectEvidenceAccessForStatus(
@@ -1784,7 +1891,7 @@ function projectAuthority(
 async function inspectSnapshotForStatus(
   root: string,
   projectId: string,
-): Promise<Record<string, unknown>> {
+): Promise<EvidencePipelineStageStatus> {
   const currentPath = join(
     workspacePaths(root).projects,
     projectId,
@@ -1801,6 +1908,8 @@ async function inspectSnapshotForStatus(
       parentSnapshotId: snapshot.parentSnapshotId,
       sourceCount: snapshot.sources.length,
       artifactCount: snapshot.artifacts.length,
+      gapCount: snapshot.gaps.length,
+      gate: snapshot.inferenceGate,
       delta: snapshot.delta,
     };
   } catch (error) {
@@ -1832,6 +1941,7 @@ function projectRecommendedAction(
   readyPackage: string | null,
   nativeStage: Awaited<ReturnType<typeof inspectNativeResearchStage>>,
   scientificReview: ScientificReviewStatus,
+  evidencePipeline: EvidencePipelineStatus,
   publication: PublicationStatus | { generationStatus: "invalid"; code: string } | null,
 ): string {
   if (project.lineage.supersededBy) {
@@ -1857,6 +1967,23 @@ function projectRecommendedAction(
   }
   if (nativeStage.status === "active") {
     return nativeStage.recommendedAction ?? "Resume the active native stage.";
+  }
+  if (readyPackage === "analyze") {
+    if (evidencePipeline.content.status === "absent") {
+      return `Decompose every acquired full-text/data artifact, register exact evidence atoms, then freeze typed content: tiangong-ai research project evidence content freeze ${project.id} --workspace ${root}`;
+    }
+    if (evidencePipeline.content.status === "invalid") {
+      return `Typed evidence content is invalid (${evidencePipeline.content.code ?? "unknown"}); repair exact decomposition/atom bindings before analysis.`;
+    }
+    if (evidencePipeline.content.gate?.decision === "stop") {
+      return "Typed evidence coverage is insufficient; complete lawful gap filling or request a scope/access handoff instead of starting inference.";
+    }
+    if (evidencePipeline.acquisition.gate?.decision === "stop") {
+      return "Frozen acquisition gaps block inference; request a scope/access handoff after all acquired content is decomposed instead of continuing substitute search.";
+    }
+    if (evidencePipeline.inference.status === "invalid") {
+      return `Inference snapshot is invalid (${evidencePipeline.inference.code ?? "unknown"}); repair its frozen upstream bindings before analysis.`;
+    }
   }
   if (scientificReview.nextGate) {
     const gate = scientificReview.nextGate;
