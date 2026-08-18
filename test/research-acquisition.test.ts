@@ -13,6 +13,12 @@ import {
 } from "../src/research/workspace/acquisition.js";
 import { registerEvidenceArtifact } from "../src/research/workspace/artifacts.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
+import {
+  freezeEvidenceContentSnapshot,
+  loadCurrentEvidenceContentSnapshot,
+  recordArtifactDecomposition,
+  registerEvidenceAtom,
+} from "../src/research/workspace/content-evidence.js";
 import { persistBrokerEvidence } from "../src/research/workspace/evidence.js";
 import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
 import { inspectDiscoveryProgress } from "../src/research/workspace/discovery-status.js";
@@ -234,6 +240,49 @@ describe("research acquisition and evidence snapshots", () => {
       assert.equal(snapshot.artifacts.length, 2);
       assert.equal(snapshot.coverage.decision, "pass");
       assert.equal(snapshot.parentSnapshotId, null);
+      const decomposition = await recordArtifactDecomposition({
+        root,
+        projectId: "artifact-project",
+        value: {
+          schemaVersion: 1,
+          sourceArtifactId: artifact.artifactId,
+          status: "complete",
+          parser: { id: "test.exact-text", version: "1.0.0" },
+          outputArtifactIds: [textArtifact.artifactId],
+          contentClasses: ["fulltext"],
+          limitations: [],
+        },
+      });
+      assert.equal(decomposition.sourceArtifactId, artifact.artifactId);
+      const atom = await registerEvidenceAtom({
+        root,
+        projectId: "artifact-project",
+        value: {
+          schemaVersion: 1,
+          atomId: "exact-source.definition.1",
+          sourceId: "exact-source",
+          candidateId: candidate.id,
+          artifactId: textArtifact.artifactId,
+          locator: { kind: "line-range", startLine: 1, endLine: 1 },
+          statement: "The selected artifact is the exact acquired source derivative.",
+          evidenceRoleIds: [],
+          coverageDimensionIds: ["research-question"],
+          evidenceFunction: "definition",
+          scope: "This atom is used only to prove exact content binding.",
+          limitations: [],
+        },
+      });
+      assert.equal(atom.excerpt, "selected exact text derivative");
+      assert.match(atom.excerptSha256, /^[a-f0-9]{64}$/);
+      const contentSnapshot = await freezeEvidenceContentSnapshot(root, "artifact-project");
+      assert.equal(contentSnapshot.gate.decision, "pass");
+      assert.equal(contentSnapshot.decompositions.length, 1);
+      assert.equal(contentSnapshot.atoms.length, 1);
+      assert.deepEqual(contentSnapshot.sourceCoverage[0]?.atomIds, [atom.atomId]);
+      assert.equal(
+        (await loadCurrentEvidenceContentSnapshot(root, "artifact-project")).snapshotSha256,
+        contentSnapshot.snapshotSha256,
+      );
       const evidencePath = join(
         workspacePaths(root).projects,
         "artifact-project",

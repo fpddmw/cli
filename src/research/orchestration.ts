@@ -27,6 +27,12 @@ import { fetchNativeCandidateSource } from "./workspace/broker.js";
 import { registerEvidenceArtifact } from "./workspace/artifacts.js";
 import { exportProjectAuditBundle, verifyProjectAuditBundle } from "./workspace/audit-bundle.js";
 import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
+import {
+  freezeEvidenceContentSnapshot,
+  loadCurrentEvidenceContentSnapshot,
+  recordArtifactDecomposition,
+  registerEvidenceAtom,
+} from "./workspace/content-evidence.js";
 import { inspectDiscoveryProgress } from "./workspace/discovery-status.js";
 import { inspectEvidenceAccessStatus } from "./workspace/evidence-exhaustion.js";
 import { recordDiscoveryAssessmentBatch } from "./workspace/discovery.js";
@@ -179,6 +185,10 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project evidence assessment record <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence download bind <project-id> --candidate <id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence artifact register <project-id> --candidate <id> --path <absolute-file> [--download-binding <id> | --derived-from-artifact <id>] [--media-type <type>] [--source-url <https-url>] [--license <declared-license>] [--license-url <https-url>] [--host-type <type>] [--article-version <version>] [--workspace <path>] [--json]
+  tiangong-ai research project evidence decomposition record <project-id> --record <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence atom register <project-id> --record <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence content freeze <project-id> [--workspace <path>] [--json]
+  tiangong-ai research project evidence content status <project-id> [--workspace <path>] [--json]
   tiangong-ai research schema show <discover|acquire|analyze|synthesize|review|doctor|scientific-design|scientific-assessment-research-design|scientific-assessment-evidence-construct|scientific-assessment-pilot-methods|scientific-review-research-design|scientific-review-evidence-construct|scientific-review-pilot-methods|publication-assessment|publication-review-evidence|publication-review-methods-reproducibility|publication-review-domain-novelty|publication-review-journal-editor> [--compatibility claude-code] [--json]
   tiangong-ai research status [--project <project-id>] [--all] [--workspace <absolute-path>] [--json]
   tiangong-ai research run [--project <project-id>] [--max-parallel <1-8>] [--max-cycles <1-100>] [--dry-run] [--progress-jsonl] [--workspace <absolute-path>] [--json]
@@ -1196,6 +1206,96 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
             : {}),
         }),
       );
+      writeJson(io, result, args);
+      return 0;
+    }
+    if (evidenceAction === "decomposition") {
+      const [decompositionAction, ...decompositionRest] = evidenceRest;
+      if (decompositionAction !== "record") {
+        throw unknownAction("research project evidence decomposition", decompositionAction ?? "");
+      }
+      const args = parseStrictArgs(
+        decompositionRest,
+        { ...WORKSPACE_OPTIONS, record: "string" },
+        "research project evidence decomposition record",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(
+        args.positionals,
+        "research project evidence decomposition record",
+      );
+      const recordPath = strictString(args, "record");
+      if (!recordPath) {
+        throw new CliError("decomposition record requires --record.", {
+          code: "RESEARCH_DECOMPOSITION_INVALID",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      const record = await readBoundedJsonRecord(
+        recordPath,
+        "--record",
+        "RESEARCH_DECOMPOSITION_INVALID",
+      );
+      const result = await withWorkspaceLock(root, "research.decomposition.record", () =>
+        recordArtifactDecomposition({ root, projectId, value: record }),
+      );
+      writeJson(io, result, args);
+      return 0;
+    }
+    if (evidenceAction === "atom") {
+      const [atomAction, ...atomRest] = evidenceRest;
+      if (atomAction !== "register") {
+        throw unknownAction("research project evidence atom", atomAction ?? "");
+      }
+      const args = parseStrictArgs(
+        atomRest,
+        { ...WORKSPACE_OPTIONS, record: "string" },
+        "research project evidence atom register",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project evidence atom register");
+      const recordPath = strictString(args, "record");
+      if (!recordPath) {
+        throw new CliError("atom register requires --record.", {
+          code: "RESEARCH_EVIDENCE_ATOM_INVALID",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      const record = await readBoundedJsonRecord(
+        recordPath,
+        "--record",
+        "RESEARCH_EVIDENCE_ATOM_INVALID",
+      );
+      const result = await withWorkspaceLock(root, "research.evidence-atom.register", () =>
+        registerEvidenceAtom({ root, projectId, value: record }),
+      );
+      writeJson(io, result, args);
+      return 0;
+    }
+    if (evidenceAction === "content") {
+      const [contentAction, ...contentRest] = evidenceRest;
+      if (contentAction !== "freeze" && contentAction !== "status") {
+        throw unknownAction("research project evidence content", contentAction ?? "");
+      }
+      const args = parseStrictArgs(
+        contentRest,
+        WORKSPACE_OPTIONS,
+        `research project evidence content ${contentAction}`,
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(
+        args.positionals,
+        `research project evidence content ${contentAction}`,
+      );
+      const root = await workspaceFromArgs(args);
+      const result =
+        contentAction === "freeze"
+          ? await withWorkspaceLock(root, "research.evidence-content.freeze", () =>
+              freezeEvidenceContentSnapshot(root, projectId),
+            )
+          : await loadCurrentEvidenceContentSnapshot(root, projectId);
       writeJson(io, result, args);
       return 0;
     }

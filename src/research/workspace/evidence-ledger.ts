@@ -34,6 +34,9 @@ export type EvidenceLedgerEventType =
   | "handoff.resolved"
   | "artifact.registered"
   | "artifact.assessed"
+  | "decomposition.recorded"
+  | "atom.registered"
+  | "content.snapshot.frozen"
   | "snapshot.frozen"
   | "claim.used"
   | "review.bound"
@@ -105,6 +108,8 @@ export async function cloneEvidenceLedger(
     "handoff.resolved",
     "artifact.registered",
     "artifact.assessed",
+    "decomposition.recorded",
+    "atom.registered",
   ]);
   let count = 0;
   for (const event of events) {
