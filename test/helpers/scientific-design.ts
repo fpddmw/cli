@@ -10,6 +10,7 @@ import {
 } from "../../src/research/workspace/scientific-review.js";
 import {
   resolveContained,
+  sha256File,
   workspacePaths,
   writeJsonAtomic,
   writeTextAtomic,
@@ -303,6 +304,17 @@ export async function passEvidenceConstructGate(root: string, projectId: string)
     }>;
   };
   const assessmentPath = join(root, `${projectId}-evidence-construct-assessment.json`);
+  const canaryPath = join(root, `${projectId}-evidence-construct-canary.json`);
+  await writeJsonAtomic(canaryPath, {
+    schemaVersion: 1,
+    projectId,
+    outcomeBlind: true,
+    rowIds: Array.from({ length: 10 }, (_, index) => `row-${index}`),
+    constructedEdgeIds: design.edges
+      .filter((edge) => edge.role === "central")
+      .map((edge) => edge.id),
+  });
+  const canarySha256 = await sha256File(canaryPath);
   await writeJsonAtomic(assessmentPath, {
     schemaVersion: 1,
     role: "evidence-construct",
@@ -317,7 +329,7 @@ export async function passEvidenceConstructGate(root: string, projectId: string)
         .filter((edge) => edge.role === "central")
         .map((edge) => edge.id),
       failedEdgeIds: [],
-      artifactSha256s: ["c".repeat(64)],
+      artifactSha256s: [canarySha256],
     },
     evidenceRoleCoverage: design.evidenceRoles.map((role, roleIndex) => ({
       roleId: role.id,
@@ -350,8 +362,28 @@ export async function passEvidenceConstructGate(root: string, projectId: string)
     assessmentPath,
     reviewerAgent: "claude",
     reviewerSessionId: `independent-${projectId}-evidence-construct-review`,
+    canaryArtifactPaths: [canaryPath],
   });
   await submitPassingReview(root, projectId, packet);
+}
+
+export function scientificEvidenceSnapshotSources(design: {
+  evidenceRoles: Array<{
+    minimumIndependentSources: number;
+    coverageDimensionIds: string[];
+    sourceTypeRequirements: string[];
+  }>;
+}) {
+  return design.evidenceRoles.flatMap((role, roleIndex) =>
+    Array.from({ length: role.minimumIndependentSources }, (_, index) => ({
+      id: `source-${roleIndex}-${index}`,
+      sourceType:
+        role.sourceTypeRequirements[index % role.sourceTypeRequirements.length] ?? "academic-paper",
+      publicationDate: "2025-01-01",
+      fullTextAvailable: true,
+      coverageDimensions: [...role.coverageDimensionIds],
+    })),
+  );
 }
 
 export async function passPilotMethodsGate(root: string, projectId: string): Promise<void> {

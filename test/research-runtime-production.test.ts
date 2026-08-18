@@ -45,6 +45,7 @@ import {
 } from "../src/research/workspace/projects.js";
 import {
   abortNativeResearchStage,
+  nativeEvidenceRequestSchema,
   prepareNativeResearchStage,
   runResearchWorkspaceWithInjectedProducerForTesting as runResearchWorkspace,
   type PackageExecutor,
@@ -63,6 +64,25 @@ import {
 import { scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("production research evidence and broker", () => {
+  it("publishes the acquisition route required by scientific broker requests", () => {
+    const ordinary = nativeEvidenceRequestSchema(false) as {
+      required: string[];
+      properties: Record<string, unknown>;
+    };
+    const scientific = nativeEvidenceRequestSchema(true) as {
+      required: string[];
+      properties: Record<string, unknown>;
+    };
+
+    assert.equal(ordinary.required.includes("acquisition_route_id"), false);
+    assert.equal(scientific.required.includes("acquisition_route_id"), true);
+    assert.ok(scientific.properties.acquisition_route_id);
+    assert.deepEqual(scientific.properties.acquisition_route_id, {
+      type: "string",
+      description: "Exact broker-capability route ID from the frozen scientific design.",
+    });
+  });
+
   it("auto-selects and paginates known provider result collections", async () => {
     const root = await temporaryDirectory();
     const skillParent = await temporaryDirectory();

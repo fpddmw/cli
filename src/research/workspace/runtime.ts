@@ -765,21 +765,7 @@ export async function prepareNativeResearchStage(input: {
                     input.root,
                     "--json",
                   ],
-                  requestSchema: {
-                    type: "object",
-                    additionalProperties: false,
-                    required: ["capability_id", "url"],
-                    properties: {
-                      capability_id: { type: "string" },
-                      credential_id: { type: "string" },
-                      url: { type: "string", format: "uri" },
-                      request_body: { type: "object" },
-                      json_pointer: { type: "string" },
-                      item_offset: { type: "integer", minimum: 0 },
-                      max_items: { type: "integer", minimum: 1 },
-                      cache_mode: { enum: ["prefer", "bypass"] },
-                    },
-                  },
+                  requestSchema: nativeEvidenceRequestSchema(Boolean(project.scientificDesign)),
                 }
               : null,
           registerArtifact:
@@ -1003,6 +989,34 @@ export async function prepareNativeResearchStage(input: {
       throw error;
     }
   });
+}
+
+export function nativeEvidenceRequestSchema(
+  requireAcquisitionRoute: boolean,
+): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      ...(requireAcquisitionRoute ? ["acquisition_route_id"] : []),
+      "capability_id",
+      "url",
+    ],
+    properties: {
+      acquisition_route_id: {
+        type: "string",
+        description: "Exact broker-capability route ID from the frozen scientific design.",
+      },
+      capability_id: { type: "string" },
+      credential_id: { type: "string" },
+      url: { type: "string", format: "uri" },
+      request_body: { type: "object" },
+      json_pointer: { type: "string" },
+      item_offset: { type: "integer", minimum: 0 },
+      max_items: { type: "integer", minimum: 1 },
+      cache_mode: { enum: ["prefer", "bypass"] },
+    },
+  };
 }
 
 export async function submitNativeResearchStage(input: {

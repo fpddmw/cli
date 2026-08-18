@@ -966,7 +966,7 @@ export function nextScientificGate(project: ProjectState): {
     blocksPackage: "discover" | "acquire" | "analyze";
   }> = [
     { role: "research-design", blocksPackage: "discover" },
-    { role: "evidence-construct", blocksPackage: "acquire" },
+    { role: "evidence-construct", blocksPackage: "analyze" },
     { role: "pilot-methods", blocksPackage: "analyze" },
   ];
   for (const item of ordered) {

@@ -34,6 +34,7 @@ import {
   passEvidenceConstructGate,
   passPilotMethodsGate,
   passResearchDesignGate,
+  scientificEvidenceSnapshotSources,
   scientificDesignInput,
 } from "./helpers/scientific-design.js";
 
@@ -467,6 +468,10 @@ async function publicationFixture(
   const root = await mkdtemp(join(tmpdir(), "tiangong-publication-workflow-"));
   await initializeResearchWorkspace(root, "Publication workflow");
   const policy = await createApprovedPublicationPolicy(root, projectId);
+  const designInput = await scientificDesignInput(root, projectId, {
+    targetJournal: policy.targetJournal,
+    policyRules: policy.resolvedRules,
+  });
   await initializeProject(
     root,
     projectId,
@@ -475,10 +480,7 @@ async function publicationFixture(
     false,
     undefined,
     policy,
-    await scientificDesignInput(root, projectId, {
-      targetJournal: policy.targetJournal,
-      policyRules: policy.resolvedRules,
-    }),
+    designInput,
   );
   await passResearchDesignGate(root, projectId);
   let project = await loadProject(root, projectId);
@@ -491,12 +493,21 @@ async function publicationFixture(
   discover.status = "complete";
   discover.completedAt = "2026-08-12T00:00:00.000Z";
   await saveProject(root, project);
-  await passEvidenceConstructGate(root, projectId);
   project = await loadProject(root, projectId);
   await writeJsonAtomic(join(outputRoot, "acquisition.json"), {
     schemaVersion: 1,
     artifacts: [],
   });
+  const snapshotSources = [
+    ...scientificEvidenceSnapshotSources(designInput.design.contract),
+    {
+      id: "peer-1",
+      sourceType: "journal-article",
+      publicationDate: "2025-01-01",
+      fullTextAvailable: true,
+      coverageDimensions: ["central-outcome"],
+    },
+  ];
   const snapshotCore = {
     schemaVersion: 1,
     kind: "tiangong-evidence-snapshot",
@@ -511,19 +522,25 @@ async function publicationFixture(
     acquisitionRecord: { path: "outputs/acquisition.json", sha256: "3".repeat(64) },
     receipts: [],
     artifacts: [],
-    sources: [{ id: "peer-1", fullTextAvailable: true }],
+    sources: snapshotSources,
     activitySummary: {
       total: 1,
       byKind: { web: 1 },
       blockedChallenges: 0,
-      linkedCandidateIds: ["peer-1"],
+      linkedCandidateIds: snapshotSources.map((source) => source.id),
     },
     coverage: {
-      dimensions: [{ id: "central-outcome", status: "covered", sourceIds: ["peer-1"] }],
+      dimensions: [
+        {
+          id: "central-outcome",
+          status: "covered",
+          sourceIds: snapshotSources.map((source) => source.id),
+        },
+      ],
     },
     limitations: [],
     delta: {
-      addedSourceIds: ["peer-1"],
+      addedSourceIds: snapshotSources.map((source) => source.id),
       changedSourceIds: [],
       removedSourceIds: [],
       unchangedSourceIds: [],
@@ -534,10 +551,21 @@ async function publicationFixture(
   const snapshotSha256 = sha256Text(canonicalJson(snapshotCore));
   const snapshot = { ...snapshotCore, snapshotSha256 };
   await writeJsonAtomic(join(outputRoot, "evidence-snapshot.json"), snapshot);
+  const immutableSnapshotRoot = join(
+    workspacePaths(root).projects,
+    projectId,
+    "evidence",
+    "snapshots",
+  );
+  await mkdir(immutableSnapshotRoot, { recursive: true });
+  await writeJsonAtomic(join(immutableSnapshotRoot, `${snapshotSha256}.json`), snapshot);
   const acquire = project.packages.find((workPackage) => workPackage.id === "acquire")!;
   acquire.status = "complete";
   acquire.completedAt = "2026-08-12T00:00:00.000Z";
+  project.evidenceState.currentSnapshotId = snapshot.snapshotId;
+  project.evidenceState.currentSnapshotSha256 = snapshotSha256;
   await saveProject(root, project);
+  await passEvidenceConstructGate(root, projectId);
   await passPilotMethodsGate(root, projectId);
   project = await loadProject(root, projectId);
   await writeJsonAtomic(join(outputRoot, "analysis.json"), {
