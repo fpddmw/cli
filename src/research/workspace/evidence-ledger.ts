@@ -37,6 +37,8 @@ export type EvidenceLedgerEventType =
   | "decomposition.recorded"
   | "atom.registered"
   | "content.snapshot.frozen"
+  | "inference.snapshot.frozen"
+  | "claim-graph.frozen"
   | "snapshot.frozen"
   | "claim.used"
   | "review.bound"

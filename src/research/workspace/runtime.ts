@@ -36,6 +36,11 @@ import {
 import { executeAgent, type AgentExecutionRequest } from "./executor.js";
 import { requiredDiscoveryCapabilityIds } from "./external-skills.js";
 import { renderInputLineContext } from "./input-plan.js";
+import {
+  freezeClaimEvidenceGraph,
+  freezeInferenceSnapshot,
+  loadCurrentInferenceSnapshot,
+} from "./inference.js";
 import { appendJournalEvent, readJournal, verifyJournal } from "./journal.js";
 import { nativeActivityRecordSchema } from "./native-activity.js";
 import {
@@ -573,6 +578,8 @@ export async function prepareNativeResearchStage(input: {
     }
     if (input.stage === "analyze" || input.stage === "synthesize") {
       await loadInferenceReadyEvidenceSnapshot(input.root, project.id);
+      if (input.stage === "analyze") await freezeInferenceSnapshot(input.root, project.id);
+      else await loadCurrentInferenceSnapshot(input.root, project.id);
     }
     if (
       config.mode === "production-research" &&
@@ -1159,6 +1166,21 @@ export async function submitNativeResearchStage(input: {
           ),
         );
       }
+      if (workPackage.stage === "analyze") {
+        const analysis = JSON.parse(
+          await readFile(
+            join(projectRoot(input.root, project.id), "outputs", "analysis.json"),
+            "utf8",
+          ),
+        ) as Record<string, unknown>;
+        await freezeClaimEvidenceGraph(input.root, project.id, analysis);
+        outputs.push(
+          await fileRecord(
+            join(projectRoot(input.root, project.id), "outputs", "claim-evidence-graph.json"),
+            "outputs/claim-evidence-graph.json",
+          ),
+        );
+      }
       await commitStageEvidenceBindings(input.root, project, workPackage);
       applyUsage(project, result);
       workPackage.status = "complete";
@@ -1630,6 +1652,8 @@ async function executeWorkPackage(
     } else {
       if (["analyze", "synthesize", "review"].includes(workPackage.stage)) {
         await loadInferenceReadyEvidenceSnapshot(root, project.id);
+        if (workPackage.stage === "analyze") await freezeInferenceSnapshot(root, project.id);
+        else await loadCurrentInferenceSnapshot(root, project.id);
       }
       const discovery =
         workPackage.stage === "discover"
@@ -1821,6 +1845,18 @@ async function executeWorkPackage(
           await fileRecord(
             join(projectRoot(root, project.id), "outputs", "evidence-snapshot.json"),
             "outputs/evidence-snapshot.json",
+          ),
+        );
+      }
+      if (workPackage.stage === "analyze") {
+        const analysis = JSON.parse(
+          await readFile(join(projectRoot(root, project.id), "outputs", "analysis.json"), "utf8"),
+        ) as Record<string, unknown>;
+        await freezeClaimEvidenceGraph(root, project.id, analysis);
+        promotedOutputs.push(
+          await fileRecord(
+            join(projectRoot(root, project.id), "outputs", "claim-evidence-graph.json"),
+            "outputs/claim-evidence-graph.json",
           ),
         );
       }
@@ -2317,7 +2353,10 @@ async function writeReviewPacket(
     "outputs/evidence.json",
     "outputs/acquisition.json",
     "outputs/evidence-snapshot.json",
+    "outputs/content-snapshot.json",
+    "outputs/inference-snapshot.json",
     "outputs/analysis.json",
+    "outputs/claim-evidence-graph.json",
     "outputs/report.md",
   ];
   const evidenceFiles = new Map<string, OutputRecord>();
@@ -2377,11 +2416,15 @@ async function writeReviewPacket(
       join(capsuleProject, "inputs", "runtime-fingerprint.json"),
       "inputs/runtime-fingerprint.json",
     ),
-    artifacts: await Promise.all(
-      artifactPaths.map((logicalPath) =>
-        fileRecord(resolveContained(capsuleProject, logicalPath), logicalPath),
-      ),
-    ),
+    artifacts: (
+      await Promise.all(
+        artifactPaths.map(async (logicalPath) =>
+          (await pathExists(resolveContained(capsuleProject, logicalPath)))
+            ? fileRecord(resolveContained(capsuleProject, logicalPath), logicalPath)
+            : null,
+        ),
+      )
+    ).filter((record): record is OutputRecord => record !== null),
   };
   const packetSha256 = sha256Text(canonicalJson(packet));
   const completePacket = {
@@ -3121,7 +3164,7 @@ async function validateOutputShape(
     reviewPacketSha256,
   );
   if (workPackage.stage === "analyze") {
-    await validateFindings(path, value.findings as unknown[]);
+    await validateAnalysis(path, value);
   }
   if (workPackage.stage === "review") {
     if (value.decision !== "pass") {
@@ -3211,35 +3254,131 @@ async function validateEvidenceSources(
   }
 }
 
-async function validateFindings(path: string, findings: unknown[]): Promise<void> {
-  const evidencePath = join(dirname(path), "evidence-snapshot.json");
-  const evidence = JSON.parse(await readFile(evidencePath, "utf8")) as unknown;
-  if (!isObject(evidence) || !Array.isArray(evidence.sources)) {
-    throw deterministicError("Analysis requires a frozen evidence-snapshot.json.");
+async function validateAnalysis(path: string, value: Record<string, unknown>): Promise<void> {
+  const inferencePath = join(dirname(path), "inference-snapshot.json");
+  const inference = JSON.parse(await readFile(inferencePath, "utf8")) as unknown;
+  if (
+    !isObject(inference) ||
+    typeof inference.snapshotSha256 !== "string" ||
+    !Array.isArray(inference.sources) ||
+    !Array.isArray(inference.atoms) ||
+    !Array.isArray(inference.claims) ||
+    !Array.isArray(inference.artifactSha256s) ||
+    !Array.isArray(inference.implementationArtifactSha256s) ||
+    !Array.isArray(inference.environmentLockSha256s)
+  ) {
+    throw deterministicError("Analysis requires a frozen inference-snapshot.json.");
+  }
+  if (value.inferenceSnapshotSha256 !== inference.snapshotSha256) {
+    throw new StructuredOutputError("Analysis does not bind the current inference snapshot.");
   }
   const sourceIds = new Set(
-    evidence.sources
+    inference.sources
       .filter((source): source is Record<string, unknown> => isObject(source))
       .map((source) => source.id)
       .filter((id): id is string => typeof id === "string"),
   );
+  const atomSources = new Map(
+    inference.atoms.flatMap((atom) =>
+      isObject(atom) && typeof atom.atomId === "string" && typeof atom.sourceId === "string"
+        ? [[atom.atomId, atom.sourceId] as const]
+        : [],
+    ),
+  );
+  const claimIds = new Set(
+    inference.claims.flatMap((claim) =>
+      isObject(claim) && typeof claim.id === "string" ? [claim.id] : [],
+    ),
+  );
+  const allowedInputSha256s = new Set(
+    (inference.artifactSha256s as unknown[]).filter(
+      (sha256): sha256 is string => typeof sha256 === "string",
+    ),
+  );
+  const allowedImplementationSha256s = new Set(
+    (inference.implementationArtifactSha256s as unknown[]).filter(
+      (sha256): sha256 is string => typeof sha256 === "string",
+    ),
+  );
+  const allowedEnvironmentSha256s = new Set(
+    (inference.environmentLockSha256s as unknown[]).filter(
+      (sha256): sha256 is string => typeof sha256 === "string",
+    ),
+  );
+  const run = value.analysisRun;
+  if (!isObject(run)) throw new StructuredOutputError("Analysis run binding is invalid.");
+  const implementationSha256s = run.implementationSha256s as string[];
+  const environmentSha256s = run.environmentSha256s as string[];
+  const inputArtifactSha256s = run.inputArtifactSha256s as string[];
+  if (
+    implementationSha256s.some((sha256) => !allowedImplementationSha256s.has(sha256)) ||
+    environmentSha256s.some((sha256) => !allowedEnvironmentSha256s.has(sha256)) ||
+    inputArtifactSha256s.some((sha256) => !allowedInputSha256s.has(sha256))
+  ) {
+    throw new StructuredOutputError(
+      "Analysis run refers to an artifact outside the inference snapshot.",
+    );
+  }
+  if (run.mode === "qualitative") {
+    if (
+      run.status !== "not-applicable" ||
+      run.command !== null ||
+      run.randomSeed !== null ||
+      implementationSha256s.length > 0 ||
+      environmentSha256s.length > 0
+    ) {
+      throw new StructuredOutputError("Qualitative analysis run metadata is inconsistent.");
+    }
+  } else if (
+    run.status !== "reproduced" ||
+    typeof run.command !== "string" ||
+    run.command.trim().length < 1 ||
+    typeof run.randomSeed !== "string" ||
+    run.randomSeed.trim().length < 1 ||
+    implementationSha256s.length < 1 ||
+    environmentSha256s.length < 1
+  ) {
+    throw new StructuredOutputError(
+      "Computational analysis requires exact reproduced run metadata.",
+    );
+  }
+  const findings = value.findings as unknown[];
   const findingIds = new Set<string>();
   for (const finding of findings) {
+    const findingEvidence =
+      isObject(finding) && Array.isArray(finding.evidence) ? finding.evidence : [];
     if (
       !isObject(finding) ||
       typeof finding.id !== "string" ||
       findingIds.has(finding.id) ||
       !Array.isArray(finding.evidence) ||
-      finding.evidence.some((id) => typeof id !== "string" || !sourceIds.has(id))
+      finding.evidence.some((id) => typeof id !== "string" || !sourceIds.has(id)) ||
+      !Array.isArray(finding.evidenceAtomIds) ||
+      finding.evidenceAtomIds.some(
+        (atomId) =>
+          typeof atomId !== "string" ||
+          !atomSources.has(atomId) ||
+          !findingEvidence.includes(atomSources.get(atomId)),
+      ) ||
+      !Array.isArray(finding.claimIds) ||
+      finding.claimIds.some((claimId) => typeof claimId !== "string" || !claimIds.has(claimId))
     ) {
       throw new StructuredOutputError(
         "analyze output contains an invalid or untraceable finding.",
         {
           validation: [
-            "finding IDs must be unique and evidence IDs must reference admitted sources",
+            "finding IDs must be unique; source, atom, and design-claim IDs must bind the inference snapshot",
           ],
           admittedEvidenceIds: [...sourceIds].sort(),
         },
+      );
+    }
+    if (
+      inference.scientificReview !== null &&
+      (finding.evidenceAtomIds.length < 1 || finding.claimIds.length < 1)
+    ) {
+      throw new StructuredOutputError(
+        "Top-journal findings require at least one evidence atom and design claim.",
       );
     }
     findingIds.add(finding.id);
@@ -3678,7 +3817,11 @@ async function commitStageEvidenceBindings(
         !isObject(finding) ||
         typeof finding.id !== "string" ||
         !Array.isArray(finding.evidence) ||
-        finding.evidence.some((sourceId) => typeof sourceId !== "string")
+        finding.evidence.some((sourceId) => typeof sourceId !== "string") ||
+        !Array.isArray(finding.evidenceAtomIds) ||
+        finding.evidenceAtomIds.some((atomId) => typeof atomId !== "string") ||
+        !Array.isArray(finding.claimIds) ||
+        finding.claimIds.some((claimId) => typeof claimId !== "string")
       ) {
         throw deterministicError("Analysis contains an invalid claim binding.");
       }
@@ -3686,6 +3829,8 @@ async function commitStageEvidenceBindings(
         claimId: finding.id,
         snapshotId: snapshot.snapshotId,
         sourceIds: [...finding.evidence].sort(),
+        atomIds: [...(finding.evidenceAtomIds as string[])].sort(),
+        designClaimIds: [...(finding.claimIds as string[])].sort(),
         claimSha256: sha256Text(canonicalJson(finding)),
       };
       const bindingSha256 = sha256Text(canonicalJson(binding));
@@ -3802,6 +3947,20 @@ async function stageContextForPackage(
   workPackage: WorkPackage,
   config: WorkspaceConfig,
 ): Promise<string> {
+  let analyzeFallbackContext: string[] = [];
+  if (workPackage.stage === "analyze") {
+    const inference = JSON.parse(
+      await readFile(resolveContained(capsuleProject, "outputs/inference-snapshot.json"), "utf8"),
+    ) as unknown;
+    if (
+      isObject(inference) &&
+      Array.isArray(inference.atoms) &&
+      inference.atoms.length === 0 &&
+      (await pathExists(resolveContained(capsuleProject, "inputs/evidence-artifact-context.txt")))
+    ) {
+      analyzeFallbackContext = ["inputs/evidence-artifact-context.txt"];
+    }
+  }
   const logicalPaths =
     workPackage.stage === "discover" && project.lineage.kind === "addendum"
       ? ["outputs/base-evidence-snapshot.json"]
@@ -3811,29 +3970,19 @@ async function stageContextForPackage(
             ...(project.lineage.kind === "addendum" ? ["outputs/base-evidence-snapshot.json"] : []),
           ]
         : workPackage.stage === "analyze"
-          ? [
-              "outputs/evidence-snapshot.json",
-              ...((await pathExists(
-                resolveContained(capsuleProject, "inputs/evidence-artifact-context.txt"),
-              ))
-                ? ["inputs/evidence-artifact-context.txt"]
-                : []),
-            ]
+          ? ["outputs/inference-snapshot.json", ...analyzeFallbackContext]
           : workPackage.stage === "synthesize"
             ? [
-                "outputs/evidence-snapshot.json",
+                "outputs/inference-snapshot.json",
                 "outputs/analysis.json",
-                ...((await pathExists(
-                  resolveContained(capsuleProject, "inputs/evidence-artifact-context.txt"),
-                ))
-                  ? ["inputs/evidence-artifact-context.txt"]
-                  : []),
+                "outputs/claim-evidence-graph.json",
               ]
             : workPackage.stage === "review"
               ? [
                   "inputs/review-evidence-context.txt",
-                  "outputs/evidence-snapshot.json",
+                  "outputs/inference-snapshot.json",
                   "outputs/analysis.json",
+                  "outputs/claim-evidence-graph.json",
                   "outputs/report.md",
                 ]
               : [];
@@ -3894,9 +4043,9 @@ function packagePrompt(
     acquire:
       "Audit every provisionally admitted source exactly once. For each source, bind its ledger candidateId, list only artifactIds returned by the exact artifact registration command, and choose accepted, limited, or rejected with a concise rationale and explicit limitations. A broker receipt is an immutable discovery record but is not full text. Use an empty artifactIds array only when intentionally retaining a source as metadata/abstract evidence or when the source is an already registered local input. Put unresolved blocking acquisition or coverage deficiencies in gaps; put honest non-blocking scope constraints in limitations. Do not invent file paths, hashes, URLs, artifact IDs, or successful downloads.",
     analyze:
-      "Use only the complete embedded frozen evidence snapshot below and return the schema-defined analysis object. Every finding must cite source IDs present in that snapshot and state uncertainty and applicability. When the snapshot has a parent, use its mechanical delta to focus re-analysis on added, changed, and removed evidence while still returning one complete current analysis.",
+      "Use only the complete embedded inference snapshot below and return analysis schema v2. Bind the exact inference snapshot hash and one reproducible analysisRun. Every finding must cite admitted source IDs and exact evidenceAtomIds; a top-journal finding must also bind design claimIds. State uncertainty and applicability. Never promote a source-level citation when no exact atom supports the statement.",
     synthesize:
-      "Use only the complete embedded admitted evidence and findings below. Return the schema-defined object whose reportMarkdown separates supported conclusions, uncertainty, limitations, and next actions. Use real Markdown line breaks encoded exactly once for JSON; never place literal /n or double-escaped \\n markers in reportMarkdown. When the admitted publication-date range is narrower than the requested range, state the exact admitted range and missing interval prominently in the opening summary.",
+      "Use only the complete embedded inference snapshot, analysis, and Claim–Evidence Graph below. Return the schema-defined object whose reportMarkdown separates supported conclusions, uncertainty, limitations, and next actions. Every material statement must remain within a graph-bound finding. Use real Markdown line breaks encoded exactly once for JSON; never place literal /n or double-escaped \\n markers in reportMarkdown.",
     review: `Independently inspect the complete embedded artifacts and globally bounded evidence excerpts. The CLI has already verified every bound full evidence object's size and SHA-256 and persistently stored the complete review packet; its hash is schema-bound even though the packet metadata is not duplicated in model context. Do not claim to have read beyond the embedded excerpts. Return the schema-defined review bound to packetSha256 ${reviewPacketSha256 ?? "unavailable"}. Use pass only when every material claim is traceable within the admitted evidence and clearly scoped to its limitations.`,
     close: "No agent action is allowed for mechanical closure.",
   };

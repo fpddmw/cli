@@ -304,12 +304,71 @@ describe("research acquisition and evidence snapshots", () => {
         hostAgent: "codex",
       });
       assert.match(analyze.prompt, /selected exact text derivative/);
-      assert.match(analyze.prompt, new RegExp(textArtifact.sha256));
-      await abortNativeResearchStage({
+      assert.match(analyze.prompt, new RegExp(atom.atomId));
+      const inferenceSnapshot = JSON.parse(
+        await readFile(
+          join(
+            workspacePaths(root).projects,
+            "artifact-project",
+            "outputs",
+            "inference-snapshot.json",
+          ),
+          "utf8",
+        ),
+      ) as { snapshotSha256: string };
+      const analysisOutput = join(staging, "analysis.json");
+      await writeFile(
+        analysisOutput,
+        JSON.stringify({
+          schemaVersion: 2,
+          inferenceSnapshotSha256: inferenceSnapshot.snapshotSha256,
+          analysisRun: {
+            id: "analysis-run-1",
+            mode: "qualitative",
+            status: "not-applicable",
+            implementationSha256s: [],
+            environmentSha256s: [],
+            inputArtifactSha256s: [textArtifact.sha256],
+            command: null,
+            randomSeed: null,
+            limitations: ["Deterministic binding fixture; no computation was required."],
+          },
+          findings: [
+            {
+              id: "finding-1",
+              statement: "The selected artifact is exact and content-addressed.",
+              evidence: ["exact-source"],
+              evidenceAtomIds: [atom.atomId],
+              claimIds: [],
+              analysisArtifactSha256s: [],
+              uncertainty: "Limited to the exact fixture artifact.",
+              applicability: "Artifact lineage validation only.",
+            },
+          ],
+          limitations: [],
+        }),
+      );
+      await submitNativeResearchStage({
         root,
         projectId: "artifact-project",
         sessionId: analyze.sessionId,
+        outputPath: analysisOutput,
+        confirmedModel: analyze.expectedModel,
       });
+      const graph = JSON.parse(
+        await readFile(
+          join(
+            workspacePaths(root).projects,
+            "artifact-project",
+            "outputs",
+            "claim-evidence-graph.json",
+          ),
+          "utf8",
+        ),
+      ) as { inferenceSnapshotSha256: string; edges: Array<{ type: string }> };
+      assert.equal(graph.inferenceSnapshotSha256, inferenceSnapshot.snapshotSha256);
+      assert.ok(graph.edges.some((edge) => edge.type === "finding-supported-by-atom"));
+      assert.ok(graph.edges.some((edge) => edge.type === "atom-derived-from-source"));
 
       const objectPath = resolveContained(workspacePaths(root).control, artifact.locator);
       await chmod(objectPath, 0o600);
