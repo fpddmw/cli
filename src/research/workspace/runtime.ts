@@ -13,6 +13,7 @@ import {
   commitAcquisitionAssessments,
   freezeEvidenceSnapshot,
   loadCurrentEvidenceSnapshot,
+  loadInferenceReadyEvidenceSnapshot,
   loadImmutableEvidenceSnapshotChain,
   materializeAcquisitionAudit,
   parseMaterializedAcquisitionAudit,
@@ -571,7 +572,7 @@ export async function prepareNativeResearchStage(input: {
       await registerProjectInputCandidates(input.root, project.id, project.inputs);
     }
     if (input.stage === "analyze" || input.stage === "synthesize") {
-      await loadCurrentEvidenceSnapshot(input.root, project.id);
+      await loadInferenceReadyEvidenceSnapshot(input.root, project.id);
     }
     if (
       config.mode === "production-research" &&
@@ -1619,7 +1620,7 @@ async function executeWorkPackage(
       promotedOutputs = await outputRecords(root, project, workPackage.expectedOutputs);
     } else {
       if (["analyze", "synthesize", "review"].includes(workPackage.stage)) {
-        await loadCurrentEvidenceSnapshot(root, project.id);
+        await loadInferenceReadyEvidenceSnapshot(root, project.id);
       }
       const discovery =
         workPackage.stage === "discover"

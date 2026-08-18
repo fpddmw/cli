@@ -387,6 +387,81 @@ describe("research acquisition and evidence snapshots", () => {
     }
   });
 
+  it("freezes an honest acquisition snapshot with gaps and stops inference separately", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-acquisition-gaps-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-acquisition-gaps-files-"));
+    const projectId = "acquisition-with-gaps";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      await initializeProject(root, projectId, "Evaluate a source without hiding access gaps.");
+      const input = join(staging, "source.txt");
+      await writeFile(input, "stable source evidence\n");
+      await addProjectInput(root, projectId, input, "primary");
+      const discover = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const [candidate] = await listEvidenceCandidates(root, projectId);
+      assert.ok(candidate);
+      await recordAdmission(root, projectId, candidate.id, "source-1");
+      const discoverOutput = join(staging, "discover.json");
+      await writeFile(discoverOutput, JSON.stringify(discoveryValue(candidate.id, "source-1")));
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: discover.sessionId,
+        outputPath: discoverOutput,
+        confirmedModel: discover.expectedModel,
+      });
+
+      const acquire = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      const blockingGap = "One indispensable licensed source still requires user authorization.";
+      const acquireOutput = join(staging, "acquire.json");
+      await writeFile(
+        acquireOutput,
+        JSON.stringify({
+          ...acquisitionValue(candidate.id, "source-1"),
+          gaps: [blockingGap],
+        }),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: acquire.sessionId,
+        outputPath: acquireOutput,
+        confirmedModel: acquire.expectedModel,
+      });
+
+      const snapshot = (await loadCurrentEvidenceSnapshot(root, projectId)) as unknown as {
+        gaps: string[];
+        inferenceGate: { decision: string; reasons: string[] };
+      };
+      assert.deepEqual(snapshot.gaps, [blockingGap]);
+      assert.equal(snapshot.inferenceGate.decision, "stop");
+      assert.ok(snapshot.inferenceGate.reasons.includes(blockingGap));
+      await assert.rejects(
+        prepareNativeResearchStage({ root, projectId, stage: "analyze", hostAgent: "codex" }),
+        (error: unknown) =>
+          error instanceof CliError &&
+          error.code === "RESEARCH_INFERENCE_GATE_BLOCKED" &&
+          Array.isArray((error.details as { reasons?: unknown[] } | undefined)?.reasons),
+      );
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("creates a non-destructive addendum and freezes an incremental child snapshot", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-addendum-test-"));
     const staging = await mkdtemp(join(tmpdir(), "tiangong-addendum-files-"));
@@ -904,6 +979,73 @@ describe("research acquisition and evidence snapshots", () => {
         rm(root, { recursive: true, force: true }),
         rm(staging, { recursive: true, force: true }),
       ]);
+    }
+  });
+
+  it("records plan-bound native Web gap filling during acquire", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-scientific-gap-fill-"));
+    const projectId = "scientific-gap-fill";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      const policy = scientificPolicyBinding(projectId);
+      const design = await scientificDesignInput(root, projectId, {
+        targetJournal: policy.targetJournal,
+      });
+      const project = await initializeProject(
+        root,
+        projectId,
+        "Can native Web close an exact acquisition gap for an admitted source?",
+        undefined,
+        false,
+        undefined,
+        policy,
+        design,
+      );
+      const discover = project.packages.find((workPackage) => workPackage.id === "discover");
+      assert.ok(discover);
+      discover.status = "running";
+      discover.startedAt = new Date().toISOString();
+      project.status = "running";
+      await saveProject(root, project);
+      const candidate = await registerNativeDiscoveryCandidate({
+        root,
+        projectId,
+        value: {
+          title: "Existing admitted source with a stale download URL",
+          url: "https://example.test/stale-source",
+        },
+      });
+      discover.status = "complete";
+      discover.completedAt = new Date().toISOString();
+      const acquire = project.packages.find((workPackage) => workPackage.id === "acquire");
+      assert.ok(acquire);
+      acquire.status = "running";
+      acquire.startedAt = new Date().toISOString();
+      await saveProject(root, project);
+
+      const receipt = await recordNativeResearchActivity({
+        root,
+        projectId,
+        value: {
+          schemaVersion: 1,
+          acquisitionRouteId: "route-native-public-search",
+          kind: "web-search",
+          channel: "codex.web",
+          input: "exact title plus institutional repository alternative URL",
+          candidateIds: [candidate.candidate.id],
+          resultCount: 1,
+          status: "completed",
+          challenge: "none",
+        },
+      });
+      assert.equal(receipt.stage, "acquire");
+      assert.equal(receipt.acquisitionRouteId, "route-native-public-search");
+      const access = await inspectEvidenceAccessStatus(root, projectId);
+      assert.deepEqual(access.untriedRequiredAgentRouteIds, []);
+      assert.equal(access.routes[0]?.exhausted, true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });
