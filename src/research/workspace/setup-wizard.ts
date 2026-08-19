@@ -531,7 +531,14 @@ export async function executeResearchSetupWizard(input: {
   }
   const explicitSkillIds = [
     ...new Set([
-      ...(includeOrchestrator ? ["tiangong.auto-research"] : []),
+      ...(includeOrchestrator
+        ? [
+            "tiangong.auto-research",
+            ...(producerAgent === "workbuddy" || producerAgent === "codebuddy"
+              ? ["tiangong.auto-research-workbuddy"]
+              : []),
+          ]
+        : []),
       ...companionIds,
       ...authoringIds,
     ]),

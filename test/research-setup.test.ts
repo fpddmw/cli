@@ -85,18 +85,18 @@ describe("research setup catalog and immutable plans", () => {
       assert.equal(catalog.policy.defaultInstallMode, "copy");
       assert.equal(catalog.policy.floatingUpdates, false);
       assert.deepEqual(catalog.installer, RESEARCH_SETUP_INSTALLER);
-      assert.equal(catalog.entries.length, 17);
+      assert.equal(catalog.entries.length, 18);
       assert.ok(catalog.entries.every((entry) => entry.bundled === false));
       assert.ok(catalog.entries.every((entry) => entry.userInitiatedOnly === true));
       assert.ok(catalog.entries.every((entry) => /^[0-9a-f]{64}$/.test(entry.expectedTreeSha256)));
       assert.ok(catalog.sources.every((source) => /^[0-9a-f]{40}$/.test(source.immutableRef)));
       assert.equal(
         catalog.sources.find((source) => source.id === "tiangong-ai-skills")?.immutableRef,
-        "1a8f768d3b489d8cf7583a2b4e9bea5913a03903",
+        "98cb8e748739205b896a9e8299398edd1ae8d7e6",
       );
       assert.equal(
         catalog.entries.find((entry) => entry.id === "tiangong.auto-research")?.expectedTreeSha256,
-        "819475ca945d00b7436e80c4e4e8d39af813ceee3034e7191ad33228a553fc86",
+        "c4c3338658bc0f78ca6d28f97f0a9281e3d3c528e13d05bd5ed6159f082925b1",
       );
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-sci-search"));
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-report-search"));
@@ -114,7 +114,15 @@ describe("research setup catalog and immutable plans", () => {
           ?.standaloneTestedCliVersion,
         "0.0.30",
       );
-      assert.deepEqual(catalog.roles.orchestrators, ["tiangong.auto-research"]);
+      assert.deepEqual(catalog.roles.orchestrators, [
+        "tiangong.auto-research",
+        "tiangong.auto-research-workbuddy",
+      ]);
+      assert.equal(
+        catalog.entries.find((entry) => entry.id === "tiangong.auto-research-workbuddy")
+          ?.expectedTreeSha256,
+        "38c004664315a6c2ebf433118cfbd02c0bb820bf6121c6fd71f0e776d04e815b",
+      );
       assert.ok(catalog.roles.inputPreprocessors.includes("tiangong.document-granular-decompose"));
       assert.ok(catalog.roles.acquisitionAdapters.includes("tiangong.academic-paper-download"));
       assert.ok(catalog.roles.postClosureAuthoring.includes("anthropic.docx"));

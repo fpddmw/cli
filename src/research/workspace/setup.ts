@@ -373,6 +373,22 @@ export async function createResearchSetupPlan(
   const selected = resolveSetupSkills([
     ...new Set([...BRAVE_PROFILE_SKILLS[input.evidenceProfile], ...input.skillIds]),
   ]);
+  if (
+    (agentRoutes.producerAgent === "workbuddy" || agentRoutes.producerAgent === "codebuddy") &&
+    selected.some((skill) => skill.id === "tiangong.auto-research") &&
+    !selected.some((skill) => skill.id === "tiangong.auto-research-workbuddy")
+  ) {
+    throw setupError({
+      code: "RESEARCH_SETUP_SELECTION_INVALID",
+      step: "selection",
+      reason:
+        "A WorkBuddy/CodeBuddy native producer requires the thin sandboxed-IDE adapter beside the canonical orchestrator.",
+      minimumAction:
+        "Select both tiangong.auto-research and tiangong.auto-research-workbuddy, or choose a Codex/Claude producer.",
+      retryCommand: "tiangong-ai research setup catalog --json",
+      exitCode: 2,
+    });
+  }
   const producerInstallTarget = agentRoutes.producerAgent === "claude" ? "claude-code" : "codex";
   if (
     selected.some((skill) => skill.role === "orchestrator") &&
