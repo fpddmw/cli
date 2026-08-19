@@ -2,6 +2,7 @@ import { lstat, readFile, realpath } from "node:fs/promises";
 import { extname, isAbsolute, relative, resolve, sep, win32 } from "node:path";
 
 import { CliError } from "../../errors.js";
+import { classifyPlatformPathRelation } from "./platform-capabilities.js";
 import type { ScientificDesignContract } from "./scientific-design.js";
 import {
   canonicalJson,
@@ -394,8 +395,12 @@ async function exactExternalFile(root: string, path: string): Promise<string> {
   }
   const lexicalControl = resolve(workspacePaths(root).control);
   const control = await realpath(lexicalControl).catch(() => lexicalControl);
-  const relation = relative(control, canonical);
-  if (canonical === control || isContainedRelativePath(relation)) {
+  const relation = classifyPlatformPathRelation({
+    platform: process.platform,
+    root: control,
+    candidate: canonical,
+  });
+  if (relation !== "outside") {
     throw scientificObjectInputError(
       "Scientific object source must originate outside the research control directory.",
       "path-inside-control",

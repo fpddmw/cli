@@ -6,6 +6,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: quality-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   clean-container-tdd:
     name: clean-container-tdd (linux / x64)
@@ -71,8 +75,14 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Test
+      - name: Full test suite
+        if: ${{ runner.os != 'Linux' || matrix.arch != 'x64' }}
         run: npm test
 
+      - name: Platform contract suite
+        if: ${{ runner.os == 'Windows' || runner.os == 'macOS' }}
+        run: npm run test:platform
+
       - name: Coverage gate
+        if: ${{ runner.os == 'Linux' && matrix.arch == 'x64' }}
         run: npm run test:coverage

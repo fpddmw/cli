@@ -18,6 +18,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CliError } from "../../errors.js";
+import { researchPlatformCapabilities } from "./platform-capabilities.js";
 import {
   configuredResearchSecrets,
   isSensitiveEnvironmentName,
@@ -546,7 +547,8 @@ async function sandboxInvocation(
   const workspaceCredentialPath = await realpath(configuredCredentialPath).catch(
     () => configuredCredentialPath,
   );
-  if (platform() === "darwin") {
+  const capabilities = researchPlatformCapabilities(platform());
+  if (capabilities.nativeIsolationProvider === "sandbox-exec") {
     const sandbox = "/usr/bin/sandbox-exec";
     await requireExecutable(sandbox, "macOS sandbox-exec");
     const profile = join(capsuleRoot, "execution.sb");
@@ -575,7 +577,7 @@ async function sandboxInvocation(
       isolation: { provider: "sandbox-exec", policySha256: sha256Text(policy) },
     };
   }
-  if (platform() === "linux") {
+  if (capabilities.nativeIsolationProvider === "bubblewrap") {
     const bubblewrap = await firstExecutable([
       "/usr/bin/bwrap",
       "/usr/local/bin/bwrap",
@@ -637,9 +639,14 @@ async function sandboxInvocation(
       },
     };
   }
-  throw new CliError(`Unsupported research execution platform: ${platform()}`, {
+  throw new CliError(`Unsupported research execution platform: ${capabilities.platform}`, {
     code: "RESEARCH_SANDBOX_UNAVAILABLE",
     exitCode: 3,
+    details: {
+      platform: capabilities.platform,
+      setupMode: capabilities.setupMode,
+      productionResearch: capabilities.productionResearch,
+    },
   });
 }
 

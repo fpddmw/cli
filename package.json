@@ -1,6 +1,6 @@
 {
   "name": "@tiangong-ai/cli",
-  "version": "0.0.45",
+  "version": "0.0.46",
   "description": "Tiangong AI command-line interface.",
   "repository": {
     "type": "git",
@@ -29,6 +29,7 @@
     "prepack": "npm run clean && npm run build",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --import tsx --test test/*.test.ts",
+    "test:platform": "npm run build && node --import tsx --test test/research-platform-contract.test.ts",
     "test:coverage": "npm run build && node ./scripts/run-test-coverage.cjs",
     "test:container": "node ./scripts/assert-clean-container.mjs && npm run lint && npm run test:coverage",
     "test:clean": "sh ./scripts/test-clean-container.sh",

@@ -14,6 +14,10 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { CliError } from "../../errors.js";
 import { packageVersion, RESEARCH_PACKAGE_NAME } from "./constants.js";
 import {
+  researchPlatformCapabilities,
+  type NativeIsolationProvider,
+} from "./platform-capabilities.js";
+import {
   executeAgent,
   fingerprintAgentRoute,
   probeNativeCapsuleIsolation,
@@ -245,6 +249,21 @@ export async function startReviewerBridgeSidecar(input: {
   executeNative?: NativeExecutor;
   fingerprintNative?: RouteFingerprinter;
 }): Promise<ReviewerBridgeSidecar> {
+  const capabilities = researchPlatformCapabilities();
+  if (!capabilities.reviewerSidecarExecution) {
+    throw new CliError(
+      `Reviewer sidecar execution is unsupported on ${capabilities.platform}; this platform is configuration/smoke-only.`,
+      {
+        code: "RESEARCH_SANDBOX_UNAVAILABLE",
+        exitCode: 3,
+        details: {
+          platform: capabilities.platform,
+          setupMode: capabilities.setupMode,
+          productionResearch: capabilities.productionResearch,
+        },
+      },
+    );
+  }
   const root = resolve(input.root);
   const stateDirectory = await requireExternalStateDirectory(root, input.stateDirectory);
   const marker = await loadWorkspaceMarker(root);
@@ -512,7 +531,7 @@ async function handleSidecarRequest(input: {
       policySha256 = executed.result.isolation!.policySha256;
     } else if (request.action === "fingerprint") {
       result = await input.fingerprintNative(config.reviewer, input.environment);
-      isolationProvider = process.platform === "darwin" ? "sandbox-exec" : "bubblewrap";
+      isolationProvider = requiredNativeIsolationProvider();
       policySha256 = sha256Text("fingerprint-only");
     } else {
       result = {
@@ -523,7 +542,7 @@ async function handleSidecarRequest(input: {
         supportedActions: ["execute", "fingerprint", "status"],
         negativeProbes: input.negativeProbes,
       };
-      isolationProvider = process.platform === "darwin" ? "sandbox-exec" : "bubblewrap";
+      isolationProvider = requiredNativeIsolationProvider();
       policySha256 = sha256Text("status-only");
     }
     const safeResult = sanitizeBridgeResult(result, input.environment);
@@ -555,6 +574,23 @@ async function handleSidecarRequest(input: {
       normalizeBridgeError(error, configuredResearchSecrets(input.environment)),
     );
   }
+}
+
+function requiredNativeIsolationProvider(): NativeIsolationProvider {
+  const capabilities = researchPlatformCapabilities();
+  if (capabilities.nativeIsolationProvider) return capabilities.nativeIsolationProvider;
+  throw new CliError(
+    `Native reviewer execution is unsupported on ${capabilities.platform}; this platform is configuration/smoke-only.`,
+    {
+      code: "RESEARCH_SANDBOX_UNAVAILABLE",
+      exitCode: 3,
+      details: {
+        platform: capabilities.platform,
+        setupMode: capabilities.setupMode,
+        productionResearch: capabilities.productionResearch,
+      },
+    },
+  );
 }
 
 async function executeSidecarReview(input: {
