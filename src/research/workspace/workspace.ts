@@ -604,6 +604,7 @@ export async function doctorResearchWorkspace(
               runtimes: smokeResults
                 .map((result) => result.runtime)
                 .sort((left, right) => left.agent.localeCompare(right.agent)),
+              reviewerExecution: smokeResults[0]!.reviewerExecution,
               smokeUsage: smokeResults
                 .map((result) => result.usage)
                 .sort((left, right) => left.agent.localeCompare(right.agent)),
@@ -713,11 +714,13 @@ async function inspectReusableDoctorAttestation(
 
 interface AgentSmokeResult {
   runtime: AgentRuntimeFingerprint;
+  reviewerExecution: WorkspaceDoctorAttestation["reviewerExecution"];
   usage: WorkspaceDoctorAttestation["smokeUsage"][number];
 }
 
 interface DoctorSmokeBundle {
   runtimes: AgentRuntimeFingerprint[];
+  reviewerExecution: WorkspaceDoctorAttestation["reviewerExecution"];
   smokeUsage: WorkspaceDoctorAttestation["smokeUsage"];
   capabilitySmoke: WorkspaceDoctorAttestation["capabilitySmoke"];
 }
@@ -768,8 +771,17 @@ async function runAgentSmokeCheck(
     if (!result.runtime) {
       throw new Error(`${route.agent} smoke did not return a runtime fingerprint`);
     }
+    if (!result.isolation) {
+      throw new Error(`${route.agent} smoke did not return a platform-capsule policy fingerprint`);
+    }
     return {
       runtime: result.runtime,
+      reviewerExecution: {
+        transport: config.reviewerExecution.transport,
+        isolationProvider: result.isolation.provider,
+        policySha256: result.isolation.policySha256,
+        signerKeyFingerprint: result.reviewAttestation?.signerKeyFingerprint ?? null,
+      },
       usage: {
         agent: route.agent,
         tokens: result.tokens,
@@ -832,6 +844,7 @@ async function persistDoctorAttestation(
       capabilityDeclarationsSha256: await sha256File(paths.capabilityDeclarations),
       capabilityLockSha256: await sha256File(paths.capabilityLock),
       doctorSchemaSha256: sha256Text(canonicalJson(schemaForStage("doctor"))),
+      reviewerExecution: smoke.reviewerExecution,
       runtimes: smoke.runtimes,
       capabilitySmoke: smoke.capabilitySmoke,
       smokeUsage: smoke.smokeUsage,
@@ -846,6 +859,7 @@ async function persistDoctorAttestation(
       checkedAt: value.checkedAt,
       expiresAt: value.expiresAt,
       runtimes: value.runtimes,
+      reviewerExecution: value.reviewerExecution,
       capabilitySmoke: value.capabilitySmoke,
       smokeUsage: value.smokeUsage,
     });
@@ -899,6 +913,16 @@ export async function verifyDoctorAttestation(root: string): Promise<{
   ) {
     errors.push("independent reviewer attestation binding drifted");
   }
+  if (
+    value.reviewerExecution.transport !== config.reviewerExecution.transport ||
+    !/^[0-9a-f]{64}$/.test(value.reviewerExecution.policySha256) ||
+    (value.reviewerExecution.transport === "sandbox-bridge"
+      ? !value.reviewerExecution.signerKeyFingerprint ||
+        !/^[0-9a-f]{64}$/.test(value.reviewerExecution.signerKeyFingerprint)
+      : value.reviewerExecution.signerKeyFingerprint !== null)
+  ) {
+    errors.push("independent reviewer transport attestation binding drifted");
+  }
   if (config.mode === "production-research") {
     const expectedCapabilityIds = declarations.capabilities
       .filter((capability) => capability.permissions.includes("brokered-network"))
@@ -940,7 +964,19 @@ function isDoctorAttestation(value: unknown): value is WorkspaceDoctorAttestatio
     new Set(value.capabilitySmoke.map((row) => (isObject(row) ? row.id : null))).size !==
       value.capabilitySmoke.length ||
     !Array.isArray(value.smokeUsage) ||
-    value.smokeUsage.length !== 1
+    value.smokeUsage.length !== 1 ||
+    !isObject(value.reviewerExecution) ||
+    (value.reviewerExecution.transport !== "native-direct" &&
+      value.reviewerExecution.transport !== "sandbox-bridge") ||
+    (value.reviewerExecution.isolationProvider !== "sandbox-exec" &&
+      value.reviewerExecution.isolationProvider !== "bubblewrap") ||
+    typeof value.reviewerExecution.policySha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(value.reviewerExecution.policySha256) ||
+    !(
+      value.reviewerExecution.signerKeyFingerprint === null ||
+      (typeof value.reviewerExecution.signerKeyFingerprint === "string" &&
+        /^[0-9a-f]{64}$/.test(value.reviewerExecution.signerKeyFingerprint))
+    )
   ) {
     return false;
   }

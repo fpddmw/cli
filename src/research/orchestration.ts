@@ -120,6 +120,7 @@ import type {
 import {
   doctorResearchWorkspace,
   initializeResearchWorkspace,
+  loadWorkspaceConfig,
   requireResearchWorkspace,
   withWorkspaceLock,
 } from "./workspace/workspace.js";
@@ -1777,6 +1778,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
   if (strictBoolean(args, "help")) return writeHelp(io);
   rejectPositionals(args.positionals, "research status");
   const root = await workspaceFromArgs(args);
+  const config = await loadWorkspaceConfig(root);
   const selectedProject = strictString(args, "project");
   const workspaceProjects = await listProjects(root);
   const allProjects = selectedProject
@@ -1796,6 +1798,20 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
         );
   const result = {
     workspace: root,
+    execution: {
+      producer: {
+        host: config.producer.agent,
+        model: config.producer.model,
+        mode: config.producer.executionMode,
+      },
+      reviewer: {
+        agent: config.reviewer.agent,
+        model: config.reviewer.model,
+        mode: config.reviewer.executionMode,
+        transport: config.reviewerExecution.transport,
+        isolationProvider: config.reviewerExecution.isolationProvider,
+      },
+    },
     hiddenSupersededProjects:
       selectedProject || strictBoolean(args, "all")
         ? 0

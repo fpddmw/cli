@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { request as httpRequest } from "node:http";
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -56,6 +58,60 @@ describe("sandbox-bridge reviewer execution", () => {
       assert.doesNotMatch(status.stderr, /clientToken|authorization|cookie/i);
     } finally {
       await fixture.cleanup();
+    }
+  });
+
+  it("serves and stops the exact CLI sidecar without exposing its client secret", async () => {
+    const fixture = await bridgeFixture();
+    const stateDirectory = await mkdtemp(join(tmpdir(), "tiangong-review-cli-state-"));
+    const child = spawn(
+      process.execPath,
+      [
+        join(process.cwd(), "bin", "tiangong-ai.js"),
+        "research",
+        "reviewer",
+        "serve",
+        "--workspace",
+        fixture.root,
+        "--state-dir",
+        stateDirectory,
+        "--json",
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, PATH: process.env.PATH },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    try {
+      const readyLine = await firstLine(child);
+      const ready = JSON.parse(readyLine) as {
+        status: string;
+        workspaceId: string;
+        keyFingerprint: string;
+      };
+      assert.equal(ready.status, "ready");
+      assert.match(ready.keyFingerprint, /^[a-f0-9]{64}$/);
+      assert.doesNotMatch(readyLine, /clientToken|authorization|private-key|state-/i);
+
+      const status = await invoke([
+        "research",
+        "reviewer",
+        "status",
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(status.exitCode, 0, status.stderr);
+      assert.equal(JSON.parse(status.stdout).workspaceId, ready.workspaceId);
+
+      child.kill("SIGTERM");
+      const [exitCode, signal] = (await once(child, "exit")) as [number | null, string | null];
+      assert.equal(exitCode, 0, `sidecar terminated by ${signal ?? "unknown"}`);
+      assert.equal(signal, null);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await Promise.all([fixture.cleanup(), rm(stateDirectory, { recursive: true, force: true })]);
     }
   });
 
@@ -459,5 +515,39 @@ async function postUnix(
     );
     request.on("error", reject);
     request.end(body);
+  });
+}
+
+async function firstLine(child: ChildProcess): Promise<string> {
+  if (!child.stdout || !child.stderr) throw new Error("sidecar stdio is unavailable");
+  return new Promise<string>((resolvePromise, reject) => {
+    let stdout = "";
+    let stderr = "";
+    const timeout = setTimeout(() => {
+      reject(new Error(`sidecar did not become ready: ${stderr.slice(0, 500)}`));
+    }, 15_000);
+    const cleanup = () => {
+      clearTimeout(timeout);
+      child.stdout?.off("data", onStdout);
+      child.stderr?.off("data", onStderr);
+      child.off("exit", onExit);
+    };
+    const onStdout = (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+      const newline = stdout.indexOf("\n");
+      if (newline < 0) return;
+      cleanup();
+      resolvePromise(stdout.slice(0, newline));
+    };
+    const onStderr = (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    };
+    const onExit = (code: number | null) => {
+      cleanup();
+      reject(new Error(`sidecar exited ${String(code)} before ready: ${stderr.slice(0, 500)}`));
+    };
+    child.stdout.on("data", onStdout);
+    child.stderr.on("data", onStderr);
+    child.once("exit", onExit);
   });
 }

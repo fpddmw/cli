@@ -1096,6 +1096,25 @@ describe("research project execution", () => {
       });
       assert.equal(packet.hostAgent, "workbuddy");
       assert.equal(packet.expectedModel, "hy3");
+      const status = await invoke([
+        "research",
+        "status",
+        "--workspace",
+        root,
+        "--project",
+        "workbuddy-native",
+        "--json",
+      ]);
+      assert.equal(status.exitCode, 0, status.stderr);
+      const statusValue = JSON.parse(status.stdout) as {
+        execution: {
+          producer: { host: string };
+          reviewer: { transport: string; isolationProvider: string };
+        };
+      };
+      assert.equal(statusValue.execution.producer.host, "workbuddy");
+      assert.equal(statusValue.execution.reviewer.transport, "sandbox-bridge");
+      assert.equal(statusValue.execution.reviewer.isolationProvider, "platform-capsule");
       await assert.rejects(
         executeAgent({
           route: {
@@ -2510,6 +2529,14 @@ describe("research workspace CLI", () => {
             binaryVersion: `mock-${request.route.agent} 1.0.0`,
             platform: process.platform,
             architecture: process.arch,
+          },
+          isolation: {
+            provider: process.platform === "darwin" ? "sandbox-exec" : "bubblewrap",
+            policySha256: "e".repeat(64),
+            readScopes: ["platform-runtime", "agent-runtime", "private-capsule"],
+            writeScopes: ["private-capsule"],
+            networkPolicy: "reviewer-provider-only",
+            toolPolicy: "none",
           },
         }),
       });

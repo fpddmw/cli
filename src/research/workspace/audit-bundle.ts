@@ -189,6 +189,7 @@ export async function exportProjectAuditBundle(input: {
           mode: config.mode,
           producer: portableAgentRoute(config.producer),
           reviewer: portableAgentRoute(config.reviewer),
+          reviewerExecution: config.reviewerExecution,
           budget: config.budget,
           runtimeLock,
           capabilityVerification,

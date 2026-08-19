@@ -291,6 +291,19 @@ producer packets contain bounded, hash-verified prior artifacts. The platform
 reviewer CLI; that adapter disables shell, unified-exec, filesystem, and
 undeclared integrations.
 
+Reviewer transport is separate from producer host and reviewer model identity.
+`native-direct` invokes the platform capsule in-process. `sandbox-bridge` uses
+an owner-only local connection record and short Unix socket to an exact-version
+sidecar outside an outer IDE sandbox. The sidecar keeps its Ed25519 private key
+and atomic nonce claims in an explicit non-symlink directory outside the
+workspace, copies only the hash-bound project capsule into private state, runs
+the same native executor, and returns a signed result attestation. The protocol
+has only execute/fingerprint/status actions, never accepts environment secrets
+or arbitrary commands, runs filesystem negative probes before READY, and does
+not fall back between transports. WorkBuddy/CodeBuddy may be recorded as native
+producer hosts, but remain forbidden child executors; the reviewer stays Codex
+or Claude.
+
 Final manuscript authoring follows the same native-host boundary. The CLI
 validates required manuscript sections and a distinct-file submission manifest,
 then freezes the native artifact, required cover/title/checklist/availability/

@@ -376,7 +376,7 @@ binds the manifest and every document by SHA-256; edits, manifest tampering, or
 expiry block preflight and all later stages until the Policy is reviewed and
 approved again.
 
-Before search, the current native Codex or Claude host must author a
+Before search, the current native Codex, Claude, WorkBuddy, or CodeBuddy host must author a
 project-specific scientific design. The CLI owns the closed schema and rejects
 designs that confuse model-to-model disagreement with observed truth, inflate
 independent sample size through resampling, omit quantity/threshold semantics,
@@ -602,13 +602,19 @@ The workspace stores its current protocol state under `.tiangong-research/`.
 Each project follows the evidence-first sequence: broad discovery, strict
 admission, acquisition audit, immutable evidence freeze, analysis, synthesis,
 independent review, and mechanical closure. Discover, acquire, analyze, and
-synthesize run in the current interactive Codex app/session or Claude Code
-session. The CLI never launches a nested producer process. Independent review
+synthesize run in the current interactive Codex, Claude Code, WorkBuddy, or
+CodeBuddy session. The CLI never launches a nested producer process. Independent review
 runs through the other configured agent family's CLI, and execution is blocked
 when the two roles use the same family.
 
-Independent reviewer execution requires `/usr/bin/sandbox-exec` on macOS or
-Bubblewrap (`bwrap`) on Linux. Windows can inspect and configure workspaces but
+Independent reviewer execution always requires `/usr/bin/sandbox-exec` on macOS
+or Bubblewrap (`bwrap`) on Linux. `reviewerExecution.transport=native-direct`
+creates that capsule in the current process. `sandbox-bridge` sends one
+hash-bound request to an owner-started, exact-version sidecar outside an IDE
+sandbox; the sidecar creates the same capsule and returns an Ed25519-signed
+attestation bound to workspace/config/runtime/capsule/request/result/model and
+policy hashes. The two transports are explicit and never fall back to each
+other. Windows can inspect and configure workspaces but
 does not launch reviewer packages; smoke-test setup reports a non-blocking
 warning there, while production readiness fails closed. The current native producer remains governed
 by its host application's own permissions; the CLI supplies a hash-bound packet
@@ -628,7 +634,7 @@ tiangong-ai research run --workspace /absolute/path/to/workspace \
   --project gpu-resource-impact --progress-jsonl
 # When stopReason is native-stage-required, perform the returned stage here:
 tiangong-ai research project stage prepare gpu-resource-impact \
-  --stage discover --host-agent codex \
+  --stage discover --host-agent workbuddy \
   --workspace /absolute/path/to/workspace --json
 tiangong-ai research project stage submit gpu-resource-impact \
   --session SESSION_ID --output /absolute/path/to/discover.json \
@@ -636,6 +642,27 @@ tiangong-ai research project stage submit gpu-resource-impact \
   --workspace /absolute/path/to/workspace --json
 tiangong-ai research status --workspace /absolute/path/to/workspace --json
 ```
+
+For WorkBuddy/CodeBuddy, keep Default Permission and start the sidecar from a
+separate native terminal with a private non-symlink state directory outside the
+workspace:
+
+```bash
+tiangong-ai research reviewer serve \
+  --workspace /absolute/path/to/workspace \
+  --state-dir /absolute/private/reviewer-sidecar --json
+
+# From the sandboxed IDE:
+tiangong-ai research reviewer status --workspace /absolute/path/to/workspace --json
+tiangong-ai research reviewer doctor --confirm-agent-smoke-cost \
+  --workspace /absolute/path/to/workspace --json
+```
+
+Sidecar readiness includes real filesystem negative probes and a fixed
+`execute|fingerprint|status` protocol. It has no arbitrary-command endpoint;
+reviewer shell, browser, web, undeclared MCP, and Skill tools remain disabled.
+Do not use Full Access, sandbox-disable flags, unsandboxed-command exceptions,
+or silent transport fallback.
 
 The discover packet derives a bounded multi-channel plan from reviewed evidence
 requirements. Required channels run first; exact repeated requests reuse the

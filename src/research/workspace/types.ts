@@ -593,6 +593,12 @@ export interface WorkspaceDoctorAttestation {
   capabilityDeclarationsSha256: string;
   capabilityLockSha256: string;
   doctorSchemaSha256: string;
+  reviewerExecution: {
+    transport: ReviewTransport;
+    isolationProvider: ReviewIsolationFingerprint["provider"];
+    policySha256: string;
+    signerKeyFingerprint: string | null;
+  };
   runtimes: AgentRuntimeFingerprint[];
   capabilitySmoke: Array<{
     id: string;

@@ -500,6 +500,8 @@ export async function evaluateProjectPreflight(
       reviewer: {
         agent: config.reviewer.agent,
         executionMode: config.reviewer.executionMode,
+        transport: config.reviewerExecution.transport,
+        isolationProvider: config.reviewerExecution.isolationProvider,
         model: config.reviewer.model,
         effort: config.reviewer.effort ?? null,
         verbosity: config.reviewer.verbosity ?? null,

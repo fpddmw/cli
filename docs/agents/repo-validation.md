@@ -310,6 +310,13 @@ exactly one external-sandbox bypass flag and no nested `--sandbox read-only`
 flag, while shell and unified-exec remain disabled. It also verifies the
 capsule-local project-root marker/config override that prevents parent
 project-config reads.
+`test/research-review-bridge.test.ts` covers explicit no-fallback selection,
+missing-sidecar errors, exact capsule copying, owner-only external key state,
+signed request/result/policy bindings, model/version/signature drift, atomic
+nonce replay rejection, a fixed no-command protocol, secret redaction, real
+macOS/Linux negative probes, workspace doctor routing, and the long-running CLI
+sidecar lifecycle. WorkBuddy native-host tests separately prove that the CLI
+records the real producer identity and refuses to launch it as a child.
 Primary/repair reuse tests verify that an identical owner-only auth copy is
 accepted idempotently while source drift is rejected without overwriting the
 capsule file.
