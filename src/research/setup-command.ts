@@ -79,7 +79,7 @@ export function researchSetupHelp(): string {
   tiangong-ai research setup init [--workspace <absolute-path>] [--json]
       Create no-overwrite setup.yaml and setup.env.example templates.
   tiangong-ai research setup catalog [--workspace <absolute-path>] [--scope project|global] [--agents codex,claude-code] [--json]
-  tiangong-ai research setup plan --workspace <absolute-path> --mode smoke-test|production-research --evidence-profile none|brave-baseline|brave-context|brave-media [--skills <csv>] [--scope project|global] [--agents <csv>] [--accept-license <csv>] [--settings <absolute-json>] [--credential-env <absolute-json>] [--agent-routes <absolute-json>] [--confirm-network-downloads] [--confirm-global] [--live] [--allow-synthetic-unstructure-upload] [--agent-smoke --confirm-agent-smoke-cost] [--replace-plan] [--json]
+  tiangong-ai research setup plan --workspace <absolute-path> --mode smoke-test|production-research --evidence-profile none|brave-baseline|brave-context|brave-media [--reviewer-transport native-direct|sandbox-bridge] [--skills <csv>] [--scope project|global] [--agents <csv>] [--accept-license <csv>] [--settings <absolute-json>] [--credential-env <absolute-json>] [--agent-routes <absolute-json>] [--confirm-network-downloads] [--confirm-global] [--live] [--allow-synthetic-unstructure-upload] [--agent-smoke --confirm-agent-smoke-cost] [--replace-plan] [--json]
   tiangong-ai research setup apply [--plan <absolute-json>] [--workspace <absolute-path>] [--skip-doctor] [--json]
   tiangong-ai research setup status [--workspace <absolute-path>] [--json]
   tiangong-ai research setup doctor [--workspace <absolute-path>] [--live] [--allow-synthetic-unstructure-upload] [--agent-smoke --confirm-agent-smoke-cost] [--json]
@@ -199,6 +199,7 @@ async function runPlan(argv: string[], io: CliIO): Promise<number> {
       settings: "string",
       "credential-env": "string",
       "agent-routes": "string",
+      "reviewer-transport": "string",
       live: "boolean",
       "allow-synthetic-unstructure-upload": "boolean",
       "agent-smoke": "boolean",
@@ -233,6 +234,10 @@ async function runPlan(argv: string[], io: CliIO): Promise<number> {
     credentialEnvironment,
     settings,
     agentRoutes,
+    reviewerExecution: {
+      transport: setupReviewerTransport(strictString(args, "reviewer-transport")),
+      isolationProvider: "platform-capsule",
+    },
     liveChecks: strictBoolean(args, "live"),
     allowSyntheticUnstructureUpload: strictBoolean(args, "allow-synthetic-unstructure-upload"),
     agentSmoke: strictBoolean(args, "agent-smoke"),
@@ -561,6 +566,12 @@ function setupMode(value: string | undefined, required: boolean): ResearchMode {
   if (value === "smoke-test" || value === "production-research") return value;
   if (!value && !required) return "production-research";
   throw invalidSetupArgument("--mode must be smoke-test or production-research.");
+}
+
+function setupReviewerTransport(value: string | undefined): "native-direct" | "sandbox-bridge" {
+  if (value === undefined || value === "native-direct") return "native-direct";
+  if (value === "sandbox-bridge") return value;
+  throw invalidSetupArgument("--reviewer-transport must be native-direct or sandbox-bridge.");
 }
 
 function setupEvidenceProfile(

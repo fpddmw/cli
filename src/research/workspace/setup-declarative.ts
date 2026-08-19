@@ -97,6 +97,10 @@ interface ResearchSetupDeclaration {
   settings: Record<string, DeclarationSettingChoice>;
   agentRoutes: Partial<ResearchSetupAgentRoutePlan> &
     Pick<ResearchSetupAgentRoutePlan, "producerAgent" | "reviewerAgent">;
+  reviewerExecution: {
+    transport: "native-direct" | "sandbox-bridge";
+    isolationProvider: "platform-capsule";
+  };
   verification: {
     live: boolean;
     allowSyntheticUnstructureUpload: boolean;
@@ -358,6 +362,7 @@ export async function loadResearchSetupDeclaration(input: {
     credentialEnvironment,
     settings,
     agentRoutes: structuredClone(declaration.agentRoutes),
+    reviewerExecution: structuredClone(declaration.reviewerExecution),
     liveChecks: declaration.verification.live,
     allowSyntheticUnstructureUpload: declaration.verification.allowSyntheticUnstructureUpload,
     agentSmoke: declaration.verification.agentSmoke,
@@ -725,6 +730,10 @@ function defaultDeclaration(root: string): ResearchSetupDeclaration {
       reviewerModel: null,
       producerPricing: null,
       reviewerPricing: null,
+    },
+    reviewerExecution: {
+      transport: "native-direct",
+      isolationProvider: "platform-capsule",
     },
     verification: {
       live: true,
@@ -1104,6 +1113,7 @@ const declarationSchema = {
     "credentials",
     "settings",
     "agentRoutes",
+    "reviewerExecution",
     "verification",
     "confirmations",
     "replaceExistingPlan",
@@ -1218,6 +1228,15 @@ const declarationSchema = {
         reviewerModel: { type: ["string", "null"], maxLength: 200 },
         producerPricing: pricingSchema,
         reviewerPricing: pricingSchema,
+      },
+    },
+    reviewerExecution: {
+      type: "object",
+      additionalProperties: false,
+      required: ["transport", "isolationProvider"],
+      properties: {
+        transport: { enum: ["native-direct", "sandbox-bridge"] },
+        isolationProvider: { const: "platform-capsule" },
       },
     },
     verification: {

@@ -439,6 +439,30 @@ export async function executeResearchSetupWizard(input: {
     ],
     "codex",
   );
+  const reviewTransport = await prompt.select<"native-direct" | "sandbox-bridge">(
+    "Independent reviewer execution",
+    [
+      {
+        value: "native-direct",
+        label: "Native OS capsule (recommended when this host can run sandbox-exec/Bubblewrap)",
+      },
+      {
+        value: "sandbox-bridge",
+        label: "Sandboxed IDE bridge (requires an owner-started native reviewer sidecar)",
+      },
+    ],
+    "native-direct",
+  );
+  const reviewerExecution = {
+    transport: reviewTransport,
+    isolationProvider: "platform-capsule" as const,
+  };
+  if (reviewTransport === "sandbox-bridge") {
+    prompt.note(
+      "The IDE remains in Default Permission mode. Start the exact-version reviewer sidecar from an owner-controlled native terminal after apply; setup never enables Full Access, disables a sandbox, or falls back to native-direct.",
+      "warning",
+    );
+  }
   const evidenceChoices: Array<{ value: ResearchSetupEvidenceProfile; label: string }> = [
     { value: EXTERNAL_SKILL_PROFILE, label: "Brave web + news (recommended baseline)" },
     {
@@ -636,6 +660,7 @@ export async function executeResearchSetupWizard(input: {
         licenseId: skill.license.id,
       })),
       acceptedLicenseIds,
+      reviewerExecution,
       credentialSources: credentials.preview,
       missingRequiredCredentialIds,
       checks: { liveChecks, allowSyntheticUnstructureUpload, agentSmoke },
@@ -667,6 +692,7 @@ export async function executeResearchSetupWizard(input: {
       credentialEnvironment: credentials.environmentBindings,
       settings,
       agentRoutes,
+      reviewerExecution,
       liveChecks,
       allowSyntheticUnstructureUpload,
       agentSmoke,

@@ -76,13 +76,20 @@ import {
   writeTextAtomic,
 } from "./storage.js";
 import { packageRoot, packageVersion, RESEARCH_PACKAGE_NAME } from "./constants.js";
+import { inspectReviewerBridgeStatus } from "./review-executor.js";
 import {
   exactResearchCliCommand,
   pinResearchCliCommand,
   researchSetupApplyCommand,
   researchSetupRetryCommand,
 } from "./setup-invocation.js";
-import type { AgentKind, AgentPricing, AgentRoute, ResearchMode } from "./types.js";
+import type {
+  AgentKind,
+  AgentPricing,
+  AgentRoute,
+  ResearchMode,
+  ReviewExecutionConfig,
+} from "./types.js";
 import {
   doctorResearchWorkspace,
   initializeResearchWorkspace,
@@ -163,6 +170,7 @@ export interface ResearchSetupPlan {
   }>;
   settings: Record<string, string>;
   agentRoutes: ResearchSetupAgentRoutePlan;
+  reviewerExecution: ReviewExecutionConfig;
   checks: {
     live: boolean;
     allowSyntheticUnstructureUpload: boolean;
@@ -211,6 +219,7 @@ export interface ResearchSetupPlanInput {
   credentialEnvironment?: Record<string, string>;
   settings?: Record<string, string>;
   agentRoutes?: Partial<ResearchSetupAgentRoutePlan>;
+  reviewerExecution?: Partial<ReviewExecutionConfig>;
   liveChecks?: boolean;
   allowSyntheticUnstructureUpload?: boolean;
   agentSmoke?: boolean;
@@ -293,6 +302,7 @@ export async function createResearchSetupPlan(
   const scope = input.scope ?? "project";
   const agents = normalizeAgents(input.agents ?? ["codex"]);
   const agentRoutes = normalizeAgentRoutes(input.agentRoutes);
+  const reviewerExecution = normalizeReviewerExecution(input.reviewerExecution);
   if (
     input.declarativeConfigurationSha256 !== undefined &&
     !/^[0-9a-f]{64}$/.test(input.declarativeConfigurationSha256)
@@ -449,6 +459,7 @@ export async function createResearchSetupPlan(
     credentialSources,
     settings,
     agentRoutes,
+    reviewerExecution,
     checks: {
       live: input.liveChecks === true,
       allowSyntheticUnstructureUpload: input.allowSyntheticUnstructureUpload === true,
@@ -1705,7 +1716,12 @@ export async function doctorResearchSetup(
       return `${command} is executable (${sanitizeResearchText(result.stdout.trim()).slice(0, 120)}).`;
     });
   }
-  if (platform() === "win32") {
+  if (plan.reviewerExecution.transport === "sandbox-bridge") {
+    await setupDoctorCheck(checks, "platform-sandbox", "runtime", async () => {
+      const status = await inspectReviewerBridgeStatus(root);
+      return `Owner-controlled reviewer sidecar is ready; version=${status.packageVersion}; key=${status.keyFingerprint.slice(0, 12)}.`;
+    });
+  } else if (platform() === "win32") {
     const production = plan.workspace.mode === "production-research";
     checks.push({
       id: "platform-sandbox",
@@ -1753,17 +1769,24 @@ export async function doctorResearchSetup(
     requiredFor: ["setup", "research-core"],
   });
   const reviewerCommand = plan.agentRoutes.reviewerAgent;
-  await setupDoctorCheck(checks, `agent.${reviewerCommand}.reviewer`, "agent", async () => {
-    const result = await runner({
-      command: reviewerCommand,
-      args: ["--version"],
-      cwd: root,
-      environment: agentDoctorEnvironment(environment),
-      timeoutMs: 30_000,
+  if (plan.reviewerExecution.transport === "sandbox-bridge") {
+    await setupDoctorCheck(checks, `agent.${reviewerCommand}.reviewer`, "agent", async () => {
+      const status = await inspectReviewerBridgeStatus(root);
+      return `${reviewerCommand} reviewer is delegated to the exact-version owner-controlled sidecar (${status.keyFingerprint.slice(0, 12)}).`;
     });
-    if (result.exitCode !== 0) throw new Error(`${reviewerCommand} is not executable`);
-    return `${reviewerCommand} reviewer CLI is executable (${sanitizeResearchText(result.stdout.trim()).slice(0, 160)}).`;
-  });
+  } else {
+    await setupDoctorCheck(checks, `agent.${reviewerCommand}.reviewer`, "agent", async () => {
+      const result = await runner({
+        command: reviewerCommand,
+        args: ["--version"],
+        cwd: root,
+        environment: agentDoctorEnvironment(environment),
+        timeoutMs: 30_000,
+      });
+      if (result.exitCode !== 0) throw new Error(`${reviewerCommand} is not executable`);
+      return `${reviewerCommand} reviewer CLI is executable (${sanitizeResearchText(result.stdout.trim()).slice(0, 160)}).`;
+    });
+  }
   await setupDoctorCheck(checks, "agent-route-config", "agent", async () => {
     const config = await loadWorkspaceConfig(root);
     if (
@@ -1784,7 +1807,7 @@ export async function doctorResearchSetup(
     ) {
       throw new Error("Production agent models and reviewed pricing are incomplete.");
     }
-    return `${config.producer.agent}(native-host) -> ${config.reviewer.agent}(headless-cli).`;
+    return `${config.producer.agent}(native-host) -> ${config.reviewer.agent}(headless-cli) via ${config.reviewerExecution.transport}.`;
   });
 
   const selected = plan.selection.skillIds.map(setupSkill);
@@ -2340,6 +2363,10 @@ function parseResearchSetupPlan(value: unknown): ResearchSetupPlan {
     Object.values(value.settings).some((item) => typeof item !== "string") ||
     !isObject(value.agentRoutes) ||
     !validAgentRoutes(value.agentRoutes) ||
+    !isObject(value.reviewerExecution) ||
+    (value.reviewerExecution.transport !== "native-direct" &&
+      value.reviewerExecution.transport !== "sandbox-bridge") ||
+    value.reviewerExecution.isolationProvider !== "platform-capsule" ||
     !isObject(value.checks) ||
     typeof value.checks.live !== "boolean" ||
     typeof value.checks.allowSyntheticUnstructureUpload !== "boolean" ||
@@ -2433,6 +2460,12 @@ function assertPlanMatchesCatalog(plan: ResearchSetupPlan): void {
   }
   if (canonicalJson(plan.agentRoutes) !== canonicalJson(normalizeAgentRoutes(plan.agentRoutes))) {
     throw planCatalogDrift("agent routes");
+  }
+  if (
+    canonicalJson(plan.reviewerExecution) !==
+    canonicalJson(normalizeReviewerExecution(plan.reviewerExecution))
+  ) {
+    throw planCatalogDrift("reviewer execution transport");
   }
   if (canonicalJson(plan.install.agents) !== canonicalJson(normalizeAgents(plan.install.agents))) {
     throw planCatalogDrift("agent selection order or duplicates");
@@ -2605,6 +2638,29 @@ function normalizedCredentialSources(
       return { id, fromEnvironment, storage: allowed.get(id)!.storage };
     })
     .sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function normalizeReviewerExecution(
+  value: Partial<ReviewExecutionConfig> | undefined,
+): ReviewExecutionConfig {
+  const transport = value?.transport ?? "native-direct";
+  const isolationProvider = value?.isolationProvider ?? "platform-capsule";
+  if (
+    (transport !== "native-direct" && transport !== "sandbox-bridge") ||
+    isolationProvider !== "platform-capsule"
+  ) {
+    throw setupError({
+      code: "RESEARCH_SETUP_REVIEW_TRANSPORT_INVALID",
+      step: "reviewer-execution",
+      reason:
+        "Reviewer execution must explicitly use native-direct or sandbox-bridge with the platform capsule.",
+      minimumAction:
+        "Choose native-direct on a normal host, or sandbox-bridge with an owner-started sidecar outside the IDE sandbox.",
+      retryCommand: "tiangong-ai research setup plan --help",
+      exitCode: 2,
+    });
+  }
+  return { transport, isolationProvider };
 }
 
 function normalizeAgentRoutes(
@@ -2834,6 +2890,7 @@ async function configureAgentRoutes(plan: ResearchSetupPlan): Promise<void> {
       plan.agentRoutes.reviewerModel,
       plan.agentRoutes.reviewerPricing,
     ),
+    reviewerExecution: plan.reviewerExecution,
   };
   await writeJsonAtomic(paths.config, updated);
 }

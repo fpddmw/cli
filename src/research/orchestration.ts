@@ -12,6 +12,7 @@ import {
   verifyCapabilities,
 } from "./workspace/capabilities.js";
 import { inspectResearchContext } from "./workspace/context.js";
+import { packageVersion } from "./workspace/constants.js";
 import { setCapabilityCredentialFromEnvironment } from "./workspace/credentials.js";
 import {
   configureExternalSkillProfile,
@@ -39,6 +40,10 @@ import { recordDiscoveryAssessmentBatch } from "./workspace/discovery.js";
 import { bindEvidenceDownload } from "./workspace/downloads.js";
 import { registerNativeDiscoveryCandidate } from "./workspace/evidence-ledger.js";
 import { recordNativeResearchActivity } from "./workspace/native-activity.js";
+import {
+  inspectReviewerBridgeStatus,
+  startReviewerBridgeSidecar,
+} from "./workspace/review-executor.js";
 import { readAndVerifyProjectInputPlan } from "./workspace/input-plan.js";
 import {
   loadCurrentClaimEvidenceGraph,
@@ -129,6 +134,7 @@ export async function runResearchOrchestrationCommand(
   if (subcommand === "context") return runContext(argv, io);
   if (subcommand === "setup") return runResearchSetupCommand(argv, io);
   if (subcommand === "workspace") return runWorkspace(argv, io);
+  if (subcommand === "reviewer") return runReviewer(argv, io);
   if (subcommand === "capability") return runCapability(argv, io);
   if (subcommand === "policy") return runPolicy(argv, io);
   if (subcommand === "publication") return runPublication(argv, io);
@@ -146,6 +152,9 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research context inspect [--path <absolute-path>] [--json]
   tiangong-ai research workspace init <absolute-path> [--name <name>] [--mode smoke-test|production-research] [--json]
   tiangong-ai research workspace doctor [--workspace <absolute-path>] [--agent-smoke] [--capability-smoke] [--json]
+  tiangong-ai research reviewer serve --state-dir <absolute-private-directory> [--workspace <absolute-path>] [--json]
+  tiangong-ai research reviewer status [--workspace <absolute-path>] [--json]
+  tiangong-ai research reviewer doctor --confirm-agent-smoke-cost [--workspace <absolute-path>] [--json]
   tiangong-ai research capability catalog [--path <absolute-path>] [--workspace <absolute-path>] [--skill-root <absolute-path>] [--json]
   tiangong-ai research capability configure [--profile ${EXTERNAL_SKILL_PROFILE}|${EXTERNAL_SKILL_CONTEXT_PROFILE}|${EXTERNAL_SKILL_MEDIA_PROFILE}] [--skill-root <absolute-path>] [--workspace <absolute-path>] [--json]
   tiangong-ai research capability import --definition <absolute-json> [--workspace <absolute-path>] [--json]
@@ -200,6 +209,104 @@ export function researchOrchestrationHelp(): string {
 
 ${researchSetupHelp()}
 `;
+}
+
+async function runReviewer(argv: string[], io: CliIO): Promise<number> {
+  const [action, ...rest] = argv;
+  if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action === "status") {
+    const args = parseStrictArgs(rest, WORKSPACE_OPTIONS, "research reviewer status");
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    if (args.positionals.length)
+      throw unknownAction("research reviewer status", args.positionals[0]!);
+    const root = await workspaceFromArgs(args);
+    writeJson(io, await inspectReviewerBridgeStatus(root), args);
+    return 0;
+  }
+  if (action === "doctor") {
+    const args = parseStrictArgs(
+      rest,
+      { ...WORKSPACE_OPTIONS, "confirm-agent-smoke-cost": "boolean" },
+      "research reviewer doctor",
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    if (args.positionals.length)
+      throw unknownAction("research reviewer doctor", args.positionals[0]!);
+    if (!strictBoolean(args, "confirm-agent-smoke-cost")) {
+      throw new CliError("Reviewer doctor requires explicit model-cost confirmation.", {
+        code: "RESEARCH_REVIEW_BRIDGE_CONFIRMATION_REQUIRED",
+        exitCode: 3,
+        details: {
+          minimumAction:
+            "Rerun with --confirm-agent-smoke-cost after reviewing reviewer provider quota and cost.",
+        },
+      });
+    }
+    const root = await workspaceFromArgs(args);
+    const result = await doctorResearchWorkspace(root, {
+      agentSmoke: true,
+      environment: io.env,
+    });
+    writeJson(io, result, args);
+    return result.status === "ready" ? 0 : 3;
+  }
+  if (action === "serve") {
+    const args = parseStrictArgs(
+      rest,
+      { ...WORKSPACE_OPTIONS, "state-dir": "string" },
+      "research reviewer serve",
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    if (args.positionals.length)
+      throw unknownAction("research reviewer serve", args.positionals[0]!);
+    const stateDirectory = strictString(args, "state-dir");
+    if (
+      !stateDirectory ||
+      !isAbsolute(stateDirectory) ||
+      resolve(stateDirectory) !== stateDirectory
+    ) {
+      throw new CliError("Reviewer sidecar --state-dir must be an explicit absolute directory.", {
+        code: "RESEARCH_REVIEW_BRIDGE_STATE_INVALID",
+        exitCode: 2,
+      });
+    }
+    const root = await workspaceFromArgs(args);
+    const sidecar = await startReviewerBridgeSidecar({
+      root,
+      stateDirectory,
+      environment: io.env,
+    });
+    writeJson(
+      io,
+      {
+        status: "ready",
+        workspaceId: sidecar.workspaceId,
+        packageVersion: packageVersion(),
+        keyFingerprint: sidecar.keyFingerprint,
+        supportedActions: ["execute", "fingerprint", "status"],
+      },
+      args,
+    );
+    try {
+      await waitForReviewerSidecarTermination();
+    } finally {
+      await sidecar.close();
+    }
+    return 0;
+  }
+  throw unknownAction("research reviewer", action);
+}
+
+async function waitForReviewerSidecarTermination(): Promise<void> {
+  await new Promise<void>((resolvePromise) => {
+    const stop = () => {
+      process.off("SIGINT", stop);
+      process.off("SIGTERM", stop);
+      resolvePromise();
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
 }
 
 async function runPublication(argv: string[], io: CliIO): Promise<number> {

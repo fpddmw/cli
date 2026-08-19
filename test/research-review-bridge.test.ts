@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
+import { runCli } from "../src/cli.js";
 import { CliError } from "../src/errors.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import type { AgentExecutionRequest } from "../src/research/workspace/executor.js";
@@ -30,6 +31,31 @@ import {
 } from "../src/research/workspace/workspace.js";
 
 describe("sandbox-bridge reviewer execution", () => {
+  it("exposes safe reviewer sidecar help and structured unavailable status", async () => {
+    const fixture = await bridgeFixture();
+    try {
+      const help = await invoke(["research", "reviewer", "--help"]);
+      assert.equal(help.exitCode, 0, help.stderr);
+      assert.match(help.stdout, /reviewer serve/);
+      assert.match(help.stdout, /reviewer status/);
+      assert.match(help.stdout, /reviewer doctor/);
+
+      const status = await invoke([
+        "research",
+        "reviewer",
+        "status",
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(status.exitCode, 3);
+      assert.equal(JSON.parse(status.stderr).error.code, "RESEARCH_REVIEW_BRIDGE_UNAVAILABLE");
+      assert.doesNotMatch(status.stderr, /clientToken|authorization|cookie/i);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("fails closed when the explicitly selected bridge is unavailable", async () => {
     const fixture = await bridgeFixture();
     try {
@@ -285,4 +311,19 @@ function successfulResult(): ExecutionResult {
       providerErrors: [],
     },
   };
+}
+
+async function invoke(argv: string[]): Promise<{
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}> {
+  let stdout = "";
+  let stderr = "";
+  const exitCode = await runCli(argv, {
+    env: {},
+    stdout: { write: (chunk: string) => void (stdout += chunk) },
+    stderr: { write: (chunk: string) => void (stderr += chunk) },
+  });
+  return { exitCode, stdout, stderr };
 }

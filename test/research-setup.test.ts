@@ -279,6 +279,10 @@ describe("research setup catalog and immutable plans", () => {
       const canonicalRoot = await realpath(root);
       assert.equal(plan.workspace.path, canonicalRoot);
       assert.equal(plan.install.scope, "project");
+      assert.deepEqual(plan.reviewerExecution, {
+        transport: "native-direct",
+        isolationProvider: "platform-capsule",
+      });
       assert.deepEqual(plan.install.targets, [
         { agent: "codex", root: join(canonicalRoot, ".agents", "skills") },
       ]);
@@ -348,6 +352,33 @@ describe("research setup catalog and immutable plans", () => {
       if (platform() !== "win32") {
         assert.equal((await lstat(workspacePaths(root).setupPlan)).mode & 0o222, 0);
       }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("binds an explicit sandbox-bridge choice into the plan and workspace config", async () => {
+    const root = await temporaryDirectory();
+    try {
+      const plan = await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [],
+        acceptedLicenseIds: [],
+        reviewerExecution: {
+          transport: "sandbox-bridge",
+          isolationProvider: "platform-capsule",
+        },
+        confirmNetworkDownloads: false,
+      });
+      assert.equal(plan.reviewerExecution.transport, "sandbox-bridge");
+      await applyResearchSetupPlan(workspacePaths(root).setupPlan, {
+        environment: {},
+        skipDoctor: true,
+      });
+      const config = await loadWorkspaceConfig(root);
+      assert.deepEqual(config.reviewerExecution, plan.reviewerExecution);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

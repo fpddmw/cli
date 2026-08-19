@@ -145,7 +145,7 @@ interface BridgeSuccessResponse {
   requestId: string;
   nonce: string;
   requestSha256: string;
-  result: ExecutionResult | AgentRuntimeFingerprint | BridgeStatus;
+  result: ExecutionResult | AgentRuntimeFingerprint | ReviewerBridgeStatus;
   attestation: ReviewExecutionAttestation;
 }
 
@@ -156,7 +156,7 @@ interface BridgeFailureResponse {
   error: { code: string; message: string; details?: unknown };
 }
 
-interface BridgeStatus {
+export interface ReviewerBridgeStatus {
   status: "ready";
   workspaceId: string;
   packageVersion: string;
@@ -204,6 +204,30 @@ export function createReviewExecutor(input: {
     fingerprint: (route) =>
       fingerprintThroughBridge(input.root, route, input.nonceFactory ?? secureNonce),
   };
+}
+
+export async function inspectReviewerBridgeStatus(root: string): Promise<ReviewerBridgeStatus> {
+  const binding = await bridgeBinding(root, "status", "reviewer-bridge-status", secureNonce);
+  const core = { ...binding.core, action: "status" as const };
+  const bridgeRequest: ReviewBridgeSimpleRequest = {
+    ...core,
+    requestSha256: sha256Text(canonicalJson(core)),
+  };
+  const response = await sendBridgeRequest(binding.connection, bridgeRequest);
+  const result = verifyBridgeResponse(binding.connection, bridgeRequest, response);
+  if (
+    !isObject(result) ||
+    result.status !== "ready" ||
+    result.workspaceId !== binding.connection.workspaceId ||
+    result.packageVersion !== packageVersion() ||
+    result.keyFingerprint !== binding.connection.keyFingerprint
+  ) {
+    throw bridgeError(
+      "RESEARCH_REVIEW_BRIDGE_RESULT_BINDING_INVALID",
+      "The reviewer bridge status response does not match its workspace and version binding.",
+    );
+  }
+  return result as unknown as ReviewerBridgeStatus;
 }
 
 export async function startReviewerBridgeSidecar(input: {
@@ -449,7 +473,7 @@ async function handleSidecarRequest(input: {
     await validateServerBinding(input.root, input.connection, request);
     await consumeNonce(input.nonceLedgerPath, request.nonce, request.issuedAt);
     const config = await loadWorkspaceConfig(input.root);
-    let result: ExecutionResult | AgentRuntimeFingerprint | BridgeStatus;
+    let result: ExecutionResult | AgentRuntimeFingerprint | ReviewerBridgeStatus;
     let capsuleSha256 = sha256Text("not-applicable");
     let isolationProvider: ReviewExecutionAttestation["isolationProvider"];
     let policySha256: string;
@@ -623,7 +647,7 @@ async function executeSidecarReview(input: {
 
 function signBridgeAttestation(input: {
   request: ReviewBridgeRequest;
-  result: ExecutionResult | AgentRuntimeFingerprint | BridgeStatus;
+  result: ExecutionResult | AgentRuntimeFingerprint | ReviewerBridgeStatus;
   capsuleSha256: string;
   isolationProvider: ReviewExecutionAttestation["isolationProvider"];
   policySha256: string;
@@ -991,10 +1015,9 @@ function publicKeyFingerprint(publicKeyPem: string): string {
   return sha256Bytes(der);
 }
 
-function sanitizeBridgeResult<T extends ExecutionResult | AgentRuntimeFingerprint | BridgeStatus>(
-  value: T,
-  environment: NodeJS.ProcessEnv,
-): T {
+function sanitizeBridgeResult<
+  T extends ExecutionResult | AgentRuntimeFingerprint | ReviewerBridgeStatus,
+>(value: T, environment: NodeJS.ProcessEnv): T {
   const secrets = configuredResearchSecrets(environment);
   if (isExecutionResult(value)) {
     return {
