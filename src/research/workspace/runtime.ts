@@ -486,10 +486,14 @@ interface NativeStageSession {
 
 type NativeCapsuleDisposition = "deleted" | "retained-outer-sandbox";
 
-function nativeCapsuleDisposition(session: NativeStageSession): NativeCapsuleDisposition {
-  return session.packet.hostAgent === "workbuddy" || session.packet.hostAgent === "codebuddy"
+function capsuleDispositionForHost(hostAgent: AgentRoute["agent"]): NativeCapsuleDisposition {
+  return hostAgent === "workbuddy" || hostAgent === "codebuddy"
     ? "retained-outer-sandbox"
     : "deleted";
+}
+
+function nativeCapsuleDisposition(session: NativeStageSession): NativeCapsuleDisposition {
+  return capsuleDispositionForHost(session.packet.hostAgent);
 }
 
 async function releaseNativeStageSession(
@@ -1684,6 +1688,8 @@ async function executeWorkPackage(
   const runId = randomUUID();
   const startedAt = new Date().toISOString();
   let capsuleRoot: string | undefined;
+  let capsuleDisposition: NativeCapsuleDisposition | null = null;
+  let retainedCapsuleId: string | null = null;
   let broker: CapabilityBroker | undefined;
   let accountedResult: ExecutionResult | undefined;
   let promotedOutputs: OutputRecord[] = [];
@@ -1713,6 +1719,9 @@ async function executeWorkPackage(
       );
       const capsule = await createCapsule(root, project, workPackage, runId, config);
       capsuleRoot = capsule.capsuleRoot;
+      capsuleDisposition = capsuleDispositionForHost(config.producer.agent);
+      retainedCapsuleId =
+        capsuleDisposition === "retained-outer-sandbox" ? basename(capsuleRoot) : null;
       if (capsule.reviewPacketRecord) {
         await appendJournalEvent(
           workspacePaths(root).journal,
@@ -1957,6 +1966,8 @@ async function executeWorkPackage(
       usage,
       runtime: accountedResult.runtime,
       reviewerExecution: accountedResult.reviewAttestation ?? accountedResult.isolation ?? null,
+      capsuleDisposition,
+      retainedCapsuleId,
     });
     emitProgress(
       options,
@@ -2039,6 +2050,8 @@ async function executeWorkPackage(
       details: failureDetails,
       outputs: promotedOutputs,
       usage,
+      capsuleDisposition,
+      retainedCapsuleId,
     });
     emitProgress(
       options,
@@ -2061,7 +2074,9 @@ async function executeWorkPackage(
     return { projectId, packageId, status: failedPackage.status };
   } finally {
     if (broker) await broker.stop();
-    if (capsuleRoot) await rm(capsuleRoot, { recursive: true, force: true });
+    if (capsuleRoot && capsuleDisposition !== "retained-outer-sandbox") {
+      await rm(capsuleRoot, { recursive: true, force: true });
+    }
   }
 }
 

@@ -319,7 +319,9 @@ sidecar lifecycle. WorkBuddy native-host tests separately prove that the CLI
 records the real producer identity, refuses to launch it as a child, removes the
 single active-session binding after submit, and retains the completed capsule
 with a non-sensitive journal disposition instead of requesting a recursive bulk
-delete from the outer IDE.
+delete from the outer IDE. A full injected WorkBuddy package flow separately
+proves that the reviewer/work-package capsule is retained with the same bounded
+disposition while mechanical closure still completes.
 Primary/repair reuse tests verify that an identical owner-only auth copy is
 accepted idempotently while source drift is rejected without overwriting the
 capsule file.

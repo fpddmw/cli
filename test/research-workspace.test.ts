@@ -1195,6 +1195,53 @@ describe("research project execution", () => {
     }
   });
 
+  it("retains WorkBuddy work-package capsules instead of requesting bulk deletion", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const config = await loadWorkspaceConfig(root);
+      await writeJsonAtomic(workspacePaths(root).config, {
+        ...config,
+        producer: {
+          ...config.producer,
+          agent: "workbuddy",
+          binary: "workbuddy-native-host",
+          model: "hy3",
+          verbosity: undefined,
+        },
+        reviewerExecution: {
+          transport: "sandbox-bridge",
+          isolationProvider: "platform-capsule",
+        },
+      });
+      await lockCapabilities(root);
+      await initializeProject(root, "workbuddy-packages", "Evaluate retained package capsules.");
+      const evidencePath = join(root, "workbuddy-package-evidence.txt");
+      await writeFile(evidencePath, "Observed WorkBuddy package evidence.\n");
+      await addProjectInput(root, "workbuddy-packages", evidencePath, "primary");
+
+      const result = await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
+        fakeExecutor([]),
+      );
+      assert.equal(result.status, "complete", JSON.stringify(result));
+      const runtimeFiles = await regularTreeFiles(workspacePaths(root).runtime);
+      assert.ok(runtimeFiles.some((path) => basename(path) === "project.json"));
+      const events = (await readFile(workspacePaths(root).journal, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { type: string; payload: Record<string, unknown> });
+      const reviewCompleted = events.find(
+        (event) => event.type === "package.completed" && event.payload.packageId === "review",
+      );
+      assert.equal(reviewCompleted?.payload.capsuleDisposition, "retained-outer-sandbox");
+      assert.match(String(reviewCompleted?.payload.retainedCapsuleId), /^[A-Za-z0-9-]+$/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("reports binding drift as a stale native session with explicit recovery", async () => {
     const root = await temporaryDirectory();
     try {
