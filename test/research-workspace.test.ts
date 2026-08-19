@@ -45,6 +45,7 @@ import {
 import {
   doctorResearchWorkspace,
   initializeResearchWorkspace,
+  loadWorkspaceConfig,
 } from "../src/research/workspace/workspace.js";
 
 describe("research workspace lifecycle", () => {
@@ -515,6 +516,59 @@ describe("research project execution", () => {
         assert.equal(result.stdout, '{"ok":true}');
         assert.equal(result.telemetry?.toolCalls, 1);
         assert.equal(result.telemetry?.itemCounts.mcp_tool_call, 1);
+      } finally {
+        await rm(capsule, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    "reports an outer-sandbox denial as a structured nested-sandbox error",
+    { skip: platform() !== "darwin" && platform() !== "linux" },
+    async () => {
+      const capsule = await temporaryDirectory();
+      try {
+        const projectRoot = join(capsule, "project");
+        await mkdir(projectRoot);
+        const binary = join(capsule, "fake-nested-sandbox-reviewer");
+        await writeFile(
+          binary,
+          [
+            "#!/bin/sh",
+            'if [ "$1" = "--version" ]; then printf \'%s\\n\' "fake-claude 1.0"; exit 0; fi',
+            "printf '%s\\n' 'sandbox-exec: sandbox_apply: Operation not permitted' >&2",
+            "exit 71",
+            "",
+          ].join("\n"),
+        );
+        await chmod(binary, 0o755);
+
+        await assert.rejects(
+          executeAgent({
+            route: { agent: "claude", binary, model: "test-reviewer" },
+            prompt: 'Return exactly {"ok":true}.',
+            outputSchema: schemaForStage("doctor"),
+            requestId: "outer-sandbox-denial-test",
+            purpose: "doctor",
+            capsuleRoot: capsule,
+            projectRoot,
+            workspaceRoot: capsule,
+            timeoutSeconds: 10,
+            maxTurns: 1,
+            maxOutputTokens: 100,
+            maxCostUsd: 1,
+            toolPolicy: "none",
+            environment: { PATH: process.env.PATH },
+            brokerUrl: null,
+          }),
+          (error: unknown) => {
+            assert.ok(error instanceof CliError);
+            assert.equal(error.code, "RESEARCH_NESTED_SANDBOX_UNSUPPORTED");
+            assert.match(error.message, /sandboxed IDE|sandbox-bridge/i);
+            assert.doesNotMatch(JSON.stringify(error.details), /execution\.sb|credential|token/i);
+            return true;
+          },
+        );
       } finally {
         await rm(capsule, { recursive: true, force: true });
       }
@@ -1008,6 +1062,181 @@ describe("research project execution", () => {
           )
           .every((record) => record.accountingMode === "reserved-native-host"),
       );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("records a WorkBuddy native stage without allowing a child producer executor", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const config = await loadWorkspaceConfig(root);
+      await writeJsonAtomic(workspacePaths(root).config, {
+        ...config,
+        producer: {
+          ...config.producer,
+          agent: "workbuddy",
+          binary: "workbuddy-native-host",
+          model: "hy3",
+          verbosity: undefined,
+        },
+        reviewerExecution: {
+          transport: "sandbox-bridge",
+          isolationProvider: "platform-capsule",
+        },
+      });
+      await lockCapabilities(root);
+      await initializeProject(root, "workbuddy-native", "Evaluate a WorkBuddy native stage.");
+      const evidencePath = join(root, "workbuddy-evidence.txt");
+      await writeFile(evidencePath, "Observed WorkBuddy native-host evidence.\n");
+      await addProjectInput(root, "workbuddy-native", evidencePath, "primary");
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "workbuddy-native",
+        stage: "discover",
+        hostAgent: "workbuddy",
+      });
+      assert.equal(packet.hostAgent, "workbuddy");
+      assert.equal(packet.expectedModel, "hy3");
+      const status = await invoke([
+        "research",
+        "status",
+        "--workspace",
+        root,
+        "--project",
+        "workbuddy-native",
+        "--json",
+      ]);
+      assert.equal(status.exitCode, 0, status.stderr);
+      const statusValue = JSON.parse(status.stdout) as {
+        execution: {
+          producer: { host: string };
+          reviewer: { transport: string; isolationProvider: string };
+        };
+      };
+      assert.equal(statusValue.execution.producer.host, "workbuddy");
+      assert.equal(statusValue.execution.reviewer.transport, "sandbox-bridge");
+      assert.equal(statusValue.execution.reviewer.isolationProvider, "platform-capsule");
+      await assert.rejects(
+        executeAgent({
+          route: {
+            agent: "workbuddy",
+            executionMode: "native-host",
+            binary: "workbuddy-native-host",
+            model: "hy3",
+          },
+          prompt: packet.prompt,
+          outputSchema: packet.outputSchema,
+          requestId: packet.sessionId,
+          purpose: "primary",
+          capsuleRoot: join(workspacePaths(root).runtime, "forbidden-child"),
+          projectRoot: root,
+          workspaceRoot: root,
+          timeoutSeconds: 10,
+          maxTurns: 1,
+          maxOutputTokens: 100,
+          maxCostUsd: 1,
+          toolPolicy: "none",
+          environment: {},
+          brokerUrl: null,
+        }),
+        (error: unknown) => error instanceof CliError && error.code === "RESEARCH_EXECUTOR_INVALID",
+      );
+      const sessionPath = join(
+        workspacePaths(root).projects,
+        "workbuddy-native",
+        "native",
+        "active.json",
+      );
+      const session = JSON.parse(await readFile(sessionPath, "utf8")) as {
+        capsuleRoot: string;
+        capsuleProject: string;
+      };
+      const execution = await fakeExecutor([])({
+        route: {
+          agent: "workbuddy",
+          executionMode: "native-host",
+          binary: "workbuddy-native-host",
+          model: packet.expectedModel,
+        },
+        prompt: packet.prompt,
+        outputSchema: packet.outputSchema,
+        requestId: packet.sessionId,
+        purpose: "primary",
+        capsuleRoot: session.capsuleRoot,
+        projectRoot: session.capsuleProject,
+        workspaceRoot: root,
+        timeoutSeconds: packet.limits.maxWallSeconds,
+        maxTurns: 1,
+        maxOutputTokens: packet.limits.maxOutputTokens,
+        maxCostUsd: packet.limits.reservedMaxCostUsd,
+        toolPolicy: "none",
+        environment: {},
+        brokerUrl: null,
+      });
+      const outputPath = join(root, "workbuddy-discover-output.json");
+      await writeFile(outputPath, execution.stdout);
+      await submitNativeResearchStage({
+        root,
+        projectId: "workbuddy-native",
+        sessionId: packet.sessionId,
+        outputPath,
+        confirmedModel: packet.expectedModel,
+      });
+      assert.equal(await lstat(sessionPath).catch(() => null), null);
+      assert.equal((await lstat(session.capsuleRoot)).isDirectory(), true);
+      assert.match(
+        await readFile(workspacePaths(root).journal, "utf8"),
+        /"capsuleDisposition":"retained-outer-sandbox"/,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retains WorkBuddy work-package capsules instead of requesting bulk deletion", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const config = await loadWorkspaceConfig(root);
+      await writeJsonAtomic(workspacePaths(root).config, {
+        ...config,
+        producer: {
+          ...config.producer,
+          agent: "workbuddy",
+          binary: "workbuddy-native-host",
+          model: "hy3",
+          verbosity: undefined,
+        },
+        reviewerExecution: {
+          transport: "sandbox-bridge",
+          isolationProvider: "platform-capsule",
+        },
+      });
+      await lockCapabilities(root);
+      await initializeProject(root, "workbuddy-packages", "Evaluate retained package capsules.");
+      const evidencePath = join(root, "workbuddy-package-evidence.txt");
+      await writeFile(evidencePath, "Observed WorkBuddy package evidence.\n");
+      await addProjectInput(root, "workbuddy-packages", evidencePath, "primary");
+
+      const result = await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
+        fakeExecutor([]),
+      );
+      assert.equal(result.status, "complete", JSON.stringify(result));
+      const runtimeFiles = await regularTreeFiles(workspacePaths(root).runtime);
+      assert.ok(runtimeFiles.some((path) => basename(path) === "project.json"));
+      const events = (await readFile(workspacePaths(root).journal, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { type: string; payload: Record<string, unknown> });
+      const reviewCompleted = events.find(
+        (event) => event.type === "package.completed" && event.payload.packageId === "review",
+      );
+      assert.equal(reviewCompleted?.payload.capsuleDisposition, "retained-outer-sandbox");
+      assert.match(String(reviewCompleted?.payload.retainedCapsuleId), /^[A-Za-z0-9-]+$/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2392,6 +2621,14 @@ describe("research workspace CLI", () => {
             binaryVersion: `mock-${request.route.agent} 1.0.0`,
             platform: process.platform,
             architecture: process.arch,
+          },
+          isolation: {
+            provider: process.platform === "darwin" ? "sandbox-exec" : "bubblewrap",
+            policySha256: "e".repeat(64),
+            readScopes: ["platform-runtime", "agent-runtime", "private-capsule"],
+            writeScopes: ["private-capsule"],
+            networkPolicy: "reviewer-provider-only",
+            toolPolicy: "none",
           },
         }),
       });

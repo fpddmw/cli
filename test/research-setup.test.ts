@@ -85,18 +85,18 @@ describe("research setup catalog and immutable plans", () => {
       assert.equal(catalog.policy.defaultInstallMode, "copy");
       assert.equal(catalog.policy.floatingUpdates, false);
       assert.deepEqual(catalog.installer, RESEARCH_SETUP_INSTALLER);
-      assert.equal(catalog.entries.length, 17);
+      assert.equal(catalog.entries.length, 18);
       assert.ok(catalog.entries.every((entry) => entry.bundled === false));
       assert.ok(catalog.entries.every((entry) => entry.userInitiatedOnly === true));
       assert.ok(catalog.entries.every((entry) => /^[0-9a-f]{64}$/.test(entry.expectedTreeSha256)));
       assert.ok(catalog.sources.every((source) => /^[0-9a-f]{40}$/.test(source.immutableRef)));
       assert.equal(
         catalog.sources.find((source) => source.id === "tiangong-ai-skills")?.immutableRef,
-        "1a8f768d3b489d8cf7583a2b4e9bea5913a03903",
+        "d7e6f512e1bd2643ea5dfceaab1eb5cf05237d3a",
       );
       assert.equal(
         catalog.entries.find((entry) => entry.id === "tiangong.auto-research")?.expectedTreeSha256,
-        "819475ca945d00b7436e80c4e4e8d39af813ceee3034e7191ad33228a553fc86",
+        "970bfe0800d6b368f0f5b88a7d79dddf4abe3dd78a14178bfd099097776ce0bd",
       );
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-sci-search"));
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-report-search"));
@@ -114,7 +114,15 @@ describe("research setup catalog and immutable plans", () => {
           ?.standaloneTestedCliVersion,
         "0.0.30",
       );
-      assert.deepEqual(catalog.roles.orchestrators, ["tiangong.auto-research"]);
+      assert.deepEqual(catalog.roles.orchestrators, [
+        "tiangong.auto-research",
+        "tiangong.auto-research-workbuddy",
+      ]);
+      assert.equal(
+        catalog.entries.find((entry) => entry.id === "tiangong.auto-research-workbuddy")
+          ?.expectedTreeSha256,
+        "c0223acc0a57866b858ddeac4e4723661f9f55e725328febb3bac1f2ad9f4c24",
+      );
       assert.ok(catalog.roles.inputPreprocessors.includes("tiangong.document-granular-decompose"));
       assert.ok(catalog.roles.acquisitionAdapters.includes("tiangong.academic-paper-download"));
       assert.ok(catalog.roles.postClosureAuthoring.includes("anthropic.docx"));
@@ -279,6 +287,10 @@ describe("research setup catalog and immutable plans", () => {
       const canonicalRoot = await realpath(root);
       assert.equal(plan.workspace.path, canonicalRoot);
       assert.equal(plan.install.scope, "project");
+      assert.deepEqual(plan.reviewerExecution, {
+        transport: "native-direct",
+        isolationProvider: "platform-capsule",
+      });
       assert.deepEqual(plan.install.targets, [
         { agent: "codex", root: join(canonicalRoot, ".agents", "skills") },
       ]);
@@ -348,6 +360,71 @@ describe("research setup catalog and immutable plans", () => {
       if (platform() !== "win32") {
         assert.equal((await lstat(workspacePaths(root).setupPlan)).mode & 0o222, 0);
       }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("binds an explicit sandbox-bridge choice into the plan and workspace config", async () => {
+    const root = await temporaryDirectory();
+    try {
+      const plan = await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [],
+        acceptedLicenseIds: [],
+        reviewerExecution: {
+          transport: "sandbox-bridge",
+          isolationProvider: "platform-capsule",
+        },
+        confirmNetworkDownloads: false,
+      });
+      assert.equal(plan.reviewerExecution.transport, "sandbox-bridge");
+      await applyResearchSetupPlan(workspacePaths(root).setupPlan, {
+        environment: {},
+        skipDoctor: true,
+      });
+      const config = await loadWorkspaceConfig(root);
+      assert.deepEqual(config.reviewerExecution, plan.reviewerExecution);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("records WorkBuddy as the native producer while keeping a CLI-only reviewer", async () => {
+    const root = await temporaryDirectory();
+    try {
+      const plan = await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [],
+        acceptedLicenseIds: [],
+        agentRoutes: {
+          producerAgent: "workbuddy",
+          reviewerAgent: "claude",
+          producerModel: "hy3",
+          reviewerModel: "claude-reviewer",
+        },
+        reviewerExecution: {
+          transport: "sandbox-bridge",
+          isolationProvider: "platform-capsule",
+        },
+        confirmNetworkDownloads: false,
+      });
+      assert.equal(plan.agentRoutes.producerAgent, "workbuddy");
+      assert.equal(plan.agentRoutes.reviewerAgent, "claude");
+      await applyResearchSetupPlan(workspacePaths(root).setupPlan, {
+        environment: {},
+        skipDoctor: true,
+      });
+      const config = await loadWorkspaceConfig(root);
+      assert.equal(config.producer.agent, "workbuddy");
+      assert.equal(config.producer.executionMode, "native-host");
+      assert.equal(config.producer.binary, "workbuddy-native-host");
+      assert.equal(config.reviewer.agent, "claude");
+      assert.equal(config.reviewer.executionMode, "headless-cli");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

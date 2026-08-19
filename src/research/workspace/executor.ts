@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
   access,
@@ -6,8 +7,10 @@ import {
   copyFile,
   lstat,
   mkdir,
+  open,
   readFile,
   realpath,
+  rm,
   writeFile,
 } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
@@ -21,7 +24,7 @@ import {
   sanitizeResearchText,
 } from "./sanitization.js";
 import type { JsonSchema } from "./schemas.js";
-import { isObject, sha256File } from "./storage.js";
+import { isObject, sha256File, sha256Text } from "./storage.js";
 import type {
   AgentReasoningEffort,
   AgentExecutionTelemetry,
@@ -29,6 +32,7 @@ import type {
   AgentRuntimeFingerprint,
   AgentVerbosity,
   ExecutionResult,
+  ReviewIsolationFingerprint,
 } from "./types.js";
 
 const MAX_CAPTURE_BYTES = 5 * 1024 * 1024;
@@ -63,6 +67,8 @@ const CODEX_DISABLED_FEATURES = [
 const ROUTE_AUTH_ENVIRONMENT: Record<AgentRoute["agent"], readonly string[]> = {
   codex: ["OPENAI_API_KEY"],
   claude: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
+  workbuddy: [],
+  codebuddy: [],
 };
 const CLAUDE_SETTINGS_ENVIRONMENT = [
   "ANTHROPIC_API_KEY",
@@ -95,6 +101,7 @@ export interface AgentExecutionRequest {
 }
 
 export async function executeAgent(request: AgentExecutionRequest): Promise<ExecutionResult> {
+  requireHeadlessAgentRoute(request.route);
   validateAgentBinary(request.route);
   if (!Number.isInteger(request.maxOutputTokens) || request.maxOutputTokens < 1) {
     throw new CliError("Agent max output tokens must be a positive integer.", {
@@ -195,6 +202,22 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
     throw error;
   }
   const wallSeconds = Number(process.hrtime.bigint() - started) / 1_000_000_000;
+  if (isNestedSandboxDenial(completed.exitCode, completed.stderr)) {
+    throw new CliError(
+      "The native-direct reviewer cannot create its platform capsule inside this sandboxed IDE. Explicitly configure sandbox-bridge and start its owner-controlled reviewer sidecar, or run the review from a native host.",
+      {
+        code: "RESEARCH_NESTED_SANDBOX_UNSUPPORTED",
+        exitCode: 3,
+        details: {
+          transport: "native-direct",
+          platform: platform(),
+          retryable: false,
+          minimumAction:
+            "Choose sandbox-bridge explicitly and start the exact-version reviewer sidecar outside the IDE sandbox; do not enable Full Access or disable either sandbox.",
+        },
+      },
+    );
+  }
   const parsed = parseAgentResult(request.route, completed.stdout, completed.stderr);
   const redacted = redactResult(parsed.stdout, parsed.stderr, secrets);
   const exitCode = redacted.exposed
@@ -226,14 +249,39 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
     wallSeconds,
     model: parsed.model ?? request.route.model,
     runtime: { ...runtime, model: parsed.model ?? request.route.model },
+    ...(request.toolPolicy === "none" && request.brokerUrl === null
+      ? {
+          isolation: {
+            ...sandboxed.isolation,
+            readScopes: [
+              "platform-runtime",
+              "agent-runtime",
+              "private-capsule",
+            ] as ReviewIsolationFingerprint["readScopes"],
+            writeScopes: ["private-capsule"] as ["private-capsule"],
+            networkPolicy: "reviewer-provider-only" as const,
+            toolPolicy: "none" as const,
+          },
+        }
+      : {}),
     telemetry: sanitizeExecutionTelemetry(parsed.telemetry, secrets),
   };
+}
+
+function isNestedSandboxDenial(exitCode: number, stderr: string): boolean {
+  if (exitCode === 0) return false;
+  return (
+    /sandbox-exec:\s*sandbox_apply:\s*Operation not permitted/i.test(stderr) ||
+    /bwrap:.*(?:namespace|userns).*Operation not permitted/i.test(stderr) ||
+    /bubblewrap:.*(?:namespace|userns).*Operation not permitted/i.test(stderr)
+  );
 }
 
 export async function fingerprintAgentRoute(
   route: AgentRoute,
   environment: NodeJS.ProcessEnv,
 ): Promise<AgentRuntimeFingerprint> {
+  requireHeadlessAgentRoute(route);
   validateAgentBinary(route);
   const executables = await resolveAgentExecutables(route, environment.PATH);
   return fingerprintResolvedBinary(
@@ -242,6 +290,124 @@ export async function fingerprintAgentRoute(
     executables.target,
     environment.PATH,
   );
+}
+
+export interface NativeCapsuleIsolationProbe {
+  outsideReadBlocked: true;
+  outsideWriteBlocked: true;
+  workspaceCredentialReadBlocked: true;
+}
+
+export async function probeNativeCapsuleIsolation(input: {
+  workspaceRoot: string;
+  stateDirectory: string;
+}): Promise<NativeCapsuleIsolationProbe> {
+  const probeId = randomUUID();
+  const capsuleRoot = join(input.stateDirectory, `isolation-probe-${probeId}`);
+  const projectRoot = join(capsuleRoot, "project");
+  const outsideReadPath = join(input.stateDirectory, `outside-read-${probeId}`);
+  const outsideWritePath = join(input.stateDirectory, `outside-write-${probeId}`);
+  const credentialPath = join(input.workspaceRoot, ".tiangong-research", ".env");
+  let createdCredential = false;
+  await mkdir(projectRoot, { recursive: true, mode: 0o700 });
+  await Promise.all([
+    mkdir(join(capsuleRoot, "home"), { mode: 0o700 }),
+    mkdir(join(capsuleRoot, "tmp"), { mode: 0o700 }),
+  ]);
+  await writeFile(outsideReadPath, "reviewer-isolation-probe\n", { mode: 0o600 });
+  if (!(await lstat(credentialPath).catch(() => undefined))) {
+    const handle = await open(credentialPath, "wx", 0o600).catch(() => null);
+    if (handle) {
+      await handle.writeFile("TIANGONG_REVIEWER_ISOLATION_PROBE=unreadable\n", "utf8");
+      await handle.close();
+      createdCredential = true;
+    }
+  }
+  try {
+    const probeScript = join(projectRoot, "isolation-probe.mjs");
+    await writeFile(
+      probeScript,
+      [
+        'import { readFileSync, writeFileSync } from "node:fs";',
+        "const [, , outsideReadPath, outsideWritePath, credentialPath] = process.argv;",
+        "const cannotRead = (path) => { try { readFileSync(path); return false; } catch { return true; } };",
+        "let outsideWriteBlocked = false;",
+        'try { writeFileSync(outsideWritePath, "forbidden\\n"); } catch { outsideWriteBlocked = true; }',
+        "process.stdout.write(JSON.stringify({",
+        "  outsideReadBlocked: cannotRead(outsideReadPath),",
+        "  outsideWriteBlocked,",
+        "  workspaceCredentialReadBlocked: cannotRead(credentialPath),",
+        '}) + "\\n");',
+        "",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+    const sandboxed = await sandboxInvocation(
+      process.execPath,
+      [probeScript, outsideReadPath, outsideWritePath, credentialPath],
+      capsuleRoot,
+      projectRoot,
+      input.workspaceRoot,
+      process.execPath,
+    );
+    const completed = await spawnCaptured({
+      binary: sandboxed.binary,
+      args: sandboxed.args,
+      cwd: projectRoot,
+      env: {
+        HOME: join(capsuleRoot, "home"),
+        PATH: "/usr/bin:/bin",
+        TMPDIR: join(capsuleRoot, "tmp"),
+      },
+      timeoutMs: 15_000,
+      maxCaptureBytes: MIN_CAPTURE_BYTES,
+    });
+    let result: unknown;
+    try {
+      result = JSON.parse(completed.stdout.trim());
+    } catch {
+      result = null;
+    }
+    const outsideWriteReachedHost =
+      (await lstat(outsideWritePath).catch(() => undefined)) !== undefined;
+    if (
+      completed.exitCode !== 0 ||
+      !isObject(result) ||
+      result.outsideReadBlocked !== true ||
+      result.workspaceCredentialReadBlocked !== true ||
+      outsideWriteReachedHost
+    ) {
+      throw new CliError("The reviewer platform capsule failed its filesystem negative probes.", {
+        code: "RESEARCH_REVIEW_BRIDGE_SANDBOX_POLICY_INVALID",
+        exitCode: 3,
+        details: {
+          provider: sandboxed.isolation.provider,
+          policySha256: sandboxed.isolation.policySha256,
+          exitCode: completed.exitCode,
+          probe: isObject(result)
+            ? {
+                outsideReadBlocked: result.outsideReadBlocked === true,
+                outsideWriteSyscallBlocked: result.outsideWriteBlocked === true,
+                outsideWriteReachedHost,
+                workspaceCredentialReadBlocked: result.workspaceCredentialReadBlocked === true,
+              }
+            : null,
+        },
+      });
+    }
+    return {
+      outsideReadBlocked: true,
+      outsideWriteBlocked: true,
+      workspaceCredentialReadBlocked: true,
+    };
+  } finally {
+    await Promise.all([
+      rm(capsuleRoot, { recursive: true, force: true }),
+      rm(outsideReadPath, { force: true }),
+      rm(outsideWritePath, { force: true }),
+      ...(createdCredential ? [rm(credentialPath, { force: true })] : []),
+    ]);
+  }
 }
 
 async function buildInvocation(
@@ -306,6 +472,12 @@ async function buildInvocation(
     args.push(request.prompt);
     return { binary: resolvedBinary, args };
   }
+  if (request.route.agent !== "claude") {
+    throw new CliError("Native WorkBuddy/CodeBuddy producers cannot be launched as child CLIs.", {
+      code: "RESEARCH_EXECUTOR_INVALID",
+      exitCode: 2,
+    });
+  }
   const toolPolicy = request.toolPolicy ?? "workspace-read";
   const args = [
     "-p",
@@ -350,6 +522,14 @@ async function buildInvocation(
   return { binary: resolvedBinary, args };
 }
 
+function requireHeadlessAgentRoute(route: AgentRoute): void {
+  if (route.agent === "codex" || route.agent === "claude") return;
+  throw new CliError(
+    `The ${route.agent} producer is native-host only and cannot be launched by the control plane.`,
+    { code: "RESEARCH_EXECUTOR_INVALID", exitCode: 2 },
+  );
+}
+
 async function sandboxInvocation(
   binary: string,
   args: string[],
@@ -357,7 +537,11 @@ async function sandboxInvocation(
   projectRoot: string,
   workspaceRoot: string,
   targetBinary: string,
-): Promise<{ binary: string; args: string[] }> {
+): Promise<{
+  binary: string;
+  args: string[];
+  isolation: Pick<ReviewIsolationFingerprint, "provider" | "policySha256">;
+}> {
   const configuredCredentialPath = join(workspaceRoot, ".tiangong-research", ".env");
   const workspaceCredentialPath = await realpath(configuredCredentialPath).catch(
     () => configuredCredentialPath,
@@ -385,7 +569,11 @@ async function sandboxInvocation(
       "",
     ].join("\n");
     await writeFile(profile, policy, { encoding: "utf8", mode: 0o600 });
-    return { binary: sandbox, args: ["-f", profile, binary, ...args] };
+    return {
+      binary: sandbox,
+      args: ["-f", profile, binary, ...args],
+      isolation: { provider: "sandbox-exec", policySha256: sha256Text(policy) },
+    };
   }
   if (platform() === "linux") {
     const bubblewrap = await firstExecutable([
@@ -440,7 +628,14 @@ async function sandboxInvocation(
       sandboxArgs.push("--ro-bind", "/dev/null", workspaceCredentialPath);
     }
     sandboxArgs.push(binary, ...args);
-    return { binary: bubblewrap, args: sandboxArgs };
+    return {
+      binary: bubblewrap,
+      args: sandboxArgs,
+      isolation: {
+        provider: "bubblewrap",
+        policySha256: sha256Text(JSON.stringify(sandboxArgs)),
+      },
+    };
   }
   throw new CliError(`Unsupported research execution platform: ${platform()}`, {
     code: "RESEARCH_SANDBOX_UNAVAILABLE",

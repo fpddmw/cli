@@ -11,6 +11,7 @@ import { appendJournalEvent, verifyJournal } from "./journal.js";
 import { loadProjectEvidenceReceipts } from "./evidence.js";
 import { executeAgent, fingerprintAgentRoute, type AgentExecutionRequest } from "./executor.js";
 import { doctorExternalCapabilities, hasPublicInternetCapability } from "./external-skills.js";
+import { createReviewExecutor } from "./review-executor.js";
 import { parseStructuredStageOutput, schemaForStage } from "./schemas.js";
 import { sanitizeResearchText } from "./sanitization.js";
 import {
@@ -165,6 +166,10 @@ export async function initializeResearchWorkspace(
       binary: "claude",
       model: null,
       effort: "low",
+    },
+    reviewerExecution: {
+      transport: "native-direct",
+      isolationProvider: "platform-capsule",
     },
     budget: structuredClone(
       mode === "production-research" ? DEFAULT_PRODUCTION_BUDGET : DEFAULT_SMOKE_BUDGET,
@@ -366,6 +371,9 @@ export async function doctorResearchWorkspace(
       detail: `producer=${value.producer.agent} reviewer=${value.reviewer.agent}`,
     };
   });
+  const configuredReviewExecutor = config
+    ? createReviewExecutor({ root: workspace, execution: config.reviewerExecution })
+    : null;
   await checked(checks, "runtime-lock", async () => {
     const lock = await requireCurrentRuntimeLock(workspace, marker);
     return { value: lock, detail: `${lock.packageName}@${lock.packageVersion}` };
@@ -448,7 +456,9 @@ export async function doctorResearchWorkspace(
           workspace,
           config,
           options.environment ?? process.env,
-          options.runtimeFingerprinter ?? fingerprintAgentRoute,
+          options.runtimeFingerprinter ??
+            configuredReviewExecutor?.fingerprint ??
+            fingerprintAgentRoute,
         )
       : null;
   const attested =
@@ -499,6 +509,13 @@ export async function doctorResearchWorkspace(
       id: "independent-review-route",
       status: "pass",
       detail: `${config.producer.agent} -> ${config.reviewer.agent}`,
+    });
+  }
+  if (config) {
+    checks.push({
+      id: "reviewer-transport",
+      status: "pass",
+      detail: `${config.reviewerExecution.transport}; isolation=${config.reviewerExecution.isolationProvider}`,
     });
   }
   if (
@@ -575,7 +592,7 @@ export async function doctorResearchWorkspace(
             config,
             route,
             options.environment ?? process.env,
-            options.executor ?? executeAgent,
+            options.executor ?? configuredReviewExecutor?.execute ?? executeAgent,
           );
           return { value, detail: agentSmokeDetail(value) };
         });
@@ -587,6 +604,7 @@ export async function doctorResearchWorkspace(
               runtimes: smokeResults
                 .map((result) => result.runtime)
                 .sort((left, right) => left.agent.localeCompare(right.agent)),
+              reviewerExecution: smokeResults[0]!.reviewerExecution,
               smokeUsage: smokeResults
                 .map((result) => result.usage)
                 .sort((left, right) => left.agent.localeCompare(right.agent)),
@@ -696,11 +714,13 @@ async function inspectReusableDoctorAttestation(
 
 interface AgentSmokeResult {
   runtime: AgentRuntimeFingerprint;
+  reviewerExecution: WorkspaceDoctorAttestation["reviewerExecution"];
   usage: WorkspaceDoctorAttestation["smokeUsage"][number];
 }
 
 interface DoctorSmokeBundle {
   runtimes: AgentRuntimeFingerprint[];
+  reviewerExecution: WorkspaceDoctorAttestation["reviewerExecution"];
   smokeUsage: WorkspaceDoctorAttestation["smokeUsage"];
   capabilitySmoke: WorkspaceDoctorAttestation["capabilitySmoke"];
 }
@@ -751,8 +771,17 @@ async function runAgentSmokeCheck(
     if (!result.runtime) {
       throw new Error(`${route.agent} smoke did not return a runtime fingerprint`);
     }
+    if (!result.isolation) {
+      throw new Error(`${route.agent} smoke did not return a platform-capsule policy fingerprint`);
+    }
     return {
       runtime: result.runtime,
+      reviewerExecution: {
+        transport: config.reviewerExecution.transport,
+        isolationProvider: result.isolation.provider,
+        policySha256: result.isolation.policySha256,
+        signerKeyFingerprint: result.reviewAttestation?.signerKeyFingerprint ?? null,
+      },
       usage: {
         agent: route.agent,
         tokens: result.tokens,
@@ -815,6 +844,7 @@ async function persistDoctorAttestation(
       capabilityDeclarationsSha256: await sha256File(paths.capabilityDeclarations),
       capabilityLockSha256: await sha256File(paths.capabilityLock),
       doctorSchemaSha256: sha256Text(canonicalJson(schemaForStage("doctor"))),
+      reviewerExecution: smoke.reviewerExecution,
       runtimes: smoke.runtimes,
       capabilitySmoke: smoke.capabilitySmoke,
       smokeUsage: smoke.smokeUsage,
@@ -829,6 +859,7 @@ async function persistDoctorAttestation(
       checkedAt: value.checkedAt,
       expiresAt: value.expiresAt,
       runtimes: value.runtimes,
+      reviewerExecution: value.reviewerExecution,
       capabilitySmoke: value.capabilitySmoke,
       smokeUsage: value.smokeUsage,
     });
@@ -882,6 +913,16 @@ export async function verifyDoctorAttestation(root: string): Promise<{
   ) {
     errors.push("independent reviewer attestation binding drifted");
   }
+  if (
+    value.reviewerExecution.transport !== config.reviewerExecution.transport ||
+    !/^[0-9a-f]{64}$/.test(value.reviewerExecution.policySha256) ||
+    (value.reviewerExecution.transport === "sandbox-bridge"
+      ? !value.reviewerExecution.signerKeyFingerprint ||
+        !/^[0-9a-f]{64}$/.test(value.reviewerExecution.signerKeyFingerprint)
+      : value.reviewerExecution.signerKeyFingerprint !== null)
+  ) {
+    errors.push("independent reviewer transport attestation binding drifted");
+  }
   if (config.mode === "production-research") {
     const expectedCapabilityIds = declarations.capabilities
       .filter((capability) => capability.permissions.includes("brokered-network"))
@@ -923,7 +964,19 @@ function isDoctorAttestation(value: unknown): value is WorkspaceDoctorAttestatio
     new Set(value.capabilitySmoke.map((row) => (isObject(row) ? row.id : null))).size !==
       value.capabilitySmoke.length ||
     !Array.isArray(value.smokeUsage) ||
-    value.smokeUsage.length !== 1
+    value.smokeUsage.length !== 1 ||
+    !isObject(value.reviewerExecution) ||
+    (value.reviewerExecution.transport !== "native-direct" &&
+      value.reviewerExecution.transport !== "sandbox-bridge") ||
+    (value.reviewerExecution.isolationProvider !== "sandbox-exec" &&
+      value.reviewerExecution.isolationProvider !== "bubblewrap") ||
+    typeof value.reviewerExecution.policySha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(value.reviewerExecution.policySha256) ||
+    !(
+      value.reviewerExecution.signerKeyFingerprint === null ||
+      (typeof value.reviewerExecution.signerKeyFingerprint === "string" &&
+        /^[0-9a-f]{64}$/.test(value.reviewerExecution.signerKeyFingerprint))
+    )
   ) {
     return false;
   }
@@ -1033,6 +1086,15 @@ function isWorkspaceConfig(value: unknown): value is WorkspaceConfig {
   if (!isObject(value) || value.schemaVersion !== 1) return false;
   if (value.mode !== "smoke-test" && value.mode !== "production-research") return false;
   if (!isAgentRoute(value.producer) || !isAgentRoute(value.reviewer)) return false;
+  if (value.reviewer.agent !== "codex" && value.reviewer.agent !== "claude") return false;
+  if (
+    !isObject(value.reviewerExecution) ||
+    (value.reviewerExecution.transport !== "native-direct" &&
+      value.reviewerExecution.transport !== "sandbox-bridge") ||
+    value.reviewerExecution.isolationProvider !== "platform-capsule"
+  ) {
+    return false;
+  }
   if (
     value.producer.executionMode !== "native-host" ||
     value.reviewer.executionMode !== "headless-cli"
@@ -1083,7 +1145,7 @@ function isAgentRoute(value: unknown): value is AgentRoute {
   if (
     !(
       isObject(value) &&
-      (value.agent === "codex" || value.agent === "claude") &&
+      ["codex", "claude", "workbuddy", "codebuddy"].includes(String(value.agent)) &&
       (value.executionMode === undefined ||
         value.executionMode === "native-host" ||
         value.executionMode === "headless-cli") &&
@@ -1107,7 +1169,9 @@ function isAgentRoute(value: unknown): value is AgentRoute {
       (value.agent === "codex" &&
         ["minimal", "low", "medium", "high", "xhigh"].includes(String(effort))) ||
       (value.agent === "claude" &&
-        ["low", "medium", "high", "xhigh", "max"].includes(String(effort)))
+        ["low", "medium", "high", "xhigh", "max"].includes(String(effort))) ||
+      ((value.agent === "workbuddy" || value.agent === "codebuddy") &&
+        ["minimal", "low", "medium", "high", "xhigh", "max"].includes(String(effort)))
     )
   ) {
     return false;

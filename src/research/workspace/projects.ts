@@ -1294,7 +1294,7 @@ function isScientificDesignBinding(
       `projects/${projectId}/scientific/design/objects/${value.designSha256}.json` ||
     typeof value.centralStudyKind !== "string" ||
     !isObject(value.producer) ||
-    !["codex", "claude"].includes(String(value.producer.agent)) ||
+    !["codex", "claude", "workbuddy", "codebuddy"].includes(String(value.producer.agent)) ||
     typeof value.producer.sessionSha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(value.producer.sessionSha256) ||
     !Array.isArray(value.mechanicalIssueCodes) ||

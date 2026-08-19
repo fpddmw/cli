@@ -15,13 +15,20 @@ export type PackageStatus = "pending" | "ready" | "running" | "retry" | "failed"
 
 export type PackageKind = "agent" | "verify";
 
-export type AgentKind = "codex" | "claude";
+export type AgentKind = "codex" | "claude" | "workbuddy" | "codebuddy";
 
 export type AgentReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type AgentVerbosity = "low" | "medium" | "high";
 
 export type ResearchMode = "smoke-test" | "production-research";
+
+export type ReviewTransport = "native-direct" | "sandbox-bridge";
+
+export interface ReviewExecutionConfig {
+  transport: ReviewTransport;
+  isolationProvider: "platform-capsule";
+}
 
 export type AgentPackageStage = "discover" | "acquire" | "analyze" | "synthesize" | "review";
 
@@ -84,6 +91,7 @@ export interface WorkspaceConfig {
   mode: ResearchMode;
   producer: AgentRoute;
   reviewer: AgentRoute;
+  reviewerExecution: ReviewExecutionConfig;
   budget: ResearchBudget;
 }
 
@@ -431,7 +439,37 @@ export interface ExecutionResult {
   wallSeconds: number;
   model: string | null;
   runtime: AgentRuntimeFingerprint | null;
+  isolation?: ReviewIsolationFingerprint | undefined;
+  reviewAttestation?: ReviewExecutionAttestation | undefined;
   telemetry?: AgentExecutionTelemetry | undefined;
+}
+
+export interface ReviewIsolationFingerprint {
+  provider: "sandbox-exec" | "bubblewrap";
+  policySha256: string;
+  readScopes: Array<"platform-runtime" | "agent-runtime" | "private-capsule">;
+  writeScopes: ["private-capsule"];
+  networkPolicy: "reviewer-provider-only";
+  toolPolicy: "none";
+}
+
+export interface ReviewExecutionAttestation {
+  schemaVersion: 1;
+  protocolVersion: 1;
+  transport: "sandbox-bridge";
+  isolationProvider: ReviewIsolationFingerprint["provider"];
+  toolPolicy: "none";
+  workspaceId: string;
+  requestId: string;
+  requestSha256: string;
+  resultSha256: string;
+  capsuleSha256: string;
+  runtimeLockSha256: string;
+  configSha256: string;
+  policySha256: string;
+  signerKeyFingerprint: string;
+  attestationSha256: string;
+  signature: string;
 }
 
 export interface AgentExecutionTelemetry {
@@ -487,6 +525,8 @@ export interface RunRecord {
   failureKind: FailureKind | null;
   failureDetails?: Record<string, unknown> | null | undefined;
   runtime: AgentRuntimeFingerprint | null;
+  isolation?: ReviewIsolationFingerprint | undefined;
+  reviewAttestation?: ReviewExecutionAttestation | undefined;
   telemetry?: AgentExecutionTelemetry | undefined;
   accountingMode?: "measured" | "reserved-native-host" | "mechanical";
 }
@@ -553,6 +593,12 @@ export interface WorkspaceDoctorAttestation {
   capabilityDeclarationsSha256: string;
   capabilityLockSha256: string;
   doctorSchemaSha256: string;
+  reviewerExecution: {
+    transport: ReviewTransport;
+    isolationProvider: ReviewIsolationFingerprint["provider"];
+    policySha256: string;
+    signerKeyFingerprint: string | null;
+  };
   runtimes: AgentRuntimeFingerprint[];
   capabilitySmoke: Array<{
     id: string;

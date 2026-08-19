@@ -46,6 +46,7 @@ describe("declarative research setup", () => {
       assert.match(yaml, /mode: production-research/);
       assert.match(yaml, /networkDownloads: false/);
       assert.match(yaml, /agentSmokeCost: false/);
+      assert.match(yaml, /reviewerExecution:[\s\S]*transport: native-direct/);
       assert.match(yaml, /acceptedLicenseIds:\s*\[\]/);
       assert.doesNotMatch(yaml, /owner-secret|example-secret/i);
       for (const skill of RESEARCH_SETUP_SKILLS) {
@@ -642,6 +643,10 @@ function validDeclarationValue() {
         cachedInputUsdPerMillionTokens: 0.1,
         outputUsdPerMillionTokens: 2,
       },
+    },
+    reviewerExecution: {
+      transport: "native-direct" as const,
+      isolationProvider: "platform-capsule" as const,
     },
     verification: {
       live: true,

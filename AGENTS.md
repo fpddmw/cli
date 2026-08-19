@@ -52,6 +52,7 @@ This repository owns the Tiangong AI command-line interface.
 - `tiangong-ai research policy`
 - `tiangong-ai research publication`
 - `tiangong-ai research workspace`
+- `tiangong-ai research reviewer`
 - `tiangong-ai research capability`
 - `tiangong-ai research project`
 - `tiangong-ai research status`

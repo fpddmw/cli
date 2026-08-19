@@ -2258,14 +2258,18 @@ describe("production research control plane", () => {
         environment: {},
         executor: async (request) => {
           smokeRequests.push(request);
-          return execution(
-            '{"ok":true}',
-            1,
-            0,
-            "",
-            request.route.model,
-            mockRuntime(request.route),
-          );
+          return {
+            ...execution('{"ok":true}', 1, 0, "", request.route.model, mockRuntime(request.route)),
+            isolation: {
+              provider:
+                process.platform === "darwin" ? ("sandbox-exec" as const) : ("bubblewrap" as const),
+              policySha256: "e".repeat(64),
+              readScopes: ["platform-runtime", "agent-runtime", "private-capsule"] as const,
+              writeScopes: ["private-capsule"] as const,
+              networkPolicy: "reviewer-provider-only" as const,
+              toolPolicy: "none" as const,
+            },
+          };
         },
       });
       assert.equal(withSmoke.status, "ready", JSON.stringify(withSmoke));

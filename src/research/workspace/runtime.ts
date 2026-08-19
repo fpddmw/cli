@@ -34,6 +34,7 @@ import {
   registerProjectInputCandidates,
 } from "./evidence-ledger.js";
 import { executeAgent, type AgentExecutionRequest } from "./executor.js";
+import { createReviewExecutor } from "./review-executor.js";
 import { requiredDiscoveryCapabilityIds } from "./external-skills.js";
 import { renderInputLineContext } from "./input-plan.js";
 import {
@@ -283,9 +284,15 @@ export const researchHandoffRecordSchema = {
 export async function runResearchWorkspace(
   root: string,
   options: RunOptions,
-  packageExecutor: PackageExecutor = executeAgent,
+  packageExecutor?: PackageExecutor,
 ): Promise<WorkspaceRunResult> {
-  return runResearchWorkspaceInternal(root, options, packageExecutor, false);
+  return runResearchWorkspaceInternal(
+    root,
+    options,
+    packageExecutor ?? executeAgent,
+    false,
+    packageExecutor === undefined,
+  );
 }
 
 /** @internal Test-only seam for exercising deterministic package admission with fake agents. */
@@ -294,7 +301,7 @@ export async function runResearchWorkspaceWithInjectedProducerForTesting(
   options: RunOptions,
   packageExecutor: PackageExecutor,
 ): Promise<WorkspaceRunResult> {
-  return runResearchWorkspaceInternal(root, options, packageExecutor, true);
+  return runResearchWorkspaceInternal(root, options, packageExecutor, true, false);
 }
 
 async function runResearchWorkspaceInternal(
@@ -302,6 +309,7 @@ async function runResearchWorkspaceInternal(
   options: RunOptions,
   packageExecutor: PackageExecutor,
   allowInjectedProducerForTesting: boolean,
+  useConfiguredReviewerExecutor: boolean,
 ): Promise<WorkspaceRunResult> {
   validateRunOptions(options);
   const requestId = randomUUID();
@@ -310,6 +318,9 @@ async function runResearchWorkspaceInternal(
     await verifyJournal(workspacePaths(root).journal);
     const config = await loadWorkspaceConfig(root);
     assertExecutionConfiguration(config);
+    const reviewerPackageExecutor = useConfiguredReviewerExecutor
+      ? createReviewExecutor({ root, execution: config.reviewerExecution }).execute
+      : null;
     for (const project of await projectsForRun(root, options.projectId)) {
       await assertProjectPublicationPolicy(root, project);
     }
@@ -379,6 +390,7 @@ async function runResearchWorkspaceInternal(
             options,
             requestId,
             packageExecutor,
+            reviewerPackageExecutor,
             doctorAttestation,
           ),
         ),
@@ -470,6 +482,31 @@ interface NativeStageSession {
   capsuleRoot: string;
   capsuleProject: string;
   sessionSha256: string;
+}
+
+type NativeCapsuleDisposition = "deleted" | "retained-outer-sandbox";
+
+function capsuleDispositionForHost(hostAgent: AgentRoute["agent"]): NativeCapsuleDisposition {
+  return hostAgent === "workbuddy" || hostAgent === "codebuddy"
+    ? "retained-outer-sandbox"
+    : "deleted";
+}
+
+function nativeCapsuleDisposition(session: NativeStageSession): NativeCapsuleDisposition {
+  return capsuleDispositionForHost(session.packet.hostAgent);
+}
+
+async function releaseNativeStageSession(
+  root: string,
+  projectId: string,
+  session: NativeStageSession,
+): Promise<NativeCapsuleDisposition> {
+  const disposition = nativeCapsuleDisposition(session);
+  await rm(nativeStageSessionPath(root, projectId), { force: true });
+  if (disposition === "deleted") {
+    await rm(session.capsuleRoot, { recursive: true, force: true });
+  }
+  return disposition;
 }
 
 export interface NativeStageStatus {
@@ -1214,6 +1251,7 @@ export async function submitNativeResearchStage(input: {
         accountingMode: "reserved-native-host",
       });
       const usage = { ...usageSlice(result), accountingMode: "reserved-native-host" };
+      const capsuleDisposition = nativeCapsuleDisposition(session);
       await appendJournalEvent(
         workspacePaths(input.root).journal,
         "native.stage.completed",
@@ -1226,10 +1264,12 @@ export async function submitNativeResearchStage(input: {
           stage: workPackage.stage,
           outputs,
           usage,
+          capsuleDisposition,
+          retainedCapsuleId:
+            capsuleDisposition === "retained-outer-sandbox" ? basename(session.capsuleRoot) : null,
         },
       );
-      await rm(nativeStageSessionPath(input.root, project.id), { force: true });
-      await rm(session.capsuleRoot, { recursive: true, force: true });
+      await releaseNativeStageSession(input.root, project.id, session);
       return {
         projectId: project.id,
         packageId: workPackage.id,
@@ -1326,10 +1366,14 @@ export async function abortNativeResearchStage(input: {
         projectId: project.id,
         packageId: workPackage.id,
         stage: workPackage.stage,
+        capsuleDisposition: nativeCapsuleDisposition(session),
+        retainedCapsuleId:
+          nativeCapsuleDisposition(session) === "retained-outer-sandbox"
+            ? basename(session.capsuleRoot)
+            : null,
       },
     );
-    await rm(nativeStageSessionPath(input.root, project.id), { force: true });
-    await rm(session.capsuleRoot, { recursive: true, force: true });
+    await releaseNativeStageSession(input.root, project.id, session);
     return {
       projectId: project.id,
       packageId: workPackage.id,
@@ -1427,6 +1471,11 @@ export async function requestResearchHandoff(input: {
       requestedAt,
       interruptedSessionId: session?.packet.sessionId ?? null,
       interruptedPackageId: session?.packet.packageId ?? null,
+      capsuleDisposition: session ? nativeCapsuleDisposition(session) : null,
+      retainedCapsuleId:
+        session && nativeCapsuleDisposition(session) === "retained-outer-sandbox"
+          ? basename(session.capsuleRoot)
+          : null,
     };
     await appendEvidenceLedgerEvent(input.root, project.id, "handoff.requested", eventPayload);
     await appendJournalEvent(
@@ -1436,8 +1485,7 @@ export async function requestResearchHandoff(input: {
       { projectId: project.id, ...eventPayload },
     );
     if (session) {
-      await rm(activePath, { force: true });
-      await rm(session.capsuleRoot, { recursive: true, force: true });
+      await releaseNativeStageSession(input.root, project.id, session);
     }
     return {
       projectId: project.id,
@@ -1601,6 +1649,7 @@ async function executeWorkPackage(
   options: RunOptions,
   requestId: string,
   packageExecutor: PackageExecutor,
+  reviewerPackageExecutor: PackageExecutor | null,
   doctorAttestation: WorkspaceDoctorAttestation | null,
 ): Promise<{ projectId: string; packageId: string; status: string }> {
   const project = await loadProject(root, projectId);
@@ -1639,6 +1688,8 @@ async function executeWorkPackage(
   const runId = randomUUID();
   const startedAt = new Date().toISOString();
   let capsuleRoot: string | undefined;
+  let capsuleDisposition: NativeCapsuleDisposition | null = null;
+  let retainedCapsuleId: string | null = null;
   let broker: CapabilityBroker | undefined;
   let accountedResult: ExecutionResult | undefined;
   let promotedOutputs: OutputRecord[] = [];
@@ -1668,6 +1719,9 @@ async function executeWorkPackage(
       );
       const capsule = await createCapsule(root, project, workPackage, runId, config);
       capsuleRoot = capsule.capsuleRoot;
+      capsuleDisposition = capsuleDispositionForHost(config.producer.agent);
+      retainedCapsuleId =
+        capsuleDisposition === "retained-outer-sandbox" ? basename(capsuleRoot) : null;
       if (capsule.reviewPacketRecord) {
         await appendJournalEvent(
           workspacePaths(root).journal,
@@ -1689,6 +1743,10 @@ async function executeWorkPackage(
         config,
       );
       const route = workPackage.executor === "reviewer" ? config.reviewer : config.producer;
+      const selectedPackageExecutor =
+        workPackage.executor === "reviewer" && reviewerPackageExecutor
+          ? reviewerPackageExecutor
+          : packageExecutor;
       executor = route.agent;
       broker =
         workPackage.stage === "discover"
@@ -1732,7 +1790,7 @@ async function executeWorkPackage(
       });
       assertPreCallTokenReservation(project, workPackage, config, primaryRequest, 0, true);
       result = await withHeartbeat(
-        packageExecutor(primaryRequest),
+        selectedPackageExecutor(primaryRequest),
         options,
         requestId,
         project,
@@ -1787,7 +1845,7 @@ async function executeWorkPackage(
           false,
         );
         const repair = await withHeartbeat(
-          packageExecutor(repairRequest),
+          selectedPackageExecutor(repairRequest),
           options,
           requestId,
           project,
@@ -1893,6 +1951,8 @@ async function executeWorkPackage(
       failureKind: null,
       failureDetails: null,
       runtime: accountedResult.runtime,
+      isolation: accountedResult.isolation,
+      reviewAttestation: accountedResult.reviewAttestation,
       telemetry: accountedResult.telemetry,
     });
     const usage = usageSlice(accountedResult);
@@ -1905,6 +1965,9 @@ async function executeWorkPackage(
       outputs: promotedOutputs,
       usage,
       runtime: accountedResult.runtime,
+      reviewerExecution: accountedResult.reviewAttestation ?? accountedResult.isolation ?? null,
+      capsuleDisposition,
+      retainedCapsuleId,
     });
     emitProgress(
       options,
@@ -1968,6 +2031,8 @@ async function executeWorkPackage(
         failureKind: classification.kind,
         failureDetails,
         runtime: accountedResult.runtime,
+        isolation: accountedResult.isolation,
+        reviewAttestation: accountedResult.reviewAttestation,
         telemetry: accountedResult.telemetry,
       });
     }
@@ -1985,6 +2050,8 @@ async function executeWorkPackage(
       details: failureDetails,
       outputs: promotedOutputs,
       usage,
+      capsuleDisposition,
+      retainedCapsuleId,
     });
     emitProgress(
       options,
@@ -2007,7 +2074,9 @@ async function executeWorkPackage(
     return { projectId, packageId, status: failedPackage.status };
   } finally {
     if (broker) await broker.stop();
-    if (capsuleRoot) await rm(capsuleRoot, { recursive: true, force: true });
+    if (capsuleRoot && capsuleDisposition !== "retained-outer-sandbox") {
+      await rm(capsuleRoot, { recursive: true, force: true });
+    }
   }
 }
 
@@ -4443,6 +4512,8 @@ function combineExecutionResults(
     wallSeconds: primary.wallSeconds + repair.wallSeconds,
     model: repair.model ?? primary.model,
     runtime: repair.runtime ?? primary.runtime,
+    isolation: repair.isolation ?? primary.isolation,
+    reviewAttestation: repair.reviewAttestation ?? primary.reviewAttestation,
     telemetry: mergeTelemetry(primary.telemetry, repair.telemetry),
   };
 }
