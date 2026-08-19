@@ -70,6 +70,7 @@ npm run test:clean:cold
 npm run lint
 npm run build
 npm test
+npm run test:platform
 npm run test:coverage
 docpact validate-config --root . --strict
 docpact lint --root . --worktree --mode enforce
@@ -88,6 +89,8 @@ does not use `--pull`, because base versions change only through reviewed digest
 updates.
 
 Use `npm run typecheck` for a faster TypeScript-only check.
+Use `npm run test:platform` for the pure path-style and platform capability
+contracts that must run identically on every host before the hosted matrix.
 Use `npm run prepush:gate` when `docpact` is installed and you want the
 aggregated local quality gate.
 

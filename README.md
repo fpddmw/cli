@@ -1099,6 +1099,7 @@ transitions.
 ```bash
 npm run lint
 npm test
+npm run test:platform
 npm run test:coverage
 npm run audit:research-setup-pins
 docpact validate-config --root . --strict

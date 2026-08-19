@@ -3,6 +3,10 @@ name: ai-doc-lint
 on:
   pull_request:
 
+concurrency:
+  group: ai-doc-lint-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -20,7 +24,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install docpact
-        run: cargo install docpact --version 0.1.4 --force
+        run: cargo install docpact --version 0.1.9 --force
 
       - name: Validate docpact config
         run: docpact validate-config --root . --strict

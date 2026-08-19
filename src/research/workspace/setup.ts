@@ -35,6 +35,7 @@ import {
   reconcileSetupManagedCapabilities,
 } from "./external-skills.js";
 import { appendJournalEvent } from "./journal.js";
+import { researchPlatformCapabilities } from "./platform-capabilities.js";
 import { validateResearchPolicyPack } from "./research-policy.js";
 import {
   configuredResearchSecrets,
@@ -1732,12 +1733,8 @@ export async function doctorResearchSetup(
       return `${command} is executable (${sanitizeResearchText(result.stdout.trim()).slice(0, 120)}).`;
     });
   }
-  if (plan.reviewerExecution.transport === "sandbox-bridge") {
-    await setupDoctorCheck(checks, "platform-sandbox", "runtime", async () => {
-      const status = await inspectReviewerBridgeStatus(root);
-      return `Owner-controlled reviewer sidecar is ready; version=${status.packageVersion}; key=${status.keyFingerprint.slice(0, 12)}.`;
-    });
-  } else if (platform() === "win32") {
+  const platformCapabilities = researchPlatformCapabilities(platform());
+  if (!platformCapabilities.nativeReviewerExecution) {
     const production = plan.workspace.mode === "production-research";
     checks.push({
       id: "platform-sandbox",
@@ -1745,22 +1742,27 @@ export async function doctorResearchSetup(
       scope: "research-core",
       status: production ? "fail" : "warn",
       detail: production
-        ? "Production research execution is unsupported on Windows because no approved capsule sandbox is available."
-        : "Windows can inspect and smoke-test setup state, but native research execution requires an approved macOS or Linux capsule sandbox.",
+        ? `Production research execution is unsupported on ${platformCapabilities.platform} because no approved capsule sandbox is available.`
+        : `${platformCapabilities.platform} is configuration/smoke-only; it can inspect setup state but cannot start a native reviewer or reviewer sidecar.`,
       minimumAction: production
         ? "Run production research on macOS with sandbox-exec or Linux with Bubblewrap."
-        : "Use macOS or Linux before switching this workspace to production-research mode.",
+        : "Use macOS or Linux before switching this workspace to production-research mode or starting a reviewer sidecar.",
       blocking: production,
       requiredFor: production ? ["setup", "research-core"] : [],
     });
+  } else if (plan.reviewerExecution.transport === "sandbox-bridge") {
+    await setupDoctorCheck(checks, "platform-sandbox", "runtime", async () => {
+      const status = await inspectReviewerBridgeStatus(root);
+      return `Owner-controlled reviewer sidecar is ready; version=${status.packageVersion}; key=${status.keyFingerprint.slice(0, 12)}.`;
+    });
   } else {
     await setupDoctorCheck(checks, "platform-sandbox", "runtime", async () => {
-      if (platform() === "darwin") {
+      if (platformCapabilities.nativeIsolationProvider === "sandbox-exec") {
         const info = await lstat("/usr/bin/sandbox-exec").catch(() => undefined);
         if (!info?.isFile()) throw new Error("/usr/bin/sandbox-exec is unavailable");
         return "macOS sandbox-exec is available.";
       }
-      if (platform() === "linux") {
+      if (platformCapabilities.nativeIsolationProvider === "bubblewrap") {
         const result = await runner({
           command: "bwrap",
           args: ["--version"],
@@ -1771,7 +1773,7 @@ export async function doctorResearchSetup(
         if (result.exitCode !== 0) throw new Error("Bubblewrap is unavailable");
         return "Linux Bubblewrap is available.";
       }
-      throw new Error("Research execution is unsupported on this platform");
+      throw new Error(`Research execution is unsupported on ${platformCapabilities.platform}`);
     });
   }
   checks.push({

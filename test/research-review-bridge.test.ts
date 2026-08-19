@@ -4,13 +4,14 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { platform, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
 import { CliError } from "../src/errors.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
+import { researchPlatformCapabilities } from "../src/research/workspace/platform-capabilities.js";
 import type { AgentExecutionRequest } from "../src/research/workspace/executor.js";
 import {
   createReviewExecutor,
@@ -63,7 +64,7 @@ describe("sandbox-bridge reviewer execution", () => {
 
   it(
     "serves and stops the exact CLI sidecar without exposing its client secret",
-    { skip: platform() !== "darwin" && platform() !== "linux" },
+    { skip: !researchPlatformCapabilities().reviewerSidecarExecution },
     async () => {
       const fixture = await bridgeFixture();
       const stateDirectory = await mkdtemp(join(tmpdir(), "tiangong-review-cli-state-"));
@@ -150,7 +151,7 @@ describe("sandbox-bridge reviewer execution", () => {
 
   it(
     "executes one exact capsule through a signed sidecar and rejects replay and policy drift",
-    { skip: platform() !== "darwin" && platform() !== "linux" },
+    { skip: !researchPlatformCapabilities().reviewerSidecarExecution },
     async () => {
       const fixture = await bridgeFixture();
       const stateDirectory = await mkdtemp(join(tmpdir(), "tiangong-review-sidecar-state-"));
@@ -331,36 +332,40 @@ describe("sandbox-bridge reviewer execution", () => {
     },
   );
 
-  it("rejects a symlinked sidecar state directory before creating key material", async () => {
-    const fixture = await bridgeFixture();
-    const parent = await mkdtemp(join(tmpdir(), "tiangong-review-state-link-"));
-    const target = join(parent, "target");
-    const link = join(parent, "link");
-    await mkdir(target);
-    await symlink(target, link);
-    try {
-      await assert.rejects(
-        startReviewerBridgeSidecar({
-          root: fixture.root,
-          stateDirectory: link,
-          environment: { PATH: process.env.PATH },
-          executeNative: async () => successfulResult(),
-        }),
-        (error: unknown) => {
-          assert.ok(error instanceof CliError);
-          assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_STATE_INVALID");
-          return true;
-        },
-      );
-      await assert.rejects(readFile(join(target, "reviewer-bridge-private-key.pem")), /ENOENT/);
-    } finally {
-      await Promise.all([fixture.cleanup(), rm(parent, { recursive: true, force: true })]);
-    }
-  });
+  it(
+    "rejects a symlinked sidecar state directory before creating key material",
+    { skip: !researchPlatformCapabilities().reviewerSidecarExecution },
+    async () => {
+      const fixture = await bridgeFixture();
+      const parent = await mkdtemp(join(tmpdir(), "tiangong-review-state-link-"));
+      const target = join(parent, "target");
+      const link = join(parent, "link");
+      await mkdir(target);
+      await symlink(target, link);
+      try {
+        await assert.rejects(
+          startReviewerBridgeSidecar({
+            root: fixture.root,
+            stateDirectory: link,
+            environment: { PATH: process.env.PATH },
+            executeNative: async () => successfulResult(),
+          }),
+          (error: unknown) => {
+            assert.ok(error instanceof CliError);
+            assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_STATE_INVALID");
+            return true;
+          },
+        );
+        await assert.rejects(readFile(join(target, "reviewer-bridge-private-key.pem")), /ENOENT/);
+      } finally {
+        await Promise.all([fixture.cleanup(), rm(parent, { recursive: true, force: true })]);
+      }
+    },
+  );
 
   it(
     "runs the workspace reviewer smoke through the explicitly configured bridge",
-    { skip: platform() !== "darwin" && platform() !== "linux" },
+    { skip: !researchPlatformCapabilities().reviewerSidecarExecution },
     async () => {
       const fixture = await bridgeFixture();
       const stateDirectory = await mkdtemp(join(tmpdir(), "tiangong-review-doctor-state-"));

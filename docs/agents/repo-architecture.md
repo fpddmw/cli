@@ -65,6 +65,12 @@ storage writes, queueing, and document status transitions.
   shell expansion, omitted optional catalog entries, YAML aliases, secret
   persistence in plans, implicit replacement, and Wizard fallback after a
   declaration error are forbidden.
+- `src/research/workspace/platform-capabilities.ts`: pure cross-platform path
+  relation and research execution capability contracts. It models Windows
+  separators, drive/case behavior, macOS `/var` aliases, native isolation
+  providers, production readiness, and reviewer-sidecar eligibility without
+  depending on the current host OS. Windows and unknown platforms remain
+  configuration/smoke-only until an approved native capsule provider exists.
 - `src/research/workspace/**`: the versioned research workspace protocol. It
   owns context classification, immutable input admission, capability policy
   locks, a separately sourced external Skill ecosystem catalog, immutable setup

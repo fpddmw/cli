@@ -12,6 +12,7 @@ import { inspectResearchContext } from "../src/research/workspace/context.js";
 import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
 import { listEvidenceCandidates } from "../src/research/workspace/evidence-ledger.js";
 import { executeAgent, fingerprintAgentRoute } from "../src/research/workspace/executor.js";
+import { researchPlatformCapabilities } from "../src/research/workspace/platform-capabilities.js";
 import {
   readAndVerifyProjectInputPlan,
   renderInputLineContext,
@@ -349,7 +350,7 @@ describe("research capability locks", () => {
 describe("research project execution", () => {
   it(
     "runs an executor inside the platform capsule and parses accounting",
-    { skip: platform() !== "darwin" && platform() !== "linux" },
+    { skip: !researchPlatformCapabilities().nativeReviewerExecution },
     async () => {
       const capsule = await temporaryDirectory();
       try {
@@ -455,7 +456,7 @@ describe("research project execution", () => {
 
   it(
     "reserves capture space for bounded MCP tool context",
-    { skip: platform() !== "darwin" && platform() !== "linux" },
+    { skip: !researchPlatformCapabilities().nativeReviewerExecution },
     async () => {
       const capsule = await temporaryDirectory();
       try {
@@ -524,7 +525,7 @@ describe("research project execution", () => {
 
   it(
     "reports an outer-sandbox denial as a structured nested-sandbox error",
-    { skip: platform() !== "darwin" && platform() !== "linux" },
+    { skip: !researchPlatformCapabilities().nativeReviewerExecution },
     async () => {
       const capsule = await temporaryDirectory();
       try {
@@ -577,7 +578,7 @@ describe("research project execution", () => {
 
   it(
     "pins a wrapper, its explicit agent target, and the internal adapter independently",
-    { skip: platform() !== "darwin" && platform() !== "linux" },
+    { skip: !researchPlatformCapabilities().nativeReviewerExecution },
     async () => {
       const capsule = await temporaryDirectory();
       try {
@@ -682,7 +683,7 @@ describe("research project execution", () => {
 
   it(
     "forwards only the selected agent authentication environment into the capsule",
-    { skip: platform() !== "darwin" && platform() !== "linux" },
+    { skip: !researchPlatformCapabilities().nativeReviewerExecution },
     async () => {
       const capsule = await temporaryDirectory();
       try {
@@ -763,7 +764,7 @@ describe("research project execution", () => {
 
   it(
     "reuses identical capsule authentication for repair and rejects source drift",
-    { skip: platform() !== "darwin" && platform() !== "linux" },
+    { skip: !researchPlatformCapabilities().nativeReviewerExecution },
     async () => {
       const capsule = await temporaryDirectory();
       const sourceHome = await temporaryDirectory();
@@ -834,7 +835,7 @@ describe("research project execution", () => {
 
   it(
     "extracts only whitelisted Claude settings authentication into the capsule",
-    { skip: platform() !== "darwin" && platform() !== "linux" },
+    { skip: !researchPlatformCapabilities().nativeReviewerExecution },
     async () => {
       const capsule = await temporaryDirectory();
       const sourceHome = await temporaryDirectory();

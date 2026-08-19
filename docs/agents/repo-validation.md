@@ -51,9 +51,22 @@ used by the reference workspace CLI:
 
 The runner label selects the actual GitHub-hosted architecture; the explicit
 `arch` value keeps job names and matrix intent auditable. Both Linux rows
-install Bubblewrap and smoke-test an unprivileged capsule before the test
-suite. The remaining lint, test, and coverage steps stay identical across all
-four rows.
+install Bubblewrap and smoke-test an unprivileged capsule. Every row runs lint,
+but each row runs the full test suite only once: Ubuntu x64 obtains that result
+through coverage, Ubuntu ARM runs `npm test`, and macOS/Windows run `npm test`
+plus the small pure `test:platform` contract. Coverage therefore runs only on
+Linux x64 and never follows a duplicate `npm test` in that job.
+
+The pure platform contract models Windows drive letters, separators,
+case-insensitive containment and cross-drive paths plus the macOS `/var` to
+`/private/var` alias without depending on the current host filesystem. The
+central capability profile declares Windows and unsupported systems
+configuration/smoke-only: they may validate setup and deterministic logic but
+cannot start a native reviewer or reviewer sidecar.
+
+Both PR workflows cancel obsolete runs for the same pull request. Pushes to
+`main` are not canceled. The docpact workflow installs the workspace-standard
+`0.1.9` release.
 
 ## Local Gates
 
@@ -63,6 +76,7 @@ Run before delivery:
 npm run test:clean:cold
 npm run lint
 npm test
+npm run test:platform
 npm run test:coverage
 npm run audit:research-setup-pins
 docpact validate-config --root . --strict
@@ -83,6 +97,11 @@ cold mode. Neither mode uses `--pull`; the base image stays reproducible until
 its reviewed digest changes. Provider live checks and the networked
 immutable-pin audit run separately because they are explicit networked
 validations.
+
+`npm run test:platform` is a fast host-independent contract for platform
+classification. It is not a substitute for the real macOS/Windows matrix; it
+moves known path and capability semantics ahead of that matrix so hosted
+runners discover only genuinely platform-specific defects.
 
 Every runtime container has no host mounts, Docker socket, credentials, or
 runtime network. It enables Docker's privileged namespace mode solely so the non-root
