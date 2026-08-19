@@ -4,7 +4,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
@@ -61,59 +61,66 @@ describe("sandbox-bridge reviewer execution", () => {
     }
   });
 
-  it("serves and stops the exact CLI sidecar without exposing its client secret", async () => {
-    const fixture = await bridgeFixture();
-    const stateDirectory = await mkdtemp(join(tmpdir(), "tiangong-review-cli-state-"));
-    const child = spawn(
-      process.execPath,
-      [
-        join(process.cwd(), "bin", "tiangong-ai.js"),
-        "research",
-        "reviewer",
-        "serve",
-        "--workspace",
-        fixture.root,
-        "--state-dir",
-        stateDirectory,
-        "--json",
-      ],
-      {
-        cwd: process.cwd(),
-        env: { ...process.env, PATH: process.env.PATH },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    try {
-      const readyLine = await firstLine(child);
-      const ready = JSON.parse(readyLine) as {
-        status: string;
-        workspaceId: string;
-        keyFingerprint: string;
-      };
-      assert.equal(ready.status, "ready");
-      assert.match(ready.keyFingerprint, /^[a-f0-9]{64}$/);
-      assert.doesNotMatch(readyLine, /clientToken|authorization|private-key|state-/i);
+  it(
+    "serves and stops the exact CLI sidecar without exposing its client secret",
+    { skip: platform() !== "darwin" && platform() !== "linux" },
+    async () => {
+      const fixture = await bridgeFixture();
+      const stateDirectory = await mkdtemp(join(tmpdir(), "tiangong-review-cli-state-"));
+      const child = spawn(
+        process.execPath,
+        [
+          join(process.cwd(), "bin", "tiangong-ai.js"),
+          "research",
+          "reviewer",
+          "serve",
+          "--workspace",
+          fixture.root,
+          "--state-dir",
+          stateDirectory,
+          "--json",
+        ],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, PATH: process.env.PATH },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      try {
+        const readyLine = await firstLine(child);
+        const ready = JSON.parse(readyLine) as {
+          status: string;
+          workspaceId: string;
+          keyFingerprint: string;
+        };
+        assert.equal(ready.status, "ready");
+        assert.match(ready.keyFingerprint, /^[a-f0-9]{64}$/);
+        assert.doesNotMatch(readyLine, /clientToken|authorization|private-key|state-/i);
 
-      const status = await invoke([
-        "research",
-        "reviewer",
-        "status",
-        "--workspace",
-        fixture.root,
-        "--json",
-      ]);
-      assert.equal(status.exitCode, 0, status.stderr);
-      assert.equal(JSON.parse(status.stdout).workspaceId, ready.workspaceId);
+        const status = await invoke([
+          "research",
+          "reviewer",
+          "status",
+          "--workspace",
+          fixture.root,
+          "--json",
+        ]);
+        assert.equal(status.exitCode, 0, status.stderr);
+        assert.equal(JSON.parse(status.stdout).workspaceId, ready.workspaceId);
 
-      child.kill("SIGTERM");
-      const [exitCode, signal] = (await once(child, "exit")) as [number | null, string | null];
-      assert.equal(exitCode, 0, `sidecar terminated by ${signal ?? "unknown"}`);
-      assert.equal(signal, null);
-    } finally {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      await Promise.all([fixture.cleanup(), rm(stateDirectory, { recursive: true, force: true })]);
-    }
-  });
+        child.kill("SIGTERM");
+        const [exitCode, signal] = (await once(child, "exit")) as [number | null, string | null];
+        assert.equal(exitCode, 0, `sidecar terminated by ${signal ?? "unknown"}`);
+        assert.equal(signal, null);
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        await Promise.all([
+          fixture.cleanup(),
+          rm(stateDirectory, { recursive: true, force: true }),
+        ]);
+      }
+    },
+  );
 
   it("fails closed when the explicitly selected bridge is unavailable", async () => {
     const fixture = await bridgeFixture();
@@ -141,181 +148,188 @@ describe("sandbox-bridge reviewer execution", () => {
     }
   });
 
-  it("executes one exact capsule through a signed sidecar and rejects replay and policy drift", async () => {
-    const fixture = await bridgeFixture();
-    const stateDirectory = await mkdtemp(join(tmpdir(), "tiangong-review-sidecar-state-"));
-    const canonicalStateDirectory = await realpath(stateDirectory);
-    let nativeCalls = 0;
-    const sidecar = await startReviewerBridgeSidecar({
-      root: fixture.root,
-      stateDirectory,
-      environment: { PATH: process.env.PATH, REVIEW_SECRET: "bridge-secret-value" },
-      executeNative: async (request) => {
-        nativeCalls += 1;
-        assert.equal(request.route.agent, "claude");
-        assert.equal(request.route.model, "bridge-reviewer-model");
-        assert.equal(request.toolPolicy, "none");
-        assert.equal(request.brokerUrl, null);
-        assert.ok(request.capsuleRoot.startsWith(`${canonicalStateDirectory}/`));
-        assert.ok(request.projectRoot.startsWith(`${request.capsuleRoot}/`));
-        assert.equal(
-          await readFile(join(request.projectRoot, "review-packet.txt"), "utf8"),
-          "packet\n",
+  it(
+    "executes one exact capsule through a signed sidecar and rejects replay and policy drift",
+    { skip: platform() !== "darwin" && platform() !== "linux" },
+    async () => {
+      const fixture = await bridgeFixture();
+      const stateDirectory = await mkdtemp(join(tmpdir(), "tiangong-review-sidecar-state-"));
+      const canonicalStateDirectory = await realpath(stateDirectory);
+      let nativeCalls = 0;
+      const sidecar = await startReviewerBridgeSidecar({
+        root: fixture.root,
+        stateDirectory,
+        environment: { PATH: process.env.PATH, REVIEW_SECRET: "bridge-secret-value" },
+        executeNative: async (request) => {
+          nativeCalls += 1;
+          assert.equal(request.route.agent, "claude");
+          assert.equal(request.route.model, "bridge-reviewer-model");
+          assert.equal(request.toolPolicy, "none");
+          assert.equal(request.brokerUrl, null);
+          assert.ok(request.capsuleRoot.startsWith(`${canonicalStateDirectory}/`));
+          assert.ok(request.projectRoot.startsWith(`${request.capsuleRoot}/`));
+          assert.equal(
+            await readFile(join(request.projectRoot, "review-packet.txt"), "utf8"),
+            "packet\n",
+          );
+          return { ...successfulResult(), stderr: "Authorization: Bearer bridge-secret-value" };
+        },
+      });
+      try {
+        const nonce = "a".repeat(64);
+        const executor = createReviewExecutor({
+          root: fixture.root,
+          execution: fixture.execution,
+          nonceFactory: () => nonce,
+          executeNative: async () => {
+            throw new Error("sandbox-bridge must never invoke the client native executor");
+          },
+        });
+        const result = await executor.execute(fixture.request);
+        assert.equal(result.exitCode, 0);
+        assert.equal(result.stdout, '{"ok":true}');
+        assert.match(result.stderr, /\[REDACTED\]/);
+        assert.equal(nativeCalls, 1);
+
+        const concurrentExecutor = createReviewExecutor({
+          root: fixture.root,
+          execution: fixture.execution,
+          nonceFactory: () => "d".repeat(64),
+        });
+        const concurrent = await Promise.allSettled([
+          concurrentExecutor.execute(fixture.request),
+          concurrentExecutor.execute(fixture.request),
+        ]);
+        assert.equal(concurrent.filter((entry) => entry.status === "fulfilled").length, 1);
+        const concurrentFailure = concurrent.find(
+          (entry): entry is PromiseRejectedResult => entry.status === "rejected",
         );
-        return { ...successfulResult(), stderr: "Authorization: Bearer bridge-secret-value" };
-      },
-    });
-    try {
-      const nonce = "a".repeat(64);
-      const executor = createReviewExecutor({
-        root: fixture.root,
-        execution: fixture.execution,
-        nonceFactory: () => nonce,
-        executeNative: async () => {
-          throw new Error("sandbox-bridge must never invoke the client native executor");
-        },
-      });
-      const result = await executor.execute(fixture.request);
-      assert.equal(result.exitCode, 0);
-      assert.equal(result.stdout, '{"ok":true}');
-      assert.match(result.stderr, /\[REDACTED\]/);
-      assert.equal(nativeCalls, 1);
+        assert.ok(concurrentFailure?.reason instanceof CliError);
+        assert.equal(
+          (concurrentFailure.reason as CliError).code,
+          "RESEARCH_REVIEW_BRIDGE_NONCE_REPLAY",
+        );
+        assert.equal(nativeCalls, 2);
+        assert.equal(result.reviewAttestation?.transport, "sandbox-bridge");
+        assert.equal(result.reviewAttestation?.isolationProvider, "bubblewrap");
+        assert.equal(result.reviewAttestation?.toolPolicy, "none");
+        assert.match(result.reviewAttestation?.requestSha256 ?? "", /^[a-f0-9]{64}$/);
+        assert.match(result.reviewAttestation?.resultSha256 ?? "", /^[a-f0-9]{64}$/);
+        assert.match(result.reviewAttestation?.capsuleSha256 ?? "", /^[a-f0-9]{64}$/);
+        assert.match(result.reviewAttestation?.policySha256 ?? "", /^[a-f0-9]{64}$/);
+        assert.match(result.reviewAttestation?.signerKeyFingerprint ?? "", /^[a-f0-9]{64}$/);
+        assert.doesNotMatch(JSON.stringify(result), /bridge-secret-value|private-key|state-/);
 
-      const concurrentExecutor = createReviewExecutor({
-        root: fixture.root,
-        execution: fixture.execution,
-        nonceFactory: () => "d".repeat(64),
-      });
-      const concurrent = await Promise.allSettled([
-        concurrentExecutor.execute(fixture.request),
-        concurrentExecutor.execute(fixture.request),
-      ]);
-      assert.equal(concurrent.filter((entry) => entry.status === "fulfilled").length, 1);
-      const concurrentFailure = concurrent.find(
-        (entry): entry is PromiseRejectedResult => entry.status === "rejected",
-      );
-      assert.ok(concurrentFailure?.reason instanceof CliError);
-      assert.equal(
-        (concurrentFailure.reason as CliError).code,
-        "RESEARCH_REVIEW_BRIDGE_NONCE_REPLAY",
-      );
-      assert.equal(nativeCalls, 2);
-      assert.equal(result.reviewAttestation?.transport, "sandbox-bridge");
-      assert.equal(result.reviewAttestation?.isolationProvider, "bubblewrap");
-      assert.equal(result.reviewAttestation?.toolPolicy, "none");
-      assert.match(result.reviewAttestation?.requestSha256 ?? "", /^[a-f0-9]{64}$/);
-      assert.match(result.reviewAttestation?.resultSha256 ?? "", /^[a-f0-9]{64}$/);
-      assert.match(result.reviewAttestation?.capsuleSha256 ?? "", /^[a-f0-9]{64}$/);
-      assert.match(result.reviewAttestation?.policySha256 ?? "", /^[a-f0-9]{64}$/);
-      assert.match(result.reviewAttestation?.signerKeyFingerprint ?? "", /^[a-f0-9]{64}$/);
-      assert.doesNotMatch(JSON.stringify(result), /bridge-secret-value|private-key|state-/);
-
-      await assert.rejects(executor.execute(fixture.request), (error: unknown) => {
-        assert.ok(error instanceof CliError);
-        assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_NONCE_REPLAY");
-        return true;
-      });
-      assert.equal(nativeCalls, 2);
-
-      const policyDriftExecutor = createReviewExecutor({
-        root: fixture.root,
-        execution: fixture.execution,
-        nonceFactory: () => "b".repeat(64),
-      });
-      await assert.rejects(
-        policyDriftExecutor.execute({ ...fixture.request, toolPolicy: "workspace-read" }),
-        (error: unknown) => {
+        await assert.rejects(executor.execute(fixture.request), (error: unknown) => {
           assert.ok(error instanceof CliError);
-          assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_SANDBOX_POLICY_INVALID");
+          assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_NONCE_REPLAY");
           return true;
-        },
-      );
+        });
+        assert.equal(nativeCalls, 2);
 
-      const modelDriftExecutor = createReviewExecutor({
-        root: fixture.root,
-        execution: fixture.execution,
-        nonceFactory: () => "c".repeat(64),
-      });
-      await assert.rejects(
-        modelDriftExecutor.execute({
-          ...fixture.request,
-          route: { ...fixture.request.route, model: "unreviewed-model" },
-        }),
-        (error: unknown) => {
+        const policyDriftExecutor = createReviewExecutor({
+          root: fixture.root,
+          execution: fixture.execution,
+          nonceFactory: () => "b".repeat(64),
+        });
+        await assert.rejects(
+          policyDriftExecutor.execute({ ...fixture.request, toolPolicy: "workspace-read" }),
+          (error: unknown) => {
+            assert.ok(error instanceof CliError);
+            assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_SANDBOX_POLICY_INVALID");
+            return true;
+          },
+        );
+
+        const modelDriftExecutor = createReviewExecutor({
+          root: fixture.root,
+          execution: fixture.execution,
+          nonceFactory: () => "c".repeat(64),
+        });
+        await assert.rejects(
+          modelDriftExecutor.execute({
+            ...fixture.request,
+            route: { ...fixture.request.route, model: "unreviewed-model" },
+          }),
+          (error: unknown) => {
+            assert.ok(error instanceof CliError);
+            assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_MODEL_MISMATCH");
+            return true;
+          },
+        );
+        assert.equal(nativeCalls, 2);
+
+        const paths = reviewerBridgePaths(fixture.root);
+        const connection = JSON.parse(await readFile(paths.connection, "utf8")) as Record<
+          string,
+          unknown
+        >;
+        assert.equal(connection.protocolVersion, 1);
+        assert.equal(connection.workspaceId, sidecar.workspaceId);
+        assert.equal(connection.keyFingerprint, sidecar.keyFingerprint);
+        assert.doesNotMatch(JSON.stringify(sidecar), /clientToken|privateKey|bridge-secret/);
+
+        const bridgeStatus = await inspectReviewerBridgeStatus(fixture.root);
+        assert.deepEqual(bridgeStatus.negativeProbes, {
+          outsideReadBlocked: true,
+          outsideWriteBlocked: true,
+          workspaceCredentialReadBlocked: true,
+          arbitraryCommandSurfaceAbsent: true,
+          reviewerToolsDisabled: true,
+        });
+
+        const unsupported = await postUnix(paths.socket, "/v1/command", {});
+        assert.equal(unsupported.status, 404);
+        assert.equal(
+          (JSON.parse(unsupported.body) as { error: { code: string } }).error.code,
+          "RESEARCH_REVIEW_BRIDGE_ACTION_INVALID",
+        );
+
+        await writeFile(
+          paths.connection,
+          `${JSON.stringify({ ...connection, packageVersion: "0.0.0" }, null, 2)}\n`,
+          { mode: 0o600 },
+        );
+        const versionExecutor = createReviewExecutor({
+          root: fixture.root,
+          execution: fixture.execution,
+          nonceFactory: () => "e".repeat(64),
+        });
+        await assert.rejects(versionExecutor.execute(fixture.request), (error: unknown) => {
           assert.ok(error instanceof CliError);
-          assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_MODEL_MISMATCH");
+          assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_VERSION_MISMATCH");
           return true;
-        },
-      );
-      assert.equal(nativeCalls, 2);
+        });
+        assert.equal(nativeCalls, 2);
 
-      const paths = reviewerBridgePaths(fixture.root);
-      const connection = JSON.parse(await readFile(paths.connection, "utf8")) as Record<
-        string,
-        unknown
-      >;
-      assert.equal(connection.protocolVersion, 1);
-      assert.equal(connection.workspaceId, sidecar.workspaceId);
-      assert.equal(connection.keyFingerprint, sidecar.keyFingerprint);
-      assert.doesNotMatch(JSON.stringify(sidecar), /clientToken|privateKey|bridge-secret/);
-
-      const bridgeStatus = await inspectReviewerBridgeStatus(fixture.root);
-      assert.deepEqual(bridgeStatus.negativeProbes, {
-        outsideReadBlocked: true,
-        outsideWriteBlocked: true,
-        workspaceCredentialReadBlocked: true,
-        arbitraryCommandSurfaceAbsent: true,
-        reviewerToolsDisabled: true,
-      });
-
-      const unsupported = await postUnix(paths.socket, "/v1/command", {});
-      assert.equal(unsupported.status, 404);
-      assert.equal(
-        (JSON.parse(unsupported.body) as { error: { code: string } }).error.code,
-        "RESEARCH_REVIEW_BRIDGE_ACTION_INVALID",
-      );
-
-      await writeFile(
-        paths.connection,
-        `${JSON.stringify({ ...connection, packageVersion: "0.0.0" }, null, 2)}\n`,
-        { mode: 0o600 },
-      );
-      const versionExecutor = createReviewExecutor({
-        root: fixture.root,
-        execution: fixture.execution,
-        nonceFactory: () => "e".repeat(64),
-      });
-      await assert.rejects(versionExecutor.execute(fixture.request), (error: unknown) => {
-        assert.ok(error instanceof CliError);
-        assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_VERSION_MISMATCH");
-        return true;
-      });
-      assert.equal(nativeCalls, 2);
-
-      const untrustedPublicKey = generateKeyPairSync("ed25519")
-        .publicKey.export({ type: "spki", format: "pem" })
-        .toString();
-      await writeFile(
-        paths.connection,
-        `${JSON.stringify({ ...connection, publicKey: untrustedPublicKey }, null, 2)}\n`,
-        { mode: 0o600 },
-      );
-      const signatureExecutor = createReviewExecutor({
-        root: fixture.root,
-        execution: fixture.execution,
-        nonceFactory: () => "f".repeat(64),
-      });
-      await assert.rejects(signatureExecutor.execute(fixture.request), (error: unknown) => {
-        assert.ok(error instanceof CliError);
-        assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_ATTESTATION_INVALID");
-        return true;
-      });
-      assert.equal(nativeCalls, 3);
-    } finally {
-      await sidecar.close();
-      await Promise.all([fixture.cleanup(), rm(stateDirectory, { recursive: true, force: true })]);
-    }
-  });
+        const untrustedPublicKey = generateKeyPairSync("ed25519")
+          .publicKey.export({ type: "spki", format: "pem" })
+          .toString();
+        await writeFile(
+          paths.connection,
+          `${JSON.stringify({ ...connection, publicKey: untrustedPublicKey }, null, 2)}\n`,
+          { mode: 0o600 },
+        );
+        const signatureExecutor = createReviewExecutor({
+          root: fixture.root,
+          execution: fixture.execution,
+          nonceFactory: () => "f".repeat(64),
+        });
+        await assert.rejects(signatureExecutor.execute(fixture.request), (error: unknown) => {
+          assert.ok(error instanceof CliError);
+          assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_ATTESTATION_INVALID");
+          return true;
+        });
+        assert.equal(nativeCalls, 3);
+      } finally {
+        await sidecar.close();
+        await Promise.all([
+          fixture.cleanup(),
+          rm(stateDirectory, { recursive: true, force: true }),
+        ]);
+      }
+    },
+  );
 
   it("rejects a symlinked sidecar state directory before creating key material", async () => {
     const fixture = await bridgeFixture();
@@ -344,36 +358,43 @@ describe("sandbox-bridge reviewer execution", () => {
     }
   });
 
-  it("runs the workspace reviewer smoke through the explicitly configured bridge", async () => {
-    const fixture = await bridgeFixture();
-    const stateDirectory = await mkdtemp(join(tmpdir(), "tiangong-review-doctor-state-"));
-    await lockCapabilities(fixture.root);
-    let sidecarExecutions = 0;
-    const sidecar = await startReviewerBridgeSidecar({
-      root: fixture.root,
-      stateDirectory,
-      environment: { PATH: process.env.PATH },
-      executeNative: async () => {
-        sidecarExecutions += 1;
-        return successfulResult();
-      },
-    });
-    try {
-      const doctor = await doctorResearchWorkspace(fixture.root, {
-        agentSmoke: true,
+  it(
+    "runs the workspace reviewer smoke through the explicitly configured bridge",
+    { skip: platform() !== "darwin" && platform() !== "linux" },
+    async () => {
+      const fixture = await bridgeFixture();
+      const stateDirectory = await mkdtemp(join(tmpdir(), "tiangong-review-doctor-state-"));
+      await lockCapabilities(fixture.root);
+      let sidecarExecutions = 0;
+      const sidecar = await startReviewerBridgeSidecar({
+        root: fixture.root,
+        stateDirectory,
         environment: { PATH: process.env.PATH },
+        executeNative: async () => {
+          sidecarExecutions += 1;
+          return successfulResult();
+        },
       });
-      assert.equal(doctor.status, "ready");
-      assert.equal(
-        doctor.checks.find((check) => check.id === "agent-sandbox-smoke")?.status,
-        "pass",
-      );
-      assert.equal(sidecarExecutions, 1);
-    } finally {
-      await sidecar.close();
-      await Promise.all([fixture.cleanup(), rm(stateDirectory, { recursive: true, force: true })]);
-    }
-  });
+      try {
+        const doctor = await doctorResearchWorkspace(fixture.root, {
+          agentSmoke: true,
+          environment: { PATH: process.env.PATH },
+        });
+        assert.equal(doctor.status, "ready");
+        assert.equal(
+          doctor.checks.find((check) => check.id === "agent-sandbox-smoke")?.status,
+          "pass",
+        );
+        assert.equal(sidecarExecutions, 1);
+      } finally {
+        await sidecar.close();
+        await Promise.all([
+          fixture.cleanup(),
+          rm(stateDirectory, { recursive: true, force: true }),
+        ]);
+      }
+    },
+  );
 });
 
 async function bridgeFixture(): Promise<{
