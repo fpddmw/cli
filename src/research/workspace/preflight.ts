@@ -7,6 +7,7 @@ import {
   type ScientificDesignContract,
   type VerifiedScientificDesign,
 } from "./scientific-design.js";
+import { inspectScientificDesignObjectBindings } from "./scientific-objects.js";
 import { schemaForStage } from "./schemas.js";
 import { canonicalJson, sha256Text } from "./storage.js";
 import type {
@@ -172,6 +173,17 @@ export async function evaluateProjectPreflight(
   }
   if (designEvaluation) {
     gaps.push(...designEvaluation.issueCodes.map((code) => `scientific-design:${code}`));
+  }
+  if (options.scientificDesign) {
+    const objectIssues = await inspectScientificDesignObjectBindings(
+      root,
+      options.scientificDesign.contract,
+    );
+    gaps.push(
+      ...objectIssues.map(
+        (issue) => `scientific-object:${issue.modelId}:${issue.artifactKind}:${issue.reason}`,
+      ),
+    );
   }
   if (options.publicationPolicy && options.scientificDesign) {
     appendScientificDesignContractGaps(

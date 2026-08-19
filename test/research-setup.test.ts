@@ -92,11 +92,11 @@ describe("research setup catalog and immutable plans", () => {
       assert.ok(catalog.sources.every((source) => /^[0-9a-f]{40}$/.test(source.immutableRef)));
       assert.equal(
         catalog.sources.find((source) => source.id === "tiangong-ai-skills")?.immutableRef,
-        "d7e6f512e1bd2643ea5dfceaab1eb5cf05237d3a",
+        "e2f9f7ed958a6380f8bc15427f73def7666d57d2",
       );
       assert.equal(
         catalog.entries.find((entry) => entry.id === "tiangong.auto-research")?.expectedTreeSha256,
-        "970bfe0800d6b368f0f5b88a7d79dddf4abe3dd78a14178bfd099097776ce0bd",
+        "8d4924d36f52fa6627994d591061eabed8f283accd2202ddbd66c986f204ee01",
       );
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-sci-search"));
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-report-search"));

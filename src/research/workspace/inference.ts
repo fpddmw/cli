@@ -149,10 +149,14 @@ export async function freezeInferenceSnapshot(
     claims = design.claims as Array<Record<string, unknown>>;
     designEdges = design.edges as Array<Record<string, unknown>>;
     implementationArtifactSha256s = sortedUnique(
-      design.identity.modelStructures.map((model) => model.implementationArtifactSha256),
+      design.identity.modelStructures
+        .map((model) => model.implementationArtifactSha256)
+        .filter((value): value is string => typeof value === "string"),
     );
     environmentLockSha256s = sortedUnique(
-      design.identity.modelStructures.map((model) => model.environmentLockSha256),
+      design.identity.modelStructures
+        .map((model) => model.environmentLockSha256)
+        .filter((value): value is string => typeof value === "string"),
     );
   }
   const core = {

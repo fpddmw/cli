@@ -328,8 +328,13 @@ describe("top-journal scientific design contract", () => {
       await readFile(join(fixtureRoot, "ev-r9-narrowed-valid.json"), "utf8"),
     ) as Record<string, any>;
     for (const model of raw.identity.modelStructures) {
+      model.implementationArtifactSha256 = null;
+      model.implementationArtifactLocator = null;
+      model.implementationEntrypoint = null;
       model.implementationStatus = "pending-source-acquisition";
       model.implementationFreezeBeforeGate = "pilot-methods";
+      model.environmentLockSha256 = null;
+      model.environmentLockLocator = null;
       model.environmentLockStatus = "pending-runtime-lock";
       model.environmentLockFreezeBeforeGate = "pilot-methods";
     }
@@ -442,6 +447,21 @@ describe("top-journal scientific design contract", () => {
       await readFile(join(fixtureRoot, "ev-r9-narrowed-valid.json"), "utf8"),
     ) as Record<string, unknown>;
     raw.secretUnreviewedOverride = true;
+    assert.throws(
+      () => parseScientificDesign(raw),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "RESEARCH_SCIENTIFIC_DESIGN_INVALID");
+        return true;
+      },
+    );
+  });
+
+  it("rejects frozen model locators that did not come from the scientific object registry", async () => {
+    const raw = JSON.parse(
+      await readFile(join(fixtureRoot, "ev-r9-narrowed-valid.json"), "utf8"),
+    ) as Record<string, any>;
+    raw.identity.modelStructures[0].implementationArtifactLocator =
+      "projects/example-project/inputs/model.json";
     assert.throws(
       () => parseScientificDesign(raw),
       (error: unknown) => {

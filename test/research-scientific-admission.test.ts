@@ -490,15 +490,7 @@ async function projectDesign(
   projectId: string,
   approvalStatus: "candidate-only" | "policy-approved" = "policy-approved",
 ): Promise<VerifiedScientificDesign> {
-  const target = join(root, `${projectId}-design.json`);
-  const value = JSON.parse(await readFile(validFixture, "utf8")) as {
-    projectId: string;
-    identity: { targetJournals: { approvalStatus: "candidate-only" | "policy-approved" } };
-  };
-  value.projectId = projectId;
-  value.identity.targetJournals.approvalStatus = approvalStatus;
-  await writeFile(target, `${JSON.stringify(value, null, 2)}\n`);
-  return readAndVerifyScientificDesign(target, projectId);
+  return (await scientificDesignInput(root, projectId, { approvalStatus })).design;
 }
 
 function policy(projectId: string): ResearchPolicyBinding {
