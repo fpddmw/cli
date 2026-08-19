@@ -166,6 +166,10 @@ export async function initializeResearchWorkspace(
       model: null,
       effort: "low",
     },
+    reviewerExecution: {
+      transport: "native-direct",
+      isolationProvider: "platform-capsule",
+    },
     budget: structuredClone(
       mode === "production-research" ? DEFAULT_PRODUCTION_BUDGET : DEFAULT_SMOKE_BUDGET,
     ),
@@ -1033,6 +1037,14 @@ function isWorkspaceConfig(value: unknown): value is WorkspaceConfig {
   if (!isObject(value) || value.schemaVersion !== 1) return false;
   if (value.mode !== "smoke-test" && value.mode !== "production-research") return false;
   if (!isAgentRoute(value.producer) || !isAgentRoute(value.reviewer)) return false;
+  if (
+    !isObject(value.reviewerExecution) ||
+    (value.reviewerExecution.transport !== "native-direct" &&
+      value.reviewerExecution.transport !== "sandbox-bridge") ||
+    value.reviewerExecution.isolationProvider !== "platform-capsule"
+  ) {
+    return false;
+  }
   if (
     value.producer.executionMode !== "native-host" ||
     value.reviewer.executionMode !== "headless-cli"

@@ -21,7 +21,7 @@ import {
   sanitizeResearchText,
 } from "./sanitization.js";
 import type { JsonSchema } from "./schemas.js";
-import { isObject, sha256File } from "./storage.js";
+import { isObject, sha256File, sha256Text } from "./storage.js";
 import type {
   AgentReasoningEffort,
   AgentExecutionTelemetry,
@@ -29,6 +29,7 @@ import type {
   AgentRuntimeFingerprint,
   AgentVerbosity,
   ExecutionResult,
+  ReviewIsolationFingerprint,
 } from "./types.js";
 
 const MAX_CAPTURE_BYTES = 5 * 1024 * 1024;
@@ -242,6 +243,21 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
     wallSeconds,
     model: parsed.model ?? request.route.model,
     runtime: { ...runtime, model: parsed.model ?? request.route.model },
+    ...(request.toolPolicy === "none" && request.brokerUrl === null
+      ? {
+          isolation: {
+            ...sandboxed.isolation,
+            readScopes: [
+              "platform-runtime",
+              "agent-runtime",
+              "private-capsule",
+            ] as ReviewIsolationFingerprint["readScopes"],
+            writeScopes: ["private-capsule"] as ["private-capsule"],
+            networkPolicy: "reviewer-provider-only" as const,
+            toolPolicy: "none" as const,
+          },
+        }
+      : {}),
     telemetry: sanitizeExecutionTelemetry(parsed.telemetry, secrets),
   };
 }
@@ -382,7 +398,11 @@ async function sandboxInvocation(
   projectRoot: string,
   workspaceRoot: string,
   targetBinary: string,
-): Promise<{ binary: string; args: string[] }> {
+): Promise<{
+  binary: string;
+  args: string[];
+  isolation: Pick<ReviewIsolationFingerprint, "provider" | "policySha256">;
+}> {
   const configuredCredentialPath = join(workspaceRoot, ".tiangong-research", ".env");
   const workspaceCredentialPath = await realpath(configuredCredentialPath).catch(
     () => configuredCredentialPath,
@@ -410,7 +430,11 @@ async function sandboxInvocation(
       "",
     ].join("\n");
     await writeFile(profile, policy, { encoding: "utf8", mode: 0o600 });
-    return { binary: sandbox, args: ["-f", profile, binary, ...args] };
+    return {
+      binary: sandbox,
+      args: ["-f", profile, binary, ...args],
+      isolation: { provider: "sandbox-exec", policySha256: sha256Text(policy) },
+    };
   }
   if (platform() === "linux") {
     const bubblewrap = await firstExecutable([
@@ -465,7 +489,14 @@ async function sandboxInvocation(
       sandboxArgs.push("--ro-bind", "/dev/null", workspaceCredentialPath);
     }
     sandboxArgs.push(binary, ...args);
-    return { binary: bubblewrap, args: sandboxArgs };
+    return {
+      binary: bubblewrap,
+      args: sandboxArgs,
+      isolation: {
+        provider: "bubblewrap",
+        policySha256: sha256Text(JSON.stringify(sandboxArgs)),
+      },
+    };
   }
   throw new CliError(`Unsupported research execution platform: ${platform()}`, {
     code: "RESEARCH_SANDBOX_UNAVAILABLE",
