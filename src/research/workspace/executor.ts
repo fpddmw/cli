@@ -195,6 +195,22 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
     throw error;
   }
   const wallSeconds = Number(process.hrtime.bigint() - started) / 1_000_000_000;
+  if (isNestedSandboxDenial(completed.exitCode, completed.stderr)) {
+    throw new CliError(
+      "The native-direct reviewer cannot create its platform capsule inside this sandboxed IDE. Explicitly configure sandbox-bridge and start its owner-controlled reviewer sidecar, or run the review from a native host.",
+      {
+        code: "RESEARCH_NESTED_SANDBOX_UNSUPPORTED",
+        exitCode: 3,
+        details: {
+          transport: "native-direct",
+          platform: platform(),
+          retryable: false,
+          minimumAction:
+            "Choose sandbox-bridge explicitly and start the exact-version reviewer sidecar outside the IDE sandbox; do not enable Full Access or disable either sandbox.",
+        },
+      },
+    );
+  }
   const parsed = parseAgentResult(request.route, completed.stdout, completed.stderr);
   const redacted = redactResult(parsed.stdout, parsed.stderr, secrets);
   const exitCode = redacted.exposed
@@ -228,6 +244,15 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
     runtime: { ...runtime, model: parsed.model ?? request.route.model },
     telemetry: sanitizeExecutionTelemetry(parsed.telemetry, secrets),
   };
+}
+
+function isNestedSandboxDenial(exitCode: number, stderr: string): boolean {
+  if (exitCode === 0) return false;
+  return (
+    /sandbox-exec:\s*sandbox_apply:\s*Operation not permitted/i.test(stderr) ||
+    /bwrap:.*(?:namespace|userns).*Operation not permitted/i.test(stderr) ||
+    /bubblewrap:.*(?:namespace|userns).*Operation not permitted/i.test(stderr)
+  );
 }
 
 export async function fingerprintAgentRoute(

@@ -522,6 +522,59 @@ describe("research project execution", () => {
   );
 
   it(
+    "reports an outer-sandbox denial as a structured nested-sandbox error",
+    { skip: platform() !== "darwin" && platform() !== "linux" },
+    async () => {
+      const capsule = await temporaryDirectory();
+      try {
+        const projectRoot = join(capsule, "project");
+        await mkdir(projectRoot);
+        const binary = join(capsule, "fake-nested-sandbox-reviewer");
+        await writeFile(
+          binary,
+          [
+            "#!/bin/sh",
+            'if [ "$1" = "--version" ]; then printf \'%s\\n\' "fake-claude 1.0"; exit 0; fi',
+            "printf '%s\\n' 'sandbox-exec: sandbox_apply: Operation not permitted' >&2",
+            "exit 71",
+            "",
+          ].join("\n"),
+        );
+        await chmod(binary, 0o755);
+
+        await assert.rejects(
+          executeAgent({
+            route: { agent: "claude", binary, model: "test-reviewer" },
+            prompt: 'Return exactly {"ok":true}.',
+            outputSchema: schemaForStage("doctor"),
+            requestId: "outer-sandbox-denial-test",
+            purpose: "doctor",
+            capsuleRoot: capsule,
+            projectRoot,
+            workspaceRoot: capsule,
+            timeoutSeconds: 10,
+            maxTurns: 1,
+            maxOutputTokens: 100,
+            maxCostUsd: 1,
+            toolPolicy: "none",
+            environment: { PATH: process.env.PATH },
+            brokerUrl: null,
+          }),
+          (error: unknown) => {
+            assert.ok(error instanceof CliError);
+            assert.equal(error.code, "RESEARCH_NESTED_SANDBOX_UNSUPPORTED");
+            assert.match(error.message, /sandboxed IDE|sandbox-bridge/i);
+            assert.doesNotMatch(JSON.stringify(error.details), /execution\.sb|credential|token/i);
+            return true;
+          },
+        );
+      } finally {
+        await rm(capsule, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
     "pins a wrapper, its explicit agent target, and the internal adapter independently",
     { skip: platform() !== "darwin" && platform() !== "linux" },
     async () => {
