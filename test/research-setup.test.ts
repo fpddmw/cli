@@ -384,6 +384,44 @@ describe("research setup catalog and immutable plans", () => {
     }
   });
 
+  it("records WorkBuddy as the native producer while keeping a CLI-only reviewer", async () => {
+    const root = await temporaryDirectory();
+    try {
+      const plan = await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: [],
+        acceptedLicenseIds: [],
+        agentRoutes: {
+          producerAgent: "workbuddy",
+          reviewerAgent: "claude",
+          producerModel: "hy3",
+          reviewerModel: "claude-reviewer",
+        },
+        reviewerExecution: {
+          transport: "sandbox-bridge",
+          isolationProvider: "platform-capsule",
+        },
+        confirmNetworkDownloads: false,
+      });
+      assert.equal(plan.agentRoutes.producerAgent, "workbuddy");
+      assert.equal(plan.agentRoutes.reviewerAgent, "claude");
+      await applyResearchSetupPlan(workspacePaths(root).setupPlan, {
+        environment: {},
+        skipDoctor: true,
+      });
+      const config = await loadWorkspaceConfig(root);
+      assert.equal(config.producer.agent, "workbuddy");
+      assert.equal(config.producer.executionMode, "native-host");
+      assert.equal(config.producer.binary, "workbuddy-native-host");
+      assert.equal(config.reviewer.agent, "claude");
+      assert.equal(config.reviewer.executionMode, "headless-cli");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("reports ignored ambient CLI and Skill conflicts for project-scoped setup", async () => {
     const root = await temporaryDirectory();
     const operatorHome = await temporaryDirectory();

@@ -1050,6 +1050,7 @@ function isWorkspaceConfig(value: unknown): value is WorkspaceConfig {
   if (!isObject(value) || value.schemaVersion !== 1) return false;
   if (value.mode !== "smoke-test" && value.mode !== "production-research") return false;
   if (!isAgentRoute(value.producer) || !isAgentRoute(value.reviewer)) return false;
+  if (value.reviewer.agent !== "codex" && value.reviewer.agent !== "claude") return false;
   if (
     !isObject(value.reviewerExecution) ||
     (value.reviewerExecution.transport !== "native-direct" &&
@@ -1108,7 +1109,7 @@ function isAgentRoute(value: unknown): value is AgentRoute {
   if (
     !(
       isObject(value) &&
-      (value.agent === "codex" || value.agent === "claude") &&
+      ["codex", "claude", "workbuddy", "codebuddy"].includes(String(value.agent)) &&
       (value.executionMode === undefined ||
         value.executionMode === "native-host" ||
         value.executionMode === "headless-cli") &&
@@ -1132,7 +1133,9 @@ function isAgentRoute(value: unknown): value is AgentRoute {
       (value.agent === "codex" &&
         ["minimal", "low", "medium", "high", "xhigh"].includes(String(effort))) ||
       (value.agent === "claude" &&
-        ["low", "medium", "high", "xhigh", "max"].includes(String(effort)))
+        ["low", "medium", "high", "xhigh", "max"].includes(String(effort))) ||
+      ((value.agent === "workbuddy" || value.agent === "codebuddy") &&
+        ["minimal", "low", "medium", "high", "xhigh", "max"].includes(String(effort)))
     )
   ) {
     return false;

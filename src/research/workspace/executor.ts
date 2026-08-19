@@ -67,6 +67,8 @@ const CODEX_DISABLED_FEATURES = [
 const ROUTE_AUTH_ENVIRONMENT: Record<AgentRoute["agent"], readonly string[]> = {
   codex: ["OPENAI_API_KEY"],
   claude: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
+  workbuddy: [],
+  codebuddy: [],
 };
 const CLAUDE_SETTINGS_ENVIRONMENT = [
   "ANTHROPIC_API_KEY",
@@ -99,6 +101,7 @@ export interface AgentExecutionRequest {
 }
 
 export async function executeAgent(request: AgentExecutionRequest): Promise<ExecutionResult> {
+  requireHeadlessAgentRoute(request.route);
   validateAgentBinary(request.route);
   if (!Number.isInteger(request.maxOutputTokens) || request.maxOutputTokens < 1) {
     throw new CliError("Agent max output tokens must be a positive integer.", {
@@ -278,6 +281,7 @@ export async function fingerprintAgentRoute(
   route: AgentRoute,
   environment: NodeJS.ProcessEnv,
 ): Promise<AgentRuntimeFingerprint> {
+  requireHeadlessAgentRoute(route);
   validateAgentBinary(route);
   const executables = await resolveAgentExecutables(route, environment.PATH);
   return fingerprintResolvedBinary(
@@ -468,6 +472,12 @@ async function buildInvocation(
     args.push(request.prompt);
     return { binary: resolvedBinary, args };
   }
+  if (request.route.agent !== "claude") {
+    throw new CliError("Native WorkBuddy/CodeBuddy producers cannot be launched as child CLIs.", {
+      code: "RESEARCH_EXECUTOR_INVALID",
+      exitCode: 2,
+    });
+  }
   const toolPolicy = request.toolPolicy ?? "workspace-read";
   const args = [
     "-p",
@@ -510,6 +520,14 @@ async function buildInvocation(
   if (request.maxCostUsd > 0) args.push("--max-budget-usd", String(request.maxCostUsd));
   if (request.route.model) args.push("--model", request.route.model);
   return { binary: resolvedBinary, args };
+}
+
+function requireHeadlessAgentRoute(route: AgentRoute): void {
+  if (route.agent === "codex" || route.agent === "claude") return;
+  throw new CliError(
+    `The ${route.agent} producer is native-host only and cannot be launched by the control plane.`,
+    { code: "RESEARCH_EXECUTOR_INVALID", exitCode: 2 },
+  );
 }
 
 async function sandboxInvocation(

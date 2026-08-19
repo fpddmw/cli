@@ -1491,7 +1491,7 @@ async function loadCurrentGeneration(
     generation.kind !== "tiangong-publication-generation" ||
     generation.projectId !== projectId ||
     !isObject(generation.producer) ||
-    !["codex", "claude"].includes(String(generation.producer.agent)) ||
+    !["codex", "claude", "workbuddy", "codebuddy"].includes(String(generation.producer.agent)) ||
     typeof generation.producer.sessionSha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(generation.producer.sessionSha256) ||
     generationSha256 !== pointer.generationSha256 ||

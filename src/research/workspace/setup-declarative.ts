@@ -1222,7 +1222,7 @@ const declarationSchema = {
       additionalProperties: false,
       required: ["producerAgent", "reviewerAgent"],
       properties: {
-        producerAgent: { enum: ["codex", "claude"] },
+        producerAgent: { enum: ["codex", "claude", "workbuddy", "codebuddy"] },
         reviewerAgent: { enum: ["codex", "claude"] },
         producerModel: { type: ["string", "null"], maxLength: 200 },
         reviewerModel: { type: ["string", "null"], maxLength: 200 },

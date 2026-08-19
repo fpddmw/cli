@@ -45,6 +45,7 @@ import {
 import {
   doctorResearchWorkspace,
   initializeResearchWorkspace,
+  loadWorkspaceConfig,
 } from "../src/research/workspace/workspace.js";
 
 describe("research workspace lifecycle", () => {
@@ -1061,6 +1062,70 @@ describe("research project execution", () => {
           )
           .every((record) => record.accountingMode === "reserved-native-host"),
       );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("records a WorkBuddy native stage without allowing a child producer executor", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const config = await loadWorkspaceConfig(root);
+      await writeJsonAtomic(workspacePaths(root).config, {
+        ...config,
+        producer: {
+          ...config.producer,
+          agent: "workbuddy",
+          binary: "workbuddy-native-host",
+          model: "hy3",
+          verbosity: undefined,
+        },
+        reviewerExecution: {
+          transport: "sandbox-bridge",
+          isolationProvider: "platform-capsule",
+        },
+      });
+      await lockCapabilities(root);
+      await initializeProject(root, "workbuddy-native", "Evaluate a WorkBuddy native stage.");
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "workbuddy-native",
+        stage: "discover",
+        hostAgent: "workbuddy",
+      });
+      assert.equal(packet.hostAgent, "workbuddy");
+      assert.equal(packet.expectedModel, "hy3");
+      await assert.rejects(
+        executeAgent({
+          route: {
+            agent: "workbuddy",
+            executionMode: "native-host",
+            binary: "workbuddy-native-host",
+            model: "hy3",
+          },
+          prompt: packet.prompt,
+          outputSchema: packet.outputSchema,
+          requestId: packet.sessionId,
+          purpose: "primary",
+          capsuleRoot: join(workspacePaths(root).runtime, "forbidden-child"),
+          projectRoot: root,
+          workspaceRoot: root,
+          timeoutSeconds: 10,
+          maxTurns: 1,
+          maxOutputTokens: 100,
+          maxCostUsd: 1,
+          toolPolicy: "none",
+          environment: {},
+          brokerUrl: null,
+        }),
+        (error: unknown) => error instanceof CliError && error.code === "RESEARCH_EXECUTOR_INVALID",
+      );
+      await abortNativeResearchStage({
+        root,
+        projectId: "workbuddy-native",
+        sessionId: packet.sessionId,
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

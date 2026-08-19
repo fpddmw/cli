@@ -373,7 +373,7 @@ export async function createResearchSetupPlan(
   const selected = resolveSetupSkills([
     ...new Set([...BRAVE_PROFILE_SKILLS[input.evidenceProfile], ...input.skillIds]),
   ]);
-  const producerInstallTarget = agentRoutes.producerAgent === "codex" ? "codex" : "claude-code";
+  const producerInstallTarget = agentRoutes.producerAgent === "claude" ? "claude-code" : "codex";
   if (
     selected.some((skill) => skill.role === "orchestrator") &&
     !agents.includes(producerInstallTarget)
@@ -2503,7 +2503,7 @@ function validAgentRoutes(value: Record<string, unknown>): boolean {
   ]);
   if (Object.keys(value).some((key) => !allowed.has(key))) return false;
   if (
-    (value.producerAgent !== "codex" && value.producerAgent !== "claude") ||
+    !["codex", "claude", "workbuddy", "codebuddy"].includes(String(value.producerAgent)) ||
     (value.reviewerAgent !== "codex" && value.reviewerAgent !== "claude") ||
     value.producerAgent === value.reviewerAgent ||
     !(value.producerModel === null || typeof value.producerModel === "string") ||
@@ -2693,11 +2693,16 @@ function normalizeAgentRoutes(
 
 function normalizeAgentKind(value: AgentKind, label: string): AgentKind {
   if (value === "codex" || value === "claude") return value;
+  if (label === "producer" && (value === "workbuddy" || value === "codebuddy")) return value;
   throw setupError({
     code: "RESEARCH_SETUP_AGENT_ROUTE_INVALID",
     step: "agent-route",
-    reason: `${label} agent must be codex or claude.`,
-    minimumAction: "Choose Codex or Claude Code and keep the reviewer on the other family.",
+    reason:
+      label === "producer"
+        ? "producer agent must be codex, claude, workbuddy, or codebuddy."
+        : "reviewer agent must be codex or claude.",
+    minimumAction:
+      "Choose the current native producer host and keep the reviewer on an independent Codex or Claude CLI family.",
     retryCommand: "tiangong-ai research setup plan --help",
     exitCode: 2,
   });
@@ -2906,7 +2911,7 @@ function setupAgentRoute(
   return {
     agent,
     executionMode,
-    binary: agent === "codex" ? "codex" : "claude",
+    binary: agent === "codex" ? "codex" : agent === "claude" ? "claude" : `${agent}-native-host`,
     model: plannedModel ?? (sameAgent ? current.model : null),
     effort: sameAgent ? (current.effort ?? "low") : "low",
     ...(agent === "codex" ? { verbosity: sameAgent ? (current.verbosity ?? "low") : "low" } : {}),

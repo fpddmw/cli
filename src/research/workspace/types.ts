@@ -15,7 +15,7 @@ export type PackageStatus = "pending" | "ready" | "running" | "retry" | "failed"
 
 export type PackageKind = "agent" | "verify";
 
-export type AgentKind = "codex" | "claude";
+export type AgentKind = "codex" | "claude" | "workbuddy" | "codebuddy";
 
 export type AgentReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 

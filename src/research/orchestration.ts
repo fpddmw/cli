@@ -110,6 +110,7 @@ import {
 } from "./workspace/scientific-review.js";
 import { isObject, pathExists, sha256Text, workspacePaths } from "./workspace/storage.js";
 import type {
+  AgentKind,
   ProjectEvidenceRequirements,
   ProjectInput,
   ProjectInputTrustStatus,
@@ -169,7 +170,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research policy validate <project-id> [--workspace <path>] [--json]
   tiangong-ai research policy approve <project-id> --confirm [--acknowledge-defaults] [--workspace <path>] [--json]
   tiangong-ai research policy resolve <project-id> [--workspace <path>] [--json]
-  tiangong-ai research publication freeze <project-id> --manuscript <absolute-file> --assessment <absolute-json> --submission <absolute-json> --producer-agent codex|claude --producer-session <opaque-id> [--supplements <absolute-json-array>] [--workspace <path>] [--json]
+  tiangong-ai research publication freeze <project-id> --manuscript <absolute-file> --assessment <absolute-json> --submission <absolute-json> --producer-agent codex|claude|workbuddy|codebuddy --producer-session <opaque-id> [--supplements <absolute-json-array>] [--workspace <path>] [--json]
   tiangong-ai research publication review prepare <project-id> --role evidence|methods-reproducibility|domain-novelty|journal-editor --reviewer-agent codex|claude --reviewer-session <opaque-id> [--workspace <path>] [--json]
   tiangong-ai research publication review submit <project-id> --role evidence|methods-reproducibility|domain-novelty|journal-editor --review <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research publication status <project-id> [--workspace <path>] [--json]
@@ -190,7 +191,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project scientific status <project-id> [--workspace <path>] [--json]
   tiangong-ai research project audit export <project-id> --output <absolute-new-directory> [--workspace <path>] [--json]
   tiangong-ai research project audit verify --bundle <absolute-directory> [--json]
-  tiangong-ai research project stage prepare <project-id> --stage discover|acquire|analyze|synthesize --host-agent codex|claude [--workspace <path>] [--json]
+  tiangong-ai research project stage prepare <project-id> --stage discover|acquire|analyze|synthesize --host-agent codex|claude|workbuddy|codebuddy [--workspace <path>] [--json]
   tiangong-ai research project stage submit <project-id> --session <id> --output <absolute-json> [--confirm-model <id>] [--workspace <path>] [--json]
   tiangong-ai research project stage abort <project-id> --session <id> [--workspace <path>] [--json]
   tiangong-ai research project evidence fetch <project-id> --request <absolute-json> [--workspace <path>] [--json]
@@ -2127,7 +2128,7 @@ function projectRecommendedAction(
       : "Inspect the blocking package and use explicit retry or fork recovery.";
   }
   if (readyPackage && ["discover", "acquire", "analyze", "synthesize"].includes(readyPackage)) {
-    return `Prepare native ${readyPackage}: tiangong-ai research project stage prepare ${project.id} --stage ${readyPackage} --host-agent <codex|claude> --workspace ${root}`;
+    return `Prepare native ${readyPackage}: tiangong-ai research project stage prepare ${project.id} --stage ${readyPackage} --host-agent <codex|claude|workbuddy|codebuddy> --workspace ${root}`;
   }
   return readyPackage === "review"
     ? `Run the independent reviewer package: tiangong-ai research run --project ${project.id} --workspace ${root}`
@@ -2261,9 +2262,11 @@ function nativeProducerStage(
   });
 }
 
-function nativeHostAgent(value: string | undefined): "codex" | "claude" {
-  if (value === "codex" || value === "claude") return value;
-  throw new CliError("--host-agent must be codex or claude.", {
+function nativeHostAgent(value: string | undefined): AgentKind {
+  if (value === "codex" || value === "claude" || value === "workbuddy" || value === "codebuddy") {
+    return value;
+  }
+  throw new CliError("--host-agent must be codex, claude, workbuddy, or codebuddy.", {
     code: "RESEARCH_NATIVE_HOST_INVALID",
     exitCode: 2,
   });
@@ -2397,12 +2400,22 @@ function scientificReviewRole(value: string | undefined): ScientificReviewRole {
   });
 }
 
-function publicationAgent(value: string | undefined, label: string): "codex" | "claude" {
-  if (value === "codex" || value === "claude") return value;
-  throw new CliError(`--${label}-agent must be codex or claude.`, {
-    code: "RESEARCH_PUBLICATION_AGENT_INVALID",
-    exitCode: 2,
-  });
+function publicationAgent(value: string | undefined, label: string): AgentKind {
+  const producer = label.includes("producer");
+  if (
+    value === "codex" ||
+    value === "claude" ||
+    (producer && (value === "workbuddy" || value === "codebuddy"))
+  ) {
+    return value;
+  }
+  throw new CliError(
+    `--${label}-agent must be ${producer ? "codex, claude, workbuddy, or codebuddy" : "codex or claude"}.`,
+    {
+      code: "RESEARCH_PUBLICATION_AGENT_INVALID",
+      exitCode: 2,
+    },
+  );
 }
 
 async function readAbsolutePathArray(path: string, option = "supplements"): Promise<string[]> {

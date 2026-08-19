@@ -23,6 +23,8 @@ import { evaluateRequiredResearchCompanions } from "./companion-readiness.js";
 export const RESEARCH_AGENT_PROTOCOL_OVERHEAD_TOKENS: Record<AgentRoute["agent"], number> = {
   codex: 5_000,
   claude: 12_000,
+  workbuddy: 12_000,
+  codebuddy: 12_000,
 };
 export const RESEARCH_ESTIMATED_BYTES_PER_TOKEN = 3;
 export const RESEARCH_MAX_REPAIR_SOURCE_BYTES = 32_000;
@@ -192,8 +194,8 @@ export async function evaluateProjectPreflight(
   ) {
     gaps.push("explicit-agent-effort-missing");
   }
-  const codexRoute = config.producer.agent === "codex" ? config.producer : config.reviewer;
-  if (config.mode === "production-research" && !codexRoute.verbosity) {
+  const codexRoute = [config.producer, config.reviewer].find((route) => route.agent === "codex");
+  if (config.mode === "production-research" && codexRoute && !codexRoute.verbosity) {
     gaps.push("explicit-codex-verbosity-missing");
   }
   if (

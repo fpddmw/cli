@@ -35,7 +35,7 @@ import {
   type ResearchSetupEvidenceProfile,
 } from "./setup.js";
 import { pathExists, workspacePaths } from "./storage.js";
-import type { AgentPricing, ResearchMode } from "./types.js";
+import type { AgentKind, AgentPricing, ResearchMode } from "./types.js";
 
 export interface ResearchSetupWizardPrompt {
   note(message: string, tone?: ResearchSetupWizardNoteTone): void;
@@ -425,7 +425,7 @@ export async function executeResearchSetupWizard(input: {
     ],
     "production-research",
   );
-  const producerAgent = await prompt.select<"codex" | "claude">(
+  const producerAgent = await prompt.select<AgentKind>(
     "Current native research host",
     [
       {
@@ -435,6 +435,14 @@ export async function executeResearchSetupWizard(input: {
       {
         value: "claude",
         label: "Claude Code interactive session (research here; Codex CLI reviews independently)",
+      },
+      {
+        value: "workbuddy",
+        label: "WorkBuddy native task (use sandbox-bridge for independent CLI review)",
+      },
+      {
+        value: "codebuddy",
+        label: "CodeBuddy native session (use sandbox-bridge when nested isolation is blocked)",
       },
     ],
     "codex",
@@ -451,7 +459,9 @@ export async function executeResearchSetupWizard(input: {
         label: "Sandboxed IDE bridge (requires an owner-started native reviewer sidecar)",
       },
     ],
-    "native-direct",
+    producerAgent === "workbuddy" || producerAgent === "codebuddy"
+      ? "sandbox-bridge"
+      : "native-direct",
   );
   const reviewerExecution = {
     transport: reviewTransport,
@@ -531,7 +541,7 @@ export async function executeResearchSetupWizard(input: {
 
   prompt.note("3. Installation targets", "section");
   const evidenceSelected = selected.some((skill) => skill.role === "evidence-capability");
-  const producerTarget = producerAgent === "codex" ? "codex" : "claude-code";
+  const producerTarget = producerAgent === "claude" ? "claude-code" : "codex";
   const installChoices = evidenceSelected
     ? producerAgent === "claude"
       ? [{ value: "both", label: "Codex capabilities + Claude Code orchestrator (required)" }]
@@ -966,9 +976,21 @@ async function collectLicenseAcceptances(
 
 async function collectAgentRoutes(
   prompt: ResearchSetupWizardPrompt,
-  producerAgent: "codex" | "claude",
+  producerAgent: AgentKind,
 ): Promise<Partial<ResearchSetupAgentRoutePlan>> {
-  const reviewerAgent = producerAgent === "codex" ? "claude" : "codex";
+  const reviewerAgent =
+    producerAgent === "codex"
+      ? "claude"
+      : producerAgent === "claude"
+        ? "codex"
+        : await prompt.select<"codex" | "claude">(
+            "Independent reviewer CLI family",
+            [
+              { value: "claude", label: "Claude Code CLI reviewer" },
+              { value: "codex", label: "Codex CLI reviewer" },
+            ],
+            "claude",
+          );
   if (!(await prompt.confirm("Configure exact native-producer/reviewer model IDs now?", false))) {
     return { producerAgent, reviewerAgent };
   }
