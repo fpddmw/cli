@@ -13,7 +13,12 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { packageVersion, RESEARCH_PACKAGE_NAME } from "./constants.js";
-import { executeAgent, fingerprintAgentRoute, type AgentExecutionRequest } from "./executor.js";
+import {
+  executeAgent,
+  fingerprintAgentRoute,
+  probeNativeCapsuleIsolation,
+  type AgentExecutionRequest,
+} from "./executor.js";
 import {
   configuredResearchSecrets,
   sanitizeResearchText,
@@ -160,6 +165,15 @@ export interface ReviewerBridgeStatus {
   packageVersion: string;
   keyFingerprint: string;
   supportedActions: ["execute", "fingerprint", "status"];
+  negativeProbes: ReviewerBridgeNegativeProbes;
+}
+
+export interface ReviewerBridgeNegativeProbes {
+  outsideReadBlocked: true;
+  outsideWriteBlocked: true;
+  workspaceCredentialReadBlocked: true;
+  arbitraryCommandSurfaceAbsent: true;
+  reviewerToolsDisabled: true;
 }
 
 export function reviewerBridgePaths(root: string): ReviewerBridgePaths {
@@ -213,7 +227,8 @@ export async function inspectReviewerBridgeStatus(root: string): Promise<Reviewe
     result.status !== "ready" ||
     result.workspaceId !== binding.connection.workspaceId ||
     result.packageVersion !== packageVersion() ||
-    result.keyFingerprint !== binding.connection.keyFingerprint
+    result.keyFingerprint !== binding.connection.keyFingerprint ||
+    !isReviewerBridgeNegativeProbes(result.negativeProbes)
   ) {
     throw bridgeError(
       "RESEARCH_REVIEW_BRIDGE_RESULT_BINDING_INVALID",
@@ -239,6 +254,15 @@ export async function startReviewerBridgeSidecar(input: {
   const paths = reviewerBridgePaths(root);
   await ensureDirectory(workspacePaths(root).runtime);
   const key = await loadOrCreateSigningKey(stateDirectory);
+  const filesystemProbe = await probeNativeCapsuleIsolation({
+    workspaceRoot: root,
+    stateDirectory,
+  });
+  const negativeProbes: ReviewerBridgeNegativeProbes = {
+    ...filesystemProbe,
+    arbitraryCommandSurfaceAbsent: true,
+    reviewerToolsDisabled: true,
+  };
   const clientToken = randomBytes(32).toString("hex");
   const connection: ReviewerBridgeConnection = {
     schemaVersion: 1,
@@ -271,6 +295,7 @@ export async function startReviewerBridgeSidecar(input: {
       environment: input.environment,
       executeNative,
       fingerprintNative,
+      negativeProbes,
     });
   });
   await listenOnSocket(server, paths.socket);
@@ -438,6 +463,7 @@ async function handleSidecarRequest(input: {
   environment: NodeJS.ProcessEnv;
   executeNative: NativeExecutor;
   fingerprintNative: RouteFingerprinter;
+  negativeProbes: ReviewerBridgeNegativeProbes;
 }): Promise<void> {
   try {
     if (input.request.method !== "POST" || input.request.url !== "/v1/review") {
@@ -495,6 +521,7 @@ async function handleSidecarRequest(input: {
         packageVersion: input.connection.packageVersion,
         keyFingerprint: input.connection.keyFingerprint,
         supportedActions: ["execute", "fingerprint", "status"],
+        negativeProbes: input.negativeProbes,
       };
       isolationProvider = process.platform === "darwin" ? "sandbox-exec" : "bubblewrap";
       policySha256 = sha256Text("status-only");
@@ -1211,6 +1238,17 @@ function isAgentRuntimeFingerprint(value: unknown): value is AgentRuntimeFingerp
     typeof value.binaryVersion === "string" &&
     typeof value.platform === "string" &&
     typeof value.architecture === "string"
+  );
+}
+
+function isReviewerBridgeNegativeProbes(value: unknown): value is ReviewerBridgeNegativeProbes {
+  return (
+    isObject(value) &&
+    value.outsideReadBlocked === true &&
+    value.outsideWriteBlocked === true &&
+    value.workspaceCredentialReadBlocked === true &&
+    value.arbitraryCommandSurfaceAbsent === true &&
+    value.reviewerToolsDisabled === true
   );
 }
 

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
   access,
@@ -6,8 +7,10 @@ import {
   copyFile,
   lstat,
   mkdir,
+  open,
   readFile,
   realpath,
+  rm,
   writeFile,
 } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
@@ -283,6 +286,124 @@ export async function fingerprintAgentRoute(
     executables.target,
     environment.PATH,
   );
+}
+
+export interface NativeCapsuleIsolationProbe {
+  outsideReadBlocked: true;
+  outsideWriteBlocked: true;
+  workspaceCredentialReadBlocked: true;
+}
+
+export async function probeNativeCapsuleIsolation(input: {
+  workspaceRoot: string;
+  stateDirectory: string;
+}): Promise<NativeCapsuleIsolationProbe> {
+  const probeId = randomUUID();
+  const capsuleRoot = join(input.stateDirectory, `isolation-probe-${probeId}`);
+  const projectRoot = join(capsuleRoot, "project");
+  const outsideReadPath = join(input.stateDirectory, `outside-read-${probeId}`);
+  const outsideWritePath = join(input.stateDirectory, `outside-write-${probeId}`);
+  const credentialPath = join(input.workspaceRoot, ".tiangong-research", ".env");
+  let createdCredential = false;
+  await mkdir(projectRoot, { recursive: true, mode: 0o700 });
+  await Promise.all([
+    mkdir(join(capsuleRoot, "home"), { mode: 0o700 }),
+    mkdir(join(capsuleRoot, "tmp"), { mode: 0o700 }),
+  ]);
+  await writeFile(outsideReadPath, "reviewer-isolation-probe\n", { mode: 0o600 });
+  if (!(await lstat(credentialPath).catch(() => undefined))) {
+    const handle = await open(credentialPath, "wx", 0o600).catch(() => null);
+    if (handle) {
+      await handle.writeFile("TIANGONG_REVIEWER_ISOLATION_PROBE=unreadable\n", "utf8");
+      await handle.close();
+      createdCredential = true;
+    }
+  }
+  try {
+    const probeScript = join(projectRoot, "isolation-probe.mjs");
+    await writeFile(
+      probeScript,
+      [
+        'import { readFileSync, writeFileSync } from "node:fs";',
+        "const [, , outsideReadPath, outsideWritePath, credentialPath] = process.argv;",
+        "const cannotRead = (path) => { try { readFileSync(path); return false; } catch { return true; } };",
+        "let outsideWriteBlocked = false;",
+        'try { writeFileSync(outsideWritePath, "forbidden\\n"); } catch { outsideWriteBlocked = true; }',
+        "process.stdout.write(JSON.stringify({",
+        "  outsideReadBlocked: cannotRead(outsideReadPath),",
+        "  outsideWriteBlocked,",
+        "  workspaceCredentialReadBlocked: cannotRead(credentialPath),",
+        '}) + "\\n");',
+        "",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+    const sandboxed = await sandboxInvocation(
+      process.execPath,
+      [probeScript, outsideReadPath, outsideWritePath, credentialPath],
+      capsuleRoot,
+      projectRoot,
+      input.workspaceRoot,
+      process.execPath,
+    );
+    const completed = await spawnCaptured({
+      binary: sandboxed.binary,
+      args: sandboxed.args,
+      cwd: projectRoot,
+      env: {
+        HOME: join(capsuleRoot, "home"),
+        PATH: "/usr/bin:/bin",
+        TMPDIR: join(capsuleRoot, "tmp"),
+      },
+      timeoutMs: 15_000,
+      maxCaptureBytes: MIN_CAPTURE_BYTES,
+    });
+    let result: unknown;
+    try {
+      result = JSON.parse(completed.stdout.trim());
+    } catch {
+      result = null;
+    }
+    const outsideWriteReachedHost =
+      (await lstat(outsideWritePath).catch(() => undefined)) !== undefined;
+    if (
+      completed.exitCode !== 0 ||
+      !isObject(result) ||
+      result.outsideReadBlocked !== true ||
+      result.workspaceCredentialReadBlocked !== true ||
+      outsideWriteReachedHost
+    ) {
+      throw new CliError("The reviewer platform capsule failed its filesystem negative probes.", {
+        code: "RESEARCH_REVIEW_BRIDGE_SANDBOX_POLICY_INVALID",
+        exitCode: 3,
+        details: {
+          provider: sandboxed.isolation.provider,
+          policySha256: sandboxed.isolation.policySha256,
+          exitCode: completed.exitCode,
+          probe: isObject(result)
+            ? {
+                outsideReadBlocked: result.outsideReadBlocked === true,
+                outsideWriteSyscallBlocked: result.outsideWriteBlocked === true,
+                outsideWriteReachedHost,
+                workspaceCredentialReadBlocked: result.workspaceCredentialReadBlocked === true,
+              }
+            : null,
+        },
+      });
+    }
+    return {
+      outsideReadBlocked: true,
+      outsideWriteBlocked: true,
+      workspaceCredentialReadBlocked: true,
+    };
+  } finally {
+    await Promise.all([
+      rm(capsuleRoot, { recursive: true, force: true }),
+      rm(outsideReadPath, { force: true }),
+      rm(outsideWritePath, { force: true }),
+      ...(createdCredential ? [rm(credentialPath, { force: true })] : []),
+    ]);
+  }
 }
 
 async function buildInvocation(

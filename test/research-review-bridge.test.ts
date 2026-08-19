@@ -12,6 +12,7 @@ import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import type { AgentExecutionRequest } from "../src/research/workspace/executor.js";
 import {
   createReviewExecutor,
+  inspectReviewerBridgeStatus,
   reviewerBridgePaths,
   startReviewerBridgeSidecar,
 } from "../src/research/workspace/review-executor.js";
@@ -201,6 +202,15 @@ describe("sandbox-bridge reviewer execution", () => {
       assert.equal(connection.workspaceId, sidecar.workspaceId);
       assert.equal(connection.keyFingerprint, sidecar.keyFingerprint);
       assert.doesNotMatch(JSON.stringify(sidecar), /clientToken|privateKey|bridge-secret/);
+
+      const bridgeStatus = await inspectReviewerBridgeStatus(fixture.root);
+      assert.deepEqual(bridgeStatus.negativeProbes, {
+        outsideReadBlocked: true,
+        outsideWriteBlocked: true,
+        workspaceCredentialReadBlocked: true,
+        arbitraryCommandSurfaceAbsent: true,
+        reviewerToolsDisabled: true,
+      });
 
       const unsupported = await postUnix(paths.socket, "/v1/command", {});
       assert.equal(unsupported.status, 404);
