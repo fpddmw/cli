@@ -101,6 +101,11 @@ import {
   scientificDesignSchema,
 } from "./workspace/scientific-design.js";
 import {
+  inspectScientificObject,
+  parseScientificObjectKind,
+  registerScientificObject,
+} from "./workspace/scientific-objects.js";
+import {
   inspectScientificReviewStatus,
   prepareScientificReview,
   scientificGateAssessmentSchema,
@@ -140,6 +145,7 @@ export async function runResearchOrchestrationCommand(
   if (subcommand === "capability") return runCapability(argv, io);
   if (subcommand === "policy") return runPolicy(argv, io);
   if (subcommand === "publication") return runPublication(argv, io);
+  if (subcommand === "scientific") return runScientific(argv, io);
   if (subcommand === "project") return runProject(argv, io);
   if (subcommand === "schema") return runSchema(argv, io);
   if (subcommand === "status") return runStatus(argv, io);
@@ -176,6 +182,8 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research publication review submit <project-id> --role evidence|methods-reproducibility|domain-novelty|journal-editor --review <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research publication status <project-id> [--workspace <path>] [--json]
   tiangong-ai research publication close <project-id> [--workspace <path>] [--json]
+  tiangong-ai research scientific object register --kind model-implementation|environment-lock --path <absolute-file> [--media-type <type>] [--workspace <path>] [--json]
+  tiangong-ai research scientific object inspect --kind model-implementation|environment-lock --locator <control-relative-locator> [--workspace <path>] [--json]
   tiangong-ai research project init <project-id> --question <question> [--goal evidence-report|top-journal] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
   tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id> --design <absolute-json>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--trust-status verified-owner-input|unverified-owner-input|reference-only|replication-candidate] [--independently-reproduced] [--workspace <path>] [--json]
@@ -211,6 +219,90 @@ export function researchOrchestrationHelp(): string {
 
 ${researchSetupHelp()}
 `;
+}
+
+async function runScientific(argv: string[], io: CliIO): Promise<number> {
+  const [action, ...rest] = argv;
+  if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action !== "object") throw unknownAction("research scientific", action);
+  const [objectAction, ...objectRest] = rest;
+  if (objectAction === "register") {
+    const args = parseStrictArgs(
+      objectRest,
+      { ...WORKSPACE_OPTIONS, kind: "string", path: "string", "media-type": "string" },
+      "research scientific object register",
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    rejectPositionals(args.positionals, "research scientific object register");
+    const sourcePath = strictString(args, "path");
+    if (!sourcePath) {
+      throw new CliError("Scientific object register requires --kind and --path.", {
+        code: "RESEARCH_SCIENTIFIC_OBJECT_INVALID",
+        exitCode: 2,
+      });
+    }
+    const root = await workspaceFromArgs(args);
+    const objectKind = parseScientificObjectKind(strictString(args, "kind"));
+    const record = await withWorkspaceLock(
+      root,
+      "research.scientific-object.register",
+      async () => {
+        const value = await registerScientificObject({
+          root,
+          objectKind,
+          path: sourcePath,
+          ...(strictString(args, "media-type")
+            ? { mediaType: strictString(args, "media-type")! }
+            : {}),
+        });
+        await appendJournalEvent(
+          workspacePaths(root).journal,
+          "scientific-object.registered",
+          "workspace",
+          {
+            objectKind: value.objectKind,
+            sha256: value.sha256,
+            bytes: value.bytes,
+            mediaType: value.mediaType,
+            objectLocator: value.objectLocator,
+            recordLocator: value.recordLocator,
+            recordSha256: value.recordSha256,
+          },
+        );
+        return value;
+      },
+    );
+    writeJson(io, record, args);
+    return 0;
+  }
+  if (objectAction === "inspect") {
+    const args = parseStrictArgs(
+      objectRest,
+      { ...WORKSPACE_OPTIONS, kind: "string", locator: "string" },
+      "research scientific object inspect",
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    rejectPositionals(args.positionals, "research scientific object inspect");
+    const objectLocator = strictString(args, "locator");
+    if (!objectLocator) {
+      throw new CliError("Scientific object inspect requires --kind and --locator.", {
+        code: "RESEARCH_SCIENTIFIC_OBJECT_INVALID",
+        exitCode: 2,
+      });
+    }
+    const root = await workspaceFromArgs(args);
+    writeJson(
+      io,
+      await inspectScientificObject({
+        root,
+        objectKind: parseScientificObjectKind(strictString(args, "kind")),
+        objectLocator,
+      }),
+      args,
+    );
+    return 0;
+  }
+  throw unknownAction("research scientific object", objectAction ?? "");
 }
 
 async function runReviewer(argv: string[], io: CliIO): Promise<number> {

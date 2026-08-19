@@ -24,6 +24,7 @@ import {
   scientificDesignPolicyGaps,
   type VerifiedScientificDesign,
 } from "./scientific-design.js";
+import { assertScientificDesignObjectBindings } from "./scientific-objects.js";
 import {
   ensureDirectory,
   fileRecord,
@@ -127,6 +128,9 @@ export async function initializeProject(
     const scientificDesign = scientificDesignInput
       ? prepareScientificDesignBinding(projectId, publicationPolicy!, scientificDesignInput)
       : null;
+    if (scientificDesignInput) {
+      await assertScientificDesignObjectBindings(root, scientificDesignInput.design.contract);
+    }
     const admittedInputPlan = inputPlan ? await reverifyProjectInputPlan(inputPlan) : undefined;
     if (config.mode === "production-research") {
       const preflight = await evaluateProjectPreflight(
@@ -446,6 +450,12 @@ export async function forkProject(
           scientificReapproval.scientificDesign,
         )
       : null;
+    if (scientificReapproval) {
+      await assertScientificDesignObjectBindings(
+        root,
+        scientificReapproval.scientificDesign.design.contract,
+      );
+    }
     if (config.mode === "production-research") {
       const preflight = await evaluateProjectPreflight(
         root,
@@ -784,6 +794,12 @@ export async function createProjectAddendum(
           scientificReapproval.scientificDesign,
         )
       : null;
+    if (scientificReapproval) {
+      await assertScientificDesignObjectBindings(
+        root,
+        scientificReapproval.scientificDesign.design.contract,
+      );
+    }
     if (config.mode === "production-research") {
       const preflight = await evaluateProjectPreflight(
         root,

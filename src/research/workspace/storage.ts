@@ -97,6 +97,18 @@ export async function writeTextAtomic(path: string, value: string, mode = 0o600)
   await replaceAtomicFile(temporary, path);
 }
 
+export async function writeBytesAtomic(
+  path: string,
+  value: Uint8Array,
+  mode = 0o600,
+): Promise<void> {
+  await ensureDirectory(dirname(path));
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temporary, value, { mode });
+  await chmod(temporary, mode).catch(() => undefined);
+  await replaceAtomicFile(temporary, path);
+}
+
 async function replaceAtomicFile(temporary: string, destination: string): Promise<void> {
   let previousMode: number | undefined;
   let destinationWasMadeWritable = false;

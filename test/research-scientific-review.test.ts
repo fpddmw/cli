@@ -41,6 +41,7 @@ import {
   sha256Text,
   workspacePaths,
   writeJsonAtomic,
+  writeTextAtomic,
 } from "../src/research/workspace/storage.js";
 import type {
   ResearchPolicyBinding,
@@ -902,7 +903,10 @@ describe("top-journal early scientific reviews", () => {
       }
 
       const promoted = packet.stageInputs[0]!;
-      await writeFile(join(workspacePaths(fixture.root).control, promoted.path), "tampered\n");
+      await writeTextAtomic(
+        join(workspacePaths(fixture.root).control, promoted.path),
+        "tampered\n",
+      );
       const reviewPath = join(fixture.root, "gap-lineage-review.json");
       await writeJsonAtomic(reviewPath, passingReview(packet, "gap-lineage-reviewer-session"));
       await assert.rejects(

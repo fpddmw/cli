@@ -11,6 +11,7 @@ import {
   scientificDesignPolicyGaps,
   type ScientificDesignContract,
 } from "./scientific-design.js";
+import { resolveScientificObjectBinding, type ScientificObjectKind } from "./scientific-objects.js";
 import { sanitizeResearchValue } from "./sanitization.js";
 import {
   canonicalJson,
@@ -21,6 +22,7 @@ import {
   sha256File,
   sha256Text,
   workspacePaths,
+  writeBytesAtomic,
   writeJsonAtomic,
   writeTextAtomic,
 } from "./storage.js";
@@ -188,6 +190,9 @@ interface ScientificReviewStageInput {
   ownerId: string;
   sourceLocator: string;
   hashBasis: "raw-file-bytes";
+  mediaType: string;
+  objectKind: ScientificObjectKind | null;
+  registrationRecordSha256: string | null;
 }
 
 export interface ScientificReviewPacket {
@@ -1267,7 +1272,7 @@ async function stageInputRecords(
   const projectRoot = join(paths.projects, project.id);
   if (role === "research-design") {
     const records: ScientificReviewStageInput[] = [];
-    const promote = async (input: {
+    const promoteLegacyJson = async (input: {
       sourceLocator: string;
       sha256: string;
       purpose: Exclude<ScientificReviewStageInput["purpose"], "stage-output">;
@@ -1323,27 +1328,42 @@ async function stageInputRecords(
         ownerId: input.ownerId,
         sourceLocator: input.sourceLocator,
         hashBasis: "raw-file-bytes",
+        mediaType: "application/json",
+        objectKind: null,
+        registrationRecordSha256: null,
       });
     };
     for (const model of design.identity.modelStructures) {
-      await promote({
-        sourceLocator: model.implementationArtifactLocator,
-        sha256: model.implementationArtifactSha256,
-        purpose: "model-implementation",
-        ownerId: model.id,
-        onFailure: (reason) => modelArtifactObjectError(role, model.id, "implementation", reason),
-      });
-      await promote({
-        sourceLocator: model.environmentLockLocator,
-        sha256: model.environmentLockSha256,
-        purpose: "model-environment-lock",
-        ownerId: model.id,
-        onFailure: (reason) => modelArtifactObjectError(role, model.id, "environment-lock", reason),
-      });
+      if (model.implementationStatus === "executable-frozen") {
+        records.push(
+          await promoteRegisteredModelObject({
+            root,
+            projectId: project.id,
+            objectKind: "model-implementation",
+            sourceLocator: model.implementationArtifactLocator!,
+            sha256: model.implementationArtifactSha256!,
+            purpose: "model-implementation",
+            ownerId: model.id,
+          }),
+        );
+      }
+      if (model.environmentLockStatus === "exact-frozen") {
+        records.push(
+          await promoteRegisteredModelObject({
+            root,
+            projectId: project.id,
+            objectKind: "environment-lock",
+            sourceLocator: model.environmentLockLocator!,
+            sha256: model.environmentLockSha256!,
+            purpose: "model-environment-lock",
+            ownerId: model.id,
+          }),
+        );
+      }
     }
     for (const gap of design.knownGaps) {
       for (const artifact of gap.sourceArtifacts) {
-        await promote({
+        await promoteLegacyJson({
           sourceLocator: artifact.objectLocator,
           sha256: artifact.sha256,
           purpose: "inherited-gap",
@@ -1379,6 +1399,9 @@ async function stageInputRecords(
         ownerId: requiredPackage,
         sourceLocator,
         hashBasis: "raw-file-bytes" as const,
+        mediaType: "application/json",
+        objectKind: null,
+        registrationRecordSha256: null,
       };
     }),
   );
@@ -1455,9 +1478,59 @@ async function stageInputRecords(
       ownerId: "evidence-construct",
       sourceLocator: `native-canary:${sha256}`,
       hashBasis: "raw-file-bytes",
+      mediaType: "application/json",
+      objectKind: null,
+      registrationRecordSha256: null,
     });
   }
   return [...stageOutputs, ...canaryRecords];
+}
+
+async function promoteRegisteredModelObject(input: {
+  root: string;
+  projectId: string;
+  objectKind: ScientificObjectKind;
+  sourceLocator: string;
+  sha256: string;
+  purpose: "model-implementation" | "model-environment-lock";
+  ownerId: string;
+}): Promise<ScientificReviewStageInput> {
+  const resolvedObject = await resolveScientificObjectBinding({
+    root: input.root,
+    objectKind: input.objectKind,
+    objectLocator: input.sourceLocator,
+    expectedSha256: input.sha256,
+  });
+  const promotedLocator = `projects/${input.projectId}/scientific/lineage/objects/${input.sha256}/blob`;
+  const promotedPath = resolveContained(workspacePaths(input.root).control, promotedLocator);
+  if (await pathExists(promotedPath)) {
+    const promotedInfo = await lstat(promotedPath).catch(() => undefined);
+    if (
+      !promotedInfo?.isFile() ||
+      promotedInfo.isSymbolicLink() ||
+      promotedInfo.size !== resolvedObject.bytes ||
+      (await sha256File(promotedPath)) !== input.sha256
+    ) {
+      throw scientificGateError(
+        "A promoted scientific design object failed its immutable binding.",
+        "research-design",
+      );
+    }
+  } else {
+    await writeBytesAtomic(promotedPath, await readFile(resolvedObject.sourcePath), 0o444);
+  }
+  return {
+    path: promotedLocator,
+    sha256: input.sha256,
+    bytes: resolvedObject.bytes,
+    purpose: input.purpose,
+    ownerId: input.ownerId,
+    sourceLocator: resolvedObject.sourceLocator,
+    hashBasis: "raw-file-bytes",
+    mediaType: resolvedObject.mediaType,
+    objectKind: input.objectKind,
+    registrationRecordSha256: resolvedObject.record.recordSha256,
+  };
 }
 
 async function assessmentEvidenceContext(
@@ -1959,7 +2032,10 @@ function isScientificReviewPacket(
         record.ownerId.length > 0 &&
         typeof record.sourceLocator === "string" &&
         record.sourceLocator.length > 0 &&
-        record.hashBasis === "raw-file-bytes",
+        record.hashBasis === "raw-file-bytes" &&
+        typeof record.mediaType === "string" &&
+        /^(?:text\/[a-z0-9.+-]+|application\/[a-z0-9.+-]+)$/u.test(record.mediaType) &&
+        validStageInputObjectMetadata(record),
     ) &&
     isObject(value.assessment) &&
     typeof value.assessment.sha256 === "string" &&
@@ -2025,6 +2101,23 @@ function requiredGateRoles(
   return ordered;
 }
 
+function validStageInputObjectMetadata(record: Record<string, unknown>): boolean {
+  const expectedKind =
+    record.purpose === "model-implementation"
+      ? "model-implementation"
+      : record.purpose === "model-environment-lock"
+        ? "environment-lock"
+        : null;
+  if (expectedKind === null) {
+    return record.objectKind === null && record.registrationRecordSha256 === null;
+  }
+  return (
+    record.objectKind === expectedKind &&
+    typeof record.registrationRecordSha256 === "string" &&
+    new RegExp(SHA256_PATTERN).test(record.registrationRecordSha256)
+  );
+}
+
 function containsSensitiveCanaryField(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(containsSensitiveCanaryField);
   if (typeof value === "string") {
@@ -2061,6 +2154,7 @@ function reviewInstructions(role: ScientificReviewRole): string[] {
     "Treat all mechanical failures as blocking; prose cannot upgrade them.",
     "Use a fresh independent reviewer session and return the authoritative closed JSON schema.",
     "Every stageInputs sha256 is the digest of raw file bytes at path; sourceLocator records provenance, while path is the promoted portable object that must be reviewed.",
+    "Use mediaType and objectKind when reading model blobs; code and lock bytes are not JSON unless their recorded mediaType says application/json.",
     "Do not infer field validation, causality, independence, or quantity scope beyond the design.",
     "Interpret this gate within the declared lifecycle: three early scientific reviews precede four final publication reviews of the frozen manuscript.",
     "A material post-review change must create a new authoritative generation and consume the declared revision reserve.",
@@ -2233,19 +2327,6 @@ function inheritedGapObjectError(
     code: "RESEARCH_SCIENTIFIC_GATE_INVALID",
     exitCode: 3,
     details: { role, gapId, artifactKind, reason },
-  });
-}
-
-function modelArtifactObjectError(
-  role: ScientificReviewRole,
-  modelId: string,
-  artifactKind: "implementation" | "environment-lock",
-  reason: "unavailable-or-unsafe" | "oversized" | "content-hash-mismatch" | "not-reviewable-json",
-): CliError {
-  return new CliError("A frozen model object failed its immutable binding.", {
-    code: "RESEARCH_SCIENTIFIC_GATE_INVALID",
-    exitCode: 3,
-    details: { role, modelId, artifactKind, reason },
   });
 }
 

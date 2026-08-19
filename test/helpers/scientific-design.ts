@@ -1,7 +1,8 @@
 import { readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 import { readAndVerifyScientificDesign } from "../../src/research/workspace/scientific-design.js";
+import { registerScientificObject } from "../../src/research/workspace/scientific-objects.js";
 import { loadProject } from "../../src/research/workspace/projects.js";
 import {
   prepareScientificReview,
@@ -30,6 +31,7 @@ export async function scientificDesignInput(
     pendingModels?: boolean;
     optionalLicensedRoute?: boolean;
     brokerCapabilityId?: string;
+    modelObjectMode?: "registered-json" | "external-raw" | "legacy-control-json";
     downloadBackend?:
       | "native-browser"
       | "chrome"
@@ -50,8 +52,11 @@ export async function scientificDesignInput(
       };
       modelStructures: Array<{
         id: string;
-        implementationArtifactLocator: string;
-        environmentLockLocator: string;
+        implementationArtifactSha256: string | null;
+        implementationArtifactLocator: string | null;
+        implementationEntrypoint: string | null;
+        environmentLockSha256: string | null;
+        environmentLockLocator: string | null;
         implementationStatus?: "executable-frozen" | "pending-source-acquisition";
         implementationFreezeBeforeGate?: "research-design" | "evidence-construct" | "pilot-methods";
         environmentLockStatus?: "exact-frozen" | "pending-runtime-lock";
@@ -132,8 +137,13 @@ export async function scientificDesignInput(
   }
   if (options.pendingModels) {
     for (const model of value.identity.modelStructures) {
+      model.implementationArtifactSha256 = null;
+      model.implementationArtifactLocator = null;
+      model.implementationEntrypoint = null;
       model.implementationStatus = "pending-source-acquisition";
       model.implementationFreezeBeforeGate = "pilot-methods";
+      model.environmentLockSha256 = null;
+      model.environmentLockLocator = null;
       model.environmentLockStatus = "pending-runtime-lock";
       model.environmentLockFreezeBeforeGate = "pilot-methods";
     }
@@ -176,24 +186,141 @@ export async function scientificDesignInput(
     route.downloadBackends = [options.downloadBackend];
     route.accessMode = authorizedBrowser ? "owner-authorized" : "open-public";
   }
-  await stageFixtureModelSources(root, value.identity.modelStructures);
+  const modelObjectSources: Array<{
+    modelId: string;
+    kind: "model-implementation" | "environment-lock";
+    path: string;
+    mediaType: string;
+    sha256: string;
+    objectLocator: string;
+  }> = [];
+  if (options.modelObjectMode === "external-raw") {
+    for (const model of value.identity.modelStructures) {
+      const implementationPath = join(root, `${model.id}.py`);
+      const environmentPath = join(root, `${model.id}.requirements.lock`);
+      await writeFile(
+        implementationPath,
+        `def evaluate_${model.id.replaceAll("-", "_")}(value):\n    return value\n`,
+      );
+      await writeFile(environmentPath, `numpy==2.3.0 --hash=sha256:${"a".repeat(64)}\n`);
+      const implementationSha256 = await sha256File(implementationPath);
+      const environmentLockSha256 = await sha256File(environmentPath);
+      model.implementationArtifactSha256 = implementationSha256;
+      model.implementationArtifactLocator = `lineage/objects/${implementationSha256}/blob`;
+      model.implementationEntrypoint = `${basename(implementationPath)}:evaluate`;
+      model.implementationStatus = "executable-frozen";
+      model.implementationFreezeBeforeGate = "research-design";
+      model.environmentLockSha256 = environmentLockSha256;
+      model.environmentLockLocator = `lineage/objects/${environmentLockSha256}/blob`;
+      model.environmentLockStatus = "exact-frozen";
+      model.environmentLockFreezeBeforeGate = "research-design";
+      modelObjectSources.push(
+        {
+          modelId: model.id,
+          kind: "model-implementation",
+          path: implementationPath,
+          mediaType: "text/x-python",
+          sha256: implementationSha256,
+          objectLocator: model.implementationArtifactLocator,
+        },
+        {
+          modelId: model.id,
+          kind: "environment-lock",
+          path: environmentPath,
+          mediaType: "text/plain",
+          sha256: environmentLockSha256,
+          objectLocator: model.environmentLockLocator,
+        },
+      );
+    }
+  } else if (options.modelObjectMode === "legacy-control-json") {
+    await stageFixtureModelSources(root, value.identity.modelStructures);
+  } else {
+    await registerFixtureModelSources(root, value.identity.modelStructures);
+  }
   await stageFixtureGapSources(root, value.knownGaps);
   await writeFile(target, `${JSON.stringify(value, null, 2)}\n`);
   return {
     design: await readAndVerifyScientificDesign(target, projectId),
     producerAgent: options.producerAgent ?? ("codex" as const),
     producerSessionId: options.producerSessionId ?? `native-${projectId}-design-session`,
+    modelObjectSources,
   };
+}
+
+async function registerFixtureModelSources(
+  root: string,
+  models: Array<{
+    id: string;
+    implementationArtifactSha256: string | null;
+    implementationArtifactLocator: string | null;
+    environmentLockSha256: string | null;
+    environmentLockLocator: string | null;
+    implementationStatus?: "executable-frozen" | "pending-source-acquisition";
+    environmentLockStatus?: "exact-frozen" | "pending-runtime-lock";
+  }>,
+): Promise<void> {
+  for (const model of models) {
+    const source = fixtureModelSource(model.id);
+    if (model.implementationStatus !== "pending-source-acquisition") {
+      const record = await registerScientificObject({
+        root,
+        objectKind: "model-implementation",
+        path: resolve("test/fixtures/scientific-design/objects", source.implementation),
+        mediaType: "application/json",
+      });
+      if (model.implementationArtifactSha256 !== record.sha256) {
+        throw new Error(`Fixture implementation digest drifted for ${model.id}`);
+      }
+      model.implementationArtifactLocator = record.objectLocator;
+    }
+    if (model.environmentLockStatus !== "pending-runtime-lock") {
+      const record = await registerScientificObject({
+        root,
+        objectKind: "environment-lock",
+        path: resolve("test/fixtures/scientific-design/objects", source.environment),
+        mediaType: "application/json",
+      });
+      if (model.environmentLockSha256 !== record.sha256) {
+        throw new Error(`Fixture environment-lock digest drifted for ${model.id}`);
+      }
+      model.environmentLockLocator = record.objectLocator;
+    }
+  }
 }
 
 async function stageFixtureModelSources(
   root: string,
   models: Array<{
     id: string;
-    implementationArtifactLocator: string;
-    environmentLockLocator: string;
+    implementationArtifactLocator: string | null;
+    environmentLockLocator: string | null;
+    implementationStatus?: "executable-frozen" | "pending-source-acquisition";
+    environmentLockStatus?: "exact-frozen" | "pending-runtime-lock";
   }>,
 ): Promise<void> {
+  for (const model of models) {
+    if (
+      model.implementationStatus === "pending-source-acquisition" ||
+      model.environmentLockStatus === "pending-runtime-lock"
+    ) {
+      continue;
+    }
+    const source = fixtureModelSource(model.id);
+    for (const [locator, filename] of [
+      [model.implementationArtifactLocator, source.implementation],
+      [model.environmentLockLocator, source.environment],
+    ] as const) {
+      if (!locator) throw new Error(`Missing frozen model locator for ${model.id}`);
+      await writeTextAtomic(
+        resolveContained(workspacePaths(root).control, locator),
+        await readFile(resolve("test/fixtures/scientific-design/objects", filename), "utf8"),
+      );
+    }
+  }
+}
+
+function fixtureModelSource(modelId: string): { implementation: string; environment: string } {
   const sourceFiles: Record<string, { implementation: string; environment: string }> = {
     "mechanistic-fatigue-model": {
       implementation: "mechanistic-fatigue-model.json",
@@ -204,19 +331,9 @@ async function stageFixtureModelSources(
       environment: "reference-environment-lock.json",
     },
   };
-  for (const model of models) {
-    const source = sourceFiles[model.id];
-    if (!source) throw new Error(`Missing fixture model objects for ${model.id}`);
-    for (const [locator, filename] of [
-      [model.implementationArtifactLocator, source.implementation],
-      [model.environmentLockLocator, source.environment],
-    ] as const) {
-      await writeTextAtomic(
-        resolveContained(workspacePaths(root).control, locator),
-        await readFile(resolve("test/fixtures/scientific-design/objects", filename), "utf8"),
-      );
-    }
-  }
+  const source = sourceFiles[modelId];
+  if (!source) throw new Error(`Missing fixture model objects for ${modelId}`);
+  return source;
 }
 
 async function stageFixtureGapSources(

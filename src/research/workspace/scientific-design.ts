@@ -66,13 +66,13 @@ export interface ScientificDesignContract {
       version: string;
       equationSet: string;
       coefficientSet: string;
-      implementationArtifactSha256: string;
-      implementationArtifactLocator: string;
-      implementationEntrypoint: string;
+      implementationArtifactSha256: string | null;
+      implementationArtifactLocator: string | null;
+      implementationEntrypoint: string | null;
       implementationStatus: "executable-frozen" | "pending-source-acquisition";
       implementationFreezeBeforeGate: "research-design" | "evidence-construct" | "pilot-methods";
-      environmentLockSha256: string;
-      environmentLockLocator: string;
+      environmentLockSha256: string | null;
+      environmentLockLocator: string | null;
       environmentLockStatus: "exact-frozen" | "pending-runtime-lock";
       environmentLockFreezeBeforeGate: "research-design" | "evidence-construct" | "pilot-methods";
       artifactHashBasis: "raw-file-bytes";
@@ -621,15 +621,20 @@ export function scientificDesignSchema(): Record<string, unknown> {
                 equationSet: nonEmptyString,
                 coefficientSet: nonEmptyString,
                 implementationArtifactSha256: {
-                  type: "string",
-                  pattern: "^[a-f0-9]{64}$",
+                  anyOf: [{ type: "string", pattern: "^[a-f0-9]{64}$" }, { type: "null" }],
                 },
                 implementationArtifactLocator: {
-                  type: "string",
-                  pattern:
-                    "^(?:projects/[a-z0-9][a-z0-9-]{2,63}|lineage/objects)/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
+                  anyOf: [
+                    {
+                      type: "string",
+                      pattern: "^lineage/objects/[a-f0-9]{64}/blob$",
+                    },
+                    { type: "null" },
+                  ],
                 },
-                implementationEntrypoint: nonEmptyString,
+                implementationEntrypoint: {
+                  anyOf: [nonEmptyString, { type: "null" }],
+                },
                 implementationStatus: {
                   type: "string",
                   enum: ["executable-frozen", "pending-source-acquisition"],
@@ -638,11 +643,17 @@ export function scientificDesignSchema(): Record<string, unknown> {
                   type: "string",
                   enum: ["research-design", "evidence-construct", "pilot-methods"],
                 },
-                environmentLockSha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
+                environmentLockSha256: {
+                  anyOf: [{ type: "string", pattern: "^[a-f0-9]{64}$" }, { type: "null" }],
+                },
                 environmentLockLocator: {
-                  type: "string",
-                  pattern:
-                    "^(?:projects/[a-z0-9][a-z0-9-]{2,63}|lineage/objects)/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
+                  anyOf: [
+                    {
+                      type: "string",
+                      pattern: "^lineage/objects/[a-f0-9]{64}/blob$",
+                    },
+                    { type: "null" },
+                  ],
                 },
                 environmentLockStatus: {
                   type: "string",
@@ -660,6 +671,66 @@ export function scientificDesignSchema(): Record<string, unknown> {
                 baselineSelectionJustification: nonEmptyString,
                 sourceEvidenceRoleIds: identifierArray,
               },
+              allOf: [
+                {
+                  if: {
+                    properties: { implementationStatus: { const: "executable-frozen" } },
+                    required: ["implementationStatus"],
+                  },
+                  then: {
+                    properties: {
+                      implementationArtifactSha256: {
+                        type: "string",
+                        pattern: "^[a-f0-9]{64}$",
+                      },
+                      implementationArtifactLocator: {
+                        type: "string",
+                        pattern: "^lineage/objects/[a-f0-9]{64}/blob$",
+                      },
+                      implementationEntrypoint: nonEmptyString,
+                      implementationFreezeBeforeGate: { const: "research-design" },
+                    },
+                  },
+                  else: {
+                    properties: {
+                      implementationArtifactSha256: { type: "null" },
+                      implementationArtifactLocator: { type: "null" },
+                      implementationEntrypoint: { type: "null" },
+                      implementationFreezeBeforeGate: {
+                        enum: ["evidence-construct", "pilot-methods"],
+                      },
+                    },
+                  },
+                },
+                {
+                  if: {
+                    properties: { environmentLockStatus: { const: "exact-frozen" } },
+                    required: ["environmentLockStatus"],
+                  },
+                  then: {
+                    properties: {
+                      environmentLockSha256: {
+                        type: "string",
+                        pattern: "^[a-f0-9]{64}$",
+                      },
+                      environmentLockLocator: {
+                        type: "string",
+                        pattern: "^lineage/objects/[a-f0-9]{64}/blob$",
+                      },
+                      environmentLockFreezeBeforeGate: { const: "research-design" },
+                    },
+                  },
+                  else: {
+                    properties: {
+                      environmentLockSha256: { type: "null" },
+                      environmentLockLocator: { type: "null" },
+                      environmentLockFreezeBeforeGate: {
+                        enum: ["evidence-construct", "pilot-methods"],
+                      },
+                    },
+                  },
+                },
+              ],
             },
           },
           allowedClaimVerbs: stringArray,
@@ -1667,11 +1738,13 @@ export function evaluateScientificDesign(
     (model) =>
       !model.equationSet.trim() ||
       !model.coefficientSet.trim() ||
-      !isReviewableDigest(model.implementationArtifactSha256) ||
-      !model.implementationArtifactLocator.trim() ||
-      !model.implementationEntrypoint.trim() ||
-      !isReviewableDigest(model.environmentLockSha256) ||
-      !model.environmentLockLocator.trim() ||
+      (model.implementationStatus === "executable-frozen" &&
+        (!isReviewableDigest(model.implementationArtifactSha256) ||
+          !model.implementationArtifactLocator?.trim() ||
+          !model.implementationEntrypoint?.trim())) ||
+      (model.environmentLockStatus === "exact-frozen" &&
+        (!isReviewableDigest(model.environmentLockSha256) ||
+          !model.environmentLockLocator?.trim())) ||
       model.artifactHashBasis !== "raw-file-bytes" ||
       !model.baselineSelectionJustification.trim(),
   );
@@ -1692,8 +1765,9 @@ export function evaluateScientificDesign(
   }
   const modelsWithoutRetrievableObjects = design.identity.modelStructures.filter(
     (model) =>
-      !model.implementationArtifactLocator.trim() ||
-      !model.environmentLockLocator.trim() ||
+      (model.implementationStatus === "executable-frozen" &&
+        !model.implementationArtifactLocator?.trim()) ||
+      (model.environmentLockStatus === "exact-frozen" && !model.environmentLockLocator?.trim()) ||
       model.artifactHashBasis !== "raw-file-bytes",
   );
   if (modelsWithoutRetrievableObjects.length) {
@@ -2742,8 +2816,10 @@ function normalizeIdentifierTerm(value: string): string {
     .trim();
 }
 
-function isReviewableDigest(value: string): boolean {
-  return /^[a-f0-9]{64}$/u.test(value) && !/^([a-f0-9])\1{63}$/u.test(value);
+function isReviewableDigest(value: string | null): boolean {
+  return (
+    typeof value === "string" && /^[a-f0-9]{64}$/u.test(value) && !/^([a-f0-9])\1{63}$/u.test(value)
+  );
 }
 
 function bootstrapMultisetCount(effectiveIndependentUnits: number): number | null {

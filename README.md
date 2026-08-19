@@ -387,10 +387,37 @@ the design or launch a nested producer.
 Hash binding alone does not make a model executable. Each model declares raw
 implementation bytes, a retrievable safe locator and entrypoint, exact
 environment-lock bytes, implementation/environment status, and a freeze gate.
+Before authoring a design with frozen model objects, register each external
+regular non-symlink file through the public content-addressed intake:
+
+```bash
+tiangong-ai research scientific object register \
+  --kind model-implementation \
+  --path /absolute/path/to/model.py \
+  --media-type text/x-python \
+  --workspace /absolute/path/to/workspace --json
+tiangong-ai research scientific object register \
+  --kind environment-lock \
+  --path /absolute/path/to/requirements.lock \
+  --media-type text/plain \
+  --workspace /absolute/path/to/workspace --json
+```
+
+Use the returned `sha256` and `objectLocator` verbatim in the design. Registration
+is workspace-scoped because it must happen before project admission. It hashes
+raw bytes, atomically stores an immutable `lineage/objects/<sha256>/blob`, and
+records only deterministic non-path metadata. It never accepts a source inside
+`.tiangong-research`, a symlink, an unsupported/binary media type, or invalid
+UTF-8. Re-registration is idempotent, and `research scientific object inspect`
+revalidates the record and blob before returning it. Do not hand-copy files into
+the control directory.
+
 Source-derived uncertainty states also declare whether their values are frozen
 or pending, and every joint state maps exact parameter-state IDs. Pending model,
 environment, or uncertainty objects are allowed only when a planned Policy rule
-owns the same due gate. They are exposed in every earlier review packet as
+owns the same due gate. Pending implementations use `null` for implementation
+SHA-256, locator, and entrypoint; pending environments use `null` for lock
+SHA-256 and locator. They are exposed in every earlier review packet as
 `futureGateObligations` and become blocking mechanical errors at that gate.
 Freezing them requires a new authoritative generation; it never upgrades the
 old object in place.
@@ -454,7 +481,10 @@ Policy, design, and fresh native producer session; it cannot inherit scientific
 approval from a superseded generation.
 
 Review packet `stageInputs` identify promoted portable objects by purpose,
-owner, source locator, and SHA-256 over raw file bytes. `packetSha256` is the
+owner, safe source locator, media type, object kind, registration-record hash,
+and SHA-256 over raw file bytes. Registered model code and environment locks are
+copied as exact project-local `blob` bytes; they are never parsed as JSON merely
+because the packet is JSON. `packetSha256` is the
 logical packet identity that excludes its own identity field; the portable
 audit manifest separately records the raw stored packet-file digest. This keeps
 packet identity and byte-level transfer verification explicit rather than

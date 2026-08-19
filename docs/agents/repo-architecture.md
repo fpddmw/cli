@@ -126,7 +126,11 @@ storage writes, queueing, and document status transitions.
   real-record construct-canary constraints are mandatory top-journal invariants
   that must resolve true; they are not optional runtime switches. It also owns
   a native-authored closed scientific-design contract with mechanical semantic
-  validation, raw-byte model/environment object bindings, executable-versus-
+  validation, a workspace-scoped content-addressed scientific-object registry
+  for external regular non-symlink UTF-8 model implementations and environment
+  locks, deterministic path-free records, admission/preflight revalidation,
+  exact project-local review-packet blob promotion, raw-byte model/environment
+  object bindings, executable-versus-
   pending freeze states, exact joint uncertainty state mappings, continuous
   decision-consequence graphs, Policy-owned future-gate obligations, exact
   Policy/design/session bindings, three ordered independent scientific review
