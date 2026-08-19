@@ -8,7 +8,7 @@ import {
   verify,
 } from "node:crypto";
 import { createServer, request as httpRequest, type Server } from "node:http";
-import { cp, chmod, lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
+import { cp, chmod, lstat, mkdir, open, readFile, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
@@ -24,7 +24,6 @@ import {
   ensureDirectory,
   hashRegularTree,
   isObject,
-  readJsonFile,
   sha256Bytes,
   sha256File,
   sha256Text,
@@ -49,7 +48,6 @@ import {
 const REVIEW_BRIDGE_PROTOCOL_VERSION = 1 as const;
 const REVIEW_BRIDGE_MAX_BODY_BYTES = 8 * 1024 * 1024;
 const REVIEW_BRIDGE_REQUEST_MAX_AGE_MS = 5 * 60 * 1000;
-const REVIEW_BRIDGE_NONCE_TTL_MS = 24 * 60 * 60 * 1000;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
 
 type NativeExecutor = (request: AgentExecutionRequest) => Promise<ExecutionResult>;
@@ -164,11 +162,6 @@ export interface ReviewerBridgeStatus {
   supportedActions: ["execute", "fingerprint", "status"];
 }
 
-interface NonceLedger {
-  schemaVersion: 1;
-  nonces: Array<{ nonce: string; seenAt: string }>;
-}
-
 export function reviewerBridgePaths(root: string): ReviewerBridgePaths {
   const runtime = workspacePaths(root).runtime;
   return {
@@ -261,7 +254,8 @@ export async function startReviewerBridgeSidecar(input: {
   };
   await removeStaleSocket(paths.socket);
   await writeJsonAtomic(paths.connection, connection, 0o600);
-  const nonceLedgerPath = join(stateDirectory, "nonce-ledger.json");
+  const nonceDirectory = join(stateDirectory, "nonces");
+  await ensureDirectory(nonceDirectory);
   const executeNative = input.executeNative ?? executeAgent;
   const fingerprintNative = input.fingerprintNative ?? fingerprintAgentRoute;
   const server = createServer((request, response) => {
@@ -273,7 +267,7 @@ export async function startReviewerBridgeSidecar(input: {
       expectedClientToken: clientToken,
       connection,
       privateKeyPem: key.privateKeyPem,
-      nonceLedgerPath,
+      nonceDirectory,
       environment: input.environment,
       executeNative,
       fingerprintNative,
@@ -440,7 +434,7 @@ async function handleSidecarRequest(input: {
   expectedClientToken: string;
   connection: ReviewerBridgeConnection;
   privateKeyPem: string;
-  nonceLedgerPath: string;
+  nonceDirectory: string;
   environment: NodeJS.ProcessEnv;
   executeNative: NativeExecutor;
   fingerprintNative: RouteFingerprinter;
@@ -471,7 +465,7 @@ async function handleSidecarRequest(input: {
     const value = JSON.parse(await readBoundedBody(input.request));
     const request = parseBridgeRequest(value);
     await validateServerBinding(input.root, input.connection, request);
-    await consumeNonce(input.nonceLedgerPath, request.nonce, request.issuedAt);
+    await consumeNonce(input.nonceDirectory, request.nonce, request.issuedAt);
     const config = await loadWorkspaceConfig(input.root);
     let result: ExecutionResult | AgentRuntimeFingerprint | ReviewerBridgeStatus;
     let capsuleSha256 = sha256Text("not-applicable");
@@ -896,25 +890,30 @@ async function validateServerBinding(
   }
 }
 
-async function consumeNonce(path: string, nonce: string, seenAt: string): Promise<void> {
-  const cutoff = Date.now() - REVIEW_BRIDGE_NONCE_TTL_MS;
-  let ledger: NonceLedger = { schemaVersion: 1, nonces: [] };
+async function consumeNonce(directory: string, nonce: string, seenAt: string): Promise<void> {
+  await ensureDirectory(directory);
+  const claimPath = join(directory, nonce);
+  let handle: Awaited<ReturnType<typeof open>>;
   try {
-    const value = await readJsonFile<unknown>(path, "Reviewer bridge nonce ledger");
-    if (isNonceLedger(value)) ledger = value;
-  } catch {
-    // A missing ledger is valid on first start. Any malformed existing ledger is
-    // replaced only after the current request has been validated independently.
-  }
-  ledger.nonces = ledger.nonces.filter((entry) => Date.parse(entry.seenAt) >= cutoff);
-  if (ledger.nonces.some((entry) => entry.nonce === nonce)) {
+    handle = await open(claimPath, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw bridgeError(
+        "RESEARCH_REVIEW_BRIDGE_NONCE_REPLAY",
+        "The reviewer bridge rejected a replayed request nonce.",
+      );
+    }
     throw bridgeError(
-      "RESEARCH_REVIEW_BRIDGE_NONCE_REPLAY",
-      "The reviewer bridge rejected a replayed request nonce.",
+      "RESEARCH_REVIEW_BRIDGE_STATE_INVALID",
+      "The reviewer bridge could not persist its replay-protection claim.",
     );
   }
-  ledger.nonces.push({ nonce, seenAt });
-  await writeJsonAtomic(path, ledger, 0o600);
+  try {
+    await handle.writeFile(`${seenAt}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
 }
 
 async function requireWorkspaceCapsule(
@@ -948,6 +947,13 @@ async function requireExternalStateDirectory(root: string, value: string): Promi
     throw bridgeError(
       "RESEARCH_REVIEW_BRIDGE_STATE_INVALID",
       "Reviewer sidecar state must use an explicit absolute directory.",
+    );
+  }
+  const selectedInfo = await lstat(value).catch(() => undefined);
+  if (selectedInfo?.isSymbolicLink() || (selectedInfo && !selectedInfo.isDirectory())) {
+    throw bridgeError(
+      "RESEARCH_REVIEW_BRIDGE_STATE_INVALID",
+      "Reviewer sidecar private state must be a regular non-symlink directory.",
     );
   }
   await ensureDirectory(value);
@@ -1170,22 +1176,6 @@ function isReviewerBridgeConnection(value: unknown): value is ReviewerBridgeConn
     typeof value.clientToken === "string" &&
     /^[a-f0-9]{64}$/.test(value.clientToken) &&
     typeof value.createdAt === "string"
-  );
-}
-
-function isNonceLedger(value: unknown): value is NonceLedger {
-  return (
-    isObject(value) &&
-    value.schemaVersion === 1 &&
-    Array.isArray(value.nonces) &&
-    value.nonces.every(
-      (entry) =>
-        isObject(entry) &&
-        typeof entry.nonce === "string" &&
-        HASH_PATTERN.test(entry.nonce) &&
-        typeof entry.seenAt === "string" &&
-        Number.isFinite(Date.parse(entry.seenAt)),
-    )
   );
 }
 

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { generateKeyPairSync } from "node:crypto";
+import { request as httpRequest } from "node:http";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -103,7 +105,7 @@ describe("sandbox-bridge reviewer execution", () => {
           await readFile(join(request.projectRoot, "review-packet.txt"), "utf8"),
           "packet\n",
         );
-        return successfulResult();
+        return { ...successfulResult(), stderr: "Authorization: Bearer bridge-secret-value" };
       },
     });
     try {
@@ -119,7 +121,28 @@ describe("sandbox-bridge reviewer execution", () => {
       const result = await executor.execute(fixture.request);
       assert.equal(result.exitCode, 0);
       assert.equal(result.stdout, '{"ok":true}');
+      assert.match(result.stderr, /\[REDACTED\]/);
       assert.equal(nativeCalls, 1);
+
+      const concurrentExecutor = createReviewExecutor({
+        root: fixture.root,
+        execution: fixture.execution,
+        nonceFactory: () => "d".repeat(64),
+      });
+      const concurrent = await Promise.allSettled([
+        concurrentExecutor.execute(fixture.request),
+        concurrentExecutor.execute(fixture.request),
+      ]);
+      assert.equal(concurrent.filter((entry) => entry.status === "fulfilled").length, 1);
+      const concurrentFailure = concurrent.find(
+        (entry): entry is PromiseRejectedResult => entry.status === "rejected",
+      );
+      assert.ok(concurrentFailure?.reason instanceof CliError);
+      assert.equal(
+        (concurrentFailure.reason as CliError).code,
+        "RESEARCH_REVIEW_BRIDGE_NONCE_REPLAY",
+      );
+      assert.equal(nativeCalls, 2);
       assert.equal(result.reviewAttestation?.transport, "sandbox-bridge");
       assert.equal(result.reviewAttestation?.isolationProvider, "bubblewrap");
       assert.equal(result.reviewAttestation?.toolPolicy, "none");
@@ -135,7 +158,7 @@ describe("sandbox-bridge reviewer execution", () => {
         assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_NONCE_REPLAY");
         return true;
       });
-      assert.equal(nativeCalls, 1);
+      assert.equal(nativeCalls, 2);
 
       const policyDriftExecutor = createReviewExecutor({
         root: fixture.root,
@@ -167,7 +190,7 @@ describe("sandbox-bridge reviewer execution", () => {
           return true;
         },
       );
-      assert.equal(nativeCalls, 1);
+      assert.equal(nativeCalls, 2);
 
       const paths = reviewerBridgePaths(fixture.root);
       const connection = JSON.parse(await readFile(paths.connection, "utf8")) as Record<
@@ -178,9 +201,80 @@ describe("sandbox-bridge reviewer execution", () => {
       assert.equal(connection.workspaceId, sidecar.workspaceId);
       assert.equal(connection.keyFingerprint, sidecar.keyFingerprint);
       assert.doesNotMatch(JSON.stringify(sidecar), /clientToken|privateKey|bridge-secret/);
+
+      const unsupported = await postUnix(paths.socket, "/v1/command", {});
+      assert.equal(unsupported.status, 404);
+      assert.equal(
+        (JSON.parse(unsupported.body) as { error: { code: string } }).error.code,
+        "RESEARCH_REVIEW_BRIDGE_ACTION_INVALID",
+      );
+
+      await writeFile(
+        paths.connection,
+        `${JSON.stringify({ ...connection, packageVersion: "0.0.0" }, null, 2)}\n`,
+        { mode: 0o600 },
+      );
+      const versionExecutor = createReviewExecutor({
+        root: fixture.root,
+        execution: fixture.execution,
+        nonceFactory: () => "e".repeat(64),
+      });
+      await assert.rejects(versionExecutor.execute(fixture.request), (error: unknown) => {
+        assert.ok(error instanceof CliError);
+        assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_VERSION_MISMATCH");
+        return true;
+      });
+      assert.equal(nativeCalls, 2);
+
+      const untrustedPublicKey = generateKeyPairSync("ed25519")
+        .publicKey.export({ type: "spki", format: "pem" })
+        .toString();
+      await writeFile(
+        paths.connection,
+        `${JSON.stringify({ ...connection, publicKey: untrustedPublicKey }, null, 2)}\n`,
+        { mode: 0o600 },
+      );
+      const signatureExecutor = createReviewExecutor({
+        root: fixture.root,
+        execution: fixture.execution,
+        nonceFactory: () => "f".repeat(64),
+      });
+      await assert.rejects(signatureExecutor.execute(fixture.request), (error: unknown) => {
+        assert.ok(error instanceof CliError);
+        assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_ATTESTATION_INVALID");
+        return true;
+      });
+      assert.equal(nativeCalls, 3);
     } finally {
       await sidecar.close();
       await Promise.all([fixture.cleanup(), rm(stateDirectory, { recursive: true, force: true })]);
+    }
+  });
+
+  it("rejects a symlinked sidecar state directory before creating key material", async () => {
+    const fixture = await bridgeFixture();
+    const parent = await mkdtemp(join(tmpdir(), "tiangong-review-state-link-"));
+    const target = join(parent, "target");
+    const link = join(parent, "link");
+    await mkdir(target);
+    await symlink(target, link);
+    try {
+      await assert.rejects(
+        startReviewerBridgeSidecar({
+          root: fixture.root,
+          stateDirectory: link,
+          environment: { PATH: process.env.PATH },
+          executeNative: async () => successfulResult(),
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof CliError);
+          assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_STATE_INVALID");
+          return true;
+        },
+      );
+      await assert.rejects(readFile(join(target, "reviewer-bridge-private-key.pem")), /ENOENT/);
+    } finally {
+      await Promise.all([fixture.cleanup(), rm(parent, { recursive: true, force: true })]);
     }
   });
 
@@ -326,4 +420,34 @@ async function invoke(argv: string[]): Promise<{
     stderr: { write: (chunk: string) => void (stderr += chunk) },
   });
   return { exitCode, stdout, stderr };
+}
+
+async function postUnix(
+  socketPath: string,
+  path: string,
+  value: unknown,
+): Promise<{ status: number; body: string }> {
+  const body = Buffer.from(JSON.stringify(value), "utf8");
+  return new Promise((resolvePromise, reject) => {
+    const request = httpRequest(
+      {
+        socketPath,
+        path,
+        method: "POST",
+        headers: { "content-type": "application/json", "content-length": body.byteLength },
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () =>
+          resolvePromise({
+            status: response.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+      },
+    );
+    request.on("error", reject);
+    request.end(body);
+  });
 }
