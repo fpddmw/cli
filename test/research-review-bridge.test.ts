@@ -332,32 +332,36 @@ describe("sandbox-bridge reviewer execution", () => {
     },
   );
 
-  it("rejects a symlinked sidecar state directory before creating key material", async () => {
-    const fixture = await bridgeFixture();
-    const parent = await mkdtemp(join(tmpdir(), "tiangong-review-state-link-"));
-    const target = join(parent, "target");
-    const link = join(parent, "link");
-    await mkdir(target);
-    await symlink(target, link);
-    try {
-      await assert.rejects(
-        startReviewerBridgeSidecar({
-          root: fixture.root,
-          stateDirectory: link,
-          environment: { PATH: process.env.PATH },
-          executeNative: async () => successfulResult(),
-        }),
-        (error: unknown) => {
-          assert.ok(error instanceof CliError);
-          assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_STATE_INVALID");
-          return true;
-        },
-      );
-      await assert.rejects(readFile(join(target, "reviewer-bridge-private-key.pem")), /ENOENT/);
-    } finally {
-      await Promise.all([fixture.cleanup(), rm(parent, { recursive: true, force: true })]);
-    }
-  });
+  it(
+    "rejects a symlinked sidecar state directory before creating key material",
+    { skip: !researchPlatformCapabilities().reviewerSidecarExecution },
+    async () => {
+      const fixture = await bridgeFixture();
+      const parent = await mkdtemp(join(tmpdir(), "tiangong-review-state-link-"));
+      const target = join(parent, "target");
+      const link = join(parent, "link");
+      await mkdir(target);
+      await symlink(target, link);
+      try {
+        await assert.rejects(
+          startReviewerBridgeSidecar({
+            root: fixture.root,
+            stateDirectory: link,
+            environment: { PATH: process.env.PATH },
+            executeNative: async () => successfulResult(),
+          }),
+          (error: unknown) => {
+            assert.ok(error instanceof CliError);
+            assert.equal(error.code, "RESEARCH_REVIEW_BRIDGE_STATE_INVALID");
+            return true;
+          },
+        );
+        await assert.rejects(readFile(join(target, "reviewer-bridge-private-key.pem")), /ENOENT/);
+      } finally {
+        await Promise.all([fixture.cleanup(), rm(parent, { recursive: true, force: true })]);
+      }
+    },
+  );
 
   it(
     "runs the workspace reviewer smoke through the explicitly configured bridge",
