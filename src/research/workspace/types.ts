@@ -525,6 +525,8 @@ export interface RunRecord {
   failureKind: FailureKind | null;
   failureDetails?: Record<string, unknown> | null | undefined;
   runtime: AgentRuntimeFingerprint | null;
+  isolation?: ReviewIsolationFingerprint | undefined;
+  reviewAttestation?: ReviewExecutionAttestation | undefined;
   telemetry?: AgentExecutionTelemetry | undefined;
   accountingMode?: "measured" | "reserved-native-host" | "mechanical";
 }

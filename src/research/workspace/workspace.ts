@@ -11,6 +11,7 @@ import { appendJournalEvent, verifyJournal } from "./journal.js";
 import { loadProjectEvidenceReceipts } from "./evidence.js";
 import { executeAgent, fingerprintAgentRoute, type AgentExecutionRequest } from "./executor.js";
 import { doctorExternalCapabilities, hasPublicInternetCapability } from "./external-skills.js";
+import { createReviewExecutor } from "./review-executor.js";
 import { parseStructuredStageOutput, schemaForStage } from "./schemas.js";
 import { sanitizeResearchText } from "./sanitization.js";
 import {
@@ -370,6 +371,9 @@ export async function doctorResearchWorkspace(
       detail: `producer=${value.producer.agent} reviewer=${value.reviewer.agent}`,
     };
   });
+  const configuredReviewExecutor = config
+    ? createReviewExecutor({ root: workspace, execution: config.reviewerExecution })
+    : null;
   await checked(checks, "runtime-lock", async () => {
     const lock = await requireCurrentRuntimeLock(workspace, marker);
     return { value: lock, detail: `${lock.packageName}@${lock.packageVersion}` };
@@ -452,7 +456,9 @@ export async function doctorResearchWorkspace(
           workspace,
           config,
           options.environment ?? process.env,
-          options.runtimeFingerprinter ?? fingerprintAgentRoute,
+          options.runtimeFingerprinter ??
+            configuredReviewExecutor?.fingerprint ??
+            fingerprintAgentRoute,
         )
       : null;
   const attested =
@@ -503,6 +509,13 @@ export async function doctorResearchWorkspace(
       id: "independent-review-route",
       status: "pass",
       detail: `${config.producer.agent} -> ${config.reviewer.agent}`,
+    });
+  }
+  if (config) {
+    checks.push({
+      id: "reviewer-transport",
+      status: "pass",
+      detail: `${config.reviewerExecution.transport}; isolation=${config.reviewerExecution.isolationProvider}`,
     });
   }
   if (
@@ -579,7 +592,7 @@ export async function doctorResearchWorkspace(
             config,
             route,
             options.environment ?? process.env,
-            options.executor ?? executeAgent,
+            options.executor ?? configuredReviewExecutor?.execute ?? executeAgent,
           );
           return { value, detail: agentSmokeDetail(value) };
         });

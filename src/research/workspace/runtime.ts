@@ -34,6 +34,7 @@ import {
   registerProjectInputCandidates,
 } from "./evidence-ledger.js";
 import { executeAgent, type AgentExecutionRequest } from "./executor.js";
+import { createReviewExecutor } from "./review-executor.js";
 import { requiredDiscoveryCapabilityIds } from "./external-skills.js";
 import { renderInputLineContext } from "./input-plan.js";
 import {
@@ -283,9 +284,15 @@ export const researchHandoffRecordSchema = {
 export async function runResearchWorkspace(
   root: string,
   options: RunOptions,
-  packageExecutor: PackageExecutor = executeAgent,
+  packageExecutor?: PackageExecutor,
 ): Promise<WorkspaceRunResult> {
-  return runResearchWorkspaceInternal(root, options, packageExecutor, false);
+  return runResearchWorkspaceInternal(
+    root,
+    options,
+    packageExecutor ?? executeAgent,
+    false,
+    packageExecutor === undefined,
+  );
 }
 
 /** @internal Test-only seam for exercising deterministic package admission with fake agents. */
@@ -294,7 +301,7 @@ export async function runResearchWorkspaceWithInjectedProducerForTesting(
   options: RunOptions,
   packageExecutor: PackageExecutor,
 ): Promise<WorkspaceRunResult> {
-  return runResearchWorkspaceInternal(root, options, packageExecutor, true);
+  return runResearchWorkspaceInternal(root, options, packageExecutor, true, false);
 }
 
 async function runResearchWorkspaceInternal(
@@ -302,6 +309,7 @@ async function runResearchWorkspaceInternal(
   options: RunOptions,
   packageExecutor: PackageExecutor,
   allowInjectedProducerForTesting: boolean,
+  useConfiguredReviewerExecutor: boolean,
 ): Promise<WorkspaceRunResult> {
   validateRunOptions(options);
   const requestId = randomUUID();
@@ -310,6 +318,9 @@ async function runResearchWorkspaceInternal(
     await verifyJournal(workspacePaths(root).journal);
     const config = await loadWorkspaceConfig(root);
     assertExecutionConfiguration(config);
+    const reviewerPackageExecutor = useConfiguredReviewerExecutor
+      ? createReviewExecutor({ root, execution: config.reviewerExecution }).execute
+      : null;
     for (const project of await projectsForRun(root, options.projectId)) {
       await assertProjectPublicationPolicy(root, project);
     }
@@ -379,6 +390,7 @@ async function runResearchWorkspaceInternal(
             options,
             requestId,
             packageExecutor,
+            reviewerPackageExecutor,
             doctorAttestation,
           ),
         ),
@@ -1601,6 +1613,7 @@ async function executeWorkPackage(
   options: RunOptions,
   requestId: string,
   packageExecutor: PackageExecutor,
+  reviewerPackageExecutor: PackageExecutor | null,
   doctorAttestation: WorkspaceDoctorAttestation | null,
 ): Promise<{ projectId: string; packageId: string; status: string }> {
   const project = await loadProject(root, projectId);
@@ -1689,6 +1702,10 @@ async function executeWorkPackage(
         config,
       );
       const route = workPackage.executor === "reviewer" ? config.reviewer : config.producer;
+      const selectedPackageExecutor =
+        workPackage.executor === "reviewer" && reviewerPackageExecutor
+          ? reviewerPackageExecutor
+          : packageExecutor;
       executor = route.agent;
       broker =
         workPackage.stage === "discover"
@@ -1732,7 +1749,7 @@ async function executeWorkPackage(
       });
       assertPreCallTokenReservation(project, workPackage, config, primaryRequest, 0, true);
       result = await withHeartbeat(
-        packageExecutor(primaryRequest),
+        selectedPackageExecutor(primaryRequest),
         options,
         requestId,
         project,
@@ -1787,7 +1804,7 @@ async function executeWorkPackage(
           false,
         );
         const repair = await withHeartbeat(
-          packageExecutor(repairRequest),
+          selectedPackageExecutor(repairRequest),
           options,
           requestId,
           project,
@@ -1893,6 +1910,8 @@ async function executeWorkPackage(
       failureKind: null,
       failureDetails: null,
       runtime: accountedResult.runtime,
+      isolation: accountedResult.isolation,
+      reviewAttestation: accountedResult.reviewAttestation,
       telemetry: accountedResult.telemetry,
     });
     const usage = usageSlice(accountedResult);
@@ -1905,6 +1924,7 @@ async function executeWorkPackage(
       outputs: promotedOutputs,
       usage,
       runtime: accountedResult.runtime,
+      reviewerExecution: accountedResult.reviewAttestation ?? accountedResult.isolation ?? null,
     });
     emitProgress(
       options,
@@ -1968,6 +1988,8 @@ async function executeWorkPackage(
         failureKind: classification.kind,
         failureDetails,
         runtime: accountedResult.runtime,
+        isolation: accountedResult.isolation,
+        reviewAttestation: accountedResult.reviewAttestation,
         telemetry: accountedResult.telemetry,
       });
     }
@@ -4443,6 +4465,8 @@ function combineExecutionResults(
     wallSeconds: primary.wallSeconds + repair.wallSeconds,
     model: repair.model ?? primary.model,
     runtime: repair.runtime ?? primary.runtime,
+    isolation: repair.isolation ?? primary.isolation,
+    reviewAttestation: repair.reviewAttestation ?? primary.reviewAttestation,
     telemetry: mergeTelemetry(primary.telemetry, repair.telemetry),
   };
 }

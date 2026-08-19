@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { CliError } from "../src/errors.js";
+import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import type { AgentExecutionRequest } from "../src/research/workspace/executor.js";
 import {
   createReviewExecutor,
@@ -23,6 +24,7 @@ import type {
   WorkspaceConfig,
 } from "../src/research/workspace/types.js";
 import {
+  doctorResearchWorkspace,
   initializeResearchWorkspace,
   loadWorkspaceConfig,
 } from "../src/research/workspace/workspace.js";
@@ -150,6 +152,37 @@ describe("sandbox-bridge reviewer execution", () => {
       assert.equal(connection.workspaceId, sidecar.workspaceId);
       assert.equal(connection.keyFingerprint, sidecar.keyFingerprint);
       assert.doesNotMatch(JSON.stringify(sidecar), /clientToken|privateKey|bridge-secret/);
+    } finally {
+      await sidecar.close();
+      await Promise.all([fixture.cleanup(), rm(stateDirectory, { recursive: true, force: true })]);
+    }
+  });
+
+  it("runs the workspace reviewer smoke through the explicitly configured bridge", async () => {
+    const fixture = await bridgeFixture();
+    const stateDirectory = await mkdtemp(join(tmpdir(), "tiangong-review-doctor-state-"));
+    await lockCapabilities(fixture.root);
+    let sidecarExecutions = 0;
+    const sidecar = await startReviewerBridgeSidecar({
+      root: fixture.root,
+      stateDirectory,
+      environment: { PATH: process.env.PATH },
+      executeNative: async () => {
+        sidecarExecutions += 1;
+        return successfulResult();
+      },
+    });
+    try {
+      const doctor = await doctorResearchWorkspace(fixture.root, {
+        agentSmoke: true,
+        environment: { PATH: process.env.PATH },
+      });
+      assert.equal(doctor.status, "ready");
+      assert.equal(
+        doctor.checks.find((check) => check.id === "agent-sandbox-smoke")?.status,
+        "pass",
+      );
+      assert.equal(sidecarExecutions, 1);
     } finally {
       await sidecar.close();
       await Promise.all([fixture.cleanup(), rm(stateDirectory, { recursive: true, force: true })]);
