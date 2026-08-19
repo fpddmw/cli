@@ -1,5 +1,5 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { extname, isAbsolute, relative, resolve, sep } from "node:path";
+import { extname, isAbsolute, relative, resolve, sep, win32 } from "node:path";
 
 import { CliError } from "../../errors.js";
 import type { ScientificDesignContract } from "./scientific-design.js";
@@ -378,29 +378,41 @@ async function exactExternalFile(root: string, path: string): Promise<string> {
       "path-invalid",
     );
   }
-  const canonical = await realpath(path).catch(() => null);
-  if (!canonical || canonical !== path) {
+  const selectedInfo = await lstat(path).catch(() => undefined);
+  if (!selectedInfo?.isFile() || selectedInfo.isSymbolicLink()) {
     throw scientificObjectInputError(
-      "Scientific object path must not traverse a symbolic link.",
+      "Scientific object path must name one regular non-symlink file.",
       "path-unsafe",
     );
   }
-  const info = await lstat(canonical).catch(() => undefined);
-  if (!info?.isFile() || info.isSymbolicLink()) {
+  const canonical = await realpath(path).catch(() => null);
+  if (!canonical) {
     throw scientificObjectInputError(
       "Scientific object path must be one regular non-symlink file.",
       "path-unsafe",
     );
   }
-  const control = resolve(workspacePaths(root).control);
+  const lexicalControl = resolve(workspacePaths(root).control);
+  const control = await realpath(lexicalControl).catch(() => lexicalControl);
   const relation = relative(control, canonical);
-  if (canonical === control || (!relation.startsWith(`..${sep}`) && relation !== "..")) {
+  if (canonical === control || isContainedRelativePath(relation)) {
     throw scientificObjectInputError(
       "Scientific object source must originate outside the research control directory.",
       "path-inside-control",
     );
   }
   return canonical;
+}
+
+export function isContainedRelativePath(value: string): boolean {
+  return (
+    value !== ".." &&
+    !value.startsWith(`..${sep}`) &&
+    !value.startsWith("../") &&
+    !value.startsWith("..\\") &&
+    !isAbsolute(value) &&
+    !win32.isAbsolute(value)
+  );
 }
 
 async function assertImmutableBlob(

@@ -407,8 +407,10 @@ Use the returned `sha256` and `objectLocator` verbatim in the design. Registrati
 is workspace-scoped because it must happen before project admission. It hashes
 raw bytes, atomically stores an immutable `lineage/objects/<sha256>/blob`, and
 records only deterministic non-path metadata. It never accepts a source inside
-`.tiangong-research`, a symlink, an unsupported/binary media type, or invalid
-UTF-8. Re-registration is idempotent, and `research scientific object inspect`
+`.tiangong-research`, a symlink as the selected file, an unsupported/binary
+media type, or invalid UTF-8. Canonical parent-directory aliases are resolved
+before containment checks, including macOS `/var` aliases and Windows
+cross-volume paths. Re-registration is idempotent, and `research scientific object inspect`
 revalidates the record and blob before returning it. Do not hand-copy files into
 the control directory.
 

@@ -261,7 +261,8 @@ lifecycle reservations, and target-specific fork generations.
 scientific-object register/inspect flow, raw Python and lock-file promotion,
 idempotency, exact media/object-kind packet metadata, symlink and control-store
 source rejection, unsupported-media and host-path redaction, preflight gaps,
-kind mismatch, and immutable-blob drift at project admission.
+kind mismatch, immutable-blob drift at project admission, canonical parent
+aliases, and Windows cross-volume containment classification.
 `test/research-scientific-review.test.ts` covers the ordered research-design,
 real-record evidence-construct, and pilot-methods gates; other-family/fresh
 reviewer sessions; closed assessment/review schemas; mechanical precedence;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -8,6 +8,7 @@ import { runCli } from "../src/cli.js";
 import type { CliIO } from "../src/io.js";
 import { initializeProject } from "../src/research/workspace/projects.js";
 import { evaluateProjectPreflight } from "../src/research/workspace/preflight.js";
+import { isContainedRelativePath } from "../src/research/workspace/scientific-objects.js";
 import { prepareScientificReview } from "../src/research/workspace/scientific-review.js";
 import {
   workspacePaths,
@@ -19,6 +20,14 @@ import { initializeResearchWorkspace } from "../src/research/workspace/workspace
 import { scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("scientific object registration", () => {
+  it("classifies POSIX escapes and Windows cross-drive relations outside the control root", () => {
+    assert.equal(isContainedRelativePath("objects/blob"), true);
+    assert.equal(isContainedRelativePath("../outside/blob"), false);
+    assert.equal(isContainedRelativePath("..\\outside\\blob"), false);
+    assert.equal(isContainedRelativePath("/outside/blob"), false);
+    assert.equal(isContainedRelativePath("D:\\outside\\blob"), false);
+  });
+
   it("registers raw model and lock bytes through the public CLI before design review", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-scientific-object-"));
     const projectId = "scientific-object-flow";
@@ -222,6 +231,31 @@ describe("scientific object registration", () => {
       ]);
       assert.equal(invalidJsonResult.exitCode, 2);
       assert.equal(JSON.parse(invalidJsonResult.stderr).error.details.reason, "json-invalid");
+
+      if (process.platform !== "win32") {
+        const realParent = join(root, "real-source-parent");
+        const aliasedParent = join(root, "aliased-source-parent");
+        const realParentSource = join(realParent, "parent-alias-model.py");
+        await mkdir(realParent);
+        await writeFile(realParentSource, "def evaluate(value):\n    return value\n");
+        await symlink(realParent, aliasedParent);
+        const parentAliasResult = await invoke([
+          "research",
+          "scientific",
+          "object",
+          "register",
+          "--kind",
+          "model-implementation",
+          "--path",
+          join(aliasedParent, "parent-alias-model.py"),
+          "--media-type",
+          "text/x-python",
+          "--workspace",
+          root,
+          "--json",
+        ]);
+        assert.equal(parentAliasResult.exitCode, 0, parentAliasResult.stderr);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
