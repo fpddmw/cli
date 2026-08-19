@@ -1088,6 +1088,9 @@ describe("research project execution", () => {
       });
       await lockCapabilities(root);
       await initializeProject(root, "workbuddy-native", "Evaluate a WorkBuddy native stage.");
+      const evidencePath = join(root, "workbuddy-evidence.txt");
+      await writeFile(evidencePath, "Observed WorkBuddy native-host evidence.\n");
+      await addProjectInput(root, "workbuddy-native", evidencePath, "primary");
       const packet = await prepareNativeResearchStage({
         root,
         projectId: "workbuddy-native",
@@ -1140,11 +1143,53 @@ describe("research project execution", () => {
         }),
         (error: unknown) => error instanceof CliError && error.code === "RESEARCH_EXECUTOR_INVALID",
       );
-      await abortNativeResearchStage({
+      const sessionPath = join(
+        workspacePaths(root).projects,
+        "workbuddy-native",
+        "native",
+        "active.json",
+      );
+      const session = JSON.parse(await readFile(sessionPath, "utf8")) as {
+        capsuleRoot: string;
+        capsuleProject: string;
+      };
+      const execution = await fakeExecutor([])({
+        route: {
+          agent: "workbuddy",
+          executionMode: "native-host",
+          binary: "workbuddy-native-host",
+          model: packet.expectedModel,
+        },
+        prompt: packet.prompt,
+        outputSchema: packet.outputSchema,
+        requestId: packet.sessionId,
+        purpose: "primary",
+        capsuleRoot: session.capsuleRoot,
+        projectRoot: session.capsuleProject,
+        workspaceRoot: root,
+        timeoutSeconds: packet.limits.maxWallSeconds,
+        maxTurns: 1,
+        maxOutputTokens: packet.limits.maxOutputTokens,
+        maxCostUsd: packet.limits.reservedMaxCostUsd,
+        toolPolicy: "none",
+        environment: {},
+        brokerUrl: null,
+      });
+      const outputPath = join(root, "workbuddy-discover-output.json");
+      await writeFile(outputPath, execution.stdout);
+      await submitNativeResearchStage({
         root,
         projectId: "workbuddy-native",
         sessionId: packet.sessionId,
+        outputPath,
+        confirmedModel: packet.expectedModel,
       });
+      assert.equal(await lstat(sessionPath).catch(() => null), null);
+      assert.equal((await lstat(session.capsuleRoot)).isDirectory(), true);
+      assert.match(
+        await readFile(workspacePaths(root).journal, "utf8"),
+        /"capsuleDisposition":"retained-outer-sandbox"/,
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

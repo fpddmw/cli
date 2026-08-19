@@ -484,6 +484,27 @@ interface NativeStageSession {
   sessionSha256: string;
 }
 
+type NativeCapsuleDisposition = "deleted" | "retained-outer-sandbox";
+
+function nativeCapsuleDisposition(session: NativeStageSession): NativeCapsuleDisposition {
+  return session.packet.hostAgent === "workbuddy" || session.packet.hostAgent === "codebuddy"
+    ? "retained-outer-sandbox"
+    : "deleted";
+}
+
+async function releaseNativeStageSession(
+  root: string,
+  projectId: string,
+  session: NativeStageSession,
+): Promise<NativeCapsuleDisposition> {
+  const disposition = nativeCapsuleDisposition(session);
+  await rm(nativeStageSessionPath(root, projectId), { force: true });
+  if (disposition === "deleted") {
+    await rm(session.capsuleRoot, { recursive: true, force: true });
+  }
+  return disposition;
+}
+
 export interface NativeStageStatus {
   status: "none" | "active" | "stale" | "invalid";
   sessionId: string | null;
@@ -1226,6 +1247,7 @@ export async function submitNativeResearchStage(input: {
         accountingMode: "reserved-native-host",
       });
       const usage = { ...usageSlice(result), accountingMode: "reserved-native-host" };
+      const capsuleDisposition = nativeCapsuleDisposition(session);
       await appendJournalEvent(
         workspacePaths(input.root).journal,
         "native.stage.completed",
@@ -1238,10 +1260,12 @@ export async function submitNativeResearchStage(input: {
           stage: workPackage.stage,
           outputs,
           usage,
+          capsuleDisposition,
+          retainedCapsuleId:
+            capsuleDisposition === "retained-outer-sandbox" ? basename(session.capsuleRoot) : null,
         },
       );
-      await rm(nativeStageSessionPath(input.root, project.id), { force: true });
-      await rm(session.capsuleRoot, { recursive: true, force: true });
+      await releaseNativeStageSession(input.root, project.id, session);
       return {
         projectId: project.id,
         packageId: workPackage.id,
@@ -1338,10 +1362,14 @@ export async function abortNativeResearchStage(input: {
         projectId: project.id,
         packageId: workPackage.id,
         stage: workPackage.stage,
+        capsuleDisposition: nativeCapsuleDisposition(session),
+        retainedCapsuleId:
+          nativeCapsuleDisposition(session) === "retained-outer-sandbox"
+            ? basename(session.capsuleRoot)
+            : null,
       },
     );
-    await rm(nativeStageSessionPath(input.root, project.id), { force: true });
-    await rm(session.capsuleRoot, { recursive: true, force: true });
+    await releaseNativeStageSession(input.root, project.id, session);
     return {
       projectId: project.id,
       packageId: workPackage.id,
@@ -1439,6 +1467,11 @@ export async function requestResearchHandoff(input: {
       requestedAt,
       interruptedSessionId: session?.packet.sessionId ?? null,
       interruptedPackageId: session?.packet.packageId ?? null,
+      capsuleDisposition: session ? nativeCapsuleDisposition(session) : null,
+      retainedCapsuleId:
+        session && nativeCapsuleDisposition(session) === "retained-outer-sandbox"
+          ? basename(session.capsuleRoot)
+          : null,
     };
     await appendEvidenceLedgerEvent(input.root, project.id, "handoff.requested", eventPayload);
     await appendJournalEvent(
@@ -1448,8 +1481,7 @@ export async function requestResearchHandoff(input: {
       { projectId: project.id, ...eventPayload },
     );
     if (session) {
-      await rm(activePath, { force: true });
-      await rm(session.capsuleRoot, { recursive: true, force: true });
+      await releaseNativeStageSession(input.root, project.id, session);
     }
     return {
       projectId: project.id,

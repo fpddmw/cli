@@ -664,6 +664,14 @@ reviewer shell, browser, web, undeclared MCP, and Skill tools remain disabled.
 Do not use Full Access, sandbox-disable flags, unsandboxed-command exceptions,
 or silent transport fallback.
 
+WorkBuddy/CodeBuddy stage teardown removes only the single active-session
+binding. It deliberately retains the completed, aborted, or handed-off native
+capsule instead of triggering an IDE-intercepted recursive bulk deletion. The
+journal records `capsuleDisposition=retained-outer-sandbox` plus a non-sensitive
+capsule ID. Native Codex/Claude hosts keep the existing automatic capsule
+deletion behavior. No path silently falls back to Full Access, and retained
+capsules are never reported as active sessions.
+
 The discover packet derives a bounded multi-channel plan from reviewed evidence
 requirements. Required channels run first; exact repeated requests reuse the
 project cache without another provider call but still consume a bounded context

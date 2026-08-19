@@ -316,7 +316,10 @@ signed request/result/policy bindings, model/version/signature drift, atomic
 nonce replay rejection, a fixed no-command protocol, secret redaction, real
 macOS/Linux negative probes, workspace doctor routing, and the long-running CLI
 sidecar lifecycle. WorkBuddy native-host tests separately prove that the CLI
-records the real producer identity and refuses to launch it as a child.
+records the real producer identity, refuses to launch it as a child, removes the
+single active-session binding after submit, and retains the completed capsule
+with a non-sensitive journal disposition instead of requesting a recursive bulk
+delete from the outer IDE.
 Primary/repair reuse tests verify that an identical owner-only auth copy is
 accepted idempotently while source drift is rejected without overwriting the
 capsule file.

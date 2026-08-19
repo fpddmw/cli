@@ -304,6 +304,14 @@ not fall back between transports. WorkBuddy/CodeBuddy may be recorded as native
 producer hosts, but remain forbidden child executors; the reviewer stays Codex
 or Claude.
 
+Native-stage session release is host-aware. Codex/Claude stages remove their
+capsules after the immutable output and journal event commit. WorkBuddy/CodeBuddy
+stages remove only the active binding and retain the capsule with a bounded ID
+and `retained-outer-sandbox` journal disposition, because an outer IDE may
+intercept recursive deletion as a privileged bulk operation. Retention never
+changes package completion, makes the capsule active again, or weakens the
+reviewer isolation boundary.
+
 Final manuscript authoring follows the same native-host boundary. The CLI
 validates required manuscript sections and a distinct-file submission manifest,
 then freezes the native artifact, required cover/title/checklist/availability/
