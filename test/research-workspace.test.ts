@@ -3,6 +3,7 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "
 import { platform, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { describe, it } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { runCli } from "../src/cli.js";
 import { CliError } from "../src/errors.js";
@@ -893,6 +894,183 @@ describe("research project execution", () => {
       }
     },
   );
+
+  it(
+    "persists refreshed Claude subscription credentials after reviewer execution",
+    { skip: !researchPlatformCapabilities().nativeReviewerExecution },
+    async () => {
+      const capsule = await temporaryDirectory();
+      const sourceHome = await temporaryDirectory();
+      try {
+        const projectRoot = join(capsule, "project");
+        const sourceConfig = join(sourceHome, ".claude");
+        await mkdir(projectRoot);
+        await mkdir(sourceConfig, { mode: 0o700 });
+        const sourceAuth = join(sourceConfig, ".credentials.json");
+        const originalCredentials =
+          '{"claudeAiOauth":{"accessToken":"oauth-access-before","refreshToken":"oauth-refresh-before"}}\n';
+        const refreshedCredentials =
+          '{"claudeAiOauth":{"accessToken":"oauth-access-after","refreshToken":"oauth-refresh-after"}}\n';
+        await writeFile(sourceAuth, originalCredentials, { mode: 0o600 });
+        const binary = join(capsule, "fake-refreshing-claude");
+        await writeFile(
+          binary,
+          [
+            "#!/bin/sh",
+            'if [ "$1" = "--version" ]; then printf \'%s\\n\' "fake-refreshing-claude 1.0"; exit 0; fi',
+            "cat >/dev/null",
+            `printf '%s\\n' '${refreshedCredentials.trim()}' > "$CLAUDE_CONFIG_DIR/.credentials.json"`,
+            `printf '%s\\n' '{"result":"{\\"ok\\":true}","usage":{"input_tokens":2,"output_tokens":1}}'`,
+            "",
+          ].join("\n"),
+        );
+        await chmod(binary, 0o755);
+
+        const result = await executeAgent({
+          route: { agent: "claude", binary, model: "test-model" },
+          prompt: "Return the doctor result.",
+          outputSchema: schemaForStage("doctor"),
+          requestId: "claude-oauth-refresh-test",
+          purpose: "doctor",
+          capsuleRoot: capsule,
+          projectRoot,
+          workspaceRoot: capsule,
+          timeoutSeconds: 10,
+          maxTurns: 1,
+          maxOutputTokens: 100,
+          maxCostUsd: 1,
+          toolPolicy: "none",
+          environment: { HOME: sourceHome, PATH: process.env.PATH },
+          brokerUrl: null,
+        });
+
+        assert.equal(result.exitCode, 0, result.stderr);
+        assert.equal(await readFile(sourceAuth, "utf8"), refreshedCredentials);
+        if (platform() !== "win32") {
+          assert.equal((await lstat(sourceAuth)).mode & 0o077, 0);
+        }
+      } finally {
+        await Promise.all([
+          rm(capsule, { recursive: true, force: true }),
+          rm(sourceHome, { recursive: true, force: true }),
+        ]);
+      }
+    },
+  );
+
+  it(
+    "refuses to overwrite concurrently changed Claude subscription credentials",
+    { skip: !researchPlatformCapabilities().nativeReviewerExecution },
+    async () => {
+      const capsule = await temporaryDirectory();
+      const sourceHome = await temporaryDirectory();
+      try {
+        const projectRoot = join(capsule, "project");
+        const sourceConfig = join(sourceHome, ".claude");
+        await mkdir(projectRoot);
+        await mkdir(sourceConfig, { mode: 0o700 });
+        const sourceAuth = join(sourceConfig, ".credentials.json");
+        const ownerCredentials =
+          '{"claudeAiOauth":{"accessToken":"oauth-owner-concurrent","refreshToken":"oauth-owner-refresh"}}\n';
+        const capsuleCredentials =
+          '{"claudeAiOauth":{"accessToken":"oauth-capsule-refreshed","refreshToken":"oauth-capsule-refresh"}}\n';
+        await writeFile(
+          sourceAuth,
+          '{"claudeAiOauth":{"accessToken":"oauth-access-before","refreshToken":"oauth-refresh-before"}}\n',
+          { mode: 0o600 },
+        );
+        const marker = join(projectRoot, "claude-started");
+        const binary = join(capsule, "fake-concurrent-claude");
+        await writeFile(
+          binary,
+          [
+            "#!/bin/sh",
+            'if [ "$1" = "--version" ]; then printf \'%s\\n\' "fake-concurrent-claude 1.0"; exit 0; fi',
+            "cat >/dev/null",
+            "printf '%s\\n' started > claude-started",
+            "sleep 1",
+            `printf '%s\\n' '${capsuleCredentials.trim()}' > "$CLAUDE_CONFIG_DIR/.credentials.json"`,
+            `printf '%s\\n' '{"result":"{\\"ok\\":true}","usage":{"input_tokens":2,"output_tokens":1}}'`,
+            "",
+          ].join("\n"),
+        );
+        await chmod(binary, 0o755);
+
+        const execution = executeAgent({
+          route: { agent: "claude", binary, model: "test-model" },
+          prompt: "Return the doctor result.",
+          outputSchema: schemaForStage("doctor"),
+          requestId: "claude-oauth-concurrent-test",
+          purpose: "doctor",
+          capsuleRoot: capsule,
+          projectRoot,
+          workspaceRoot: capsule,
+          timeoutSeconds: 10,
+          maxTurns: 1,
+          maxOutputTokens: 100,
+          maxCostUsd: 1,
+          toolPolicy: "none",
+          environment: { HOME: sourceHome, PATH: process.env.PATH },
+          brokerUrl: null,
+        });
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          if (await lstat(marker).catch(() => null)) break;
+          await delay(10);
+        }
+        assert.ok(await lstat(marker).catch(() => null));
+        await writeFile(sourceAuth, ownerCredentials, { mode: 0o600 });
+
+        await assert.rejects(
+          execution,
+          (error: unknown) =>
+            error instanceof CliError &&
+            error.code === "RESEARCH_EXECUTOR_AUTH_RECONCILIATION_FAILED",
+        );
+        assert.equal(await readFile(sourceAuth, "utf8"), ownerCredentials);
+        assert.equal(
+          await readFile(join(capsule, "home", ".claude", ".credentials.json"), "utf8"),
+          capsuleCredentials,
+        );
+      } finally {
+        await Promise.all([
+          rm(capsule, { recursive: true, force: true }),
+          rm(sourceHome, { recursive: true, force: true }),
+        ]);
+      }
+    },
+  );
+
+  it("retains a package capsule when authentication reconciliation fails", async () => {
+    const root = await temporaryDirectory();
+    let retainedCapsule = "";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      await initializeProject(root, "auth-reconciliation", "Preserve refreshed reviewer auth.");
+
+      await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 1, dryRun: false, environment: {} },
+        async (request) => {
+          retainedCapsule = request.capsuleRoot;
+          throw new CliError("Refreshed authentication requires owner reconciliation.", {
+            code: "RESEARCH_EXECUTOR_AUTH_RECONCILIATION_FAILED",
+            exitCode: 3,
+            details: { retainCapsule: true },
+          });
+        },
+      );
+
+      assert.ok(retainedCapsule);
+      assert.equal((await lstat(retainedCapsule)).isDirectory(), true);
+      assert.match(
+        await readFile(workspacePaths(root).journal, "utf8"),
+        /"capsuleDisposition":"retained-auth-reconciliation"/,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 
   it(
     "extracts only whitelisted Claude settings authentication into the capsule",

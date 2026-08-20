@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-08-20
-lastReviewedCommit: daf1a9dd243163778e60b48803263a0fcf1ef678
+lastReviewedCommit: a011bc2f65d6cf842ae121ce24e65c8375815db7
 ---
 
 # Tiangong AI CLI
@@ -713,9 +713,15 @@ inside the outer IDE. Native stages remove only the single active-session
 binding, while completed, aborted, handed-off, and reviewer/work-package
 capsules are retained. The journal records
 `capsuleDisposition=retained-outer-sandbox` plus a non-sensitive capsule ID.
-Native Codex/Claude hosts keep the existing automatic capsule deletion behavior.
-No path silently falls back to Full Access, and retained capsules are never
-reported as active sessions.
+Native Codex/Claude hosts normally keep automatic capsule deletion. On Linux/WSL,
+when Claude refreshes an owner-only `.credentials.json` capsule copy, the CLI
+persists it through a same-directory atomic replacement only while the configured
+owner path, real path, mode, and initial hash remain unchanged. Concurrent owner
+changes or an unverifiable replacement fail closed and retain the capsule with
+`capsuleDisposition=retained-auth-reconciliation` plus a non-sensitive capsule ID
+for owner recovery. Static environment credentials are never written back. No path
+silently falls back to Full Access, and retained capsules are never reported as
+active sessions.
 
 The discover packet derives a bounded multi-channel plan from reviewed evidence
 requirements. Required channels run first; exact repeated requests reuse the

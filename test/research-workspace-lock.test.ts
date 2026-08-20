@@ -130,8 +130,24 @@ describe("research workspace lock crash consistency", () => {
       );
       assert.equal(project.id, "recovered-legacy-lock");
       const journalText = await readFile(workspacePaths(root).journal, "utf8");
-      assert.match(journalText, /"reason":"legacy-dead-owner"/u);
-      assert.equal(journalText.includes(String(deadOwner.pid)), false);
+      const recoveryEvent = journalText
+        .trim()
+        .split(/\r?\n/u)
+        .map((line) => JSON.parse(line) as { type?: string; payload?: Record<string, unknown> })
+        .find(
+          (event) =>
+            event.type === "workspace.lock.recovered" &&
+            event.payload?.reason === "legacy-dead-owner",
+        );
+      assert.ok(recoveryEvent);
+      const recoveryPayload = recoveryEvent.payload ?? {};
+      assert.equal(Object.hasOwn(recoveryPayload, "pid"), false);
+      assert.equal(
+        Object.values(recoveryPayload).some(
+          (value) => value === deadOwner.pid || value === String(deadOwner.pid),
+        ),
+        false,
+      );
     } finally {
       if (deadOwner.exitCode === null && deadOwner.signalCode === null) {
         deadOwner.kill("SIGKILL");
