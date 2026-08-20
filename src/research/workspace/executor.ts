@@ -174,6 +174,7 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
     completed = await spawnCaptured({
       binary: sandboxed.binary,
       args: sandboxed.args,
+      stdin: invocation.stdin,
       cwd: request.projectRoot,
       env: sanitizedEnvironment(
         request.environment,
@@ -415,7 +416,7 @@ async function buildInvocation(
   request: AgentExecutionRequest,
   resolvedBinary: string,
   outputSchemaPath: string,
-): Promise<{ binary: string; args: string[] }> {
+): Promise<{ binary: string; args: string[]; stdin: string }> {
   await writeFile(outputSchemaPath, `${JSON.stringify(request.outputSchema, null, 2)}\n`, {
     encoding: "utf8",
     mode: 0o600,
@@ -470,8 +471,7 @@ async function buildInvocation(
       );
     }
     if (request.route.model) args.push("--model", request.route.model);
-    args.push(request.prompt);
-    return { binary: resolvedBinary, args };
+    return { binary: resolvedBinary, args, stdin: request.prompt };
   }
   if (request.route.agent !== "claude") {
     throw new CliError("Native WorkBuddy/CodeBuddy producers cannot be launched as child CLIs.", {
@@ -482,7 +482,6 @@ async function buildInvocation(
   const toolPolicy = request.toolPolicy ?? "workspace-read";
   const args = [
     "-p",
-    request.prompt,
     "--output-format",
     "json",
     "--permission-mode",
@@ -500,7 +499,7 @@ async function buildInvocation(
     request.route.effort ?? DEFAULT_AGENT_EFFORT,
   ];
   if (request.purpose !== "repair") {
-    args.splice(4, 0, "--json-schema", JSON.stringify(request.outputSchema));
+    args.splice(1, 0, "--json-schema", JSON.stringify(request.outputSchema));
   }
   const allowedTools = toolPolicy === "none" ? [] : ["Read", "Glob", "Grep"];
   if (request.brokerUrl) {
@@ -520,7 +519,7 @@ async function buildInvocation(
   args.push("--allowedTools", allowedTools.join(","));
   if (request.maxCostUsd > 0) args.push("--max-budget-usd", String(request.maxCostUsd));
   if (request.route.model) args.push("--model", request.route.model);
-  return { binary: resolvedBinary, args };
+  return { binary: resolvedBinary, args, stdin: request.prompt };
 }
 
 function requireHeadlessAgentRoute(route: AgentRoute): void {
@@ -912,6 +911,7 @@ async function resolveExecutable(binary: string, pathValue: string | undefined):
 async function spawnCaptured(input: {
   binary: string;
   args: string[];
+  stdin?: string;
   cwd: string;
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
@@ -923,7 +923,7 @@ async function spawnCaptured(input: {
       env: input.env,
       shell: false,
       detached: platform() !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
@@ -941,6 +941,14 @@ async function spawnCaptured(input: {
       }
     };
     const timer = setTimeout(() => terminate(), input.timeoutMs);
+    child.stdin.on("error", (error) => {
+      if ((error as NodeJS.ErrnoException).code === "EPIPE" || settled) return;
+      settled = true;
+      clearTimeout(timer);
+      terminate();
+      reject(error);
+    });
+    child.stdin.end(input.stdin ?? "", "utf8");
     const capture = (target: Buffer[], chunk: Buffer): void => {
       capturedBytes += chunk.length;
       if (capturedBytes > input.maxCaptureBytes) {

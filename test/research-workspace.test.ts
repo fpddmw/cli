@@ -349,6 +349,67 @@ describe("research capability locks", () => {
 
 describe("research project execution", () => {
   it(
+    "streams large Codex and Claude prompts over stdin instead of argv",
+    { skip: !researchPlatformCapabilities().nativeReviewerExecution },
+    async () => {
+      const largePrompt = `${"x".repeat(500_000)}\nlarge-prompt-stdin-sentinel`;
+      for (const agent of ["codex", "claude"] as const) {
+        const capsule = await temporaryDirectory();
+        try {
+          const projectRoot = join(capsule, "project");
+          const capturedPrompt = join(capsule, `${agent}-prompt.txt`);
+          const binary = join(capsule, `fake-${agent}-stdin`);
+          await mkdir(projectRoot);
+          await writeFile(
+            binary,
+            [
+              "#!/bin/sh",
+              `if [ "$1" = "--version" ]; then printf '%s\\n' "fake-${agent} 1.0"; exit 0; fi`,
+              'case "$*" in *"large-prompt-stdin-sentinel"*) exit 92;; esac',
+              `cat > ${JSON.stringify(capturedPrompt)}`,
+              `grep -q "large-prompt-stdin-sentinel" ${JSON.stringify(capturedPrompt)} || exit 93`,
+              ...(agent === "codex"
+                ? [
+                    `printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"ok\\":true}"}}'`,
+                    `printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":2,"cached_input_tokens":0,"output_tokens":1}}'`,
+                  ]
+                : [
+                    `printf '%s\\n' '{"result":"{\\"ok\\":true}","usage":{"input_tokens":2,"output_tokens":1}}'`,
+                  ]),
+              "",
+            ].join("\n"),
+          );
+          await chmod(binary, 0o755);
+
+          const result = await executeAgent({
+            route: { agent, binary, model: "test-model" },
+            prompt: largePrompt,
+            outputSchema: schemaForStage("doctor"),
+            requestId: `${agent}-large-stdin-test`,
+            purpose: "doctor",
+            capsuleRoot: capsule,
+            projectRoot,
+            workspaceRoot: capsule,
+            timeoutSeconds: 10,
+            maxTurns: 1,
+            maxOutputTokens: 100,
+            maxCostUsd: 1,
+            toolPolicy: "none",
+            environment: { PATH: process.env.PATH },
+            brokerUrl: null,
+          });
+
+          assert.equal(result.exitCode, 0, result.stderr);
+          assert.equal(result.stdout, '{"ok":true}');
+          assert.equal(await readFile(capturedPrompt, "utf8"), largePrompt);
+        } finally {
+          await rm(capsule, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it(
     "runs an executor inside the platform capsule and parses accounting",
     { skip: !researchPlatformCapabilities().nativeReviewerExecution },
     async () => {
@@ -695,11 +756,11 @@ describe("research project execution", () => {
           [
             "#!/bin/sh",
             'if [ "$1" = "--version" ]; then printf \'%s\\n\' "fake-claude 1.0"; exit 0; fi',
+            "prompt=$(cat)",
             "schema_ok=false",
-            'case "$*" in',
-            '  *"Return the doctor result."*"--json-schema"*) schema_ok=true;;',
-            '  *"Repair the result."*"--json-schema"*) ;;',
-            '  *"Repair the result."*) schema_ok=true;;',
+            'case "$prompt" in',
+            '  "Return the doctor result.") case "$*" in *"--json-schema"*) schema_ok=true;; esac;;',
+            '  "Repair the result.") case "$*" in *"--json-schema"*) ;; *) schema_ok=true;; esac;;',
             "esac",
             'if [ "$schema_ok" = true ] && [ "$ANTHROPIC_API_KEY" = "anthropic-test-secret-value" ] && [ -z "$OPENAI_API_KEY" ] && [ "$CLAUDE_CODE_TMPDIR" = "$TMPDIR" ] && [ "$CLAUDE_TMPDIR" = "$TMPDIR" ] && [ "$BUN_TMPDIR" = "$TMPDIR" ] && case "$*" in *"--permission-mode default"*"--max-turns 1"*"--effort xhigh"*) true;; *) false;; esac; then',
             '  printf \'%s\\n\' \'{"result":"{\\"ok\\":true}","usage":{"input_tokens":2,"output_tokens":1}}\'',

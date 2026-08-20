@@ -117,6 +117,7 @@ storage writes, queueing, and document status transitions.
   documentation included at admission,
   mode-specific budgets with low-cost smoke defaults and deliberately generous
   but finite production runaway ceilings,
+  stdin-delivered agent prompts that are independent of host argv limits,
   tool-context-aware process capture, classified retries,
   project-scoped scheduling/exit status, durable user-action and
   external-response handoffs, JSONL progress, recovery events, exact
@@ -248,6 +249,10 @@ credentials remain in an owner-only logical map and are injected only by the
 broker. POST request bodies reject credential-like fields, persist only their
 hash outside the evidence object, and cannot redirect. A selected production
 profile must include an independent public-internet capability. The reviewed
+broker response screen requires explicit authentication headers, sensitive
+fields, or exact configured secrets; ordinary academic prose containing words
+such as `Basic` or `Bearer` is not an authentication signal without that
+context. The reviewed
 Tiangong SCI, report, and patent adapters are optional, distinct
 owner-whitelisted databases and cannot satisfy that public-internet gate or
 substitute for one another; arbitrary owner databases still require an explicit
