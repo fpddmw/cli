@@ -73,7 +73,10 @@ storage writes, queueing, and document status transitions.
   configuration/smoke-only until an approved native capsule provider exists.
 - `src/research/workspace/**`: the versioned research workspace protocol. It
   owns context classification, immutable input admission, capability policy
-  locks, a separately sourced external Skill ecosystem catalog, immutable setup
+  locks, heartbeat-backed setup/workspace mutation leases with same-host
+  dead-process recovery, delayed unknown-host expiry, owner-token-checked
+  release, safe legacy-file-lock migration, and path-free append-only recovery
+  events, a separately sourced external Skill ecosystem catalog, immutable setup
   plans/state/history, reproducible detached source checkout with fixed Git
   line-ending behavior, locale-independent whole-tree hashing, and exact-copy
   installation, custom external capability admission,
