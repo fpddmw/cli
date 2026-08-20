@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-08-20
-lastReviewedCommit: 54bdf7b2d26750ce205c2a04fe351a967a7d631c
+lastReviewedCommit: a011bc2f65d6cf842ae121ce24e65c8375815db7
 ---
 
 # Repo Validation
@@ -353,7 +353,11 @@ proves that the reviewer/work-package capsule is retained with the same bounded
 disposition while mechanical closure still completes.
 Primary/repair reuse tests verify that an identical owner-only auth copy is
 accepted idempotently while source drift is rejected without overwriting the
-capsule file.
+capsule file. Claude subscription regressions verify successful atomic refresh
+writeback, concurrent owner-change refusal without overwrite, and retained
+capsule disposition when reconciliation fails. The legacy lock regression
+parses the exact recovery event before checking that PID data is absent, rather
+than treating unrelated timestamp or digest digits as a leak.
 Leaf-command help tests run from an unmanaged directory before workspace
 resolution. A deterministic fake Codex emits a
 90 KiB MCP result to prove the capture reservation includes bounded tool

@@ -10,6 +10,7 @@ import {
   open,
   readFile,
   realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -99,6 +100,20 @@ export interface AgentExecutionRequest {
   toolPolicy?: "none" | "workspace-read";
   environment: NodeJS.ProcessEnv;
   brokerUrl: string | null;
+}
+
+interface CapsuleAuthenticationBinding {
+  agent: AgentRoute["agent"];
+  source: string;
+  sourceRealPath: string;
+  destination: string;
+  sourceSha256: string;
+}
+
+interface PreparedCapsuleAuthentication {
+  secrets: string[];
+  environment: NodeJS.ProcessEnv;
+  bindings: CapsuleAuthenticationBinding[];
 }
 
 export async function executeAgent(request: AgentExecutionRequest): Promise<ExecutionResult> {
@@ -202,6 +217,8 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
       });
     }
     throw error;
+  } finally {
+    secrets.push(...(await reconcileCapsuleAuthentication(capsuleAuth)));
   }
   const wallSeconds = Number(process.hrtime.bigint() - started) / 1_000_000_000;
   if (isNestedSandboxDenial(completed.exitCode, completed.stderr)) {
@@ -653,7 +670,7 @@ async function prepareCapsuleHome(
   route: AgentRoute,
   capsuleHome: string,
   environment: NodeJS.ProcessEnv,
-): Promise<{ secrets: string[]; environment: NodeJS.ProcessEnv }> {
+): Promise<PreparedCapsuleAuthentication> {
   await mkdir(capsuleHome, { recursive: true, mode: 0o700 });
   const sourceHome =
     environment.HOME && isAbsolute(environment.HOME) ? environment.HOME : homedir();
@@ -681,6 +698,7 @@ async function prepareCapsuleHome(
           },
         ];
   const secrets: string[] = [];
+  const bindings: CapsuleAuthenticationBinding[] = [];
   for (const candidate of candidates) {
     const info = await lstat(candidate.source).catch(() => undefined);
     if (!info) continue;
@@ -694,8 +712,20 @@ async function prepareCapsuleHome(
       );
     }
     assertOwnerOnlyAuthenticationFile(info.mode, route.agent);
+    const sourceRealPath = await realpath(candidate.source);
     await mkdir(dirname(candidate.destination), { recursive: true, mode: 0o700 });
-    await ensureCapsuleAuthenticationFile(candidate.source, candidate.destination, route.agent);
+    const sourceSha256 = await ensureCapsuleAuthenticationFile(
+      sourceRealPath,
+      candidate.destination,
+      route.agent,
+    );
+    bindings.push({
+      agent: route.agent,
+      source: candidate.source,
+      sourceRealPath,
+      destination: candidate.destination,
+      sourceSha256,
+    });
     secrets.push(...authSecretValues(await readFile(candidate.destination, "utf8")));
   }
   const settingsEnvironment =
@@ -709,6 +739,7 @@ async function prepareCapsuleHome(
   return {
     secrets: [...new Set(secrets)].sort((left, right) => right.length - left.length),
     environment: settingsEnvironment,
+    bindings,
   };
 }
 
@@ -716,7 +747,7 @@ async function ensureCapsuleAuthenticationFile(
   source: string,
   destination: string,
   agent: AgentRoute["agent"],
-): Promise<void> {
+): Promise<string> {
   let destinationInfo = await lstat(destination).catch(() => undefined);
   if (!destinationInfo) {
     try {
@@ -747,6 +778,114 @@ async function ensureCapsuleAuthenticationFile(
       },
     );
   }
+  return sourceSha256;
+}
+
+async function reconcileCapsuleAuthentication(
+  authentication: PreparedCapsuleAuthentication,
+): Promise<string[]> {
+  const refreshedSecrets: string[] = [];
+  for (const binding of authentication.bindings) {
+    if (binding.agent !== "claude") continue;
+    const destinationInfo = await lstat(binding.destination).catch(() => undefined);
+    if (!destinationInfo?.isFile() || destinationInfo.isSymbolicLink()) {
+      throw authenticationReconciliationError("the capsule credential is no longer a regular file");
+    }
+    assertReconciliationFileMode(destinationInfo.mode, "the capsule credential");
+    const destinationSha256 = await sha256File(binding.destination);
+    if (destinationSha256 === binding.sourceSha256) continue;
+
+    const refreshedContent = await readFile(binding.destination, "utf8");
+    try {
+      if (!isObject(JSON.parse(refreshedContent) as unknown)) {
+        throw new Error("credential root must be an object");
+      }
+    } catch {
+      throw authenticationReconciliationError("the refreshed capsule credential is not valid JSON");
+    }
+    await assertAuthenticationSourceUnchanged(binding);
+
+    const temporaryPath = join(
+      dirname(binding.sourceRealPath),
+      `.tiangong-claude-credentials-${randomUUID()}.tmp`,
+    );
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(temporaryPath, "wx", 0o600);
+      await handle.writeFile(refreshedContent, "utf8");
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await chmod(temporaryPath, 0o600);
+      await assertAuthenticationSourceUnchanged(binding);
+      await rename(temporaryPath, binding.sourceRealPath);
+      const persistedInfo = await lstat(binding.sourceRealPath);
+      if (!persistedInfo.isFile() || persistedInfo.isSymbolicLink()) {
+        throw new Error("persisted credential is not a regular file");
+      }
+      assertOwnerOnlyAuthenticationFile(persistedInfo.mode, binding.agent);
+      if ((await sha256File(binding.sourceRealPath)) !== destinationSha256) {
+        throw new Error("persisted credential hash does not match the capsule credential");
+      }
+    } catch (error) {
+      await handle?.close().catch(() => undefined);
+      await rm(temporaryPath, { force: true }).catch(() => undefined);
+      if (
+        error instanceof CliError &&
+        error.code === "RESEARCH_EXECUTOR_AUTH_RECONCILIATION_FAILED"
+      ) {
+        throw error;
+      }
+      throw authenticationReconciliationError("atomic owner credential replacement failed");
+    }
+    refreshedSecrets.push(...authSecretValues(refreshedContent));
+  }
+  return refreshedSecrets;
+}
+
+async function assertAuthenticationSourceUnchanged(
+  binding: CapsuleAuthenticationBinding,
+): Promise<void> {
+  const configuredSourceInfo = await lstat(binding.source).catch(() => undefined);
+  if (!configuredSourceInfo?.isFile() || configuredSourceInfo.isSymbolicLink()) {
+    throw authenticationReconciliationError(
+      "the configured owner credential is no longer a regular file",
+    );
+  }
+  const currentRealPath = await realpath(binding.source).catch(() => undefined);
+  if (currentRealPath !== binding.sourceRealPath) {
+    throw authenticationReconciliationError("the owner credential path changed concurrently");
+  }
+  const sourceInfo = await lstat(binding.sourceRealPath).catch(() => undefined);
+  if (!sourceInfo?.isFile() || sourceInfo.isSymbolicLink()) {
+    throw authenticationReconciliationError("the owner credential is no longer a regular file");
+  }
+  assertReconciliationFileMode(sourceInfo.mode, "the owner credential");
+  if ((await sha256File(binding.sourceRealPath)) !== binding.sourceSha256) {
+    throw authenticationReconciliationError("the owner credential changed concurrently");
+  }
+}
+
+function assertReconciliationFileMode(mode: number, description: string): void {
+  if (platform() !== "win32" && (mode & 0o077) !== 0) {
+    throw authenticationReconciliationError(`${description} is not owner-only`);
+  }
+}
+
+function authenticationReconciliationError(reason: string): CliError {
+  return new CliError(
+    `Refreshed Claude authentication could not be persisted because ${reason}. The capsule was retained for owner recovery.`,
+    {
+      code: "RESEARCH_EXECUTOR_AUTH_RECONCILIATION_FAILED",
+      exitCode: 3,
+      details: {
+        agent: "claude",
+        retainCapsule: true,
+        minimumAction:
+          "Reconcile the retained capsule credential with the owner Claude credential before deleting the capsule.",
+      },
+    },
+  );
 }
 
 async function readClaudeSettingsEnvironment(path: string): Promise<NodeJS.ProcessEnv> {

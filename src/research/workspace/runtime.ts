@@ -484,7 +484,10 @@ interface NativeStageSession {
   sessionSha256: string;
 }
 
-type NativeCapsuleDisposition = "deleted" | "retained-outer-sandbox";
+type NativeCapsuleDisposition =
+  | "deleted"
+  | "retained-outer-sandbox"
+  | "retained-auth-reconciliation";
 
 function capsuleDispositionForHost(hostAgent: AgentRoute["agent"]): NativeCapsuleDisposition {
   return hostAgent === "workbuddy" || hostAgent === "codebuddy"
@@ -1982,6 +1985,16 @@ async function executeWorkPackage(
     );
     return { projectId, packageId, status: "complete" };
   } catch (error) {
+    if (
+      capsuleRoot &&
+      error instanceof CliError &&
+      error.code === "RESEARCH_EXECUTOR_AUTH_RECONCILIATION_FAILED" &&
+      isObject(error.details) &&
+      error.details.retainCapsule === true
+    ) {
+      capsuleDisposition = "retained-auth-reconciliation";
+      retainedCapsuleId = basename(capsuleRoot);
+    }
     const failedProject = await loadProject(root, projectId);
     const failedPackage = packageById(failedProject, packageId);
     const secrets = configuredResearchSecrets(options.environment);
@@ -2074,7 +2087,7 @@ async function executeWorkPackage(
     return { projectId, packageId, status: failedPackage.status };
   } finally {
     if (broker) await broker.stop();
-    if (capsuleRoot && capsuleDisposition !== "retained-outer-sandbox") {
+    if (capsuleRoot && capsuleDisposition === "deleted") {
       await rm(capsuleRoot, { recursive: true, force: true });
     }
   }

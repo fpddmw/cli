@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-08-20
-lastReviewedCommit: 54bdf7b2d26750ce205c2a04fe351a967a7d631c
+lastReviewedCommit: a011bc2f65d6cf842ae121ce24e65c8375815db7
 ---
 
 # Repo Architecture
@@ -112,6 +112,8 @@ storage writes, queueing, and document status transitions.
   pre-review deterministic Markdown newline-artifact normalization with
   content-free journal provenance,
   hash-verified idempotent capsule-auth reuse across primary/repair calls,
+  owner-hash-bound atomic reconciliation for refreshed Claude subscription
+  credentials with concurrent-change refusal and retained-capsule recovery,
   separately fingerprinted reviewer targets/wrappers/adapters, hash-bound
   reviewer doctor attestations with expiry-aware reuse and live runtime-drift
   verification,
@@ -322,8 +324,12 @@ not fall back between transports. WorkBuddy/CodeBuddy may be recorded as native
 producer hosts, but remain forbidden child executors; the reviewer stays Codex
 or Claude.
 
-Capsule release is host-aware. Codex/Claude stages and work packages remove
-their capsules after the immutable output and journal event commit.
+Capsule release is host-aware. Codex/Claude stages and work packages normally
+remove their capsules after the immutable output and journal event commit. A
+failed Claude subscription-credential reconciliation instead fails the package
+and retains the capsule with `retained-auth-reconciliation`, so refreshed bytes
+are not destroyed before the owner resolves a concurrent source change or local
+replacement failure.
 WorkBuddy/CodeBuddy stages remove only the active binding, and every native or
 reviewer/work-package capsule is retained with a bounded ID and
 `retained-outer-sandbox` journal disposition, because an outer IDE may intercept
