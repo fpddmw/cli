@@ -37,15 +37,15 @@ export function sanitizeResearchText(value: string, secrets: readonly string[] =
       /(["']?(?:access[_-]?token|api[_-]?key|apikey|auth|authorization|cookie|credential|password|secret|session(?:[_-]?id)?|token)["']?\s*:\s*["'])([^"']*)(["'])/gi,
       "$1[REDACTED]$3",
     )
-    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/-]+=*/gi, "$1 [REDACTED]")
+    .replace(
+      /\b((?:proxy-)?authorization)\s*:\s*((?:Bearer|Basic)\s+)?[^\s,;}"'<>\\]+/gi,
+      "$1: $2[REDACTED]",
+    )
     .replace(
       /\b(access_token|api[_-]?key|apikey|auth|authorization|cookie|password|secret|session|token)\s*=\s*[^\s,;}&"'<>\\]+/gi,
       "$1=[REDACTED]",
     )
-    .replace(
-      /\b(authorization|cookie|set-cookie|x-api-key|api-key)\s*:\s*[^\s,;}"'<>\\]+/gi,
-      "$1: [REDACTED]",
-    );
+    .replace(/\b(cookie|set-cookie|x-api-key|api-key)\s*:\s*[^\s,;}"'<>\\]+/gi, "$1: [REDACTED]");
   return sanitizeUrls(sanitized);
 }
 

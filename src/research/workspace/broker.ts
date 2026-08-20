@@ -1047,8 +1047,7 @@ function assertNoSensitiveResponseMaterial(bytes: Buffer, contentType: string): 
   if (!contentType.includes("json") && !contentType.startsWith("text/")) return;
   const text = bytes.toString("utf8");
   if (
-    /\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/-]+=*/i.test(text) ||
-    /\b(authorization|cookie|set-cookie|x-api-key|api-key)\s*:/i.test(text) ||
+    /\b((?:proxy-)?authorization|cookie|set-cookie|x-api-key|api-key)\s*:/i.test(text) ||
     /\b(access_token|api[_-]?key|apikey|password|secret|session|token)\s*=/i.test(text)
   ) {
     throw new Error("response contains credential-like material and was not persisted");

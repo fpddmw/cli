@@ -210,6 +210,63 @@ describe("production research evidence and broker", () => {
     }
   });
 
+  it("preserves ordinary academic Basic phrases in provider responses", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    const originalFetch = globalThis.fetch;
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, "ordinary-basic-phrases", "Admit ordinary academic text.");
+      await installNetworkCapability(root, skillParent);
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "ordinary-basic-phrases",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      globalThis.fetch = async () =>
+        new Response(
+          JSON.stringify({
+            results: [
+              {
+                title: "Basic conception and basic principle",
+                url: "https://source.test/basic-conception",
+                abstract: "Basic approaches remain ordinary academic prose.",
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+
+      const result = await fetchNativeCandidateSource({
+        root,
+        projectId: "ordinary-basic-phrases",
+        request: {
+          capability_id: "method.public-source",
+          url: "https://source.test/items?q=basic-principle",
+          json_pointer: "/results",
+        },
+      });
+
+      assert.equal((result.candidates as unknown[]).length, 1);
+      const bounded = result.boundedContext as { encoding: string; text: string };
+      assert.equal(bounded.encoding, "utf8");
+      assert.match(bounded.text, /Basic conception and basic principle/);
+      assert.match(bounded.text, /Basic approaches remain ordinary academic prose/);
+      await abortNativeResearchStage({
+        root,
+        projectId: "ordinary-basic-phrases",
+        sessionId: packet.sessionId,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("returns a structured sanitized error for an unprojectable sensitive text response", async () => {
     const root = await temporaryDirectory();
     const skillParent = await temporaryDirectory();
