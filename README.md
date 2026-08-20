@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-08-20
-lastReviewedCommit: a011bc2f65d6cf842ae121ce24e65c8375815db7
+lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
 ---
 
 # Tiangong AI CLI
@@ -604,6 +604,14 @@ presentation Skills are post-closure authoring only. Run selected preprocessors
 and acquisition adapters with `research setup companion run`, then admit their
 exact hash-bound output separately. Automatic paper OA exhaustion returns an
 explicit browser handoff and never launches or chooses a browser silently.
+The paper companion and its setup-doctor preflight both enter the verified
+Skill through `scripts/runtime.py`; the CLI never bypasses that lock by invoking
+`fetch.py` or importing `pypdf` from ambient Python. A missing runtime remains
+an actionable, non-installing failure until the owner explicitly runs the
+Skill's hash-locked bootstrap. Selected DOCX/PPTX authoring Skills also report
+authoring as degraded when their confirmed pinned `defusedxml` or
+`markitdown[pptx]` prerequisite is unavailable; setup reports the exact user
+action and never installs either package.
 For PPT creation, setup recommends `hugohe3.ppt-master` first;
 `anthropic.pptx` remains a compatible situational option, and both may be
 selected in the same explicit plan.
