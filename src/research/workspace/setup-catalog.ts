@@ -115,7 +115,7 @@ export const RESEARCH_SETUP_SELECTION_GUIDANCE = {
 } as const;
 
 const BRAVE_COMMIT = "3e088af66eb61f1c207c22b2be0278ca8744d1d1";
-const TIANGONG_SKILLS_COMMIT = "e2f9f7ed958a6380f8bc15427f73def7666d57d2";
+const TIANGONG_SKILLS_COMMIT = "02e4ac4b670ba60e3549835e5b58b2ef1e15dbe2";
 const ANTHROPIC_SKILLS_COMMIT = "f17010c9bb483898c1d9c9f42dde2b3a98889434";
 const PPT_MASTER_COMMIT = "4343bd8bfc91e79dfb9680681a378476cc38a280";
 
@@ -218,11 +218,31 @@ const PYTHON_310: ResearchSetupDependency = {
 const PYPDF_LOCK: ResearchSetupDependency = {
   id: "academic-paper-download:pypdf",
   kind: "python-package",
-  requirement: "pypdf==6.14.2 from requirements.txt",
-  requiredFor: "academic-paper-download structural PDF validation",
+  requirement: "pypdf==6.14.2 from requirements.lock through the verified Skill runtime",
+  requiredFor: "academic-paper-download locked execution and structural PDF validation",
   automaticInstall: false,
   minimumAction:
-    "Create an isolated Python environment and install the Skill's pinned requirements.txt; do not install CloakBrowser unless that optional handoff is explicitly selected later.",
+    "From the verified installed academic-paper-download Skill directory, run `python3 scripts/runtime.py bootstrap --locked --json`, review the result, then rerun setup doctor; do not install CloakBrowser unless that optional handoff is explicitly selected later.",
+};
+
+const AUTHORING_DEFUSEDXML: ResearchSetupDependency = {
+  id: "authoring:defusedxml",
+  kind: "python-package",
+  requirement: "defusedxml==0.7.1",
+  requiredFor: "DOCX and PPTX XML-safe validation helpers",
+  automaticInstall: false,
+  minimumAction:
+    "Install `defusedxml==0.7.1` into the explicit Python environment used by the selected document Skills, then rerun setup doctor.",
+};
+
+const AUTHORING_MARKITDOWN_PPTX: ResearchSetupDependency = {
+  id: "authoring:markitdown-pptx",
+  kind: "python-package",
+  requirement: "markitdown[pptx]==0.1.7",
+  requiredFor: "PPTX content QA",
+  automaticInstall: false,
+  minimumAction:
+    "Install `markitdown[pptx]==0.1.7` into an explicit Python environment whose `markitdown` command is on PATH, then rerun setup doctor.",
 };
 
 const PPT_MASTER_LOCK_REQUIRED: ResearchSetupDependency = {
@@ -453,7 +473,7 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     skillName: "document-granular-decompose",
     sourceId: "tiangong-ai-skills",
     sourceRelativePath: "document-granular-decompose",
-    expectedTreeSha256: "4b0c38ec0e789fa6484964a1d037ce956509534768d317d6b59eceade91adf9d",
+    expectedTreeSha256: "e7ef2d0fe57582d3d0ce7e847a2165498f91aa13ba35a260f494fc2407d7d07e",
     tier: "enhanced",
     role: "input-preprocessor",
     purpose: "Hash-bound local-document preprocessing before immutable input admission.",
@@ -537,7 +557,12 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     defaultSelected: false,
     credentialIds: [],
     settingIds: [],
-    dependencies: [],
+    dependencies:
+      skillName === "docx"
+        ? [PYTHON_310, AUTHORING_DEFUSEDXML]
+        : skillName === "pptx"
+          ? [PYTHON_310, AUTHORING_DEFUSEDXML, AUTHORING_MARKITDOWN_PPTX]
+          : [],
     license: ANTHROPIC_DOCUMENT_TERMS,
     conflictGroup: null,
     capabilityKind: null,

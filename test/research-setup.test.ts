@@ -92,7 +92,7 @@ describe("research setup catalog and immutable plans", () => {
       assert.ok(catalog.sources.every((source) => /^[0-9a-f]{40}$/.test(source.immutableRef)));
       assert.equal(
         catalog.sources.find((source) => source.id === "tiangong-ai-skills")?.immutableRef,
-        "e2f9f7ed958a6380f8bc15427f73def7666d57d2",
+        "02e4ac4b670ba60e3549835e5b58b2ef1e15dbe2",
       );
       assert.equal(
         catalog.entries.find((entry) => entry.id === "tiangong.auto-research")?.expectedTreeSha256,
@@ -126,6 +126,23 @@ describe("research setup catalog and immutable plans", () => {
       assert.ok(catalog.roles.inputPreprocessors.includes("tiangong.document-granular-decompose"));
       assert.ok(catalog.roles.acquisitionAdapters.includes("tiangong.academic-paper-download"));
       assert.ok(catalog.roles.postClosureAuthoring.includes("anthropic.docx"));
+      assert.equal(
+        catalog.entries.find((entry) => entry.id === "tiangong.document-granular-decompose")
+          ?.expectedTreeSha256,
+        "e7ef2d0fe57582d3d0ce7e847a2165498f91aa13ba35a260f494fc2407d7d07e",
+      );
+      assert.deepEqual(
+        catalog.entries
+          .find((entry) => entry.id === "anthropic.docx")
+          ?.dependencies.map((dependency) => dependency.id),
+        ["python-3.10", "authoring:defusedxml"],
+      );
+      assert.deepEqual(
+        catalog.entries
+          .find((entry) => entry.id === "anthropic.pptx")
+          ?.dependencies.map((dependency) => dependency.id),
+        ["python-3.10", "authoring:defusedxml", "authoring:markitdown-pptx"],
+      );
       assert.deepEqual(
         Object.fromEntries(
           catalog.entries
@@ -1489,12 +1506,76 @@ describe("research setup execution and operator safety", () => {
         (check) => check.id === "dependency.academic-paper-download:pypdf",
       );
       assert.equal(pypdfDependency?.status, "fail");
-      assert.match(pypdfDependency?.minimumAction ?? "", /isolated Python environment/i);
+      assert.match(pypdfDependency?.minimumAction ?? "", /runtime\.py bootstrap --locked/i);
       assert.equal(
         (await readFile(workspacePaths(root).setupReport, "utf8")).includes(secret),
         false,
       );
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("degrades selected authoring Skills when mandatory document tools are absent", async () => {
+    const root = await temporaryDirectory();
+    const selected = RESEARCH_SETUP_SKILLS.filter((candidate) =>
+      ["anthropic.docx", "anthropic.pptx"].includes(candidate.id),
+    );
+    const originalHashes = new Map(
+      selected.map((skill) => [skill.id, skill.expectedTreeSha256] as const),
+    );
+    try {
+      for (const skill of selected) {
+        const directory = join(root, ".agents", "skills", skill.skillName);
+        await mkdir(directory, { recursive: true });
+        await writeFile(join(directory, "SKILL.md"), `# ${skill.skillName} fixture\n`);
+        skill.expectedTreeSha256 = await hashRegularTree(directory);
+      }
+      await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: selected.map((skill) => skill.id),
+        acceptedLicenseIds: ["anthropic-skills:document-terms"],
+        confirmNetworkDownloads: true,
+      });
+      await initializeResearchWorkspace(root, undefined, "smoke-test");
+
+      const report = await doctorResearchSetup(root, {
+        runner: async ({ command, args }) => {
+          if (command === "python3" && args.includes("--version")) {
+            return { exitCode: 0, stdout: "Python 3.12.8\n", stderr: "" };
+          }
+          if (command === "python3" && args.some((arg) => arg.includes("defusedxml"))) {
+            return { exitCode: 1, stdout: "", stderr: "missing" };
+          }
+          if (command === "markitdown") {
+            return { exitCode: 127, stdout: "", stderr: "missing" };
+          }
+          return { exitCode: 0, stdout: `${command} fixture-version\n`, stderr: "" };
+        },
+      });
+
+      assert.equal(report.researchReadiness, "READY");
+      assert.equal(report.authoringReadiness, "DEGRADED");
+      assert.equal(report.overallReadiness, "PARTIALLY_READY");
+      const checks = report.checks as Array<{
+        id: string;
+        status: string;
+        minimumAction: string | null;
+      }>;
+      const defusedxml = checks.find((check) => check.id === "dependency.authoring:defusedxml");
+      const markitdown = checks.find(
+        (check) => check.id === "dependency.authoring:markitdown-pptx",
+      );
+      assert.equal(defusedxml?.status, "fail");
+      assert.match(defusedxml?.minimumAction ?? "", /defusedxml==0\.7\.1/);
+      assert.equal(markitdown?.status, "fail");
+      assert.match(markitdown?.minimumAction ?? "", /markitdown\[pptx\]==0\.1\.7/);
+    } finally {
+      for (const skill of selected) {
+        skill.expectedTreeSha256 = originalHashes.get(skill.id)!;
+      }
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -1512,8 +1593,10 @@ describe("research setup execution and operator safety", () => {
     const originalTreeSha256 = skill.expectedTreeSha256;
     try {
       const skillDirectory = join(root, ".agents", "skills", skill.skillName);
-      await mkdir(skillDirectory, { recursive: true });
+      await mkdir(join(skillDirectory, "scripts"), { recursive: true });
       await writeFile(join(skillDirectory, "SKILL.md"), "# Academic paper fixture\n");
+      await writeFile(join(skillDirectory, "scripts", "runtime.py"), "# runtime fixture\n");
+      const runtimePath = await realpath(join(skillDirectory, "scripts", "runtime.py"));
       skill.expectedTreeSha256 = await hashRegularTree(skillDirectory);
       await createResearchSetupPlan({
         workspace: root,
@@ -1531,15 +1614,21 @@ describe("research setup execution and operator safety", () => {
         environmentName: "OWNER_S2_VALUE",
         environment: { OWNER_S2_VALUE: secret },
       });
+      const runtimeDoctorCalls: string[][] = [];
       const report = await doctorResearchSetup(root, {
         live: true,
         environment: { OWNER_S2_VALUE: secret },
         runner: async ({ command, args }) => {
-          if (
-            command === "python3" &&
-            args.includes("import importlib.metadata as m; print(m.version('pypdf'))")
-          ) {
-            return { exitCode: 0, stdout: "6.14.2\n", stderr: "" };
+          if (command === "python3" && args[0] === runtimePath) {
+            runtimeDoctorCalls.push(args);
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify({
+                ok: true,
+                data: { message: "Locked runtime preflight passed", pypdf: "6.14.2" },
+              }),
+              stderr: "",
+            };
           }
           if (command === "python3" && args.includes("--version")) {
             return { exitCode: 0, stdout: "Python 3.12.8\n", stderr: "" };
@@ -1557,6 +1646,7 @@ describe("research setup execution and operator safety", () => {
         },
         sleeper: async (milliseconds) => void sleeps.push(milliseconds),
       });
+      assert.deepEqual(runtimeDoctorCalls, [[runtimePath, "doctor", "--json"]]);
       assert.equal(providerCalls, 2);
       assert.deepEqual(providerUrls, [
         "https://api.semanticscholar.org/graph/v1/paper/DOI:10.1038/s41586-020-2649-2?fields=paperId",
@@ -1833,6 +1923,8 @@ describe("research setup execution and operator safety", () => {
       const skillDirectory = join(root, ".agents", "skills", skill.skillName);
       await mkdir(join(skillDirectory, "scripts"), { recursive: true });
       await writeFile(join(skillDirectory, "scripts", "fetch.py"), "# fixture\n");
+      await writeFile(join(skillDirectory, "scripts", "runtime.py"), "# runtime fixture\n");
+      const runtimePath = await realpath(join(skillDirectory, "scripts", "runtime.py"));
       skill.expectedTreeSha256 = await hashRegularTree(skillDirectory);
       await createResearchSetupPlan({
         workspace: root,
@@ -1867,7 +1959,10 @@ describe("research setup execution and operator safety", () => {
             OWNER_S2_KEY: secret,
             COOKIE: "must-not-be-inherited",
           },
-          runner: async ({ args, environment }) => {
+          runner: async ({ command, args, environment }) => {
+            assert.equal(command, "python3");
+            assert.deepEqual(args.slice(0, 2), [runtimePath, "fetch"]);
+            assert.equal(args.includes(join(skillDirectory, "scripts", "fetch.py")), false);
             assert.ok(args.includes("10.1234/example"));
             assert.equal(environment.SEMANTIC_SCHOLAR_API_KEY, secret);
             assert.equal(environment.UNPAYWALL_EMAIL, "oa@example.test");
@@ -1909,6 +2004,45 @@ describe("research setup execution and operator safety", () => {
       assert.equal(result.artifact.path, artifactPath);
       assert.notEqual(result.artifact.path, decoyPath);
       assert.equal(result.artifact.sha256, await sha256File(artifactPath));
+
+      const privateRuntimePath = join(root, "private-runtime-token");
+      await assert.rejects(
+        runResearchSetupCompanion(
+          {
+            workspace: root,
+            skillId: "tiangong.academic-paper-download",
+            outputDirectory,
+            doi: "10.1234/runtime-missing",
+          },
+          {
+            environment: { PATH: process.env.PATH },
+            runner: async () => ({
+              exitCode: 3,
+              stdout: JSON.stringify({
+                ok: false,
+                error: {
+                  code: "runtime_missing",
+                  message: "The locked runtime is not installed",
+                  runtime_dir: privateRuntimePath,
+                },
+              }),
+              stderr: privateRuntimePath,
+            }),
+          },
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof Error && "code" in error && "details" in error);
+          assert.equal(
+            (error as Error & { code: string }).code,
+            "RESEARCH_SETUP_COMPANION_RUNTIME_INVALID",
+          );
+          assert.equal(JSON.stringify(error).includes(privateRuntimePath), false);
+          const details = (error as Error & { details: Record<string, unknown> }).details;
+          assert.deepEqual(details.diagnostics, { runtimeErrorCode: "runtime_missing" });
+          assert.match(String(details.minimumAction), /runtime\.py bootstrap --locked --json/);
+          return true;
+        },
+      );
 
       const handoff = await runResearchSetupCompanion(
         {

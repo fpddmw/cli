@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-08-20
-lastReviewedCommit: 574f421b2e3ca032b65248e6ee83af3efdd66c12
+lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
 ---
 
 # Repo Architecture
@@ -269,7 +269,11 @@ Document decomposition is an input-preprocessor and paper download is an
 acquisition adapter. Their explicit companion command verifies the installed
 tree, builds a minimal child environment, and returns hash-bound output for
 later input admission; neither executes inside an agent capsule or becomes
-evidence by itself. Authoring Skills run only after closure. Optional companion
+evidence by itself. The paper adapter is entered only through its verified
+`runtime.py` lock for both execution and setup doctor; ambient `fetch.py` and
+ambient `pypdf` execution are not valid control-plane paths. Authoring Skills
+run only after closure, and confirmed DOCX/PPTX Python/CLI prerequisites are
+domain-scoped setup checks rather than implicit installs. Optional companion
 failures are domain-scoped diagnostics unless a project's
 `requiredCompanionIds` (or the explicit operation itself) names that exact
 component. Semantic Scholar resolver throttling therefore degrades acquisition

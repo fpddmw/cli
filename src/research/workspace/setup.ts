@@ -1959,7 +1959,7 @@ export async function doctorResearchSetup(
     });
   }
 
-  await appendDependencyChecks(checks, selected, runner, root, environment);
+  await appendDependencyChecks(checks, plan, selected, runner, root, environment);
 
   let capabilityDoctor: Awaited<ReturnType<typeof doctorExternalCapabilities>> | null = null;
   const blockingBeforeLive = checks
@@ -3812,10 +3812,10 @@ async function runAcademicPaperCompanion(input: {
       exitCode: 2,
     });
   }
-  const script = join(input.skillDirectory, "scripts", "fetch.py");
-  await requireRegularCompanionFile(input.root, script, "adapter script");
+  const runtimeScript = join(input.skillDirectory, "scripts", "runtime.py");
+  await requireRegularCompanionFile(input.root, runtimeScript, "locked runtime script");
   const timeoutSeconds = normalizedCompanionTimeout(input.input.timeoutSeconds, 30, 600);
-  const args = [script];
+  const args = [runtimeScript, "fetch"];
   if (doi) args.push(doi);
   else args.push("--title", title!);
   if (input.input.author) args.push("--author", input.input.author);
@@ -3834,6 +3834,19 @@ async function runAcademicPaperCompanion(input: {
     timeoutMs: (timeoutSeconds + 60) * 4 * 1_000,
   });
   const envelope = parseCompanionJson(execution.stdout, input.root, "academic-paper-download");
+  if (execution.exitCode !== 0 && envelope.ok === false && isObject(envelope.error)) {
+    const runtimeErrorCode = safeAcademicPaperRuntimeErrorCode(envelope.error.code);
+    throw setupError({
+      code: "RESEARCH_SETUP_COMPANION_RUNTIME_INVALID",
+      step: "companion-runtime",
+      reason: `The academic paper locked runtime failed preflight (${runtimeErrorCode}).`,
+      minimumAction:
+        "From the verified installed academic-paper-download Skill directory, run `python3 scripts/runtime.py bootstrap --locked --json`, review the result, then rerun setup doctor and the companion command.",
+      retryCommand: `tiangong-ai research setup doctor --workspace ${input.root} --json`,
+      exitCode: 3,
+      diagnostics: { runtimeErrorCode },
+    });
+  }
   const results =
     isObject(envelope.data) && Array.isArray(envelope.data.results) ? envelope.data.results : [];
   if (results.length !== 1 || !isObject(results[0])) {
@@ -3976,6 +3989,19 @@ async function runAcademicPaperCompanion(input: {
     ],
     next: "Admit the exact PDF or a derived hash-bound view as a declared research input.",
   };
+}
+
+function safeAcademicPaperRuntimeErrorCode(value: unknown): string {
+  const allowed = new Set([
+    "python_incompatible",
+    "lock_missing",
+    "lock_invalid",
+    "runtime_missing",
+    "runtime_invalid",
+    "runtime_io_error",
+    "dependency_install_failed",
+  ]);
+  return typeof value === "string" && allowed.has(value) ? value : "runtime_error";
 }
 
 function companionEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -4968,6 +4994,7 @@ async function setupDoctorCheck(
 
 async function appendDependencyChecks(
   checks: SetupDoctorCheck[],
+  plan: ResearchSetupPlan,
   selected: ResearchSetupSkill[],
   runner: SetupCommandRunner,
   root: string,
@@ -5015,20 +5042,57 @@ async function appendDependencyChecks(
           return `${versionText.trim()} satisfies ${dependency.requirement}.`;
         }
         if (dependency.id === "academic-paper-download:pypdf") {
+          const skill = setupSkill("tiangong.academic-paper-download");
+          const skillDirectory = await verifiedCompanionSkillDirectory(plan, skill);
+          const runtimeScript = join(skillDirectory, "scripts", "runtime.py");
+          await requireRegularCompanionFile(root, runtimeScript, "locked runtime script");
           const result = await runner({
             command: "python3",
-            args: ["-c", "import importlib.metadata as m; print(m.version('pypdf'))"],
+            args: [runtimeScript, "doctor", "--json"],
+            cwd: root,
+            environment: installerEnvironment(environment),
+            timeoutMs: 15_000,
+          });
+          const envelope = parseCompanionJson(
+            result.stdout,
+            root,
+            "academic-paper-download locked runtime doctor",
+          );
+          const data = isObject(envelope.data) ? envelope.data : {};
+          if (result.exitCode !== 0 || envelope.ok !== true || data.pypdf !== "6.14.2") {
+            throw new Error("The verified academic paper locked runtime is not ready.");
+          }
+          return `${dependency.requirement} is ready.`;
+        }
+        if (dependency.id === "authoring:defusedxml") {
+          const result = await runner({
+            command: "python3",
+            args: [
+              "-c",
+              "import importlib.metadata as m, defusedxml; print(m.version('defusedxml'))",
+            ],
             cwd: root,
             environment: installerEnvironment(environment),
             timeoutMs: 15_000,
           });
           const observed = result.stdout.trim();
-          if (result.exitCode !== 0 || observed !== "6.14.2") {
-            throw new Error(
-              `${dependency.requirement} is not active in the selected python3 environment.`,
-            );
+          if (result.exitCode !== 0 || observed !== "0.7.1") {
+            throw new Error(`${dependency.requirement} is not active in the selected python3.`);
           }
           return `${dependency.requirement} is active.`;
+        }
+        if (dependency.id === "authoring:markitdown-pptx") {
+          const result = await runner({
+            command: "markitdown",
+            args: ["--version"],
+            cwd: root,
+            environment: installerEnvironment(environment),
+            timeoutMs: 15_000,
+          });
+          if (result.exitCode !== 0 || !/\b0\.1\.7\b/.test(result.stdout)) {
+            throw new Error(`${dependency.requirement} is not available on PATH.`);
+          }
+          return `${dependency.requirement} is available on PATH.`;
         }
         throw new Error(
           `No automatic dependency check is declared for ${dependency.id}. ${dependency.minimumAction}`,

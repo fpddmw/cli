@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-08-20
-lastReviewedCommit: 574f421b2e3ca032b65248e6ee83af3efdd66c12
+lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
 ---
 
 # Repo Validation
@@ -207,7 +207,11 @@ replacement-time managed capability and credential pruning with custom/Skill
 preservation, explicit smoke-failure blocking, minimal secret environments,
 exact document/paper artifact
 binding, no-overwrite/no-directory-scan behavior, explicit browser handoff, and
-bounded JSON POST broker credential/body redaction. Readiness tests additionally
+bounded JSON POST broker credential/body redaction. Paper companion tests also
+require execution and doctor to use the installed Skill's locked `runtime.py`,
+including a sanitized actionable missing-runtime error. Authoring readiness
+tests prove selected DOCX/PPTX Skills degrade when confirmed `defusedxml` or
+`markitdown[pptx]` prerequisites are absent. Readiness tests additionally
 prove that one capability probe is reused, paid reviewer smoke is skipped after
 a blocking prerequisite, Semantic Scholar throttling degrades only acquisition,
 and an optional preprocessor becomes a hard gate only when its exact catalog ID
