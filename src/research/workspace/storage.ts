@@ -4,15 +4,17 @@ import {
   chmod,
   lstat,
   mkdir,
-  open,
   readFile,
   readdir,
   rename,
   rm,
+  rmdir,
   stat,
   writeFile,
 } from "node:fs/promises";
+import { hostname } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import lockfile from "proper-lockfile";
 
 import { CliError } from "../../errors.js";
 import { RESEARCH_CONTROL_DIRECTORY } from "./constants.js";
@@ -28,6 +30,38 @@ const IGNORED_TREE_NAMES = new Set([
 ]);
 
 export const REGULAR_TREE_HASH_ALGORITHM = "sha256-nfc-path-size-content-v2";
+
+const FILE_LOCK_STALE_MS = 120_000;
+const FILE_LOCK_UPDATE_MS = 10_000;
+const FILE_LOCK_TRANSITION_STALE_MS = 10_000;
+const FILE_LOCK_OWNER_MAX_BYTES = 16 * 1024;
+const LOCK_OPERATION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+export interface FileLockRecovery {
+  reason: "dead-owner" | "expired-lease" | "legacy-dead-owner";
+  previousOperation: string;
+  previousAcquiredAt: string | null;
+  previousLockIdSha256: string;
+  previousOwnerState: "dead" | "expired";
+}
+
+export interface FileLockOwnerRecord {
+  schemaVersion: 2;
+  kind: "tiangong-file-lock-owner";
+  lockId: string;
+  pid: number;
+  hostname: string;
+  operation: string;
+  acquiredAt: string;
+  staleAfterMs: number;
+  planSha256: string | null;
+  recordSha256: string;
+}
+
+export type FileLockRelease = (() => Promise<void>) & {
+  owner: FileLockOwnerRecord;
+  recovery: FileLockRecovery | null;
+};
 
 export function workspacePaths(root: string): WorkspacePaths {
   const canonicalRoot = resolve(root);
@@ -300,23 +334,426 @@ export function resolveContained(root: string, logicalPath: string): string {
   return candidate;
 }
 
-export async function acquireFileLock(
-  path: string,
-  payload: unknown,
-): Promise<() => Promise<void>> {
+export async function acquireFileLock(path: string, payload: unknown): Promise<FileLockRelease> {
   await ensureDirectory(dirname(path));
+  const releaseTransition = await acquireLockTransition(path);
+  let releaseLease: (() => Promise<void>) | null = null;
   try {
-    const handle = await open(path, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify(payload)}\n`, "utf8");
-    await handle.close();
+    const recovery = await recoverExistingLock(path);
+    try {
+      releaseLease = await lockfile.lock(path, {
+        realpath: false,
+        lockfilePath: path,
+        stale: FILE_LOCK_STALE_MS,
+        update: FILE_LOCK_UPDATE_MS,
+        retries: 0,
+        onCompromised: () => {
+          throw lockCompromisedError();
+        },
+      });
+    } catch (error) {
+      throw await classifyLockAcquireError(path, error);
+    }
+    const owner = createFileLockOwner(payload);
+    try {
+      await writeJsonAtomic(fileLockOwnerPath(path), owner, 0o600);
+    } catch {
+      await releaseLease().catch(() => undefined);
+      releaseLease = null;
+      throw new CliError("Research operation lock metadata could not be persisted.", {
+        code: "RESEARCH_WORKSPACE_LOCK_INVALID",
+        exitCode: 3,
+        details: {
+          ownerState: "unknown",
+          operation: owner.operation,
+          minimumAction:
+            "Inspect workspace filesystem health and retry; do not delete lock state manually.",
+        },
+      });
+    }
+    let released = false;
+    const release = async () => {
+      if (released) return;
+      const releaseTransitionLease = await acquireLockTransition(path);
+      try {
+        const current = await readFileLockOwner(path);
+        if (!current || current.lockId !== owner.lockId) {
+          throw lockCompromisedError();
+        }
+        await releaseLease!();
+        released = true;
+        await rm(fileLockOwnerPath(path), { force: true });
+      } catch (error) {
+        if (error instanceof CliError) throw error;
+        throw lockCompromisedError();
+      } finally {
+        await releaseTransitionLease();
+      }
+    };
+    return Object.assign(release, { owner, recovery });
   } catch (error) {
-    throw new CliError(`Research workspace is locked: ${path}`, {
+    if (releaseLease) await releaseLease().catch(() => undefined);
+    throw error;
+  } finally {
+    await releaseTransition();
+  }
+}
+
+async function acquireLockTransition(path: string): Promise<() => Promise<void>> {
+  try {
+    const release = await lockfile.lock(`${path}.transition-target`, {
+      realpath: false,
+      lockfilePath: `${path}.transition`,
+      stale: FILE_LOCK_TRANSITION_STALE_MS,
+      update: 2_000,
+      retries: {
+        retries: 50,
+        factor: 1,
+        minTimeout: 100,
+        maxTimeout: 100,
+        randomize: false,
+      },
+      onCompromised: () => {
+        throw lockCompromisedError();
+      },
+    });
+    return async () => {
+      try {
+        await release();
+      } catch {
+        throw lockCompromisedError();
+      }
+    };
+  } catch (error) {
+    if (!isLockContentionError(error)) throw lockStateInvalidError();
+    throw new CliError("Research lock transition is busy or unavailable.", {
       code: "RESEARCH_WORKSPACE_LOCKED",
       exitCode: 3,
-      details: { error: String(error) },
+      details: {
+        ownerState: "unknown",
+        operation: null,
+        acquiredAt: null,
+        ageSeconds: null,
+        retryAfterSeconds: 1,
+        minimumAction:
+          "Retry once after the current lock transition completes; do not delete lock state manually.",
+      },
     });
   }
-  return async () => rm(path, { force: true });
+}
+
+async function recoverExistingLock(path: string): Promise<FileLockRecovery | null> {
+  const info = await lstat(path).catch(() => undefined);
+  if (!info) {
+    try {
+      await rm(fileLockOwnerPath(path), { force: true });
+    } catch {
+      throw lockStateInvalidError();
+    }
+    return null;
+  }
+  if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory())) {
+    throw lockUnknownError(null, null, null);
+  }
+
+  if (info.isFile()) {
+    const legacy = await readLegacyLock(path);
+    if (!legacy) throw lockUnknownError(null, null, ageSeconds(info.mtimeMs));
+    const ownerState = probeProcess(legacy.pid, legacy.hostname);
+    if (ownerState !== "dead") {
+      throw lockBusyObservationError({
+        ownerState,
+        operation: legacy.operation,
+        acquiredAt: legacy.acquiredAt,
+        ageSeconds: ageSeconds(Date.parse(legacy.acquiredAt)),
+      });
+    }
+    const quarantine = `${path}.stale-${randomUUID()}`;
+    try {
+      await rename(path, quarantine);
+      await rm(quarantine, { force: true });
+    } catch {
+      throw lockStateInvalidError();
+    }
+    return {
+      reason: "legacy-dead-owner",
+      previousOperation: legacy.operation,
+      previousAcquiredAt: legacy.acquiredAt,
+      previousLockIdSha256: sha256Text(canonicalJson(legacy)),
+      previousOwnerState: "dead",
+    };
+  }
+
+  const owner = await readFileLockOwner(path);
+  const ownerState = owner ? probeProcess(owner.pid, owner.hostname) : "unknown";
+  const leaseAgeSeconds = ageSeconds(info.mtimeMs);
+  if (ownerState === "alive") {
+    throw lockBusyObservationError({
+      ownerState,
+      operation: owner?.operation ?? null,
+      acquiredAt: owner?.acquiredAt ?? null,
+      ageSeconds: owner ? ageSeconds(Date.parse(owner.acquiredAt)) : leaseAgeSeconds,
+    });
+  }
+  if (ownerState !== "dead" && leaseAgeSeconds < Math.ceil(FILE_LOCK_STALE_MS / 1_000)) {
+    throw lockBusyObservationError({
+      ownerState,
+      operation: owner?.operation ?? null,
+      acquiredAt: owner?.acquiredAt ?? null,
+      ageSeconds: leaseAgeSeconds,
+    });
+  }
+
+  try {
+    await rmdir(path);
+    await rm(fileLockOwnerPath(path), { force: true });
+  } catch {
+    throw lockStateInvalidError();
+  }
+  return {
+    reason: ownerState === "dead" ? "dead-owner" : "expired-lease",
+    previousOperation: owner?.operation ?? "unknown",
+    previousAcquiredAt: owner?.acquiredAt ?? null,
+    previousLockIdSha256: owner ? sha256Text(owner.lockId) : sha256Text("unknown-lock-owner"),
+    previousOwnerState: ownerState === "dead" ? "dead" : "expired",
+  };
+}
+
+async function classifyLockAcquireError(path: string, error: unknown): Promise<CliError> {
+  if (!isLockContentionError(error)) return lockStateInvalidError();
+  const info = await lstat(path).catch(() => undefined);
+  if (!info) return lockUnknownError(null, null, null);
+  if (info.isFile()) {
+    const legacy = await readLegacyLock(path);
+    if (!legacy) return lockUnknownError(null, null, ageSeconds(info.mtimeMs));
+    return lockBusyObservationError({
+      ownerState: probeProcess(legacy.pid, legacy.hostname),
+      operation: legacy.operation,
+      acquiredAt: legacy.acquiredAt,
+      ageSeconds: ageSeconds(Date.parse(legacy.acquiredAt)),
+    });
+  }
+  const owner = await readFileLockOwner(path);
+  const ownerState = owner ? probeProcess(owner.pid, owner.hostname) : "unknown";
+  return lockBusyObservationError({
+    ownerState,
+    operation: owner?.operation ?? null,
+    acquiredAt: owner?.acquiredAt ?? null,
+    ageSeconds: owner ? ageSeconds(Date.parse(owner.acquiredAt)) : ageSeconds(info.mtimeMs),
+  });
+}
+
+function isLockContentionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "ELOCKED" || code === "EEXIST";
+}
+
+function createFileLockOwner(payload: unknown): FileLockOwnerRecord {
+  const source = isObject(payload) ? payload : {};
+  const operation = safeLockOperation(source.operation);
+  const planSha256 =
+    typeof source.planSha256 === "string" && /^[a-f0-9]{64}$/u.test(source.planSha256)
+      ? source.planSha256
+      : null;
+  const core = {
+    schemaVersion: 2 as const,
+    kind: "tiangong-file-lock-owner" as const,
+    lockId: randomUUID(),
+    pid: process.pid,
+    hostname: hostname(),
+    operation,
+    acquiredAt: new Date().toISOString(),
+    staleAfterMs: FILE_LOCK_STALE_MS,
+    planSha256,
+  };
+  return { ...core, recordSha256: sha256Text(canonicalJson(core)) };
+}
+
+async function readFileLockOwner(path: string): Promise<FileLockOwnerRecord | null> {
+  const ownerPath = fileLockOwnerPath(path);
+  const info = await lstat(ownerPath).catch(() => undefined);
+  if (
+    !info?.isFile() ||
+    info.isSymbolicLink() ||
+    info.size < 2 ||
+    info.size > FILE_LOCK_OWNER_MAX_BYTES
+  ) {
+    return null;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(ownerPath, "utf8")) as unknown;
+  } catch {
+    return null;
+  }
+  if (!isFileLockOwnerRecord(value)) return null;
+  const { recordSha256, ...core } = value;
+  return recordSha256 === sha256Text(canonicalJson(core)) ? value : null;
+}
+
+function isFileLockOwnerRecord(value: unknown): value is FileLockOwnerRecord {
+  if (!isObject(value)) return false;
+  const allowed = new Set([
+    "schemaVersion",
+    "kind",
+    "lockId",
+    "pid",
+    "hostname",
+    "operation",
+    "acquiredAt",
+    "staleAfterMs",
+    "planSha256",
+    "recordSha256",
+  ]);
+  return (
+    Object.keys(value).every((key) => allowed.has(key)) &&
+    value.schemaVersion === 2 &&
+    value.kind === "tiangong-file-lock-owner" &&
+    typeof value.lockId === "string" &&
+    /^[a-f0-9-]{36}$/u.test(value.lockId) &&
+    Number.isSafeInteger(value.pid) &&
+    Number(value.pid) > 0 &&
+    typeof value.hostname === "string" &&
+    value.hostname.length >= 1 &&
+    value.hostname.length <= 255 &&
+    typeof value.operation === "string" &&
+    LOCK_OPERATION.test(value.operation) &&
+    typeof value.acquiredAt === "string" &&
+    Number.isFinite(Date.parse(value.acquiredAt)) &&
+    value.staleAfterMs === FILE_LOCK_STALE_MS &&
+    (value.planSha256 === null ||
+      (typeof value.planSha256 === "string" && /^[a-f0-9]{64}$/u.test(value.planSha256))) &&
+    typeof value.recordSha256 === "string" &&
+    /^[a-f0-9]{64}$/u.test(value.recordSha256)
+  );
+}
+
+async function readLegacyLock(path: string): Promise<{
+  pid: number;
+  hostname: string | null;
+  operation: string;
+  acquiredAt: string;
+} | null> {
+  const info = await lstat(path).catch(() => undefined);
+  if (!info?.isFile() || info.isSymbolicLink() || info.size < 2 || info.size > 16 * 1024) {
+    return null;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(path, "utf8")) as unknown;
+  } catch {
+    return null;
+  }
+  if (
+    !isObject(value) ||
+    !Number.isSafeInteger(value.pid) ||
+    Number(value.pid) <= 0 ||
+    typeof value.operation !== "string" ||
+    !LOCK_OPERATION.test(value.operation) ||
+    typeof value.acquiredAt !== "string" ||
+    !Number.isFinite(Date.parse(value.acquiredAt)) ||
+    (value.hostname !== undefined &&
+      (typeof value.hostname !== "string" || value.hostname.length > 255))
+  ) {
+    return null;
+  }
+  return {
+    pid: Number(value.pid),
+    hostname: typeof value.hostname === "string" ? value.hostname : null,
+    operation: value.operation,
+    acquiredAt: value.acquiredAt,
+  };
+}
+
+function probeProcess(pid: number, ownerHostname: string | null): "alive" | "dead" | "unknown" {
+  if (ownerHostname && ownerHostname !== hostname()) return "unknown";
+  try {
+    process.kill(pid, 0);
+    return "alive";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return "dead";
+    return "unknown";
+  }
+}
+
+function safeLockOperation(value: unknown): string {
+  return typeof value === "string" && LOCK_OPERATION.test(value) ? value : "research.operation";
+}
+
+function fileLockOwnerPath(path: string): string {
+  return `${path}.owner.json`;
+}
+
+function ageSeconds(timestampMs: number): number {
+  if (!Number.isFinite(timestampMs)) return 0;
+  return Math.max(0, Math.floor((Date.now() - timestampMs) / 1_000));
+}
+
+function lockBusyObservationError(input: {
+  ownerState: "alive" | "dead" | "unknown";
+  operation: string | null;
+  acquiredAt: string | null;
+  ageSeconds: number | null;
+}): CliError {
+  return new CliError("Research workspace has another active or unverifiable writer.", {
+    code: "RESEARCH_WORKSPACE_LOCKED",
+    exitCode: 3,
+    details: {
+      ownerState: input.ownerState,
+      operation: input.operation,
+      acquiredAt: input.acquiredAt,
+      ageSeconds: input.ageSeconds,
+      leaseStaleAfterSeconds: Math.ceil(FILE_LOCK_STALE_MS / 1_000),
+      retryAfterSeconds:
+        input.ownerState === "alive"
+          ? 1
+          : input.ageSeconds === null
+            ? Math.ceil(FILE_LOCK_STALE_MS / 1_000)
+            : Math.max(1, Math.ceil(FILE_LOCK_STALE_MS / 1_000) - input.ageSeconds),
+      minimumAction:
+        input.ownerState === "alive"
+          ? "Wait for the named operation to finish, then retry; do not delete lock state manually."
+          : "Inspect the owning host or wait for the heartbeat lease to expire; do not delete lock state manually.",
+    },
+  });
+}
+
+function lockStateInvalidError(): CliError {
+  return new CliError("Research workspace lock state is unreadable or unsafe.", {
+    code: "RESEARCH_WORKSPACE_LOCK_INVALID",
+    exitCode: 3,
+    details: {
+      ownerState: "unknown",
+      minimumAction:
+        "Inspect workspace filesystem permissions and lock-state integrity; do not delete lock state manually.",
+    },
+  });
+}
+
+function lockUnknownError(
+  operation: string | null,
+  acquiredAt: string | null,
+  lockAgeSeconds: number | null,
+): CliError {
+  return lockBusyObservationError({
+    ownerState: "unknown",
+    operation,
+    acquiredAt,
+    ageSeconds: lockAgeSeconds,
+  });
+}
+
+function lockCompromisedError(): CliError {
+  return new CliError("Research workspace lock ownership changed unexpectedly.", {
+    code: "RESEARCH_WORKSPACE_LOCK_COMPROMISED",
+    exitCode: 3,
+    details: {
+      ownerState: "compromised",
+      minimumAction:
+        "Stop mutation, inspect workspace status from a separate read-only command, and do not delete lock state manually.",
+    },
+  });
 }
 
 export async function pathExists(path: string): Promise<boolean> {

@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-08-20
-lastReviewedCommit: daf1a9dd243163778e60b48803263a0fcf1ef678
+lastReviewedCommit: 54bdf7b2d26750ce205c2a04fe351a967a7d631c
 ---
 
 # Repo Validation
@@ -315,7 +315,11 @@ snapshot/delta lineage, and non-destructive addenda. Workspace/runtime tests
 additionally verify default superseded-project filtering, authoritative fork
 lineage, archive/abandon dispositions, durable user/external handoffs and
 challenge gates, and closure rejection when any bound snapshot-chain object
-drifts.
+drifts. `test/research-workspace-lock.test.ts` uses real child processes to
+prove `SIGKILL` recovery, released single-file-lock migration, live-owner
+refusal with sanitized actionable diagnostics, and owner-token-checked release;
+the full setup suite also proves that setup initialization accepts only the
+exact current lease artifacts while the lock is held.
 
 Scientific route-exhaustion regressions additionally require exact route IDs on
 broker, native-host, and download events; reject unbound or selector-mismatched

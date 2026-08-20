@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-19
-lastReviewedCommit: 6adf1ad32bdfaa74bc1449bc46c2e6591bae67a1
+lastReviewedAt: 2026-08-20
+lastReviewedCommit: 54bdf7b2d26750ce205c2a04fe351a967a7d631c
 ---
 
 # Repo Architecture
@@ -73,7 +73,10 @@ storage writes, queueing, and document status transitions.
   configuration/smoke-only until an approved native capsule provider exists.
 - `src/research/workspace/**`: the versioned research workspace protocol. It
   owns context classification, immutable input admission, capability policy
-  locks, a separately sourced external Skill ecosystem catalog, immutable setup
+  locks, heartbeat-backed setup/workspace mutation leases with same-host
+  dead-process recovery, delayed unknown-host expiry, owner-token-checked
+  release, safe legacy-file-lock migration, and path-free append-only recovery
+  events, a separately sourced external Skill ecosystem catalog, immutable setup
   plans/state/history, reproducible detached source checkout with fixed Git
   line-ending behavior, locale-independent whole-tree hashing, and exact-copy
   installation, custom external capability admission,

@@ -639,6 +639,18 @@ CodeBuddy session. The CLI never launches a nested producer process. Independent
 runs through the other configured agent family's CLI, and execution is blocked
 when the two roles use the same family.
 
+Every workspace mutation is serialized by an owner-recorded directory lease
+with a heartbeat. A later command immediately reclaims a lease whose same-host
+owner process is definitely dead; an unverifiable cross-host lease is reclaimed
+only after its heartbeat expires. The CLI also recognizes and safely recovers
+the single-file lock left by a killed earlier release. Recovery is appended to
+the workspace journal using only the prior operation, time, reason, and a
+one-way lock identifier—never a PID, hostname, or host path. A live or
+unverifiable owner returns `RESEARCH_WORKSPACE_LOCKED` with a minimum action and
+must not be bypassed by manually deleting lock state. Idempotent commands such
+as an already-recorded download bind may then be replayed normally after safe
+recovery.
+
 Independent reviewer execution always requires `/usr/bin/sandbox-exec` on macOS
 or Bubblewrap (`bwrap`) on Linux. `reviewerExecution.transport=native-direct`
 creates that capsule in the current process. `sandbox-bridge` sends one

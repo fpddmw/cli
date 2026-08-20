@@ -239,15 +239,24 @@ async function requireSetupOnlyControlDirectory(control: string): Promise<void> 
     "setup-state.json",
     "setup-report.json",
     "setup.lock",
+    "setup.lock.owner.json",
   ]);
   const entries = await readdir(control, { withFileTypes: true });
+  const entryByName = new Map(entries.map((entry) => [entry.name, entry]));
   if (
     entries.length === 0 ||
     entries.some(
       (entry) =>
-        !(allowedFiles.has(entry.name) && entry.isFile()) &&
-        !(entry.name === "setup-history" && entry.isDirectory() && !entry.isSymbolicLink()),
-    )
+        !(
+          allowedFiles.has(entry.name) &&
+          (entry.isFile() ||
+            (entry.name === "setup.lock" && entry.isDirectory() && !entry.isSymbolicLink()))
+        ) && !(entry.name === "setup-history" && entry.isDirectory() && !entry.isSymbolicLink()),
+    ) ||
+    (entryByName.get("setup.lock")?.isDirectory() === true &&
+      entryByName.get("setup.lock.owner.json")?.isFile() !== true) ||
+    (entryByName.has("setup.lock.owner.json") &&
+      entryByName.get("setup.lock")?.isDirectory() !== true)
   ) {
     throw new CliError(`Research workspace state already exists: ${control}`, {
       code: "RESEARCH_WORKSPACE_EXISTS",
@@ -259,6 +268,7 @@ async function requireSetupOnlyControlDirectory(control: string): Promise<void> 
       await validateSetupHistoryDirectory(join(control, entry.name));
       continue;
     }
+    if (entry.name === "setup.lock" && entry.isDirectory()) continue;
     const info = await lstat(join(control, entry.name));
     if (!info.isFile() || info.isSymbolicLink()) {
       throw new CliError(`Research setup state must use regular non-symlink files: ${entry.name}`, {
@@ -1030,6 +1040,12 @@ export async function withWorkspaceLock<T>(
     acquiredAt: new Date().toISOString(),
   });
   try {
+    if (release.recovery) {
+      await appendJournalEvent(paths.journal, "workspace.lock.recovered", "workspace", {
+        ...release.recovery,
+        recoveryOperation: operation,
+      });
+    }
     return await callback();
   } finally {
     await release();

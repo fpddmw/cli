@@ -2260,42 +2260,51 @@ export async function checkResearchSetupUpdates(
 export async function clearStaleSetupLock(workspace: string): Promise<void> {
   const root = requireAbsoluteWorkspace(resolve(workspace));
   const lockPath = workspacePaths(root).setupLock;
-  const info = await lstat(lockPath).catch(() => undefined);
-  if (!info) return;
-  if (!info.isFile() || info.isSymbolicLink()) {
-    throw setupError({
+  let release: Awaited<ReturnType<typeof acquireFileLock>>;
+  try {
+    release = await acquireFileLock(lockPath, {
+      operation: "research.setup.lock-recovery",
+      acquiredAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    if (error instanceof CliError && error.code === "RESEARCH_WORKSPACE_LOCKED") {
+      const details = isObject(error.details) ? error.details : {};
+      if (details.ownerState === "alive") {
+        throw new CliError("Setup is already running in another live process.", {
+          code: "RESEARCH_SETUP_LOCK_ACTIVE",
+          exitCode: 3,
+          details: {
+            ownerState: "alive",
+            operation: typeof details.operation === "string" ? details.operation : null,
+            acquiredAt: typeof details.acquiredAt === "string" ? details.acquiredAt : null,
+            minimumAction:
+              "Wait for the active setup operation to finish, then retry; do not delete lock state manually.",
+          },
+        });
+      }
+      throw new CliError("Setup lock ownership cannot yet be verified safely.", {
+        code: "RESEARCH_SETUP_LOCK_UNVERIFIABLE",
+        exitCode: 3,
+        details: {
+          ownerState: "unknown",
+          retryAfterSeconds:
+            typeof details.retryAfterSeconds === "number" ? details.retryAfterSeconds : null,
+          minimumAction:
+            "Wait for the reported lease interval and retry; do not delete lock state manually.",
+        },
+      });
+    }
+    throw new CliError("Setup lock state is unreadable or unsafe.", {
       code: "RESEARCH_SETUP_LOCK_INVALID",
-      step: "retry",
-      reason: "Setup lock is not a regular file.",
-      minimumAction: "Inspect the lock path manually; it will not be removed automatically.",
-      retryCommand: `tiangong-ai research setup status --workspace ${root} --json`,
       exitCode: 3,
+      details: {
+        ownerState: "unknown",
+        minimumAction:
+          "Inspect workspace filesystem permissions and lock-state integrity; do not delete lock state manually.",
+      },
     });
   }
-  let payload: unknown;
-  try {
-    payload = JSON.parse(await readFile(lockPath, "utf8")) as unknown;
-  } catch {
-    payload = null;
-  }
-  if (isObject(payload) && payload.hostname === hostname() && typeof payload.pid === "number") {
-    try {
-      process.kill(payload.pid, 0);
-      throw setupError({
-        code: "RESEARCH_SETUP_LOCK_ACTIVE",
-        step: "retry",
-        reason: `Setup lock belongs to live process ${payload.pid}.`,
-        minimumAction: "Wait for the active setup process to finish; do not clear its lock.",
-        retryCommand: `tiangong-ai research setup status --workspace ${root} --json`,
-        exitCode: 3,
-      });
-    } catch (error) {
-      if (error instanceof CliError) throw error;
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ESRCH") throw error;
-    }
-  }
-  await rm(lockPath);
+  await release();
 }
 
 function parseResearchSetupPlan(value: unknown): ResearchSetupPlan {
