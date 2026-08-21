@@ -41,7 +41,7 @@ export interface ResearchSetupLicense {
 
 export interface ResearchSetupDependency {
   id: string;
-  kind: "command" | "python-package" | "manual";
+  kind: "command" | "python-package" | "node-package" | "manual";
   requirement: string;
   requiredFor: string;
   automaticInstall: false;
@@ -235,14 +235,171 @@ const AUTHORING_DEFUSEDXML: ResearchSetupDependency = {
     "Install `defusedxml==0.7.1` into the explicit Python environment used by the selected document Skills, then rerun setup doctor.",
 };
 
-const AUTHORING_MARKITDOWN_PPTX: ResearchSetupDependency = {
-  id: "authoring:markitdown-pptx",
+const AUTHORING_LXML: ResearchSetupDependency = {
+  id: "authoring:lxml",
   kind: "python-package",
-  requirement: "markitdown[pptx]==0.1.7",
-  requiredFor: "PPTX content QA",
+  requirement: "lxml importable from the same authoring Python",
+  requiredFor: "DOCX and PPTX schema validators",
   automaticInstall: false,
   minimumAction:
-    "Install `markitdown[pptx]==0.1.7` into an explicit Python environment whose `markitdown` command is on PATH, then rerun setup doctor.",
+    "Install a reviewed lxml release into the explicit Python used for authoring, then rerun setup doctor.",
+};
+
+const AUTHORING_PILLOW: ResearchSetupDependency = {
+  id: "authoring:pillow",
+  kind: "python-package",
+  requirement: "Pillow importable from the same authoring Python",
+  requiredFor: "PPTX thumbnail and visual QA helpers",
+  automaticInstall: false,
+  minimumAction:
+    "Install a reviewed Pillow release into the explicit Python used for authoring, then rerun setup doctor.",
+};
+
+const AUTHORING_PYTHON_PPTX: ResearchSetupDependency = {
+  id: "authoring:python-pptx",
+  kind: "python-package",
+  requirement: "python-pptx importable from the same authoring Python",
+  requiredFor: "MarkItDown PPTX support",
+  automaticInstall: false,
+  minimumAction:
+    "Install markitdown with its pptx extra into the explicit Python used for authoring, then rerun setup doctor.",
+};
+
+const AUTHORING_MARKITDOWN: ResearchSetupDependency = {
+  id: "authoring:markitdown",
+  kind: "python-package",
+  requirement: "markitdown==0.1.7 from the same authoring Python",
+  requiredFor: "PPTX and XLSX content QA",
+  automaticInstall: false,
+  minimumAction:
+    "Install markitdown==0.1.7 with the selected pptx/xlsx extras into the explicit authoring Python, then rerun setup doctor.",
+};
+
+const AUTHORING_NODE_DOCX: ResearchSetupDependency = {
+  id: "authoring:node-docx",
+  kind: "node-package",
+  requirement: "Node docx module resolvable by the setup runtime",
+  requiredFor: "DOCX creation",
+  automaticInstall: false,
+  minimumAction:
+    "Make the reviewed docx Node module resolvable through the authoring Node/NODE_PATH, then rerun setup doctor.",
+};
+
+const AUTHORING_NODE_PPTXGENJS: ResearchSetupDependency = {
+  id: "authoring:node-pptxgenjs",
+  kind: "node-package",
+  requirement: "Node pptxgenjs module resolvable by the setup runtime",
+  requiredFor: "PPTX creation",
+  automaticInstall: false,
+  minimumAction:
+    "Make the reviewed pptxgenjs Node module resolvable through the authoring Node/NODE_PATH, then rerun setup doctor.",
+};
+
+const AUTHORING_PANDOC: ResearchSetupDependency = {
+  id: "authoring:pandoc",
+  kind: "command",
+  requirement: "pandoc executable",
+  requiredFor: "DOCX text extraction",
+  automaticInstall: false,
+  minimumAction: "Install Pandoc outside this CLI, then rerun setup doctor.",
+};
+
+const AUTHORING_LIBREOFFICE: ResearchSetupDependency = {
+  id: "authoring:libreoffice",
+  kind: "command",
+  requirement: "LibreOffice soffice executable",
+  requiredFor: "DOCX/PPTX rendering and XLSX formula recalculation",
+  automaticInstall: false,
+  minimumAction:
+    "Install LibreOffice outside this CLI and expose soffice on PATH, then rerun setup doctor.",
+};
+
+const AUTHORING_POPPLER: ResearchSetupDependency = {
+  id: "authoring:poppler",
+  kind: "command",
+  requirement: "Poppler pdftoppm executable",
+  requiredFor: "DOCX/PDF/PPTX visual QA",
+  automaticInstall: false,
+  minimumAction:
+    "Install Poppler outside this CLI and expose pdftoppm on PATH, then rerun setup doctor.",
+};
+
+const AUTHORING_ZIP: ResearchSetupDependency = {
+  id: "authoring:zip",
+  kind: "command",
+  requirement: "zip executable",
+  requiredFor: "DOCX and PPTX exact OOXML repacking",
+  automaticInstall: false,
+  minimumAction: "Install a zip command outside this CLI, then rerun setup doctor.",
+};
+
+const AUTHORING_UNZIP: ResearchSetupDependency = {
+  id: "authoring:unzip",
+  kind: "command",
+  requirement: "unzip executable",
+  requiredFor: "DOCX and PPTX exact OOXML editing",
+  automaticInstall: false,
+  minimumAction: "Install an unzip command outside this CLI, then rerun setup doctor.",
+};
+
+const AUTHORING_PYPDF: ResearchSetupDependency = {
+  id: "authoring:pypdf",
+  kind: "python-package",
+  requirement: "pypdf importable from the same authoring Python",
+  requiredFor: "PDF structure and page validation",
+  automaticInstall: false,
+  minimumAction:
+    "Install a reviewed pypdf release into the authoring Python, then rerun setup doctor.",
+};
+
+const AUTHORING_PDFPLUMBER: ResearchSetupDependency = {
+  id: "authoring:pdfplumber",
+  kind: "python-package",
+  requirement: "pdfplumber importable from the same authoring Python",
+  requiredFor: "PDF text and table extraction",
+  automaticInstall: false,
+  minimumAction:
+    "Install a reviewed pdfplumber release into the authoring Python, then rerun setup doctor.",
+};
+
+const AUTHORING_REPORTLAB: ResearchSetupDependency = {
+  id: "authoring:reportlab",
+  kind: "python-package",
+  requirement: "reportlab importable from the same authoring Python",
+  requiredFor: "PDF creation canary",
+  automaticInstall: false,
+  minimumAction:
+    "Install a reviewed reportlab release into the authoring Python, then rerun setup doctor.",
+};
+
+const AUTHORING_PDF2IMAGE: ResearchSetupDependency = {
+  id: "authoring:pdf2image",
+  kind: "python-package",
+  requirement: "pdf2image importable from the same authoring Python",
+  requiredFor: "PDF Skill image conversion helpers",
+  automaticInstall: false,
+  minimumAction:
+    "Install a reviewed pdf2image release into the authoring Python, then rerun setup doctor.",
+};
+
+const AUTHORING_OPENPYXL: ResearchSetupDependency = {
+  id: "authoring:openpyxl",
+  kind: "python-package",
+  requirement: "openpyxl importable from the same authoring Python",
+  requiredFor: "XLSX creation and formula verification",
+  automaticInstall: false,
+  minimumAction:
+    "Install a reviewed openpyxl release into the authoring Python, then rerun setup doctor.",
+};
+
+const AUTHORING_PANDAS: ResearchSetupDependency = {
+  id: "authoring:pandas",
+  kind: "python-package",
+  requirement: "pandas importable from the same authoring Python",
+  requiredFor: "XLSX bulk data workflows",
+  automaticInstall: false,
+  minimumAction:
+    "Install a Python-version-compatible reviewed pandas release into the authoring Python, then rerun setup doctor.",
 };
 
 const PPT_MASTER_LOCK_REQUIRED: ResearchSetupDependency = {
@@ -559,10 +716,49 @@ export const RESEARCH_SETUP_SKILLS: readonly ResearchSetupSkill[] = [
     settingIds: [],
     dependencies:
       skillName === "docx"
-        ? [PYTHON_310, AUTHORING_DEFUSEDXML]
-        : skillName === "pptx"
-          ? [PYTHON_310, AUTHORING_DEFUSEDXML, AUTHORING_MARKITDOWN_PPTX]
-          : [],
+        ? [
+            PYTHON_310,
+            AUTHORING_DEFUSEDXML,
+            AUTHORING_LXML,
+            AUTHORING_NODE_DOCX,
+            AUTHORING_PANDOC,
+            AUTHORING_LIBREOFFICE,
+            AUTHORING_POPPLER,
+            AUTHORING_ZIP,
+            AUTHORING_UNZIP,
+          ]
+        : skillName === "pdf"
+          ? [
+              PYTHON_310,
+              AUTHORING_PYPDF,
+              AUTHORING_PDFPLUMBER,
+              AUTHORING_REPORTLAB,
+              AUTHORING_PILLOW,
+              AUTHORING_PDF2IMAGE,
+              AUTHORING_PANDAS,
+              AUTHORING_POPPLER,
+            ]
+          : skillName === "pptx"
+            ? [
+                PYTHON_310,
+                AUTHORING_DEFUSEDXML,
+                AUTHORING_LXML,
+                AUTHORING_PILLOW,
+                AUTHORING_PYTHON_PPTX,
+                AUTHORING_MARKITDOWN,
+                AUTHORING_NODE_PPTXGENJS,
+                AUTHORING_LIBREOFFICE,
+                AUTHORING_POPPLER,
+                AUTHORING_ZIP,
+                AUTHORING_UNZIP,
+              ]
+            : [
+                PYTHON_310,
+                AUTHORING_OPENPYXL,
+                AUTHORING_PANDAS,
+                AUTHORING_MARKITDOWN,
+                AUTHORING_LIBREOFFICE,
+              ],
     license: ANTHROPIC_DOCUMENT_TERMS,
     conflictGroup: null,
     capabilityKind: null,

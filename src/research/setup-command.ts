@@ -10,6 +10,7 @@ import {
   EXTERNAL_SKILL_MEDIA_PROFILE,
   EXTERNAL_SKILL_PROFILE,
 } from "./workspace/external-skills.js";
+import { exportSetupAuditBundle, verifySetupAuditBundle } from "./workspace/setup-audit-bundle.js";
 import { inspectResearchSetupCatalog } from "./workspace/setup-catalog.js";
 import {
   discoverResearchSetupDeclaration,
@@ -59,6 +60,7 @@ export async function runResearchSetupCommand(argv: string[], io: CliIO): Promis
   if (action === "apply") return runApply(rest, io);
   if (action === "status") return runStatus(rest, io);
   if (action === "doctor") return runDoctor(rest, io);
+  if (action === "audit") return runAudit(rest, io);
   if (action === "credential") return runCredential(rest, io);
   if (action === "companion") return runCompanion(rest, io);
   if (action === "retry") return runRetry(rest, io);
@@ -83,6 +85,8 @@ export function researchSetupHelp(): string {
   tiangong-ai research setup apply [--plan <absolute-json>] [--workspace <absolute-path>] [--skip-doctor] [--json]
   tiangong-ai research setup status [--workspace <absolute-path>] [--json]
   tiangong-ai research setup doctor [--workspace <absolute-path>] [--live] [--allow-synthetic-unstructure-upload] [--agent-smoke --confirm-agent-smoke-cost] [--json]
+  tiangong-ai research setup audit export --output <absolute-new-directory> [--workspace <absolute-path>] [--json]
+  tiangong-ai research setup audit verify --bundle <absolute-directory> --expected-manifest-sha256 <sha256> [--json]
   tiangong-ai research setup credential set --id <logical-id> (--prompt | --from-stdin | --from-env <name>) [--workspace <absolute-path>] [--json]
   tiangong-ai research setup companion run --id tiangong.document-granular-decompose --input <absolute-file> --output <absolute-new-file> [--timeout <seconds>] [--workspace <absolute-path>] [--json]
   tiangong-ai research setup companion run --id tiangong.academic-paper-download (--doi <doi> | --title <exact-title> [--author <name>] [--year <yyyy>]) --out <absolute-existing-directory> [--timeout <seconds>] [--workspace <absolute-path>] [--json]
@@ -103,7 +107,67 @@ Safety defaults:
   Disabled credentials must remain empty and are never selected by presence.
   Declarative apply always runs live provider checks and independent reviewer
   smoke; setup succeeds only when overallReadiness is READY.
+  Setup audit verification requires the manifest digest retained outside the
+  bundle from the trusted export result.
 `;
+}
+
+async function runAudit(argv: string[], io: CliIO): Promise<number> {
+  const [action, ...rest] = argv;
+  if (action === "--help" || action === "-h" || action === "help") {
+    write(io.stdout, researchSetupHelp());
+    return 0;
+  }
+  if (action === "export") {
+    const args = parseStrictArgs(
+      rest,
+      { ...WORKSPACE_OPTIONS, output: "string" },
+      "research setup audit export",
+    );
+    if (strictBoolean(args, "help")) return writeSetupHelp(io);
+    rejectPositionals(args.positionals, "research setup audit export");
+    const output = strictString(args, "output");
+    if (!output || !isAbsolute(output) || resolve(output) !== output) {
+      throw invalidSetupArgument(
+        "research setup audit export requires normalized absolute --output.",
+      );
+    }
+    const result = await exportSetupAuditBundle({
+      root: workspaceArgument(args),
+      destination: output,
+      environment: io.env,
+    });
+    writeSetupJson(io, result, args);
+    return 0;
+  }
+  if (action === "verify") {
+    const args = parseStrictArgs(
+      rest,
+      { ...COMMON_OPTIONS, bundle: "string", "expected-manifest-sha256": "string" },
+      "research setup audit verify",
+    );
+    if (strictBoolean(args, "help")) return writeSetupHelp(io);
+    rejectPositionals(args.positionals, "research setup audit verify");
+    const bundle = strictString(args, "bundle");
+    if (!bundle || !isAbsolute(bundle) || resolve(bundle) !== bundle) {
+      throw invalidSetupArgument(
+        "research setup audit verify requires normalized absolute --bundle.",
+      );
+    }
+    const expectedManifestSha256 = strictString(args, "expected-manifest-sha256");
+    if (!expectedManifestSha256 || !/^[a-f0-9]{64}$/u.test(expectedManifestSha256)) {
+      throw invalidSetupArgument(
+        "research setup audit verify requires --expected-manifest-sha256 from a trusted external record.",
+      );
+    }
+    const result = await verifySetupAuditBundle(bundle, { expectedManifestSha256 });
+    writeSetupJson(io, result, args);
+    return 0;
+  }
+  throw new CliError(`Unknown research setup audit action: ${action ?? "missing"}`, {
+    code: "INVALID_ARGS",
+    exitCode: 2,
+  });
 }
 
 async function runSetupEntry(argv: string[], io: CliIO): Promise<number> {

@@ -51,6 +51,18 @@ storage writes, queueing, and document status transitions.
   deterministic automation surfaces. Wizard presentation is semantic and
   TTY-aware, with plain output for `NO_COLOR`, dumb terminals, and JSON mode;
   styling never changes plan or command contracts.
+- `src/research/workspace/setup-audit-bundle.ts`: setup-only portable audit
+  export and offline verification before project initialization. It emits a
+  closed allowlist of path-free control-plane projections, binds each exact
+  file and its semantic relationship to the manifest, and excludes credential
+  stores, source/install trees, native state, provider output, and unrelated
+  workspace bytes. Local locators, static-header values, credential prefixes,
+  and free-form Doctor fields are digest-only. Verification derives hashes,
+  portability checks, and semantics from one stable bounded byte snapshot per
+  file and rejects concurrent tree drift. Export is atomic and does not rerun Doctor or perform
+  network/model work. Offline verification requires the manifest SHA-256
+  returned through the trusted export result; an internally stored digest alone
+  proves only self-consistency and is never treated as a provenance anchor.
 - `src/research/workspace/setup-declarative.ts`: closed-schema YAML intake,
   no-overwrite example generation, fixed-path discovery, owner-only literal env
   intake, semantic configuration hashing, immutable-plan binding/reuse, and
@@ -272,8 +284,13 @@ later input admission; neither executes inside an agent capsule or becomes
 evidence by itself. The paper adapter is entered only through its verified
 `runtime.py` lock for both execution and setup doctor; ambient `fetch.py` and
 ambient `pypdf` execution are not valid control-plane paths. Authoring Skills
-run only after closure, and confirmed DOCX/PPTX Python/CLI prerequisites are
-domain-scoped setup checks rather than implicit installs. Optional companion
+run only after closure. DOCX, PDF, PPTX, and XLSX readiness resolves one
+Python/Node runtime, probes the complete selected dependency/command matrix,
+and runs isolated exact-file functional canaries through the pinned Skill
+helpers, including PDF image conversion/validation and both PPTX/XLSX
+MarkItDown conversion. A missing prerequisite or failed canary blocks that authoring
+component without blocking research core; setup never installs dependencies.
+Optional companion
 failures are domain-scoped diagnostics unless a project's
 `requiredCompanionIds` (or the explicit operation itself) names that exact
 component. Semantic Scholar resolver throttling therefore degrades acquisition
