@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { platform, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Readable } from "node:stream";
 import { describe, it } from "node:test";
 
@@ -135,13 +135,62 @@ describe("research setup catalog and immutable plans", () => {
         catalog.entries
           .find((entry) => entry.id === "anthropic.docx")
           ?.dependencies.map((dependency) => dependency.id),
-        ["python-3.10", "authoring:defusedxml"],
+        [
+          "python-3.10",
+          "authoring:defusedxml",
+          "authoring:lxml",
+          "authoring:node-docx",
+          "authoring:pandoc",
+          "authoring:libreoffice",
+          "authoring:poppler",
+          "authoring:zip",
+          "authoring:unzip",
+        ],
+      );
+      assert.deepEqual(
+        catalog.entries
+          .find((entry) => entry.id === "anthropic.pdf")
+          ?.dependencies.map((dependency) => dependency.id),
+        [
+          "python-3.10",
+          "authoring:pypdf",
+          "authoring:pdfplumber",
+          "authoring:reportlab",
+          "authoring:pillow",
+          "authoring:pdf2image",
+          "authoring:pandas",
+          "authoring:poppler",
+        ],
       );
       assert.deepEqual(
         catalog.entries
           .find((entry) => entry.id === "anthropic.pptx")
           ?.dependencies.map((dependency) => dependency.id),
-        ["python-3.10", "authoring:defusedxml", "authoring:markitdown-pptx"],
+        [
+          "python-3.10",
+          "authoring:defusedxml",
+          "authoring:lxml",
+          "authoring:pillow",
+          "authoring:python-pptx",
+          "authoring:markitdown",
+          "authoring:node-pptxgenjs",
+          "authoring:libreoffice",
+          "authoring:poppler",
+          "authoring:zip",
+          "authoring:unzip",
+        ],
+      );
+      assert.deepEqual(
+        catalog.entries
+          .find((entry) => entry.id === "anthropic.xlsx")
+          ?.dependencies.map((dependency) => dependency.id),
+        [
+          "python-3.10",
+          "authoring:openpyxl",
+          "authoring:pandas",
+          "authoring:markitdown",
+          "authoring:libreoffice",
+        ],
       );
       assert.deepEqual(
         Object.fromEntries(
@@ -1516,10 +1565,12 @@ describe("research setup execution and operator safety", () => {
     }
   });
 
-  it("degrades selected authoring Skills when mandatory document tools are absent", async () => {
+  it("blocks selected authoring components when any complete workflow prerequisite is absent", async () => {
     const root = await temporaryDirectory();
     const selected = RESEARCH_SETUP_SKILLS.filter((candidate) =>
-      ["anthropic.docx", "anthropic.pptx"].includes(candidate.id),
+      ["anthropic.docx", "anthropic.pdf", "anthropic.pptx", "anthropic.xlsx"].includes(
+        candidate.id,
+      ),
     );
     const originalHashes = new Map(
       selected.map((skill) => [skill.id, skill.expectedTreeSha256] as const),
@@ -1529,6 +1580,27 @@ describe("research setup execution and operator safety", () => {
         const directory = join(root, ".agents", "skills", skill.skillName);
         await mkdir(directory, { recursive: true });
         await writeFile(join(directory, "SKILL.md"), `# ${skill.skillName} fixture\n`);
+        if (["docx", "pptx"].includes(skill.skillName)) {
+          await mkdir(join(directory, "scripts", "office"), { recursive: true });
+          await writeFile(join(directory, "scripts", "office", "validate.py"), "# validator\n");
+          await writeFile(join(directory, "scripts", "office", "soffice.py"), "# office\n");
+        }
+        if (skill.skillName === "pptx") {
+          await writeFile(join(directory, "scripts", "thumbnail.py"), "# thumbnail\n");
+        }
+        if (skill.skillName === "pdf") {
+          await mkdir(join(directory, "scripts"), { recursive: true });
+          await writeFile(join(directory, "scripts", "convert_pdf_to_images.py"), "# convert\n");
+          await writeFile(
+            join(directory, "scripts", "create_validation_image.py"),
+            "# validate image\n",
+          );
+        }
+        if (skill.skillName === "xlsx") {
+          await mkdir(join(directory, "scripts", "office"), { recursive: true });
+          await writeFile(join(directory, "scripts", "recalc.py"), "# recalc\n");
+          await writeFile(join(directory, "scripts", "office", "soffice.py"), "# office\n");
+        }
         skill.expectedTreeSha256 = await hashRegularTree(directory);
       }
       await createResearchSetupPlan({
@@ -1543,35 +1615,248 @@ describe("research setup execution and operator safety", () => {
 
       const report = await doctorResearchSetup(root, {
         runner: async ({ command, args }) => {
-          if (command === "python3" && args.includes("--version")) {
+          const commandName = basename(command);
+          const isPython = commandName.startsWith("python3");
+          if (isPython && args.includes("--version")) {
             return { exitCode: 0, stdout: "Python 3.12.8\n", stderr: "" };
           }
-          if (command === "python3" && args.some((arg) => arg.includes("defusedxml"))) {
-            return { exitCode: 1, stdout: "", stderr: "missing" };
+          if (isPython && args.some((arg) => arg.includes("defusedxml"))) {
+            return { exitCode: 0, stdout: "0.7.1\n", stderr: "" };
           }
-          if (command === "markitdown") {
+          if (["pandoc", "pdftoppm", "soffice", "node", "zip", "unzip"].includes(commandName)) {
             return { exitCode: 127, stdout: "", stderr: "missing" };
+          }
+          if (
+            isPython &&
+            args.some((arg) =>
+              [
+                "lxml",
+                "PIL",
+                "pypdf",
+                "pdfplumber",
+                "reportlab",
+                "pdf2image",
+                "openpyxl",
+                "pandas",
+              ].some((name) => arg.includes(name)),
+            )
+          ) {
+            return { exitCode: 1, stdout: "", stderr: "missing" };
           }
           return { exitCode: 0, stdout: `${command} fixture-version\n`, stderr: "" };
         },
       });
 
       assert.equal(report.researchReadiness, "READY");
-      assert.equal(report.authoringReadiness, "DEGRADED");
+      assert.equal(report.authoringReadiness, "BLOCKED");
       assert.equal(report.overallReadiness, "PARTIALLY_READY");
       const checks = report.checks as Array<{
         id: string;
         status: string;
         minimumAction: string | null;
       }>;
-      const defusedxml = checks.find((check) => check.id === "dependency.authoring:defusedxml");
-      const markitdown = checks.find(
-        (check) => check.id === "dependency.authoring:markitdown-pptx",
+      for (const id of [
+        "dependency.authoring:lxml",
+        "dependency.authoring:node-docx",
+        "dependency.authoring:pandoc",
+        "dependency.authoring:pypdf",
+        "dependency.authoring:pdf2image",
+        "dependency.authoring:pillow",
+        "dependency.authoring:node-pptxgenjs",
+        "dependency.authoring:openpyxl",
+        "dependency.authoring:pandas",
+      ]) {
+        assert.equal(checks.find((check) => check.id === id)?.status, "fail", id);
+      }
+      for (const skillId of [
+        "anthropic.docx",
+        "anthropic.pdf",
+        "anthropic.pptx",
+        "anthropic.xlsx",
+      ]) {
+        const canary = checks.find((check) => check.id === `authoring-canary.${skillId}`);
+        assert.equal(canary?.status, "fail", skillId);
+        assert.match(canary?.minimumAction ?? "", /prerequisite|runtime|dependency/i);
+      }
+    } finally {
+      for (const skill of selected) {
+        skill.expectedTreeSha256 = originalHashes.get(skill.id)!;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires all four exact-file authoring canaries before reporting READY", async () => {
+    const root = await temporaryDirectory();
+    const bin = join(root, "authoring-bin");
+    const selected = RESEARCH_SETUP_SKILLS.filter((candidate) =>
+      ["anthropic.docx", "anthropic.pdf", "anthropic.pptx", "anthropic.xlsx"].includes(
+        candidate.id,
+      ),
+    );
+    const originalHashes = new Map(
+      selected.map((skill) => [skill.id, skill.expectedTreeSha256] as const),
+    );
+    const calls: Array<{ command: string; args: string[] }> = [];
+    try {
+      await mkdir(bin);
+      for (const name of ["node", "pandoc", "soffice", "pdftoppm", "zip", "unzip"]) {
+        const path = join(bin, name);
+        await writeFile(path, "#!/bin/sh\nexit 0\n");
+        await chmod(path, 0o755);
+      }
+      const virtualEnvironmentPython = join(root, "authoring-python-real");
+      await writeFile(virtualEnvironmentPython, "#!/bin/sh\nexit 0\n");
+      await chmod(virtualEnvironmentPython, 0o755);
+      await symlink(virtualEnvironmentPython, join(bin, "python3"));
+      for (const skill of selected) {
+        const directory = join(root, ".agents", "skills", skill.skillName);
+        await mkdir(directory, { recursive: true });
+        await writeFile(join(directory, "SKILL.md"), `# ${skill.skillName} fixture\n`);
+        if (["docx", "pptx"].includes(skill.skillName)) {
+          await mkdir(join(directory, "scripts", "office"), { recursive: true });
+          await writeFile(join(directory, "scripts", "office", "validate.py"), "# validator\n");
+          await writeFile(join(directory, "scripts", "office", "soffice.py"), "# office\n");
+        }
+        if (skill.skillName === "pptx") {
+          await writeFile(join(directory, "scripts", "thumbnail.py"), "# thumbnail\n");
+        }
+        if (skill.skillName === "pdf") {
+          await mkdir(join(directory, "scripts"), { recursive: true });
+          await writeFile(join(directory, "scripts", "convert_pdf_to_images.py"), "# convert\n");
+          await writeFile(
+            join(directory, "scripts", "create_validation_image.py"),
+            "# validate image\n",
+          );
+        }
+        if (skill.skillName === "xlsx") {
+          await mkdir(join(directory, "scripts", "office"), { recursive: true });
+          await writeFile(join(directory, "scripts", "recalc.py"), "# recalc\n");
+          await writeFile(join(directory, "scripts", "office", "soffice.py"), "# office\n");
+        }
+        skill.expectedTreeSha256 = await hashRegularTree(directory);
+      }
+      await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: selected.map((skill) => skill.id),
+        acceptedLicenseIds: ["anthropic-skills:document-terms"],
+        confirmNetworkDownloads: true,
+      });
+      await initializeResearchWorkspace(root, undefined, "smoke-test");
+      const environment = { PATH: bin, NODE_PATH: join(root, "node_modules") };
+      const report = await doctorResearchSetup(root, {
+        environment,
+        runner: async ({ command, args }) => {
+          calls.push({ command, args });
+          const name = basename(command);
+          if (name === "python3" && args.includes("--version")) {
+            return { exitCode: 0, stdout: "Python 3.12.8\n", stderr: "" };
+          }
+          if (name === "python3" && args[0] === "-c" && args[1]?.includes("importlib.metadata")) {
+            const version = args[1].includes("markitdown")
+              ? "0.1.7"
+              : args[1].includes("defusedxml")
+                ? "0.7.1"
+                : "1.0.0";
+            return { exitCode: 0, stdout: `${version}\n`, stderr: "" };
+          }
+          if (name === "node" && args[1]?.includes("require.resolve")) {
+            return { exitCode: 0, stdout: "/virtual/node-module.js", stderr: "" };
+          }
+          if (
+            ["pandoc", "soffice", "pdftoppm", "zip", "unzip"].includes(name) &&
+            args.some((arg) => arg.startsWith("-v") || arg === "--version")
+          ) {
+            return { exitCode: 0, stdout: `${name} 1.0\n`, stderr: "" };
+          }
+          if (name === "node" && args[0] === "-e") {
+            await writeFile(args.at(-1)!, Buffer.alloc(256, 1));
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (name === "python3" && args[0] === "-c" && args[1]?.includes("reportlab")) {
+            await writeFile(args[2]!, Buffer.alloc(256, 2));
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (name === "python3" && args[0] === "-c" && args[1]?.includes("Workbook")) {
+            await writeFile(args[2]!, Buffer.alloc(256, 3));
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (name === "python3" && args[0] === "-c" && args[1]?.includes("pdfplumber")) {
+            return { exitCode: 0, stdout: "TIANGONG_PDF_CANARY\n", stderr: "" };
+          }
+          if (name === "python3" && args[0] === "-c" && args[1]?.includes("data_only=True")) {
+            return { exitCode: 0, stdout: "5\n", stderr: "" };
+          }
+          if (name === "python3" && args[0] === "-m" && args[1] === "markitdown") {
+            return {
+              exitCode: 0,
+              stdout: args.at(-1)?.endsWith(".xlsx")
+                ? "Sheet1 TIANGONG\\_XLSX\\_CANARY 5\n"
+                : "TIANGONG_PPTX_CANARY\n",
+              stderr: "",
+            };
+          }
+          if (name === "pandoc") {
+            return { exitCode: 0, stdout: "TIANGONG_DOCX_CANARY\n", stderr: "" };
+          }
+          if (name === "python3" && args[0]?.endsWith("soffice.py")) {
+            const source = args.at(-1)!;
+            await writeFile(source.replace(/\.docx$/u, ".pdf"), Buffer.alloc(256, 4));
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (name === "pdftoppm") {
+            await writeFile(`${args.at(-1)!}.png`, Buffer.alloc(128, 5));
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (name === "python3" && args[0]?.endsWith("thumbnail.py")) {
+            await writeFile(`${args[2]}.jpg`, Buffer.alloc(128, 6));
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (name === "python3" && args[0]?.endsWith("convert_pdf_to_images.py")) {
+            await writeFile(join(args[2]!, "page_1.png"), Buffer.alloc(128, 7));
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (name === "python3" && args[0]?.endsWith("create_validation_image.py")) {
+            await writeFile(args.at(-1)!, Buffer.alloc(128, 8));
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (name === "python3" && args[0]?.endsWith("recalc.py")) {
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify({ status: "success", total_errors: 0, total_formulas: 1 }),
+              stderr: "",
+            };
+          }
+          return { exitCode: 0, stdout: `${name} fixture-version\n`, stderr: "" };
+        },
+      });
+      assert.equal(report.researchReadiness, "READY");
+      assert.equal(report.authoringReadiness, "READY");
+      const checks = report.checks as Array<{ id: string; status: string }>;
+      for (const skill of selected) {
+        assert.equal(
+          checks.find((check) => check.id === `authoring-canary.${skill.id}`)?.status,
+          "pass",
+          skill.id,
+        );
+      }
+      assert.equal(
+        calls.some((call) =>
+          ["pip", "npm", "brew", "apt", "apt-get"].includes(basename(call.command)),
+        ),
+        false,
       );
-      assert.equal(defusedxml?.status, "fail");
-      assert.match(defusedxml?.minimumAction ?? "", /defusedxml==0\.7\.1/);
-      assert.equal(markitdown?.status, "fail");
-      assert.match(markitdown?.minimumAction ?? "", /markitdown\[pptx\]==0\.1\.7/);
+      assert.ok(calls.some((call) => call.args[0]?.endsWith("convert_pdf_to_images.py")));
+      assert.ok(
+        calls.some(
+          (call) =>
+            call.args[0] === "-m" &&
+            call.args[1] === "markitdown" &&
+            call.args.at(-1)?.endsWith(".xlsx"),
+        ),
+      );
     } finally {
       for (const skill of selected) {
         skill.expectedTreeSha256 = originalHashes.get(skill.id)!;

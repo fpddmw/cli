@@ -314,6 +314,39 @@ optional selected-component failures remain visible as a non-zero incomplete
 setup instead of a false success. The native producer is still not launched as
 a child process.
 
+Before project initialization, a setup-only audit can be exported without
+rerunning Doctor, contacting a provider, or launching a model. The exporter
+creates a new portable directory atomically and verifies it before returning.
+The independent verifier accepts the directory from any absolute location:
+
+```bash
+tiangong-ai research setup audit export \
+  --workspace /absolute/path/to/workspace \
+  --output /absolute/path/to/new-setup-audit --json
+tiangong-ai research setup audit verify \
+  --bundle /absolute/path/to/new-setup-audit \
+  --expected-manifest-sha256 <digest-from-trusted-export-record> --json
+```
+
+The closed manifest binds portable projections of the immutable setup plan and
+state plus every available setup report, runtime/capability lock, Doctor
+attestation, and declaration binding. It rejects missing, extra, symlinked,
+reordered, hash-drifted, or semantically disconnected entries. Credential
+values and environment-variable names, owner secret stores, source caches,
+installed Skill trees, browser/auth state, raw provider output, unrelated
+workspace files, and host paths are never included. This setup proof is
+separate from `research project audit`: readiness may honestly be `BLOCKED` or
+`PARTIALLY_READY` while bundle integrity still verifies.
+Local capability locators, static-header values, credential prefixes, and
+free-form Doctor runtime/telemetry strings are represented only by SHA-256
+bindings in their closed portable projections. Verification parses and checks
+the exact bytes captured with each file hash, then rejects a tree or file that
+changes before completion.
+The manifest digest returned by export is an external trust anchor: retain it
+in a separate run record, CI record, or other trusted channel. Verification
+requires that explicit digest and never trusts a digest read only from the
+mutable bundle itself.
+
 If the full orchestrator was selected, accepted apply creates a separate
 project-local `tiangong-auto-research-recovery` Skill after credentials are
 stored and before source checkout. This CLI-generated, plan-bound shim can only
@@ -608,10 +641,16 @@ The paper companion and its setup-doctor preflight both enter the verified
 Skill through `scripts/runtime.py`; the CLI never bypasses that lock by invoking
 `fetch.py` or importing `pypdf` from ambient Python. A missing runtime remains
 an actionable, non-installing failure until the owner explicitly runs the
-Skill's hash-locked bootstrap. Selected DOCX/PPTX authoring Skills also report
-authoring as degraded when their confirmed pinned `defusedxml` or
-`markitdown[pptx]` prerequisite is unavailable; setup reports the exact user
-action and never installs either package.
+Skill's hash-locked bootstrap. Selected DOCX, PDF, PPTX, and XLSX authoring
+Skills bind one resolved Python and Node environment, check their complete
+Python/Node package and external-command matrices, and then run an exact-file
+functional canary through the installed pinned Skill helpers. The canaries
+create, validate, extract or recalculate, and render synthetic sentinel
+artifacts, including the PDF image helpers and both PPTX/XLSX MarkItDown paths,
+without scanning a directory for a newest file. A failed prerequisite
+or canary makes only that authoring component `BLOCKED`; research-core readiness
+remains independent. Setup reports the minimum owner action and never runs pip,
+npm, Homebrew, apt, or another dependency installer.
 For PPT creation, setup recommends `hugohe3.ppt-master` first;
 `anthropic.pptx` remains a compatible situational option, and both may be
 selected in the same explicit plan.

@@ -4,6 +4,7 @@ import {
   chmod,
   link,
   lstat,
+  mkdtemp,
   mkdir,
   open,
   readFile,
@@ -12,8 +13,8 @@ import {
   rename,
   rm,
 } from "node:fs/promises";
-import { hostname, homedir, platform } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { hostname, homedir, platform, tmpdir } from "node:os";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { CliError } from "../../errors.js";
@@ -1460,6 +1461,7 @@ async function containsUnmanagedPathCliFallback(root: string): Promise<boolean> 
 async function findAmbientExecutable(
   environment: NodeJS.ProcessEnv,
   executable: string,
+  options: { preserveLeafSymlink?: boolean } = {},
 ): Promise<{ path: string; ignoredByExactInvocation: true } | null> {
   const pathValue = environment.PATH;
   if (!pathValue) return null;
@@ -1467,14 +1469,18 @@ async function findAmbientExecutable(
   for (const directory of pathValue.split(process.platform === "win32" ? ";" : ":")) {
     if (!directory) continue;
     for (const suffix of suffixes) {
-      const candidate = join(directory, `${executable}${suffix}`);
+      const candidate = resolve(directory, `${executable}${suffix}`);
       const info = await lstat(candidate).catch(() => undefined);
       if (!info || (!info.isFile() && !info.isSymbolicLink())) continue;
       const resolved = await realpath(candidate).catch(() => undefined);
       if (!resolved) continue;
       const resolvedInfo = await lstat(resolved).catch(() => undefined);
-      if (resolvedInfo?.isFile() && !resolvedInfo.isSymbolicLink())
-        return { path: resolved, ignoredByExactInvocation: true };
+      if (resolvedInfo?.isFile() && !resolvedInfo.isSymbolicLink()) {
+        const path = options.preserveLeafSymlink
+          ? join(await realpath(dirname(candidate)), basename(candidate))
+          : resolved;
+        return { path, ignoredByExactInvocation: true };
+      }
     }
   }
   return null;
@@ -1959,7 +1965,16 @@ export async function doctorResearchSetup(
     });
   }
 
-  await appendDependencyChecks(checks, plan, selected, runner, root, environment);
+  const authoringRuntime = await resolveAuthoringRuntime(selected, environment);
+  await appendDependencyChecks(checks, plan, selected, runner, root, environment, authoringRuntime);
+  await appendAuthoringCanaryChecks(checks, {
+    plan,
+    selected,
+    runner,
+    root,
+    environment,
+    runtime: authoringRuntime,
+  });
 
   let capabilityDoctor: Awaited<ReturnType<typeof doctorExternalCapabilities>> | null = null;
   const blockingBeforeLive = checks
@@ -4508,6 +4523,12 @@ function setupDomainReadiness(
   const matching = checks.filter((check) => check.scope === scope);
   if (matching.length === 0) return "NOT_REQUIRED";
   if (matching.some((check) => check.blocking && check.status === "fail")) return "BLOCKED";
+  if (
+    scope === "authoring" &&
+    matching.some((check) => check.componentGate && check.status === "fail")
+  ) {
+    return "BLOCKED";
+  }
   return matching.some((check) => check.status !== "pass") ? "DEGRADED" : "READY";
 }
 
@@ -4785,6 +4806,7 @@ function installerEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "NODE_EXTRA_CA_CERTS",
+    "NODE_PATH",
     "CODEX_HOME",
     "CLAUDE_CONFIG_DIR",
     "VIRTUAL_ENV",
@@ -4992,6 +5014,127 @@ async function setupDoctorCheck(
   }
 }
 
+type AuthoringRuntimeBinding = {
+  python: string | null;
+  node: string | null;
+  pandoc: string | null;
+  soffice: string | null;
+  pdftoppm: string | null;
+  zip: string | null;
+  unzip: string | null;
+};
+
+const AUTHORING_PYTHON_PROBES: Record<
+  string,
+  { distribution: string; module: string; exactVersion: string | null }
+> = {
+  "authoring:defusedxml": {
+    distribution: "defusedxml",
+    module: "defusedxml",
+    exactVersion: "0.7.1",
+  },
+  "authoring:lxml": { distribution: "lxml", module: "lxml.etree", exactVersion: null },
+  "authoring:pillow": { distribution: "Pillow", module: "PIL", exactVersion: null },
+  "authoring:python-pptx": {
+    distribution: "python-pptx",
+    module: "pptx",
+    exactVersion: null,
+  },
+  "authoring:markitdown": {
+    distribution: "markitdown",
+    module: "markitdown",
+    exactVersion: "0.1.7",
+  },
+  "authoring:pypdf": { distribution: "pypdf", module: "pypdf", exactVersion: null },
+  "authoring:pdfplumber": {
+    distribution: "pdfplumber",
+    module: "pdfplumber",
+    exactVersion: null,
+  },
+  "authoring:reportlab": {
+    distribution: "reportlab",
+    module: "reportlab",
+    exactVersion: null,
+  },
+  "authoring:pdf2image": {
+    distribution: "pdf2image",
+    module: "pdf2image",
+    exactVersion: null,
+  },
+  "authoring:openpyxl": {
+    distribution: "openpyxl",
+    module: "openpyxl",
+    exactVersion: null,
+  },
+  "authoring:pandas": { distribution: "pandas", module: "pandas", exactVersion: null },
+};
+
+const AUTHORING_NODE_PROBES: Record<string, string> = {
+  "authoring:node-docx": "docx",
+  "authoring:node-pptxgenjs": "pptxgenjs",
+};
+
+const AUTHORING_COMMAND_PROBES: Record<
+  string,
+  Extract<keyof AuthoringRuntimeBinding, "pandoc" | "soffice" | "pdftoppm" | "zip" | "unzip">
+> = {
+  "authoring:pandoc": "pandoc",
+  "authoring:libreoffice": "soffice",
+  "authoring:poppler": "pdftoppm",
+  "authoring:zip": "zip",
+  "authoring:unzip": "unzip",
+};
+
+async function resolveAuthoringRuntime(
+  selected: ResearchSetupSkill[],
+  environment: NodeJS.ProcessEnv,
+): Promise<AuthoringRuntimeBinding | null> {
+  if (!selected.some((skill) => skill.role === "post-closure-authoring")) return null;
+  const resolveCommand = async (name: string): Promise<string | null> =>
+    (
+      await findAmbientExecutable(environment, name, {
+        preserveLeafSymlink: name === "python3",
+      })
+    )?.path ?? null;
+  const [python, node, pandoc, soffice, pdftoppm, zip, unzip] = await Promise.all([
+    resolveCommand("python3"),
+    resolveCommand("node"),
+    resolveCommand("pandoc"),
+    resolveCommand("soffice"),
+    resolveCommand("pdftoppm"),
+    resolveCommand("zip"),
+    resolveCommand("unzip"),
+  ]);
+  return { python, node, pandoc, soffice, pdftoppm, zip, unzip };
+}
+
+function requireAuthoringRuntimeExecutable(value: string | null, minimumAction: string): string {
+  if (!value) throw new Error(minimumAction);
+  return value;
+}
+
+function authoringEnvironment(
+  source: NodeJS.ProcessEnv,
+  runtime: AuthoringRuntimeBinding | null,
+): NodeJS.ProcessEnv {
+  const result = installerEnvironment(source);
+  const commandDirectories = [
+    runtime?.soffice,
+    runtime?.pdftoppm,
+    runtime?.pandoc,
+    runtime?.zip,
+    runtime?.unzip,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .map(dirname);
+  if (commandDirectories.length) {
+    result.PATH = [...new Set(commandDirectories), result.PATH ?? ""]
+      .filter(Boolean)
+      .join(delimiter);
+  }
+  return result;
+}
+
 async function appendDependencyChecks(
   checks: SetupDoctorCheck[],
   plan: ResearchSetupPlan,
@@ -4999,6 +5142,7 @@ async function appendDependencyChecks(
   runner: SetupCommandRunner,
   root: string,
   environment: NodeJS.ProcessEnv,
+  authoringRuntime: AuthoringRuntimeBinding | null,
 ): Promise<void> {
   const dependencies = [
     ...new Map(
@@ -5025,7 +5169,7 @@ async function appendDependencyChecks(
       async () => {
         if (dependency.id === "python-3.10") {
           const result = await runner({
-            command: "python3",
+            command: authoringRuntime?.python ?? "python3",
             args: ["--version"],
             cwd: root,
             environment: installerEnvironment(environment),
@@ -5064,35 +5208,72 @@ async function appendDependencyChecks(
           }
           return `${dependency.requirement} is ready.`;
         }
-        if (dependency.id === "authoring:defusedxml") {
+        const pythonProbe = AUTHORING_PYTHON_PROBES[dependency.id];
+        if (pythonProbe) {
+          const python = requireAuthoringRuntimeExecutable(
+            authoringRuntime?.python ?? null,
+            dependency.minimumAction,
+          );
           const result = await runner({
-            command: "python3",
+            command: python,
             args: [
               "-c",
-              "import importlib.metadata as m, defusedxml; print(m.version('defusedxml'))",
+              `import importlib.metadata as m; import ${pythonProbe.module}; print(m.version(${JSON.stringify(pythonProbe.distribution)}))`,
             ],
             cwd: root,
             environment: installerEnvironment(environment),
             timeoutMs: 15_000,
           });
           const observed = result.stdout.trim();
-          if (result.exitCode !== 0 || observed !== "0.7.1") {
-            throw new Error(`${dependency.requirement} is not active in the selected python3.`);
+          if (
+            result.exitCode !== 0 ||
+            !observed ||
+            (pythonProbe.exactVersion !== null && observed !== pythonProbe.exactVersion)
+          ) {
+            throw new Error(
+              `${dependency.requirement} is not active in the bound authoring Python.`,
+            );
           }
-          return `${dependency.requirement} is active.`;
+          return `${dependency.requirement} is active (version ${observed}).`;
         }
-        if (dependency.id === "authoring:markitdown-pptx") {
+        const nodeProbe = AUTHORING_NODE_PROBES[dependency.id];
+        if (nodeProbe) {
+          const node = requireAuthoringRuntimeExecutable(
+            authoringRuntime?.node ?? null,
+            dependency.minimumAction,
+          );
           const result = await runner({
-            command: "markitdown",
-            args: ["--version"],
+            command: node,
+            args: [
+              "-e",
+              `const resolved=require.resolve(${JSON.stringify(nodeProbe)}); process.stdout.write(resolved);`,
+            ],
             cwd: root,
-            environment: installerEnvironment(environment),
+            environment: authoringEnvironment(environment, authoringRuntime),
             timeoutMs: 15_000,
           });
-          if (result.exitCode !== 0 || !/\b0\.1\.7\b/.test(result.stdout)) {
-            throw new Error(`${dependency.requirement} is not available on PATH.`);
+          if (result.exitCode !== 0 || !result.stdout.trim()) {
+            throw new Error(
+              `${dependency.requirement} is not resolvable by the bound authoring Node.`,
+            );
           }
-          return `${dependency.requirement} is available on PATH.`;
+          return `${dependency.requirement} is resolvable.`;
+        }
+        const commandKey = AUTHORING_COMMAND_PROBES[dependency.id];
+        if (commandKey) {
+          const command = requireAuthoringRuntimeExecutable(
+            authoringRuntime?.[commandKey] ?? null,
+            dependency.minimumAction,
+          );
+          const result = await runner({
+            command,
+            args: ["pdftoppm", "zip", "unzip"].includes(commandKey) ? ["-v"] : ["--version"],
+            cwd: root,
+            environment: authoringEnvironment(environment, authoringRuntime),
+            timeoutMs: 15_000,
+          });
+          if (result.exitCode !== 0) throw new Error(`${dependency.requirement} is unavailable.`);
+          return `${dependency.requirement} is executable.`;
         }
         throw new Error(
           `No automatic dependency check is declared for ${dependency.id}. ${dependency.minimumAction}`,
@@ -5102,6 +5283,368 @@ async function appendDependencyChecks(
     );
   }
 }
+
+async function appendAuthoringCanaryChecks(
+  checks: SetupDoctorCheck[],
+  input: {
+    plan: ResearchSetupPlan;
+    selected: ResearchSetupSkill[];
+    runner: SetupCommandRunner;
+    root: string;
+    environment: NodeJS.ProcessEnv;
+    runtime: AuthoringRuntimeBinding | null;
+  },
+): Promise<void> {
+  for (const skill of input.selected.filter(
+    (candidate) =>
+      candidate.role === "post-closure-authoring" &&
+      ["anthropic.docx", "anthropic.pdf", "anthropic.pptx", "anthropic.xlsx"].includes(
+        candidate.id,
+      ),
+  )) {
+    const failedPrerequisites = checks.filter(
+      (check) =>
+        check.id.startsWith("dependency.") &&
+        check.status === "fail" &&
+        setupCheckComponentIds(check, input.selected).includes(skill.id),
+    );
+    if (failedPrerequisites.length) {
+      checks.push({
+        id: `authoring-canary.${skill.id}`,
+        category: "authoring-canary",
+        scope: "authoring",
+        componentIds: [skill.id],
+        status: "fail",
+        detail: `Functional canary was not started because prerequisite checks failed: ${failedPrerequisites.map((check) => check.id).join(", ")}.`,
+        minimumAction:
+          "Resolve every declared runtime and dependency prerequisite, then rerun setup doctor; setup never installs them.",
+        blocking: false,
+        componentGate: true,
+        requiredFor: [`component:${skill.id}`],
+        skippedBecause: failedPrerequisites.map((check) => check.id).join(", "),
+      });
+      continue;
+    }
+    await setupDoctorCheck(
+      checks,
+      `authoring-canary.${skill.id}`,
+      "authoring-canary",
+      async () => {
+        const temporary = await mkdtemp(join(tmpdir(), `tiangong-authoring-${skill.skillName}-`));
+        try {
+          await runAuthoringCanary({ ...input, skill, temporary });
+          return `${skill.id} completed its exact-file synthetic functional canary.`;
+        } finally {
+          await rm(temporary, { recursive: true, force: true });
+        }
+      },
+      "Inspect the failed pinned helper/package/command step, repair the explicit authoring runtime outside this CLI, and rerun setup doctor.",
+    );
+    Object.assign(checks.at(-1)!, {
+      scope: "authoring" as const,
+      componentIds: [skill.id],
+      blocking: false,
+      componentGate: true,
+      requiredFor: [`component:${skill.id}`],
+    });
+  }
+}
+
+async function runAuthoringCanary(input: {
+  plan: ResearchSetupPlan;
+  skill: ResearchSetupSkill;
+  runner: SetupCommandRunner;
+  root: string;
+  environment: NodeJS.ProcessEnv;
+  runtime: AuthoringRuntimeBinding | null;
+  temporary: string;
+}): Promise<void> {
+  const environment = authoringEnvironment(input.environment, input.runtime);
+  environment.PYTHONDONTWRITEBYTECODE = "1";
+  if (input.skill.id === "anthropic.docx") return runDocxAuthoringCanary(input, environment);
+  if (input.skill.id === "anthropic.pdf") return runPdfAuthoringCanary(input, environment);
+  if (input.skill.id === "anthropic.pptx") return runPptxAuthoringCanary(input, environment);
+  if (input.skill.id === "anthropic.xlsx") return runXlsxAuthoringCanary(input, environment);
+  throw new Error("Unsupported authoring canary.");
+}
+
+async function runDocxAuthoringCanary(
+  input: Parameters<typeof runAuthoringCanary>[0],
+  environment: NodeJS.ProcessEnv,
+): Promise<void> {
+  const node = requireAuthoringRuntimeExecutable(input.runtime?.node ?? null, "Node is missing.");
+  const python = requireAuthoringRuntimeExecutable(
+    input.runtime?.python ?? null,
+    "Python is missing.",
+  );
+  const pandoc = requireAuthoringRuntimeExecutable(
+    input.runtime?.pandoc ?? null,
+    "Pandoc is missing.",
+  );
+  const pdftoppm = requireAuthoringRuntimeExecutable(
+    input.runtime?.pdftoppm ?? null,
+    "Poppler is missing.",
+  );
+  const skillDirectory = await verifiedCompanionSkillDirectory(input.plan, input.skill);
+  const validator = join(skillDirectory, "scripts", "office", "validate.py");
+  const soffice = join(skillDirectory, "scripts", "office", "soffice.py");
+  await Promise.all([
+    requireRegularCompanionFile(input.root, validator, "DOCX validator"),
+    requireRegularCompanionFile(input.root, soffice, "DOCX LibreOffice helper"),
+  ]);
+  const document = join(input.temporary, "docx-canary.docx");
+  await authoringStep(input, environment, "docx.create", node, [
+    "-e",
+    DOCX_CANARY_SCRIPT,
+    document,
+  ]);
+  await requireAuthoringArtifact(document, 128);
+  await authoringStep(input, environment, "docx.validate", python, [validator, document]);
+  const text = await authoringStep(input, environment, "docx.extract", pandoc, [
+    "-t",
+    "plain",
+    document,
+  ]);
+  if (!text.stdout.includes("TIANGONG_DOCX_CANARY")) {
+    throw new Error("DOCX text extraction did not return the exact canary sentinel.");
+  }
+  await authoringStep(
+    input,
+    environment,
+    "docx.render",
+    python,
+    [soffice, "--headless", "--convert-to", "pdf", "--outdir", input.temporary, document],
+    60_000,
+  );
+  const pdf = join(input.temporary, "docx-canary.pdf");
+  await requireAuthoringArtifact(pdf, 128);
+  const renderPrefix = join(input.temporary, "docx-page");
+  await authoringStep(input, environment, "docx.rasterize", pdftoppm, [
+    "-f",
+    "1",
+    "-singlefile",
+    "-png",
+    pdf,
+    renderPrefix,
+  ]);
+  await requireAuthoringArtifact(`${renderPrefix}.png`, 64);
+}
+
+async function runPdfAuthoringCanary(
+  input: Parameters<typeof runAuthoringCanary>[0],
+  environment: NodeJS.ProcessEnv,
+): Promise<void> {
+  const python = requireAuthoringRuntimeExecutable(
+    input.runtime?.python ?? null,
+    "Python is missing.",
+  );
+  const pdftoppm = requireAuthoringRuntimeExecutable(
+    input.runtime?.pdftoppm ?? null,
+    "Poppler is missing.",
+  );
+  const skillDirectory = await verifiedCompanionSkillDirectory(input.plan, input.skill);
+  const converter = join(skillDirectory, "scripts", "convert_pdf_to_images.py");
+  const validationImage = join(skillDirectory, "scripts", "create_validation_image.py");
+  await Promise.all([
+    requireRegularCompanionFile(input.root, converter, "PDF image converter"),
+    requireRegularCompanionFile(input.root, validationImage, "PDF validation image helper"),
+  ]);
+  const pdf = join(input.temporary, "pdf-canary.pdf");
+  await authoringStep(input, environment, "pdf.create", python, ["-c", PDF_CANARY_SCRIPT, pdf]);
+  await requireAuthoringArtifact(pdf, 128);
+  const parsed = await authoringStep(input, environment, "pdf.parse", python, [
+    "-c",
+    PDF_VERIFY_SCRIPT,
+    pdf,
+  ]);
+  if (!parsed.stdout.includes("TIANGONG_PDF_CANARY")) {
+    throw new Error("PDF parser did not return the exact canary sentinel.");
+  }
+  const renderPrefix = join(input.temporary, "pdf-page");
+  await authoringStep(input, environment, "pdf.rasterize", pdftoppm, [
+    "-f",
+    "1",
+    "-singlefile",
+    "-png",
+    pdf,
+    renderPrefix,
+  ]);
+  await requireAuthoringArtifact(`${renderPrefix}.png`, 64);
+  const pages = join(input.temporary, "pdf-pages");
+  await mkdir(pages);
+  await authoringStep(input, environment, "pdf.convert-images", python, [converter, pdf, pages]);
+  const page = join(pages, "page_1.png");
+  await requireAuthoringArtifact(page, 64);
+  const fields = join(input.temporary, "pdf-fields.json");
+  await writeJsonAtomic(fields, { form_fields: [] });
+  const annotated = join(input.temporary, "pdf-validation.png");
+  await authoringStep(input, environment, "pdf.validation-image", python, [
+    validationImage,
+    "1",
+    fields,
+    page,
+    annotated,
+  ]);
+  await requireAuthoringArtifact(annotated, 64);
+}
+
+async function runPptxAuthoringCanary(
+  input: Parameters<typeof runAuthoringCanary>[0],
+  environment: NodeJS.ProcessEnv,
+): Promise<void> {
+  const node = requireAuthoringRuntimeExecutable(input.runtime?.node ?? null, "Node is missing.");
+  const python = requireAuthoringRuntimeExecutable(
+    input.runtime?.python ?? null,
+    "Python is missing.",
+  );
+  const skillDirectory = await verifiedCompanionSkillDirectory(input.plan, input.skill);
+  const validator = join(skillDirectory, "scripts", "office", "validate.py");
+  const thumbnail = join(skillDirectory, "scripts", "thumbnail.py");
+  await Promise.all([
+    requireRegularCompanionFile(input.root, validator, "PPTX validator"),
+    requireRegularCompanionFile(input.root, thumbnail, "PPTX thumbnail helper"),
+  ]);
+  const presentation = join(input.temporary, "pptx-canary.pptx");
+  await authoringStep(input, environment, "pptx.create", node, [
+    "-e",
+    PPTX_CANARY_SCRIPT,
+    presentation,
+  ]);
+  await requireAuthoringArtifact(presentation, 128);
+  await authoringStep(input, environment, "pptx.validate", python, [validator, presentation]);
+  const text = await authoringStep(input, environment, "pptx.extract", python, [
+    "-m",
+    "markitdown",
+    presentation,
+  ]);
+  if (!text.stdout.includes("TIANGONG_PPTX_CANARY")) {
+    throw new Error("PPTX MarkItDown did not return the exact canary sentinel.");
+  }
+  const thumbnailPrefix = join(input.temporary, "pptx-grid");
+  await authoringStep(
+    input,
+    environment,
+    "pptx.thumbnail",
+    python,
+    [thumbnail, presentation, thumbnailPrefix, "--cols", "1"],
+    60_000,
+  );
+  await requireAuthoringArtifact(`${thumbnailPrefix}.jpg`, 64);
+}
+
+async function runXlsxAuthoringCanary(
+  input: Parameters<typeof runAuthoringCanary>[0],
+  environment: NodeJS.ProcessEnv,
+): Promise<void> {
+  const python = requireAuthoringRuntimeExecutable(
+    input.runtime?.python ?? null,
+    "Python is missing.",
+  );
+  const skillDirectory = await verifiedCompanionSkillDirectory(input.plan, input.skill);
+  const recalc = join(skillDirectory, "scripts", "recalc.py");
+  await requireRegularCompanionFile(input.root, recalc, "XLSX recalculation helper");
+  const workbook = join(input.temporary, "xlsx-canary.xlsx");
+  await authoringStep(input, environment, "xlsx.create", python, [
+    "-c",
+    XLSX_CANARY_SCRIPT,
+    workbook,
+  ]);
+  await requireAuthoringArtifact(workbook, 128);
+  const recalculated = await authoringStep(
+    input,
+    environment,
+    "xlsx.recalculate",
+    python,
+    [recalc, workbook, "60"],
+    75_000,
+  );
+  let result: unknown;
+  try {
+    result = JSON.parse(recalculated.stdout) as unknown;
+  } catch {
+    throw new Error("XLSX recalculation helper did not return JSON.");
+  }
+  if (!isObject(result) || result.status !== "success" || result.total_errors !== 0) {
+    throw new Error("XLSX recalculation helper did not complete without formula errors.");
+  }
+  const cached = await authoringStep(input, environment, "xlsx.verify-cache", python, [
+    "-c",
+    XLSX_VERIFY_SCRIPT,
+    workbook,
+  ]);
+  if (cached.stdout.trim() !== "5") {
+    throw new Error("XLSX recalculation did not persist the exact cached formula value.");
+  }
+  const markdown = await authoringStep(input, environment, "xlsx.extract", python, [
+    "-m",
+    "markitdown",
+    workbook,
+  ]);
+  const normalizedMarkdown = markdown.stdout.replaceAll("\\_", "_");
+  if (
+    !normalizedMarkdown.includes("TIANGONG_XLSX_CANARY") ||
+    !/(?:^|\D)5(?:\D|$)/u.test(normalizedMarkdown)
+  ) {
+    throw new Error("XLSX MarkItDown did not return the exact canary sentinel and value.");
+  }
+}
+
+async function authoringStep(
+  input: Parameters<typeof runAuthoringCanary>[0],
+  environment: NodeJS.ProcessEnv,
+  step: string,
+  command: string,
+  args: string[],
+  timeoutMs = 30_000,
+): Promise<SetupCommandResult> {
+  const result = await input.runner({
+    command,
+    args,
+    cwd: input.root,
+    environment,
+    timeoutMs,
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(`Authoring canary step failed (${step}).`);
+  }
+  return result;
+}
+
+async function requireAuthoringArtifact(path: string, minimumBytes: number): Promise<void> {
+  const info = await lstat(path).catch(() => undefined);
+  if (!info?.isFile() || info.isSymbolicLink() || info.size < minimumBytes) {
+    throw new Error("Authoring canary did not create its exact expected regular artifact.");
+  }
+}
+
+const DOCX_CANARY_SCRIPT = String.raw`
+const fs=require("node:fs"); const {Document,Packer,Paragraph}=require("docx");
+(async()=>{const out=process.argv[1]; const doc=new Document({sections:[{children:[new Paragraph("TIANGONG_DOCX_CANARY")]}]}); fs.writeFileSync(out,await Packer.toBuffer(doc));})().catch(()=>process.exit(1));`;
+
+const PDF_CANARY_SCRIPT = String.raw`
+import sys
+from reportlab.pdfgen import canvas
+c=canvas.Canvas(sys.argv[1]); c.drawString(72,720,"TIANGONG_PDF_CANARY"); c.save()`;
+
+const PDF_VERIFY_SCRIPT = String.raw`
+import sys, pdfplumber
+from pypdf import PdfReader
+assert len(PdfReader(sys.argv[1]).pages)==1
+with pdfplumber.open(sys.argv[1]) as p: print(p.pages[0].extract_text())`;
+
+const PPTX_CANARY_SCRIPT = String.raw`
+const pptxgen=require("pptxgenjs");
+(async()=>{const p=new pptxgen(); p.addSlide().addText("TIANGONG_PPTX_CANARY",{x:1,y:1,w:6,h:1}); await p.writeFile({fileName:process.argv[1]});})().catch(()=>process.exit(1));`;
+
+const XLSX_CANARY_SCRIPT = String.raw`
+import sys
+from openpyxl import Workbook
+w=Workbook(); s=w.active; s["A1"]="TIANGONG_XLSX_CANARY"; s["A2"]=2; s["A3"]=3; s["A4"]="=SUM(A2:A3)"; w.save(sys.argv[1])`;
+
+const XLSX_VERIFY_SCRIPT = String.raw`
+import sys
+from openpyxl import load_workbook
+w=load_workbook(sys.argv[1],data_only=True,read_only=True); print(w.active["A4"].value); w.close()`;
 
 async function appendCompanionLiveChecks(
   checks: SetupDoctorCheck[],

@@ -210,8 +210,16 @@ binding, no-overwrite/no-directory-scan behavior, explicit browser handoff, and
 bounded JSON POST broker credential/body redaction. Paper companion tests also
 require execution and doctor to use the installed Skill's locked `runtime.py`,
 including a sanitized actionable missing-runtime error. Authoring readiness
-tests prove selected DOCX/PPTX Skills degrade when confirmed `defusedxml` or
-`markitdown[pptx]` prerequisites are absent. Readiness tests additionally
+tests cover the complete DOCX/PDF/PPTX/XLSX package and command matrices,
+same-runtime binding, component-scoped blocking, all four exact-file functional
+canaries, and the prohibition on implicit pip/npm/system installation.
+`test/research-setup-audit-bundle.test.ts` proves setup-only export is portable,
+closed, secret-free, movable, exact-file and semantically hash-bound; missing,
+extra, tampered, symlinked, or invalid-attestation inputs fail closed without
+rerunning setup work. It also covers an external expected-digest trust anchor,
+JSON-escaped secrets, oversized files, closed proof schemas, and recomputed
+internal hashes, concurrent file replacement, local-capability path removal,
+and digest-only Doctor/static-header/credential-prefix fields. Readiness tests additionally
 prove that one capability probe is reused, paid reviewer smoke is skipped after
 a blocking prerequisite, Semantic Scholar throttling degrades only acquisition,
 and an optional preprocessor becomes a hard gate only when its exact catalog ID
