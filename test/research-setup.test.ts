@@ -1615,7 +1615,7 @@ describe("research setup execution and operator safety", () => {
 
       const report = await doctorResearchSetup(root, {
         runner: async ({ command, args }) => {
-          const commandName = basename(command);
+          const commandName = basename(command).replace(/\.(?:cmd|exe)$/iu, "");
           const isPython = commandName.startsWith("python3");
           if (isPython && args.includes("--version")) {
             return { exitCode: 0, stdout: "Python 3.12.8\n", stderr: "" };
