@@ -111,13 +111,16 @@ storage writes, queueing, and document status transitions.
   retained only by hash, exact download-event binding, and explicit exact-file
   artifact registration with PDF/ZIP/OpenXML validation,
   acquisition audits that freeze both success and honest gaps, immutable
-  parent/delta evidence snapshots, exact-lineage artifact decomposition,
+  parent/delta evidence snapshots, automatic hash-checked input-backed artifact
+  materialization for readable local inputs, exact-lineage artifact decomposition,
   line-range/JSON-Pointer evidence atoms, typed-content coverage snapshots,
   separate inference-stop gates, immutable inference snapshots, schema-v2
   reproducible analysis runs, and mechanically generated Claim-Evidence Graphs,
-  addendum
-  supersession, one authoritative project lineage with explicit
-  archive/abandon dispositions, and default historical-project filtering,
+  addendum supersession, reviewer-driven synthesis revisions with immutable
+  prior-report archives, rollback-protected recovery forks that re-sign typed
+  content for the target, commit-marker-based rejection of partial forks, one
+  authoritative project lineage with explicit archive/abandon dispositions,
+  and default historical-project filtering,
   hash-bound native-host producer stage prepare/submit/abort, one-shot native
   broker fetches, schema-driven reviewer output and isolated repair, dedicated
   reviewer capsule homes,
@@ -331,6 +334,28 @@ producer packets contain bounded, hash-verified prior artifacts. The platform
 `sandbox-exec`/Bubblewrap capsule is used for the independently launched
 reviewer CLI; that adapter disables shell, unified-exec, filesystem, and
 undeclared integrations.
+
+For accepted local full-text sources, acquisition materialization verifies the
+admitted input hash and creates an idempotent artifact identity before the
+acquire package closes. Producer-readable inputs can therefore be atomized
+without a second manual copy. Binary inputs remain non-readable and stop acquire
+until the decision also binds a valid readable derivative. Input-backed
+artifacts do not expand an input plan's bounded prompt context; exact bytes stay
+available to the artifact, atom, packet, and audit validators.
+
+An independent-review revision can reopen a completed synthesis package only
+through the explicit retry command and only while the review package records the
+mechanical revision-required failure. The current report remains in place until
+the replacement submit commits, and its prior bytes are preserved in a
+content-addressed read-only revision archive.
+
+Recovery forks validate top-journal resume limits before target creation, clone
+and re-register decomposition/atom records against the target acquisition, and
+freeze a new target-bound content snapshot. Top-journal recovery stops at
+acquire so the new Policy/design generation can complete its own scientific
+reviews. Once mutation starts, every failure rolls back source state and removes
+the target. Status requires the append-only `project.forked` marker before a fork
+can be authoritative, so legacy half-written targets are reported as invalid.
 
 Reviewer transport is separate from producer host and reviewer model identity.
 `native-direct` invokes the platform capsule in-process. `sandbox-bridge` uses

@@ -239,8 +239,10 @@ owner-only whitelisted Claude settings authentication, production doctor
 attestation creation, default-doctor reuse, current-runtime drift rejection,
 two-protocol-turn tool-free review with exact local views and cited broker
 items selected from hash-bound raw responses by admitted JSON Pointer,
-persistent packet/context tamper rejection at closure, JSONL progress, and
-append-only retry/fork recovery. `test/research-external-skills.test.ts`
+persistent packet/context tamper rejection at closure, JSONL progress,
+reviewer-driven synthesis reopening with a read-only prior-report archive,
+append-only retry/fork recovery, and zero-target rollback after inherited-output
+validation failure. `test/research-external-skills.test.ts`
 validates the pinned external recommendation catalog, actionable missing-install
 errors, owner-environment credential configuration without disclosure, custom
 database Skill admission, whole-tree locks and staged manifests, static/live
@@ -272,8 +274,10 @@ separation, append-only reviewer-session reuse rejection, raw-session
 non-persistence, active-base-research status, revision invalidation, package
 status projection, and publication closure language ceilings.
 `test/research-acquisition.test.ts` additionally covers honest acquisition
-freeze with a separate inference stop, exact decomposition lineage, evidence
-atoms, typed-content snapshots, inference snapshots, generated Claim-Evidence
+freeze with a separate inference stop, hash-checked input-backed artifact
+materialization without bounded-context expansion, exact decomposition lineage,
+evidence atoms, typed-content snapshots, target-bound content reconstruction on
+recovery fork, inference snapshots, generated Claim-Evidence
 Graphs, operator-visible `evidencePipeline` status, semantic audit-chain export,
 safe journal-proof derivatives, and pre-export tamper rejection.
 `test/research-scientific-design.test.ts` uses the EV pavement-model R9 failure
@@ -287,7 +291,8 @@ continuous decision-consequence graphs, explicit factor/uncertainty
 composition, and the rule that specification bytes do not establish
 executability. `test/research-scientific-admission.test.ts` covers native producer
 session hashing, immutable design admission, Policy/design identity, complete
-lifecycle reservations, and target-specific fork generations.
+lifecycle reservations, target-specific fork generations, and zero-write
+rejection when top-journal recovery requests inheritance beyond acquire.
 `test/research-scientific-objects.test.ts` covers the public pre-admission
 scientific-object register/inspect flow, raw Python and lock-file promotion,
 idempotency, exact media/object-kind packet metadata, symlink and control-store
@@ -325,7 +330,8 @@ parent URL inheritance and conflicting derivative URL rejection, binary-only
 versus producer-readable full text, artifact drift, immutable
 snapshot/delta lineage, and non-destructive addenda. Workspace/runtime tests
 additionally verify default superseded-project filtering, authoritative fork
-lineage, archive/abandon dispositions, durable user/external handoffs and
+lineage, invalid authority for an uncommitted partial fork, archive/abandon
+dispositions, durable user/external handoffs and
 challenge gates, and closure rejection when any bound snapshot-chain object
 drifts. `test/research-workspace-lock.test.ts` uses real child processes to
 prove `SIGKILL` recovery, released single-file-lock migration, live-owner
