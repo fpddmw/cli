@@ -713,6 +713,19 @@ describe("research acquisition and evidence snapshots", () => {
         [sourceArtifact.artifactId, contextArtifact.artifactId].sort(),
       );
 
+      await recordArtifactDecomposition({
+        root,
+        projectId,
+        value: {
+          schemaVersion: 1,
+          sourceArtifactId: sourceArtifact.artifactId,
+          status: "complete",
+          parser: { id: "test.input-context", version: "1.0.0" },
+          outputArtifactIds: [contextArtifact.artifactId],
+          contentClasses: ["fulltext"],
+          limitations: [],
+        },
+      });
       await registerEvidenceAtom({
         root,
         projectId,

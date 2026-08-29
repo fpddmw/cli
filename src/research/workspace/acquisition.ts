@@ -154,7 +154,15 @@ export async function materializeAcquisitionAudit(
       const currentSha256 = projectInput
         ? await sha256File(projectInput.path).catch(() => null)
         : null;
-      if (!projectInput || currentSha256 !== projectInput.sha256) {
+      const currentContextSha256 = projectInput?.contextPath
+        ? await sha256File(projectInput.contextPath).catch(() => null)
+        : null;
+      if (
+        !projectInput ||
+        currentSha256 !== projectInput.sha256 ||
+        (projectInput.contextPath &&
+          (!projectInput.contextSha256 || currentContextSha256 !== projectInput.contextSha256))
+      ) {
         throw new CliError(
           `Accepted full-text input ${decision.sourceId} no longer matches its admitted bytes.`,
           {
@@ -174,6 +182,23 @@ export async function materializeAcquisitionAudit(
       if (!normalizedArtifactIds.includes(inputArtifact.artifactId)) {
         normalizedArtifactIds.push(inputArtifact.artifactId);
         boundArtifacts.push(inputArtifact);
+      }
+      if (
+        !boundArtifacts.some((artifact) => producerVisibleMediaType(artifact.mediaType)) &&
+        projectInput.contextPath
+      ) {
+        const contextArtifact = await registerEvidenceArtifact({
+          root,
+          projectId: project.id,
+          candidateId: decision.candidateId,
+          path: projectInput.contextPath,
+          derivedFromArtifactId: inputArtifact.artifactId,
+        });
+        artifacts.set(contextArtifact.artifactId, contextArtifact);
+        if (!normalizedArtifactIds.includes(contextArtifact.artifactId)) {
+          normalizedArtifactIds.push(contextArtifact.artifactId);
+          boundArtifacts.push(contextArtifact);
+        }
       }
     }
     if (
