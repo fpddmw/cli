@@ -36,6 +36,7 @@ import {
 import {
   addProjectInput,
   createProjectAddendum,
+  forkProject,
   initializeProject,
   loadProject,
   saveProject,
@@ -535,6 +536,57 @@ describe("research acquisition and evidence snapshots", () => {
         },
       });
       assert.equal((await freezeEvidenceContentSnapshot(root, projectId)).gate.decision, "pass");
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("rebuilds typed evidence content when a recovery fork inherits acquisition", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-content-fork-test-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-content-fork-files-"));
+    const sourceId = "content-fork-source";
+    const targetId = "content-fork-target";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      const { snapshot } = await freezeInputOnlyProject(root, staging, sourceId);
+      const [candidate] = await listEvidenceCandidates(root, sourceId);
+      const [artifact] = snapshot.artifacts;
+      assert.ok(candidate);
+      assert.ok(artifact);
+      await registerEvidenceAtom({
+        root,
+        projectId: sourceId,
+        value: {
+          schemaVersion: 1,
+          atomId: "source-1.atom.1",
+          sourceId: "source-1",
+          candidateId: candidate.id,
+          artifactId: artifact.artifactId,
+          locator: { kind: "line-range", startLine: 1, endLine: 1 },
+          statement: "The source contains stable evidence.",
+          evidenceRoleIds: [],
+          coverageDimensionIds: ["research-question"],
+          evidenceFunction: "support",
+          scope: "Recovery fork content inheritance regression.",
+          limitations: [],
+        },
+      });
+      const sourceContent = await freezeEvidenceContentSnapshot(root, sourceId);
+      assert.equal(sourceContent.gate.decision, "pass");
+
+      await forkProject(root, sourceId, targetId, "acquire");
+      const targetContent = await loadCurrentEvidenceContentSnapshot(root, targetId);
+      assert.equal(targetContent.projectId, targetId);
+      assert.notEqual(targetContent.snapshotSha256, sourceContent.snapshotSha256);
+      assert.equal(targetContent.gate.decision, "pass");
+      assert.equal(targetContent.atoms.length, 1);
+      assert.equal(targetContent.atoms[0]?.projectId, targetId);
+      assert.equal(targetContent.atoms[0]?.artifactId, artifact.artifactId);
+      assert.notEqual(targetContent.atoms[0]?.atomSha256, sourceContent.atoms[0]?.atomSha256);
     } finally {
       await Promise.all([
         rm(root, { recursive: true, force: true }),

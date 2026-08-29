@@ -2438,6 +2438,38 @@ describe("production research control plane", () => {
     }
   });
 
+  it("removes a recovery target and preserves source authority when fork validation fails", async () => {
+    const root = await temporaryDirectory();
+    const sourceId = "fork-rollback-source";
+    const targetId = "fork-rollback-target";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, sourceId, "Keep failed recovery forks side-effect free.");
+      const input = join(root, "fork-rollback-source.txt");
+      await writeFile(input, "source evidence\n");
+      await addProjectInput(root, sourceId, input, "primary");
+      const completed = await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
+        deterministicExecutor(),
+      );
+      assert.equal(completed.status, "complete", JSON.stringify(completed));
+      await writeFile(
+        join(workspacePaths(root).projects, sourceId, "outputs", "analysis.json"),
+        '{"schemaVersion":2}\n',
+      );
+
+      await assert.rejects(forkProject(root, sourceId, targetId, "analyze"));
+      assert.equal(
+        await lstat(join(workspacePaths(root).projects, targetId)).catch(() => null),
+        null,
+      );
+      assert.equal((await loadProject(root, sourceId)).lineage.supersededBy, null);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("reopens synthesis after reviewer revision while preserving the prior report", async () => {
     const root = await temporaryDirectory();
     const projectId = "reviewer-revision";

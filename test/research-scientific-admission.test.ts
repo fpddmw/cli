@@ -13,6 +13,7 @@ import {
   loadProject,
   nextReadyPackage,
   nextScientificGate,
+  saveProject,
 } from "../src/research/workspace/projects.js";
 import {
   readAndVerifyScientificDesign,
@@ -479,6 +480,48 @@ describe("top-journal scientific design admission", () => {
       assert.equal(fork.lineage.supersedes, sourceId);
       assert.equal((await loadProject(root, sourceId)).lineage.supersededBy, targetId);
       assert.equal(nextReadyPackage(fork), undefined);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects top-journal analyze inheritance before creating a recovery target", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-scientific-resume-preflight-"));
+    const sourceId = "scientific-resume-r1";
+    const targetId = "scientific-resume-r2";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const source = await initializeProject(
+        root,
+        sourceId,
+        "Require target-specific scientific reviews before inherited analysis.",
+        undefined,
+        false,
+        undefined,
+        policy(sourceId),
+        await scientificDesignInput(root, sourceId),
+      );
+      const now = new Date().toISOString();
+      for (const stage of ["discover", "acquire", "analyze"] as const) {
+        const workPackage = source.packages.find((item) => item.stage === stage)!;
+        workPackage.status = "complete";
+        workPackage.completedAt = now;
+      }
+      await saveProject(root, source);
+
+      await assert.rejects(
+        forkProject(root, sourceId, targetId, "analyze", {
+          publicationPolicy: policy(targetId),
+          scientificDesign: await scientificDesignInput(root, targetId),
+        }),
+        (error: unknown) =>
+          (error as { code?: string }).code === "RESEARCH_PROJECT_FORK_RESUME_UNAVAILABLE",
+      );
+      assert.equal(
+        await lstat(join(workspacePaths(root).projects, targetId)).catch(() => null),
+        null,
+      );
+      assert.equal((await loadProject(root, sourceId)).lineage.supersededBy, null);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
