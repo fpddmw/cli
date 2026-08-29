@@ -458,7 +458,7 @@ describe("research acquisition and evidence snapshots", () => {
     }
   });
 
-  it("keeps accepted full-text inputs in acquire until an atom-capable artifact is bound", async () => {
+  it("materializes accepted readable inputs as atom-capable acquisition artifacts", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-input-atomization-test-"));
     const staging = await mkdtemp(join(tmpdir(), "tiangong-input-atomization-files-"));
     const projectId = "input-atomization";
@@ -500,34 +500,6 @@ describe("research acquisition and evidence snapshots", () => {
         acquireOutput,
         JSON.stringify(acquisitionValue(candidate.id, "owner-source")),
       );
-      await assert.rejects(
-        submitNativeResearchStage({
-          root,
-          projectId,
-          sessionId: acquire.sessionId,
-          outputPath: acquireOutput,
-          confirmedModel: acquire.expectedModel,
-        }),
-        (error: unknown) =>
-          error instanceof CliError && error.code === "RESEARCH_INPUT_ATOMIZATION_REQUIRED",
-      );
-      assert.equal(
-        (await loadProject(root, projectId)).packages.find((item) => item.stage === "acquire")
-          ?.status,
-        "running",
-      );
-
-      const artifact = await registerEvidenceArtifact({
-        root,
-        projectId,
-        candidateId: candidate.id,
-        path: inputPath,
-        mediaType: "text/markdown",
-      });
-      await writeFile(
-        acquireOutput,
-        JSON.stringify(acquisitionValue(candidate.id, "owner-source", [artifact.artifactId])),
-      );
       await submitNativeResearchStage({
         root,
         projectId,
@@ -536,9 +508,33 @@ describe("research acquisition and evidence snapshots", () => {
         confirmedModel: acquire.expectedModel,
       });
       const snapshot = await loadCurrentEvidenceSnapshot(root, projectId);
+      const [artifact] = snapshot.artifacts;
+      assert.ok(artifact);
+      assert.equal(artifact.sha256, await sha256File(inputPath));
+      assert.equal(artifact.mediaType, "text/markdown");
       assert.equal(snapshot.sources[0]?.producerContextLevel, "full-input");
       assert.deepEqual(snapshot.sources[0]?.artifactIds, [artifact.artifactId]);
       assert.deepEqual(snapshot.sources[0]?.producerVisibleArtifactIds, [artifact.artifactId]);
+
+      await registerEvidenceAtom({
+        root,
+        projectId,
+        value: {
+          schemaVersion: 1,
+          atomId: "owner-source.atom.1",
+          sourceId: "owner-source",
+          candidateId: candidate.id,
+          artifactId: artifact.artifactId,
+          locator: { kind: "line-range", startLine: 1, endLine: 1 },
+          statement: "The owner supplied exact local evidence.",
+          evidenceRoleIds: [],
+          coverageDimensionIds: ["research-question"],
+          evidenceFunction: "support",
+          scope: "Input atomization regression.",
+          limitations: [],
+        },
+      });
+      assert.equal((await freezeEvidenceContentSnapshot(root, projectId)).gate.decision, "pass");
     } finally {
       await Promise.all([
         rm(root, { recursive: true, force: true }),

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { cp, lstat, readdir } from "node:fs/promises";
+import { cp, lstat, readFile, readdir } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
@@ -30,11 +30,13 @@ import {
   fileRecord,
   fileSize,
   isObject,
+  pathExists,
   readJsonFile,
   sha256File,
   sha256Text,
   workspacePaths,
   writeJsonAtomic,
+  writeTextAtomic,
 } from "./storage.js";
 import type {
   AgentKind,
@@ -336,12 +338,25 @@ export async function retryProjectPackage(
     const selected = packageId
       ? packageById(project, packageId)
       : project.packages.find((item) => item.status === "failed" || item.status === "retry");
-    if (!selected || (selected.status !== "failed" && selected.status !== "retry")) {
+    const review = project.packages.find((item) => item.stage === "review");
+    const reviewerRevision = Boolean(
+      selected?.stage === "synthesize" &&
+      selected.status === "complete" &&
+      review?.status === "failed" &&
+      review.lastError === "Independent review requested revision.",
+    );
+    if (
+      !selected ||
+      (selected.status !== "failed" && selected.status !== "retry" && !reviewerRevision)
+    ) {
       throw new CliError("Project retry requires a failed or retryable package.", {
         code: "RESEARCH_RETRY_NOT_AVAILABLE",
         exitCode: 2,
       });
     }
+    const archivedReport = reviewerRevision
+      ? await archiveSynthesisRevision(root, projectId)
+      : null;
     const selectedIndex = project.packages.indexOf(selected);
     const previous = {
       status: selected.status,
@@ -366,9 +381,41 @@ export async function retryProjectPackage(
       packageId: selected.id,
       previous,
       preservedOutputs: true,
+      reason: reviewerRevision ? "reviewer-revision" : "package-failure",
+      archivedReport,
     });
     return project;
   });
+}
+
+async function archiveSynthesisRevision(
+  root: string,
+  projectId: string,
+): Promise<{ path: string; sha256: string; bytes: number }> {
+  const projectRoot = join(workspacePaths(root).projects, projectId);
+  const reportPath = join(projectRoot, "outputs", "report.md");
+  if (!(await pathExists(reportPath))) {
+    throw new CliError("Reviewer-driven synthesis revision requires the current report output.", {
+      code: "RESEARCH_REVISION_OUTPUT_REQUIRED",
+      exitCode: 3,
+      details: { projectId, path: "outputs/report.md" },
+    });
+  }
+  const reportSha256 = await sha256File(reportPath);
+  const logicalPath = `outputs/revisions/synthesize/${reportSha256}/report.md`;
+  const archivePath = join(projectRoot, logicalPath);
+  if (await pathExists(archivePath)) {
+    if ((await sha256File(archivePath)) !== reportSha256) {
+      throw new CliError("Archived synthesis revision failed its content-address binding.", {
+        code: "RESEARCH_REVISION_ARCHIVE_INVALID",
+        exitCode: 3,
+        details: { projectId, path: logicalPath },
+      });
+    }
+  } else {
+    await writeTextAtomic(archivePath, await readFile(reportPath, "utf8"), 0o444);
+  }
+  return fileRecord(archivePath, logicalPath);
 }
 
 export async function forkProject(

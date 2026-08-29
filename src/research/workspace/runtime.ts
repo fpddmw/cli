@@ -2275,13 +2275,17 @@ async function createCapsule(
         new Set(frozenSnapshot.artifacts.map((artifact) => artifact.artifactId)),
       )
     : [];
+  const inputSha256s = new Set(project.inputs.map((input) => input.sha256));
+  const contextualEvidenceArtifacts = evidenceArtifacts.filter(
+    (artifact) => !inputSha256s.has(artifact.sha256),
+  );
   if (
     (workPackage.stage === "analyze" || workPackage.stage === "synthesize") &&
-    evidenceArtifacts.length
+    contextualEvidenceArtifacts.length
   ) {
     await writeProducerArtifactContext(
       capsuleProject,
-      evidenceArtifacts,
+      contextualEvidenceArtifacts,
       Math.floor((config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN) / 2),
     );
   }
@@ -2324,7 +2328,7 @@ async function createCapsule(
           capsuleProject,
           contextBundleContent,
           evidenceReceipts,
-          evidenceArtifacts,
+          contextualEvidenceArtifacts,
           config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
         )
       : null;
