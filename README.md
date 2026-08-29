@@ -841,6 +841,17 @@ closure remains unchanged, the child snapshot records a mechanical delta, and
 default status hides the superseded project (`research status --all` shows full
 lineage).
 
+Accepted local inputs are normalized into immutable input-backed artifacts while
+the acquire package is still active. JSON, CSV, Markdown, and plain-text inputs
+therefore have an atom-capable identity even when the producer omitted an
+artifact ID. Binary inputs such as XLSX are registered for audit but still need
+a producer-readable derivative in the acquisition decision; the CLI returns
+`RESEARCH_INPUT_ATOMIZATION_REQUIRED` before closing acquire when that derivative
+is missing. An input hash drift stops normalization instead of silently binding
+new bytes. Input-backed artifacts remain packet-bound, while an explicitly
+bounded input context continues to control what producer and reviewer prompts
+embed.
+
 Use `research run --project <id>` for an auditable project-scoped run: only
 that project is checked, scheduled, summarized, and bound to the top-level
 JSON/JSONL `projectId`, so historical blocked siblings do not alter its exit
@@ -1080,10 +1091,28 @@ Explicit recovery uses append-only management events:
 ```bash
 tiangong-ai research project retry gpu-resource-impact --package analyze \
   --workspace /absolute/path/to/workspace
+tiangong-ai research project retry gpu-resource-impact --package synthesize \
+  --workspace /absolute/path/to/workspace
 tiangong-ai research project fork gpu-resource-impact \
   --to gpu-resource-impact-v2 --resume-through analyze \
   --workspace /absolute/path/to/workspace
 ```
+
+Selecting a completed `synthesize` package is allowed only after the downstream
+independent review explicitly requested revision. The prior report is retained
+read-only under `outputs/revisions/synthesize/<sha256>/report.md`; review and
+closure are invalidated, while unchanged discovery, acquisition, content,
+inference, analysis, and graph objects remain bound.
+
+Recovery fork writes are rollback-protected. If inherited output, content,
+inference, or graph validation fails, the target directory is removed and
+source authority is restored. A source typed-content snapshot is revalidated
+and re-signed for the target generation instead of copying its project-bound
+hash. Top-journal generations may resume only through `acquire`, because the
+target-specific scientific design must complete fresh evidence-construct and
+pilot-methods reviews before analysis. `research status --all` marks any legacy
+fork directory without a `project.forked` commit marker as
+`authority.state = "invalid"` rather than authoritative.
 
 ## Research Search
 

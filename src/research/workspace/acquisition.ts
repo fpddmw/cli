@@ -2,7 +2,11 @@ import { chmod, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { CliError } from "../../errors.js";
-import { loadEvidenceArtifactRecords, type EvidenceArtifactRecord } from "./artifacts.js";
+import {
+  loadEvidenceArtifactRecords,
+  registerEvidenceArtifact,
+  type EvidenceArtifactRecord,
+} from "./artifacts.js";
 import { loadProjectEvidenceReceipts } from "./evidence.js";
 import {
   appendEvidenceLedgerEvent,
@@ -120,14 +124,16 @@ export async function materializeAcquisitionAudit(
       record,
     ]),
   );
-  const decisions = parsed.decisions.map((decision) => {
+  const decisions: MaterializedAcquisitionAudit["decisions"] = [];
+  for (const decision of parsed.decisions) {
     const expectedCandidateId = sourceCandidates.get(decision.sourceId);
     if (!expectedCandidateId || expectedCandidateId !== decision.candidateId) {
       throw acquisitionOutputError(
         `Acquisition decision ${decision.sourceId} is not bound to its ledger candidate.`,
       );
     }
-    const boundArtifacts = decision.artifactIds.map((artifactId) => {
+    const normalizedArtifactIds = [...decision.artifactIds];
+    const boundArtifacts = normalizedArtifactIds.map((artifactId) => {
       const artifact = artifacts.get(artifactId);
       if (!artifact || artifact.candidateId !== decision.candidateId) {
         throw acquisitionOutputError(
@@ -139,6 +145,63 @@ export async function materializeAcquisitionAudit(
     const source = sourceById.get(decision.sourceId);
     const provenance = source && isObject(source.provenance) ? source.provenance : {};
     if (
+      decision.status === "accepted" &&
+      source?.fullTextAvailable === true &&
+      !boundArtifacts.some((artifact) => producerVisibleMediaType(artifact.mediaType)) &&
+      provenance.kind === "input"
+    ) {
+      const projectInput = project.inputs.find((input) => input.id === provenance.id);
+      const currentSha256 = projectInput
+        ? await sha256File(projectInput.path).catch(() => null)
+        : null;
+      const currentContextSha256 = projectInput?.contextPath
+        ? await sha256File(projectInput.contextPath).catch(() => null)
+        : null;
+      if (
+        !projectInput ||
+        currentSha256 !== projectInput.sha256 ||
+        (projectInput.contextPath &&
+          (!projectInput.contextSha256 || currentContextSha256 !== projectInput.contextSha256))
+      ) {
+        throw new CliError(
+          `Accepted full-text input ${decision.sourceId} no longer matches its admitted bytes.`,
+          {
+            code: "RESEARCH_INPUT_DRIFT",
+            exitCode: 3,
+            details: { sourceId: decision.sourceId, inputId: provenance.id ?? null },
+          },
+        );
+      }
+      const inputArtifact = await registerEvidenceArtifact({
+        root,
+        projectId: project.id,
+        candidateId: decision.candidateId,
+        path: projectInput.path,
+      });
+      artifacts.set(inputArtifact.artifactId, inputArtifact);
+      if (!normalizedArtifactIds.includes(inputArtifact.artifactId)) {
+        normalizedArtifactIds.push(inputArtifact.artifactId);
+        boundArtifacts.push(inputArtifact);
+      }
+      if (
+        !boundArtifacts.some((artifact) => producerVisibleMediaType(artifact.mediaType)) &&
+        projectInput.contextPath
+      ) {
+        const contextArtifact = await registerEvidenceArtifact({
+          root,
+          projectId: project.id,
+          candidateId: decision.candidateId,
+          path: projectInput.contextPath,
+          derivedFromArtifactId: inputArtifact.artifactId,
+        });
+        artifacts.set(contextArtifact.artifactId, contextArtifact);
+        if (!normalizedArtifactIds.includes(contextArtifact.artifactId)) {
+          normalizedArtifactIds.push(contextArtifact.artifactId);
+          boundArtifacts.push(contextArtifact);
+        }
+      }
+    }
+    if (
       provenance.kind === "broker" &&
       boundArtifacts.some((artifact) => !artifactHasDownloadProvenance(artifact, artifacts))
     ) {
@@ -146,8 +209,29 @@ export async function materializeAcquisitionAudit(
         `Network source ${decision.sourceId} includes an artifact without an exact download or derived-file binding.`,
       );
     }
-    return { ...decision, artifacts: boundArtifacts };
-  });
+    if (
+      decision.status === "accepted" &&
+      source?.fullTextAvailable === true &&
+      !boundArtifacts.some((artifact) => producerVisibleMediaType(artifact.mediaType))
+    ) {
+      throw new CliError(
+        `Accepted full-text input ${decision.sourceId} requires a producer-readable artifact before acquisition can close.`,
+        {
+          code: "RESEARCH_INPUT_ATOMIZATION_REQUIRED",
+          exitCode: 3,
+          details: {
+            sourceId: decision.sourceId,
+            candidateId: decision.candidateId,
+            artifactIds: normalizedArtifactIds,
+            acceptedMediaTypes: ["application/json", "text/csv", "text/markdown", "text/plain"],
+            recovery:
+              "Register the exact local input or a readable derivative during the active acquire stage, then include its artifact ID in this decision.",
+          },
+        },
+      );
+    }
+    decisions.push({ ...decision, artifactIds: normalizedArtifactIds, artifacts: boundArtifacts });
+  }
   return {
     schemaVersion: 1,
     decisions,

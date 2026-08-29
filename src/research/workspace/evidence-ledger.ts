@@ -110,8 +110,6 @@ export async function cloneEvidenceLedger(
     "handoff.resolved",
     "artifact.registered",
     "artifact.assessed",
-    "decomposition.recorded",
-    "atom.registered",
   ]);
   let count = 0;
   for (const event of events) {

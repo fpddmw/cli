@@ -2149,6 +2149,40 @@ describe("research workspace CLI", () => {
     }
   });
 
+  it("marks an uncommitted recovery fork as invalid instead of authoritative", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(
+        root,
+        "partial-source",
+        "Retain source authority after a failed fork.",
+      );
+      const partial = await initializeProject(
+        root,
+        "partial-target",
+        "Do not trust a target without a fork commit marker.",
+      );
+      partial.lineage.kind = "fork";
+      partial.lineage.derivedFrom = "partial-source";
+      partial.lineage.supersedes = "partial-source";
+      await saveProject(root, partial);
+
+      const status = JSON.parse(
+        (await invoke(["research", "status", "--workspace", root, "--all", "--json"])).stdout,
+      ) as { projects: Array<{ id: string; authority: { state: string; projectId: string } }> };
+      assert.deepEqual(
+        status.projects.map((project) => [project.id, project.authority]),
+        [
+          ["partial-source", { state: "authoritative", projectId: "partial-source" }],
+          ["partial-target", { state: "invalid", projectId: "partial-target" }],
+        ],
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("durably separates agent work, user action, and external-response waiting", async () => {
     const root = await temporaryDirectory();
     try {

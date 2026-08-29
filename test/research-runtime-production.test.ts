@@ -40,6 +40,7 @@ import {
   forkProject,
   initializeProject,
   loadProject,
+  nextReadyPackage,
   retryProjectPackage,
   saveProject,
 } from "../src/research/workspace/projects.js";
@@ -2432,6 +2433,89 @@ describe("production research control plane", () => {
         normal,
       );
       assert.equal(forkResult.status, "complete", JSON.stringify(forkResult));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("removes a recovery target and preserves source authority when fork validation fails", async () => {
+    const root = await temporaryDirectory();
+    const sourceId = "fork-rollback-source";
+    const targetId = "fork-rollback-target";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, sourceId, "Keep failed recovery forks side-effect free.");
+      const input = join(root, "fork-rollback-source.txt");
+      await writeFile(input, "source evidence\n");
+      await addProjectInput(root, sourceId, input, "primary");
+      const completed = await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
+        deterministicExecutor(),
+      );
+      assert.equal(completed.status, "complete", JSON.stringify(completed));
+      await writeFile(
+        join(workspacePaths(root).projects, sourceId, "outputs", "analysis.json"),
+        '{"schemaVersion":2}\n',
+      );
+
+      await assert.rejects(forkProject(root, sourceId, targetId, "analyze"));
+      assert.equal(
+        await lstat(join(workspacePaths(root).projects, targetId)).catch(() => null),
+        null,
+      );
+      assert.equal((await loadProject(root, sourceId)).lineage.supersededBy, null);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reopens synthesis after reviewer revision while preserving the prior report", async () => {
+    const root = await temporaryDirectory();
+    const projectId = "reviewer-revision";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const project = await initializeProject(
+        root,
+        projectId,
+        "Allow an auditable report revision after independent review.",
+      );
+      const now = new Date().toISOString();
+      for (const stage of ["discover", "acquire", "analyze", "synthesize"] as const) {
+        const workPackage = project.packages.find((item) => item.stage === stage)!;
+        workPackage.status = "complete";
+        workPackage.completedAt = now;
+      }
+      const review = project.packages.find((item) => item.stage === "review")!;
+      review.status = "failed";
+      review.completedAt = now;
+      review.lastError = "Independent review requested revision.";
+      review.lastFailureKind = "configuration";
+      await saveProject(root, project);
+
+      const reportPath = join(workspacePaths(root).projects, projectId, "outputs", "report.md");
+      const originalReport = "# Report\n\nRevision one with an incorrect graph hash.\n";
+      await writeFile(reportPath, originalReport);
+
+      const retried = await retryProjectPackage(root, projectId, "synthesize");
+      assert.equal(retried.packages.find((item) => item.stage === "synthesize")?.status, "ready");
+      assert.equal(retried.packages.find((item) => item.stage === "review")?.status, "pending");
+      assert.equal(retried.packages.find((item) => item.stage === "close")?.status, "pending");
+      assert.equal(nextReadyPackage(retried)?.id, "synthesize");
+      assert.equal(await readFile(reportPath, "utf8"), originalReport);
+
+      const revisionRoot = join(
+        workspacePaths(root).projects,
+        projectId,
+        "outputs",
+        "revisions",
+        "synthesize",
+      );
+      const revisions = await readdir(revisionRoot);
+      assert.equal(revisions.length, 1);
+      const archivedReport = join(revisionRoot, revisions[0]!, "report.md");
+      assert.equal(await readFile(archivedReport, "utf8"), originalReport);
+      assert.equal((await lstat(archivedReport)).mode & 0o222, 0);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

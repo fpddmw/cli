@@ -33,9 +33,11 @@ import {
   registerBrokerCandidates,
   registerNativeDiscoveryCandidate,
 } from "../src/research/workspace/evidence-ledger.js";
+import { readAndVerifyProjectInputPlan } from "../src/research/workspace/input-plan.js";
 import {
   addProjectInput,
   createProjectAddendum,
+  forkProject,
   initializeProject,
   loadProject,
   saveProject,
@@ -458,6 +460,350 @@ describe("research acquisition and evidence snapshots", () => {
     }
   });
 
+  it("materializes accepted readable inputs as atom-capable acquisition artifacts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-input-atomization-test-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-input-atomization-files-"));
+    const projectId = "input-atomization";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      await initializeProject(root, projectId, "Require an atomizable local input.");
+      const inputPath = join(staging, "owner-input.md");
+      await writeFile(inputPath, "# Owner evidence\n\nExact local evidence.\n");
+      await addProjectInput(root, projectId, inputPath, "primary");
+
+      const discover = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const [candidate] = await listEvidenceCandidates(root, projectId);
+      assert.ok(candidate);
+      await recordAdmission(root, projectId, candidate.id, "owner-source");
+      const discoverOutput = join(staging, "discover.json");
+      await writeFile(discoverOutput, JSON.stringify(discoveryValue(candidate.id, "owner-source")));
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: discover.sessionId,
+        outputPath: discoverOutput,
+        confirmedModel: discover.expectedModel,
+      });
+
+      const acquire = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      const acquireOutput = join(staging, "acquire.json");
+      await writeFile(
+        acquireOutput,
+        JSON.stringify(acquisitionValue(candidate.id, "owner-source")),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: acquire.sessionId,
+        outputPath: acquireOutput,
+        confirmedModel: acquire.expectedModel,
+      });
+      const snapshot = await loadCurrentEvidenceSnapshot(root, projectId);
+      const [artifact] = snapshot.artifacts;
+      assert.ok(artifact);
+      assert.equal(artifact.sha256, await sha256File(inputPath));
+      assert.equal(artifact.mediaType, "text/markdown");
+      assert.equal(snapshot.sources[0]?.producerContextLevel, "full-input");
+      assert.deepEqual(snapshot.sources[0]?.artifactIds, [artifact.artifactId]);
+      assert.deepEqual(snapshot.sources[0]?.producerVisibleArtifactIds, [artifact.artifactId]);
+
+      await registerEvidenceAtom({
+        root,
+        projectId,
+        value: {
+          schemaVersion: 1,
+          atomId: "owner-source.atom.1",
+          sourceId: "owner-source",
+          candidateId: candidate.id,
+          artifactId: artifact.artifactId,
+          locator: { kind: "line-range", startLine: 1, endLine: 1 },
+          statement: "The owner supplied exact local evidence.",
+          evidenceRoleIds: [],
+          coverageDimensionIds: ["research-question"],
+          evidenceFunction: "support",
+          scope: "Input atomization regression.",
+          limitations: [],
+        },
+      });
+      assert.equal((await freezeEvidenceContentSnapshot(root, projectId)).gate.decision, "pass");
+
+      const binaryProjectId = "binary-input-atomization";
+      await initializeProject(root, binaryProjectId, "Require a readable spreadsheet derivative.");
+      const workbookPath = join(staging, "owner-input.xlsx");
+      await writeFile(
+        workbookPath,
+        storedZip([
+          ["[Content_Types].xml", Buffer.from("<Types/>")],
+          [
+            "xl/workbook.xml",
+            Buffer.from('<workbook><sheets><sheet name="Sheet1" sheetId="1"/></sheets></workbook>'),
+          ],
+          ["xl/worksheets/sheet1.xml", Buffer.from("<worksheet/>")],
+        ]),
+      );
+      await addProjectInput(root, binaryProjectId, workbookPath, "primary");
+      const binaryDiscover = await prepareNativeResearchStage({
+        root,
+        projectId: binaryProjectId,
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const [binaryCandidate] = await listEvidenceCandidates(root, binaryProjectId);
+      assert.ok(binaryCandidate);
+      await recordAdmission(root, binaryProjectId, binaryCandidate.id, "spreadsheet-source");
+      const binaryDiscoverOutput = join(staging, "binary-discover.json");
+      await writeFile(
+        binaryDiscoverOutput,
+        JSON.stringify(discoveryValue(binaryCandidate.id, "spreadsheet-source")),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId: binaryProjectId,
+        sessionId: binaryDiscover.sessionId,
+        outputPath: binaryDiscoverOutput,
+        confirmedModel: binaryDiscover.expectedModel,
+      });
+      const binaryAcquire = await prepareNativeResearchStage({
+        root,
+        projectId: binaryProjectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      const binaryAcquireOutput = join(staging, "binary-acquire.json");
+      await writeFile(
+        binaryAcquireOutput,
+        JSON.stringify(acquisitionValue(binaryCandidate.id, "spreadsheet-source")),
+      );
+      await assert.rejects(
+        submitNativeResearchStage({
+          root,
+          projectId: binaryProjectId,
+          sessionId: binaryAcquire.sessionId,
+          outputPath: binaryAcquireOutput,
+          confirmedModel: binaryAcquire.expectedModel,
+        }),
+        (error: unknown) =>
+          error instanceof CliError &&
+          error.code === "RESEARCH_INPUT_ATOMIZATION_REQUIRED" &&
+          Array.isArray((error.details as { artifactIds?: unknown[] }).artifactIds) &&
+          (error.details as { artifactIds: unknown[] }).artifactIds.length === 1,
+      );
+      assert.equal(
+        (await loadProject(root, binaryProjectId)).packages.find((item) => item.stage === "acquire")
+          ?.status,
+        "running",
+      );
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("materializes a readable context derivative for accepted binary inputs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-binary-context-test-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-binary-context-files-"));
+    const projectId = "binary-context-atomization";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      const inputPath = join(staging, "owner-paper.pdf");
+      const contextPath = join(staging, "owner-paper.txt");
+      const planPath = join(staging, "input-plan.json");
+      await writeFile(inputPath, await validPdf("binary input with readable derivative"));
+      await writeFile(contextPath, "Facility A reports a bounded monthly water observation.\n");
+      await writeFile(
+        planPath,
+        JSON.stringify({
+          schemaVersion: 1,
+          inputs: [
+            {
+              path: inputPath,
+              contextPath,
+              role: "primary",
+              dimensions: ["research-question"],
+              sourceType: "owner-input",
+              fullText: true,
+              publicationDate: "2026-08-29",
+            },
+          ],
+        }),
+      );
+      await initializeProject(
+        root,
+        projectId,
+        "Require a producer-readable derivative for an accepted binary input.",
+        undefined,
+        false,
+        await readAndVerifyProjectInputPlan(planPath),
+      );
+
+      const discover = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const [candidate] = await listEvidenceCandidates(root, projectId);
+      assert.ok(candidate);
+      await recordAdmission(root, projectId, candidate.id, "binary-context-source");
+      const discoverOutput = join(staging, "discover.json");
+      await writeFile(
+        discoverOutput,
+        JSON.stringify(discoveryValue(candidate.id, "binary-context-source")),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: discover.sessionId,
+        outputPath: discoverOutput,
+        confirmedModel: discover.expectedModel,
+      });
+
+      const acquire = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      const acquireOutput = join(staging, "acquire.json");
+      await writeFile(
+        acquireOutput,
+        JSON.stringify(acquisitionValue(candidate.id, "binary-context-source")),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: acquire.sessionId,
+        outputPath: acquireOutput,
+        confirmedModel: acquire.expectedModel,
+      });
+
+      const snapshot = await loadCurrentEvidenceSnapshot(root, projectId);
+      const sourceSha256 = await sha256File(inputPath);
+      const contextSha256 = await sha256File(contextPath);
+      const sourceArtifact = snapshot.artifacts.find(
+        (artifact) => artifact.sha256 === sourceSha256,
+      );
+      const contextArtifact = snapshot.artifacts.find(
+        (artifact) => artifact.sha256 === contextSha256,
+      );
+      assert.ok(sourceArtifact);
+      assert.ok(contextArtifact);
+      assert.equal(sourceArtifact.mediaType, "application/pdf");
+      assert.equal(contextArtifact.mediaType, "text/plain");
+      assert.equal(contextArtifact.derivedFromArtifactId, sourceArtifact.artifactId);
+      assert.deepEqual(snapshot.sources[0]?.producerVisibleArtifactIds, [
+        contextArtifact.artifactId,
+      ]);
+      assert.deepEqual(
+        [...(snapshot.sources[0]?.artifactIds as string[])].sort(),
+        [sourceArtifact.artifactId, contextArtifact.artifactId].sort(),
+      );
+
+      await recordArtifactDecomposition({
+        root,
+        projectId,
+        value: {
+          schemaVersion: 1,
+          sourceArtifactId: sourceArtifact.artifactId,
+          status: "complete",
+          parser: { id: "test.input-context", version: "1.0.0" },
+          outputArtifactIds: [contextArtifact.artifactId],
+          contentClasses: ["fulltext"],
+          limitations: [],
+        },
+      });
+      await registerEvidenceAtom({
+        root,
+        projectId,
+        value: {
+          schemaVersion: 1,
+          atomId: "binary-context-source.atom.1",
+          sourceId: "binary-context-source",
+          candidateId: candidate.id,
+          artifactId: contextArtifact.artifactId,
+          locator: { kind: "line-range", startLine: 1, endLine: 1 },
+          statement: "The readable derivative retains the bounded observation.",
+          evidenceRoleIds: [],
+          coverageDimensionIds: ["research-question"],
+          evidenceFunction: "support",
+          scope: "Binary input context atomization regression.",
+          limitations: [],
+        },
+      });
+      assert.equal((await freezeEvidenceContentSnapshot(root, projectId)).gate.decision, "pass");
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("rebuilds typed evidence content when a recovery fork inherits acquisition", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-content-fork-test-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-content-fork-files-"));
+    const sourceId = "content-fork-source";
+    const targetId = "content-fork-target";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      const { snapshot } = await freezeInputOnlyProject(root, staging, sourceId);
+      const [candidate] = await listEvidenceCandidates(root, sourceId);
+      const [artifact] = snapshot.artifacts;
+      assert.ok(candidate);
+      assert.ok(artifact);
+      await registerEvidenceAtom({
+        root,
+        projectId: sourceId,
+        value: {
+          schemaVersion: 1,
+          atomId: "source-1.atom.1",
+          sourceId: "source-1",
+          candidateId: candidate.id,
+          artifactId: artifact.artifactId,
+          locator: { kind: "line-range", startLine: 1, endLine: 1 },
+          statement: "The source contains stable evidence.",
+          evidenceRoleIds: [],
+          coverageDimensionIds: ["research-question"],
+          evidenceFunction: "support",
+          scope: "Recovery fork content inheritance regression.",
+          limitations: [],
+        },
+      });
+      const sourceContent = await freezeEvidenceContentSnapshot(root, sourceId);
+      assert.equal(sourceContent.gate.decision, "pass");
+
+      await forkProject(root, sourceId, targetId, "acquire");
+      const targetContent = await loadCurrentEvidenceContentSnapshot(root, targetId);
+      assert.equal(targetContent.projectId, targetId);
+      assert.notEqual(targetContent.snapshotSha256, sourceContent.snapshotSha256);
+      assert.equal(targetContent.gate.decision, "pass");
+      assert.equal(targetContent.atoms.length, 1);
+      assert.equal(targetContent.atoms[0]?.projectId, targetId);
+      assert.equal(targetContent.atoms[0]?.artifactId, artifact.artifactId);
+      assert.notEqual(targetContent.atoms[0]?.atomSha256, sourceContent.atoms[0]?.atomSha256);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("rejects symlink artifacts and sensitive source URLs during acquisition", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-acquisition-safety-"));
     const staging = await mkdtemp(join(tmpdir(), "tiangong-acquisition-safety-files-"));
@@ -756,7 +1102,12 @@ describe("research acquisition and evidence snapshots", () => {
         hostAgent: "codex",
       });
       const acquireOutput = join(staging, "addendum-acquire.json");
-      await writeFile(acquireOutput, JSON.stringify(acquisitionValue(candidate.id, "source-1")));
+      await writeFile(
+        acquireOutput,
+        JSON.stringify(
+          acquisitionValue(candidate.id, "source-1", [sourceSnapshot.artifacts[0]!.artifactId]),
+        ),
+      );
       await submitNativeResearchStage({
         root,
         projectId: "source-addendum",
@@ -1298,8 +1649,18 @@ async function freezeInputOnlyProject(
     stage: "acquire",
     hostAgent: "codex",
   });
+  const artifact = await registerEvidenceArtifact({
+    root,
+    projectId,
+    candidateId: candidate.id,
+    path: input,
+    mediaType: "text/plain",
+  });
   const acquireOutput = join(staging, `${projectId}-acquire.json`);
-  await writeFile(acquireOutput, JSON.stringify(acquisitionValue(candidate.id, "source-1")));
+  await writeFile(
+    acquireOutput,
+    JSON.stringify(acquisitionValue(candidate.id, "source-1", [artifact.artifactId])),
+  );
   await submitNativeResearchStage({
     root,
     projectId,
