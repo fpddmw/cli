@@ -1,9 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { cp, lstat, readFile, readdir } from "node:fs/promises";
+import { cp, lstat, readFile, readdir, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { RESEARCH_CONTROL_DIRECTORY } from "./constants.js";
+import {
+  freezeEvidenceContentSnapshot,
+  loadCurrentEvidenceContentSnapshot,
+  recordArtifactDecomposition,
+  registerEvidenceAtom,
+} from "./content-evidence.js";
 import { appendJournalEvent } from "./journal.js";
 import { cloneProjectEvidenceReceipts } from "./evidence.js";
 import {
@@ -538,6 +544,34 @@ export async function forkProject(
         });
       }
     }
+    if (
+      targetScientificDesign &&
+      inheritedStages.some((stage) => stage === "analyze" || stage === "synthesize")
+    ) {
+      throw new CliError(
+        "Top-journal recovery cannot inherit analysis before the target generation completes its own scientific reviews.",
+        {
+          code: "RESEARCH_PROJECT_FORK_RESUME_UNAVAILABLE",
+          exitCode: 3,
+          details: {
+            requestedResumeThrough: resumeThrough ?? null,
+            maximumResumeThrough: "acquire",
+            requiredAction:
+              "Fork through acquire, verify the rebuilt typed-content snapshot, and complete the target evidence-construct and pilot-methods reviews before analysis.",
+          },
+        },
+      );
+    }
+    const sourceContentPath = join(
+      workspacePaths(root).projects,
+      sourceProjectId,
+      "outputs",
+      "content-snapshot.json",
+    );
+    const sourceContent =
+      inheritedStages.includes("acquire") && (await pathExists(sourceContentPath))
+        ? await loadCurrentEvidenceContentSnapshot(root, sourceProjectId)
+        : null;
     const now = new Date().toISOString();
     for (const workPackage of packages) {
       if (inheritedStages.includes(workPackage.stage)) {
@@ -581,101 +615,179 @@ export async function forkProject(
       handoff: initialHandoffState(),
       evidenceState: initialEvidenceState(),
     };
-    await Promise.all([
-      ensureDirectory(targetRoot),
-      ensureDirectory(join(targetRoot, "outputs")),
-      ensureDirectory(join(targetRoot, "runs")),
-    ]);
-    if (targetScientificDesign && scientificReapproval) {
-      await writeJsonAtomic(
-        join(workspacePaths(root).control, targetScientificDesign.objectLocator),
-        scientificReapproval.scientificDesign.design.contract,
-      );
+    const sourceBeforeMutation = structuredClone(source);
+    let targetMutationStarted = false;
+    let sourceMutationAttempted = false;
+    try {
+      targetMutationStarted = true;
+      await Promise.all([
+        ensureDirectory(targetRoot),
+        ensureDirectory(join(targetRoot, "outputs")),
+        ensureDirectory(join(targetRoot, "runs")),
+      ]);
+      if (targetScientificDesign && scientificReapproval) {
+        await writeJsonAtomic(
+          join(workspacePaths(root).control, targetScientificDesign.objectLocator),
+          scientificReapproval.scientificDesign.design.contract,
+        );
+      }
+      const inheritedOutputs: Array<{ path: string; sha256: string; bytes: number }> = [];
+      const stageOutput: Record<string, string> = {
+        discover: "outputs/evidence.json",
+        acquire: "outputs/acquisition.json",
+        analyze: "outputs/analysis.json",
+        synthesize: "outputs/report.md",
+      };
+      for (const stage of inheritedStages) {
+        const logicalPath = stageOutput[stage]!;
+        const sourcePath = join(workspacePaths(root).projects, sourceProjectId, logicalPath);
+        const record = await fileRecord(sourcePath, logicalPath);
+        const destination = join(targetRoot, logicalPath);
+        await ensureDirectory(dirname(destination));
+        await cp(sourcePath, destination, { errorOnExist: true, force: false });
+        inheritedOutputs.push(record);
+      }
+      if (inheritedStages.includes("discover")) {
+        await cloneProjectEvidenceReceipts(root, sourceProjectId, targetProjectId);
+        await cloneEvidenceLedger(root, sourceProjectId, targetProjectId);
+      }
+      if (inheritedStages.includes("acquire")) {
+        await cloneProjectArtifactRecords(root, sourceProjectId, targetProjectId);
+      }
+      refreshProject(project);
+      await writeJsonAtomic(join(targetRoot, "project.json"), project);
+      if (inheritedStages.includes("acquire")) {
+        await freezeEvidenceSnapshot(root, project);
+        inheritedOutputs.push(
+          await fileRecord(
+            join(targetRoot, "outputs", "evidence-snapshot.json"),
+            "outputs/evidence-snapshot.json",
+          ),
+        );
+        await saveProject(root, project);
+        if (sourceContent) {
+          for (const decomposition of sourceContent.decompositions) {
+            await recordArtifactDecomposition({
+              root,
+              projectId: targetProjectId,
+              value: {
+                schemaVersion: 1,
+                sourceArtifactId: decomposition.sourceArtifactId,
+                status: decomposition.status,
+                parser: decomposition.parser,
+                outputArtifactIds: decomposition.outputArtifactIds,
+                contentClasses: decomposition.contentClasses,
+                limitations: decomposition.limitations,
+              },
+            });
+          }
+          for (const atom of sourceContent.atoms) {
+            await registerEvidenceAtom({
+              root,
+              projectId: targetProjectId,
+              value: {
+                schemaVersion: 1,
+                atomId: atom.atomId,
+                sourceId: atom.sourceId,
+                candidateId: atom.candidateId,
+                artifactId: atom.artifactId,
+                locator: atom.locator,
+                statement: atom.statement,
+                evidenceRoleIds: atom.evidenceRoleIds,
+                coverageDimensionIds: atom.coverageDimensionIds,
+                evidenceFunction: atom.evidenceFunction,
+                scope: atom.scope,
+                limitations: atom.limitations,
+              },
+            });
+          }
+          await freezeEvidenceContentSnapshot(root, targetProjectId);
+          inheritedOutputs.push(
+            await fileRecord(
+              join(targetRoot, "outputs", "content-snapshot.json"),
+              "outputs/content-snapshot.json",
+            ),
+          );
+        }
+      }
+      if (inheritedStages.includes("analyze")) {
+        const { freezeClaimEvidenceGraph, freezeInferenceSnapshot } =
+          await import("./inference.js");
+        const inference = await freezeInferenceSnapshot(root, targetProjectId);
+        const analysisPath = join(targetRoot, "outputs", "analysis.json");
+        const analysis = await readJsonFile<Record<string, unknown>>(
+          analysisPath,
+          `Inherited analysis for ${targetProjectId}`,
+        );
+        analysis.inferenceSnapshotSha256 = inference.snapshotSha256;
+        await writeJsonAtomic(analysisPath, analysis);
+        await freezeClaimEvidenceGraph(root, targetProjectId, analysis);
+        const priorAnalysisIndex = inheritedOutputs.findIndex(
+          (record) => record.path === "outputs/analysis.json",
+        );
+        const reboundAnalysis = await fileRecord(analysisPath, "outputs/analysis.json");
+        if (priorAnalysisIndex >= 0) inheritedOutputs[priorAnalysisIndex] = reboundAnalysis;
+        else inheritedOutputs.push(reboundAnalysis);
+        inheritedOutputs.push(
+          await fileRecord(
+            join(targetRoot, "outputs", "inference-snapshot.json"),
+            "outputs/inference-snapshot.json",
+          ),
+          await fileRecord(
+            join(targetRoot, "outputs", "claim-evidence-graph.json"),
+            "outputs/claim-evidence-graph.json",
+          ),
+        );
+      }
+      source.lineage.supersededBy = targetProjectId;
+      source.evidenceState.staleReason = `Superseded by recovery fork ${targetProjectId}.`;
+      refreshProject(source);
+      sourceMutationAttempted = true;
+      await saveProject(root, source);
+      await appendEvidenceLedgerEvent(root, sourceProjectId, "project.superseded", {
+        sourceProjectId,
+        supersededBy: targetProjectId,
+        reason: "recovery-fork",
+      });
+      await appendJournalEvent(workspacePaths(root).journal, "project.forked", targetProjectId, {
+        sourceProjectId,
+        targetProjectId,
+        resumeThrough: resumeThrough ?? null,
+        inheritedOutputs,
+        inheritedUsage: false,
+        sourceSuperseded: true,
+        publicationPolicySha256: targetPolicy?.resolvedPolicySha256 ?? null,
+        scientificDesignSha256: targetScientificDesign?.designSha256 ?? null,
+        scientificDesignProducerSessionSha256:
+          targetScientificDesign?.producer.sessionSha256 ?? null,
+      });
+      return project;
+    } catch (error) {
+      const rollbackFailures: string[] = [];
+      if (sourceMutationAttempted) {
+        await saveProject(root, sourceBeforeMutation).catch((rollbackError: unknown) => {
+          rollbackFailures.push(`source:${String(rollbackError)}`);
+        });
+      }
+      if (targetMutationStarted) {
+        await rm(targetRoot, { recursive: true, force: true }).catch((rollbackError: unknown) => {
+          rollbackFailures.push(`target:${String(rollbackError)}`);
+        });
+      }
+      if (rollbackFailures.length) {
+        throw new CliError("Recovery fork failed and rollback could not restore a clean state.", {
+          code: "RESEARCH_PROJECT_FORK_ROLLBACK_FAILED",
+          exitCode: 3,
+          details: {
+            sourceProjectId,
+            targetProjectId,
+            originalError: error instanceof Error ? error.message : String(error),
+            rollbackFailures,
+          },
+        });
+      }
+      throw error;
     }
-    const inheritedOutputs: Array<{ path: string; sha256: string; bytes: number }> = [];
-    const stageOutput: Record<string, string> = {
-      discover: "outputs/evidence.json",
-      acquire: "outputs/acquisition.json",
-      analyze: "outputs/analysis.json",
-      synthesize: "outputs/report.md",
-    };
-    for (const stage of inheritedStages) {
-      const logicalPath = stageOutput[stage]!;
-      const sourcePath = join(workspacePaths(root).projects, sourceProjectId, logicalPath);
-      const record = await fileRecord(sourcePath, logicalPath);
-      const destination = join(targetRoot, logicalPath);
-      await ensureDirectory(dirname(destination));
-      await cp(sourcePath, destination, { errorOnExist: true, force: false });
-      inheritedOutputs.push(record);
-    }
-    if (inheritedStages.includes("discover")) {
-      await cloneProjectEvidenceReceipts(root, sourceProjectId, targetProjectId);
-      await cloneEvidenceLedger(root, sourceProjectId, targetProjectId);
-    }
-    if (inheritedStages.includes("acquire")) {
-      await cloneProjectArtifactRecords(root, sourceProjectId, targetProjectId);
-    }
-    refreshProject(project);
-    await writeJsonAtomic(join(targetRoot, "project.json"), project);
-    if (inheritedStages.includes("acquire")) {
-      await freezeEvidenceSnapshot(root, project);
-      inheritedOutputs.push(
-        await fileRecord(
-          join(targetRoot, "outputs", "evidence-snapshot.json"),
-          "outputs/evidence-snapshot.json",
-        ),
-      );
-      await saveProject(root, project);
-    }
-    if (inheritedStages.includes("analyze")) {
-      const { freezeClaimEvidenceGraph, freezeInferenceSnapshot } = await import("./inference.js");
-      const inference = await freezeInferenceSnapshot(root, targetProjectId);
-      const analysisPath = join(targetRoot, "outputs", "analysis.json");
-      const analysis = await readJsonFile<Record<string, unknown>>(
-        analysisPath,
-        `Inherited analysis for ${targetProjectId}`,
-      );
-      analysis.inferenceSnapshotSha256 = inference.snapshotSha256;
-      await writeJsonAtomic(analysisPath, analysis);
-      await freezeClaimEvidenceGraph(root, targetProjectId, analysis);
-      const priorAnalysisIndex = inheritedOutputs.findIndex(
-        (record) => record.path === "outputs/analysis.json",
-      );
-      const reboundAnalysis = await fileRecord(analysisPath, "outputs/analysis.json");
-      if (priorAnalysisIndex >= 0) inheritedOutputs[priorAnalysisIndex] = reboundAnalysis;
-      else inheritedOutputs.push(reboundAnalysis);
-      inheritedOutputs.push(
-        await fileRecord(
-          join(targetRoot, "outputs", "inference-snapshot.json"),
-          "outputs/inference-snapshot.json",
-        ),
-        await fileRecord(
-          join(targetRoot, "outputs", "claim-evidence-graph.json"),
-          "outputs/claim-evidence-graph.json",
-        ),
-      );
-    }
-    source.lineage.supersededBy = targetProjectId;
-    source.evidenceState.staleReason = `Superseded by recovery fork ${targetProjectId}.`;
-    refreshProject(source);
-    await saveProject(root, source);
-    await appendEvidenceLedgerEvent(root, sourceProjectId, "project.superseded", {
-      sourceProjectId,
-      supersededBy: targetProjectId,
-      reason: "recovery-fork",
-    });
-    await appendJournalEvent(workspacePaths(root).journal, "project.forked", targetProjectId, {
-      sourceProjectId,
-      targetProjectId,
-      resumeThrough: resumeThrough ?? null,
-      inheritedOutputs,
-      inheritedUsage: false,
-      sourceSuperseded: true,
-      publicationPolicySha256: targetPolicy?.resolvedPolicySha256 ?? null,
-      scientificDesignSha256: targetScientificDesign?.designSha256 ?? null,
-      scientificDesignProducerSessionSha256: targetScientificDesign?.producer.sessionSha256 ?? null,
-    });
-    return project;
   });
 }
 
