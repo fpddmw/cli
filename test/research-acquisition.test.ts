@@ -536,6 +536,73 @@ describe("research acquisition and evidence snapshots", () => {
         },
       });
       assert.equal((await freezeEvidenceContentSnapshot(root, projectId)).gate.decision, "pass");
+
+      const binaryProjectId = "binary-input-atomization";
+      await initializeProject(root, binaryProjectId, "Require a readable spreadsheet derivative.");
+      const workbookPath = join(staging, "owner-input.xlsx");
+      await writeFile(
+        workbookPath,
+        storedZip([
+          ["[Content_Types].xml", Buffer.from("<Types/>")],
+          [
+            "xl/workbook.xml",
+            Buffer.from('<workbook><sheets><sheet name="Sheet1" sheetId="1"/></sheets></workbook>'),
+          ],
+          ["xl/worksheets/sheet1.xml", Buffer.from("<worksheet/>")],
+        ]),
+      );
+      await addProjectInput(root, binaryProjectId, workbookPath, "primary");
+      const binaryDiscover = await prepareNativeResearchStage({
+        root,
+        projectId: binaryProjectId,
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const [binaryCandidate] = await listEvidenceCandidates(root, binaryProjectId);
+      assert.ok(binaryCandidate);
+      await recordAdmission(root, binaryProjectId, binaryCandidate.id, "spreadsheet-source");
+      const binaryDiscoverOutput = join(staging, "binary-discover.json");
+      await writeFile(
+        binaryDiscoverOutput,
+        JSON.stringify(discoveryValue(binaryCandidate.id, "spreadsheet-source")),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId: binaryProjectId,
+        sessionId: binaryDiscover.sessionId,
+        outputPath: binaryDiscoverOutput,
+        confirmedModel: binaryDiscover.expectedModel,
+      });
+      const binaryAcquire = await prepareNativeResearchStage({
+        root,
+        projectId: binaryProjectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      const binaryAcquireOutput = join(staging, "binary-acquire.json");
+      await writeFile(
+        binaryAcquireOutput,
+        JSON.stringify(acquisitionValue(binaryCandidate.id, "spreadsheet-source")),
+      );
+      await assert.rejects(
+        submitNativeResearchStage({
+          root,
+          projectId: binaryProjectId,
+          sessionId: binaryAcquire.sessionId,
+          outputPath: binaryAcquireOutput,
+          confirmedModel: binaryAcquire.expectedModel,
+        }),
+        (error: unknown) =>
+          error instanceof CliError &&
+          error.code === "RESEARCH_INPUT_ATOMIZATION_REQUIRED" &&
+          Array.isArray((error.details as { artifactIds?: unknown[] }).artifactIds) &&
+          (error.details as { artifactIds: unknown[] }).artifactIds.length === 1,
+      );
+      assert.equal(
+        (await loadProject(root, binaryProjectId)).packages.find((item) => item.stage === "acquire")
+          ?.status,
+        "running",
+      );
     } finally {
       await Promise.all([
         rm(root, { recursive: true, force: true }),
