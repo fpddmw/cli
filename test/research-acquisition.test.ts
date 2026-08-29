@@ -458,6 +458,95 @@ describe("research acquisition and evidence snapshots", () => {
     }
   });
 
+  it("keeps accepted full-text inputs in acquire until an atom-capable artifact is bound", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-input-atomization-test-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-input-atomization-files-"));
+    const projectId = "input-atomization";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      await initializeProject(root, projectId, "Require an atomizable local input.");
+      const inputPath = join(staging, "owner-input.md");
+      await writeFile(inputPath, "# Owner evidence\n\nExact local evidence.\n");
+      await addProjectInput(root, projectId, inputPath, "primary");
+
+      const discover = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const [candidate] = await listEvidenceCandidates(root, projectId);
+      assert.ok(candidate);
+      await recordAdmission(root, projectId, candidate.id, "owner-source");
+      const discoverOutput = join(staging, "discover.json");
+      await writeFile(discoverOutput, JSON.stringify(discoveryValue(candidate.id, "owner-source")));
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: discover.sessionId,
+        outputPath: discoverOutput,
+        confirmedModel: discover.expectedModel,
+      });
+
+      const acquire = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      const acquireOutput = join(staging, "acquire.json");
+      await writeFile(
+        acquireOutput,
+        JSON.stringify(acquisitionValue(candidate.id, "owner-source")),
+      );
+      await assert.rejects(
+        submitNativeResearchStage({
+          root,
+          projectId,
+          sessionId: acquire.sessionId,
+          outputPath: acquireOutput,
+          confirmedModel: acquire.expectedModel,
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_INPUT_ATOMIZATION_REQUIRED",
+      );
+      assert.equal(
+        (await loadProject(root, projectId)).packages.find((item) => item.stage === "acquire")
+          ?.status,
+        "running",
+      );
+
+      const artifact = await registerEvidenceArtifact({
+        root,
+        projectId,
+        candidateId: candidate.id,
+        path: inputPath,
+        mediaType: "text/markdown",
+      });
+      await writeFile(
+        acquireOutput,
+        JSON.stringify(acquisitionValue(candidate.id, "owner-source", [artifact.artifactId])),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: acquire.sessionId,
+        outputPath: acquireOutput,
+        confirmedModel: acquire.expectedModel,
+      });
+      const snapshot = await loadCurrentEvidenceSnapshot(root, projectId);
+      assert.equal(snapshot.sources[0]?.producerContextLevel, "full-input");
+      assert.deepEqual(snapshot.sources[0]?.artifactIds, [artifact.artifactId]);
+      assert.deepEqual(snapshot.sources[0]?.producerVisibleArtifactIds, [artifact.artifactId]);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("rejects symlink artifacts and sensitive source URLs during acquisition", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-acquisition-safety-"));
     const staging = await mkdtemp(join(tmpdir(), "tiangong-acquisition-safety-files-"));
@@ -756,7 +845,12 @@ describe("research acquisition and evidence snapshots", () => {
         hostAgent: "codex",
       });
       const acquireOutput = join(staging, "addendum-acquire.json");
-      await writeFile(acquireOutput, JSON.stringify(acquisitionValue(candidate.id, "source-1")));
+      await writeFile(
+        acquireOutput,
+        JSON.stringify(
+          acquisitionValue(candidate.id, "source-1", [sourceSnapshot.artifacts[0]!.artifactId]),
+        ),
+      );
       await submitNativeResearchStage({
         root,
         projectId: "source-addendum",
@@ -1298,8 +1392,18 @@ async function freezeInputOnlyProject(
     stage: "acquire",
     hostAgent: "codex",
   });
+  const artifact = await registerEvidenceArtifact({
+    root,
+    projectId,
+    candidateId: candidate.id,
+    path: input,
+    mediaType: "text/plain",
+  });
   const acquireOutput = join(staging, `${projectId}-acquire.json`);
-  await writeFile(acquireOutput, JSON.stringify(acquisitionValue(candidate.id, "source-1")));
+  await writeFile(
+    acquireOutput,
+    JSON.stringify(acquisitionValue(candidate.id, "source-1", [artifact.artifactId])),
+  );
   await submitNativeResearchStage({
     root,
     projectId,
