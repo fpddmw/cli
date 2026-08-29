@@ -33,6 +33,7 @@ import {
   registerBrokerCandidates,
   registerNativeDiscoveryCandidate,
 } from "../src/research/workspace/evidence-ledger.js";
+import { readAndVerifyProjectInputPlan } from "../src/research/workspace/input-plan.js";
 import {
   addProjectInput,
   createProjectAddendum,
@@ -603,6 +604,134 @@ describe("research acquisition and evidence snapshots", () => {
           ?.status,
         "running",
       );
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("materializes a readable context derivative for accepted binary inputs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-binary-context-test-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-binary-context-files-"));
+    const projectId = "binary-context-atomization";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      const inputPath = join(staging, "owner-paper.pdf");
+      const contextPath = join(staging, "owner-paper.txt");
+      const planPath = join(staging, "input-plan.json");
+      await writeFile(inputPath, await validPdf("binary input with readable derivative"));
+      await writeFile(contextPath, "Facility A reports a bounded monthly water observation.\n");
+      await writeFile(
+        planPath,
+        JSON.stringify({
+          schemaVersion: 1,
+          inputs: [
+            {
+              path: inputPath,
+              contextPath,
+              role: "primary",
+              dimensions: ["research-question"],
+              sourceType: "owner-input",
+              fullText: true,
+              publicationDate: "2026-08-29",
+            },
+          ],
+        }),
+      );
+      await initializeProject(
+        root,
+        projectId,
+        "Require a producer-readable derivative for an accepted binary input.",
+        undefined,
+        false,
+        await readAndVerifyProjectInputPlan(planPath),
+      );
+
+      const discover = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const [candidate] = await listEvidenceCandidates(root, projectId);
+      assert.ok(candidate);
+      await recordAdmission(root, projectId, candidate.id, "binary-context-source");
+      const discoverOutput = join(staging, "discover.json");
+      await writeFile(
+        discoverOutput,
+        JSON.stringify(discoveryValue(candidate.id, "binary-context-source")),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: discover.sessionId,
+        outputPath: discoverOutput,
+        confirmedModel: discover.expectedModel,
+      });
+
+      const acquire = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      const acquireOutput = join(staging, "acquire.json");
+      await writeFile(
+        acquireOutput,
+        JSON.stringify(acquisitionValue(candidate.id, "binary-context-source")),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: acquire.sessionId,
+        outputPath: acquireOutput,
+        confirmedModel: acquire.expectedModel,
+      });
+
+      const snapshot = await loadCurrentEvidenceSnapshot(root, projectId);
+      const sourceSha256 = await sha256File(inputPath);
+      const contextSha256 = await sha256File(contextPath);
+      const sourceArtifact = snapshot.artifacts.find(
+        (artifact) => artifact.sha256 === sourceSha256,
+      );
+      const contextArtifact = snapshot.artifacts.find(
+        (artifact) => artifact.sha256 === contextSha256,
+      );
+      assert.ok(sourceArtifact);
+      assert.ok(contextArtifact);
+      assert.equal(sourceArtifact.mediaType, "application/pdf");
+      assert.equal(contextArtifact.mediaType, "text/plain");
+      assert.equal(contextArtifact.derivedFromArtifactId, sourceArtifact.artifactId);
+      assert.deepEqual(snapshot.sources[0]?.producerVisibleArtifactIds, [
+        contextArtifact.artifactId,
+      ]);
+      assert.deepEqual(
+        [...(snapshot.sources[0]?.artifactIds as string[])].sort(),
+        [sourceArtifact.artifactId, contextArtifact.artifactId].sort(),
+      );
+
+      await registerEvidenceAtom({
+        root,
+        projectId,
+        value: {
+          schemaVersion: 1,
+          atomId: "binary-context-source.atom.1",
+          sourceId: "binary-context-source",
+          candidateId: candidate.id,
+          artifactId: contextArtifact.artifactId,
+          locator: { kind: "line-range", startLine: 1, endLine: 1 },
+          statement: "The readable derivative retains the bounded observation.",
+          evidenceRoleIds: [],
+          coverageDimensionIds: ["research-question"],
+          evidenceFunction: "support",
+          scope: "Binary input context atomization regression.",
+          limitations: [],
+        },
+      });
+      assert.equal((await freezeEvidenceContentSnapshot(root, projectId)).gate.decision, "pass");
     } finally {
       await Promise.all([
         rm(root, { recursive: true, force: true }),
