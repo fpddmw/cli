@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 7b7fc682698778edf5b77d69f0fa3f944e6da4a6
+lastReviewedCommit: 0fc51a9fe4ac25582be03fac925738605431af69
 ---
 
 # 原子数据运行时实施计划
@@ -67,6 +67,8 @@ PR 随后只更新已确认的 exact binding。
 
 ## 工作包 1：TypeScript 7 基线
 
+状态：完成（2026-08-30）。
+
 范围只包括工具链，不混入 `data` 业务行为：
 
 - 将 `typescript` 升级到 7.x，并由 `package-lock.json` 锁定精确解析版本；保持 Node
@@ -75,6 +77,14 @@ PR 随后只更新已确认的 exact binding。
 - 确认 `tsx`、Node test、c8、Prettier、declaration/source map 和 npm pack 与 TS7
   协同。
 - 更新 clean-test dependency layer 和四平台 CI 所需输入。
+
+实际结果：
+
+- `typescript` 升级为 `^7.0.2`，lockfile 固定 7.0.2 及官方平台二进制包；
+- `tsconfig.json` 显式声明 Node 类型，不依赖 TypeScript 7 的空 `types` 默认值；
+- 仓库未使用 7.0 暂不提供的 programmatic compiler API；
+- 修复 5.9.3 基线上已经存在的 13 个测试类型标注/空值缩窄错误，不改变运行时；
+- 全量 typecheck 加入四平台 CI 和 clean-container，在 coverage 之前强制执行。
 
 验证：`npm run typecheck`、`npm run build`、`npm test`、`npm run test:platform`、
 `npm run test:coverage`、`npm run test:clean:cold`、`npm pack --dry-run`，以及 docpact

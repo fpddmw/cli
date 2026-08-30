@@ -18,7 +18,7 @@ checkPaths:
   - docs/agents/**
   - src/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 7b7fc682698778edf5b77d69f0fa3f944e6da4a6
+lastReviewedCommit: 0fc51a9fe4ac25582be03fac925738605431af69
 ---
 
 # Tiangong AI CLI Contract
@@ -68,6 +68,7 @@ Run before delivery:
 ```bash
 npm run test:clean:cold
 npm run lint
+npm run typecheck
 npm run build
 npm test
 npm run test:platform

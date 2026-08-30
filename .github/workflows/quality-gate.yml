@@ -75,6 +75,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Typecheck
+        run: npm run typecheck
+
       - name: Full test suite
         if: ${{ runner.os != 'Linux' || matrix.arch != 'x64' }}
         run: npm test

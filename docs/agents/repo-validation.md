@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 7b7fc682698778edf5b77d69f0fa3f944e6da4a6
+lastReviewedCommit: 0fc51a9fe4ac25582be03fac925738605431af69
 ---
 
 # Repo Validation
@@ -28,7 +28,8 @@ lastReviewedCommit: 7b7fc682698778edf5b77d69f0fa3f944e6da4a6
 
 - Node: `>=24 <25`
 - Package manager: `npm`
-- Source: TypeScript
+- Source: TypeScript 7.0.2 native compiler (`typescript` range `^7.0.2`, exact
+  resolution locked by `package-lock.json`)
 - Stable launcher: `bin/tiangong-ai.js`
 - Research execution sandbox: macOS `sandbox-exec` or Linux Bubblewrap
 - Windows validates setup and deterministic logic in smoke-test mode, but
@@ -38,12 +39,17 @@ lastReviewedCommit: 7b7fc682698778edf5b77d69f0fa3f944e6da4a6
   keeps Prettier behavior consistent across Linux, macOS, and Windows CI
   runners.
 
-## Proposed TypeScript 7 And Data Gates
+## TypeScript 7 Baseline And Proposed Data Gates
 
-The atomic data implementation plan requires a TypeScript 7.x toolchain gate
-before any connector business logic. That migration remains proposed until its
-own reviewed change updates `package.json`, the lockfile, build configuration,
-and clean-container dependency inputs. Node stays on `>=24 <25`.
+The TypeScript 7 toolchain gate is complete before connector business logic.
+The repository uses the native `tsc` from TypeScript 7.0.2, explicitly loads
+Node declarations through `types: ["node"]`, and does not import the compiler's
+programmatic API. Node stays on `>=24 <25`.
+
+Every hosted matrix row runs the full TypeScript check, and the clean-container
+gate runs it before coverage. This includes test sources, while the declaration
+build remains scoped to `src/**`. The migration fixed pre-existing test-only
+inference/nullability failures without changing runtime behavior.
 
 The future data runtime must add a dedicated connector conformance gate rather
 than relying on the repository's aggregate coverage threshold. It must cover
@@ -70,11 +76,12 @@ used by the reference workspace CLI:
 
 The runner label selects the actual GitHub-hosted architecture; the explicit
 `arch` value keeps job names and matrix intent auditable. Both Linux rows
-install Bubblewrap and smoke-test an unprivileged capsule. Every row runs lint,
-but each row runs the full test suite only once: Ubuntu x64 obtains that result
-through coverage, Ubuntu ARM runs `npm test`, and macOS/Windows run `npm test`
-plus the small pure `test:platform` contract. Coverage therefore runs only on
-Linux x64 and never follows a duplicate `npm test` in that job.
+install Bubblewrap and smoke-test an unprivileged capsule. Every row runs lint
+and the full TypeScript check, but each row runs the full runtime test suite only
+once: Ubuntu x64 obtains that result through coverage, Ubuntu ARM runs
+`npm test`, and macOS/Windows run `npm test` plus the small pure
+`test:platform` contract. Coverage therefore runs only on Linux x64 and never
+follows a duplicate `npm test` in that job.
 
 The pure platform contract models Windows drive letters, separators,
 case-insensitive containment and cross-drive paths plus the macOS `/var` to
@@ -94,6 +101,7 @@ Run before delivery:
 ```bash
 npm run test:clean:cold
 npm run lint
+npm run typecheck
 npm test
 npm run test:platform
 npm run test:coverage
@@ -105,7 +113,7 @@ docpact lint --root . --worktree --mode enforce
 `npm run test:clean` is the iterative red/green/refactor entrypoint. It builds
 from the digest-pinned Node 24 image, may reuse Docker layers whose declared
 inputs still match, copies only the `.dockerignore`-filtered checkout, and runs
-the full lint/coverage gate as a non-root user in a newly created,
+the full lint/typecheck/coverage gate as a non-root user in a newly created,
 runtime-offline container. Tests run after container creation and are never a
 build-cache result. Host tests cannot replace this gate.
 

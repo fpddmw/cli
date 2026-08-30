@@ -17,7 +17,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 7b7fc682698778edf5b77d69f0fa3f944e6da4a6
+lastReviewedCommit: 0fc51a9fe4ac25582be03fac925738605431af69
 ---
 
 # 原子数据运行时目标架构
@@ -30,10 +30,10 @@ HTTP、认证、分页、重试、缓存或回执实现。Auto Research 复用�
 服务，再把通用数据结果提升为研究证据；它不通过子进程重新调用 CLI，也不要求独立
 `data run` 进入 research workspace。
 
-这项重构以 Node 24 和 TypeScript 7.x 为实现基线。TypeScript 7 工具链升级必须先于
-数据业务代码落地，并作为独立、可回退的变更接受四平台、clean-container 和发布包
-验证。旧 Python fetch 脚本只能提供外部可观察行为、fixture 设计和来源知识，不能成为
-新运行时依赖或兼容层。
+这项重构以 Node 24 和原生 TypeScript 7.0.2 编译器为实现基线。TypeScript 7 工具链
+门槛已在数据业务代码之前独立完成，并接受四平台、clean-container 和发布包验证。
+旧 Python fetch 脚本只能提供外部可观察行为、fixture 设计和来源知识，不能成为新
+运行时依赖或兼容层。
 
 ## 公共命令契约
 

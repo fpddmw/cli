@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 7b7fc682698778edf5b77d69f0fa3f944e6da4a6
+lastReviewedCommit: 0fc51a9fe4ac25582be03fac925738605431af69
 ---
 
 # Repo Architecture
@@ -209,8 +209,8 @@ evidence admission, budgets, journals, persistence, and review.
 
 Skills will remain semantic entrypoints and exact compatibility bindings. They
 must not duplicate connector execution or machine schemas. The implementation
-baseline is Node 24 with TypeScript 7.x; the toolchain migration is a separate
-gate before data business logic.
+baseline is Node 24 with the native TypeScript 7.0.2 compiler; that toolchain
+gate is complete before data business logic begins.
 
 ## Bulk Ingest Boundary
 
