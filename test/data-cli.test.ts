@@ -43,7 +43,11 @@ describe("data CLI", () => {
         (payload.capabilities as Array<{ capabilityId: string }>).map(
           (capability) => capability.capabilityId,
         ),
-        ["airnow.hourly-observations", "federal-register.documents"],
+        [
+          "airnow.hourly-observations",
+          "federal-register.documents",
+          "usgs.water-instantaneous-values",
+        ],
       );
       assert.match(payload.catalogDigest, /^[a-f0-9]{64}$/);
       assert.equal(capture.output().stderr, "");

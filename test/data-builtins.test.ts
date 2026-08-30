@@ -19,11 +19,15 @@ function captureIo() {
 }
 
 describe("built-in data connectors", () => {
-  it("publishes both first-batch capabilities in deterministic order", () => {
+  it("publishes every built-in capability in deterministic order", () => {
     const capabilities = builtInDataRegistry.catalog().capabilities;
     assert.deepEqual(
       capabilities.map((item) => item.capabilityId),
-      ["airnow.hourly-observations", "federal-register.documents"],
+      [
+        "airnow.hourly-observations",
+        "federal-register.documents",
+        "usgs.water-instantaneous-values",
+      ],
     );
     for (const capability of capabilities) {
       assert.equal(typeof capability.summary, "string");
@@ -36,7 +40,11 @@ describe("built-in data connectors", () => {
   });
 
   it("describes and diagnoses each capability offline", async () => {
-    for (const capabilityId of ["airnow.hourly-observations", "federal-register.documents"]) {
+    for (const capabilityId of [
+      "airnow.hourly-observations",
+      "federal-register.documents",
+      "usgs.water-instantaneous-values",
+    ]) {
       const description = builtInDataRegistry.describe(capabilityId);
       assert.equal(description?.operations.length, 1);
       const discovery = (

@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 7523757200cc863dd07c882a41b0299b8bc712b1
+lastReviewedCommit: 832e302
 ---
 
 # 原子数据运行时实施计划
@@ -198,15 +198,31 @@ runtime primitive。
 
 建议批次，不等于全部自动批准：
 
-1. USGS Water IV、Open-Meteo 系列：扩展时序、空间和多变量合同。
-2. NASA FIRMS、OpenAQ、Regulations.gov：验证真实 credential 和 provider auth 路径。
-3. GDELT 系列、Bluesky/YouTube/RSS/fulltext：先判断是原子 connector、内容获取器还是
+1. USGS Water IV：作为后续迁移首项，扩展时序、空间、多变量、provisional qualifier
+   和 legacy provider 生命周期合同。
+2. Open-Meteo 系列：继续扩展时序、空间和多变量合同。
+3. NASA FIRMS、OpenAQ、Regulations.gov：验证真实 credential 和 provider auth 路径。
+4. GDELT 系列、Bluesky/YouTube/RSS/fulltext：先判断是原子 connector、内容获取器还是
    Research/媒体工作流，避免把异构行为硬塞进一个 data Schema。
-4. Tiangong KB search、academic paper/download、email 和本地文件能力：保持既有产品
+5. Tiangong KB search、academic paper/download、email 和本地文件能力：保持既有产品
    边界，除非单独评审证明应迁入 data runtime。
 
 每一批都先更新迁移清单，只以真实价值、许可清晰度、API 稳定性、维护成本、fixture
 可得性和 Research 需求决定是否迁移，不追求旧 Skill 数量对等。
+
+### 后续迁移 1：USGS Water IV
+
+- 新增 `usgs.water-instantaneous-values/fetch`，执行一个 bbox 或 sites、period 或显式
+  window 的有界 WaterServices IV 请求；闭合输入 Schema 使用官方 100 sites 与 bbox
+  25 平方度上限，并保留旧 Skill 的 `ST/active` 和 `00060/00065` 默认值。
+- WaterML JSON 输出归一化为 series summary 与 observation records；坏 row/series 保留
+  可用数据并返回 partial，整体 envelope 或安全上限错误返回 blocked，record cap 返回
+  complete-but-truncated。
+- fixture 为按官方 WaterML JSON 结构重建的合成数据；catalog、describe、static doctor、
+  connector conformance 与 dist pack 合同全部离线验证。
+- Discovery Metadata 明确该 endpoint 为计划在 2027 年第一季度下线的 legacy 服务，
+  并指向现代 Water Data APIs；这项迁移完成当前 Skill 去重，但不假装解决长期 API
+  迁移，现代 endpoint 需要单独 capability/operation 评审。
 
 ## PR 与提交拆分
 

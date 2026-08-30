@@ -17,7 +17,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 7523757200cc863dd07c882a41b0299b8bc712b1
+lastReviewedCommit: 832e302
 ---
 
 # 原子数据运行时目标架构
@@ -37,8 +37,8 @@ HTTP、认证、分页、重试、缓存或回执实现。Auto Research 复用�
 
 ## 公共命令契约
 
-以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册首批两个
-connector：
+以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册两个试点
+connector 和首个后续迁移 connector：
 
 ```text
 tiangong-ai data catalog
@@ -136,7 +136,7 @@ catalog、两个公共对象、canonical JSON 和 digest 计算必须与 locale�
 主机无关。connector 可以共同编译进一个 npm 包，但不得导入另一个 connector 的业务
 实现。
 
-## 首批内置 Connectors
+## 内置 Connectors
 
 `airnow.hourly-observations/fetch-hourly` 从
 `https://files.airnowtech.org/airnow/` 按 UTC 小时规划官方 `HourlyAQObs` 文件，校验
@@ -158,7 +158,18 @@ document search metadata，不访问结果中的正文、XML 或 PDF 链接，�
 法律使用限制依据其
 [About This Site](https://www.federalregister.gov/reader-aids/government-policy-and-ofr-procedures/about-this-site)。
 
-两个 connector 均无凭证、默认 static doctor 完全离线，且互不导入业务函数。测试
+`usgs.water-instantaneous-values/fetch` 对应一个有界的 legacy WaterServices IV 请求。
+它要求 bbox 或最多 100 个显式 site number 二选一，以及 ISO-8601 period 或显式
+RFC3339 起止时间二选一；默认参数为 discharge `00060` 与 gage height `00065`，默认
+site type/status 为 `ST/active`。WaterML JSON 归一化保留站点、坐标、参数、单位、
+timestamp、qualifier 和 provisional 状态；单个坏 series/value row 作为明确 partial
+隔离，整体 envelope 错误或超过 500 series、每 series 10,000 values 时阻断。接口和
+25 平方度 bbox/100 sites 限制依据官方
+[Instantaneous Values 文档](https://waterservices.usgs.gov/docs/instantaneous-values/instantaneous-values-details/)；
+Discovery Metadata 同时标明 legacy WaterServices 计划于 2027 年第一季度下线，并指向
+[现代 Water Data APIs](https://www.usgs.gov/tools/usgs-water-data-apis)。
+
+三个 connector 均无凭证、默认 static doctor 完全离线，且互不导入业务函数。测试
 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制的 live provider 响应。
 
 ## 机器 Envelope

@@ -31,13 +31,15 @@ describe("data package contract", () => {
     }
   });
 
-  it("emits the built-in registry and both connector contracts into dist", async () => {
+  it("emits the built-in registry and every connector contract into dist", async () => {
     const modules = [
       "data/builtins.js",
       "data/connectors/airnow-hourly-observations.js",
       "data/connectors/airnow-hourly-observations.schemas.js",
       "data/connectors/federal-register-documents.js",
       "data/connectors/federal-register-documents.schemas.js",
+      "data/connectors/usgs-water-instantaneous-values.js",
+      "data/connectors/usgs-water-instantaneous-values.schemas.js",
     ];
     for (const modulePath of modules) {
       await access(join(repositoryRoot, "dist", ...modulePath.split("/")));
@@ -51,7 +53,11 @@ describe("data package contract", () => {
     };
     assert.deepEqual(
       builtins.builtInDataRegistry.catalog().capabilities.map((item) => item.capabilityId),
-      ["airnow.hourly-observations", "federal-register.documents"],
+      [
+        "airnow.hourly-observations",
+        "federal-register.documents",
+        "usgs.water-instantaneous-values",
+      ],
     );
   });
 });
