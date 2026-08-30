@@ -51,6 +51,45 @@ describe("bounded data HTTP", () => {
     assert.equal(response.observation.attempts, 1);
   });
 
+  it("injects a path-segment credential without exposing it to the request digest", async () => {
+    const first = syntheticConnector({ credential: true });
+    first.credentials[0]!.injection = {
+      kind: "path-segment",
+      placeholder: "{api-token}",
+    };
+    const requested: string[] = [];
+    const run = async (secret: string) => {
+      const client = createBoundedHttpClient({
+        capabilityId: first.capabilityId,
+        endpoints: first.endpoints,
+        credentials: first.credentials,
+        environment: { TIANGONG_DATA_TEST_TOKEN: secret },
+        limits: first.limits,
+        fetchImpl: (async (target) => {
+          requested.push(String(target));
+          return new Response('{"items":[]}', {
+            headers: { "content-type": "application/json" },
+          });
+        }) as typeof fetch,
+      });
+      return client.request({
+        endpointId: "primary",
+        method: "GET",
+        path: "/v1/{api-token}/items",
+        credentialId: "api-token",
+      });
+    };
+
+    const left = await run("first-secret");
+    const right = await run("second-secret");
+    assert.deepEqual(requested, [
+      "https://example.test/v1/first-secret/items",
+      "https://example.test/v1/second-secret/items",
+    ]);
+    assert.equal(left.observation.requestDigest, right.observation.requestDigest);
+    assert.doesNotMatch(JSON.stringify([left.observation, right.observation]), /first|second/);
+  });
+
   it("rejects cross-origin redirects without forwarding credentials", async () => {
     const calls: string[] = [];
     const client = httpClient({

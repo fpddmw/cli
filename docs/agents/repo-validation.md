@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-30
-lastReviewedCommit: b4eb75b
+lastReviewedAt: 2026-08-31
+lastReviewedCommit: a9304b2
 ---
 
 # Repo Validation
@@ -56,7 +56,8 @@ relying only on the repository's aggregate coverage threshold. It covers
 execution-manifest, discovery-metadata and schema stability; proves that
 discovery-only wording changes do not alter execution bindings; and covers
 canonical cross-platform digests, endpoint and redirect policy, bounded HTTP
-behavior, logical credential injection, redaction, pagination/partial results,
+behavior, header and protected path-segment logical credential injection,
+secret-independent request digests, redaction, pagination/partial results,
 stable errors, receipt binding, and npm package discovery of the published
 schemas. Provider live tests remain explicit opt-ins; ordinary and
 clean-container CI use privacy-safe fixtures and synthetic connectors only.
@@ -70,6 +71,14 @@ provider metadata validation, and preservation of earlier pages after a later
 failure. Fixture provenance notes live beside the fixtures under
 `test/fixtures/data/**`; no provider response, credential, or user data is
 checked in.
+
+`test/data-nasa-firms-fire-connector.test.ts` proves required MAP_KEY preflight,
+five-day chunk planning, provider availability checks, bbox/window/transaction
+limits, VIIRS field normalization, no-results, record caps, invalid-row and
+later-chunk partial isolation, and hotspot/non-perimeter discovery boundaries.
+The shared CSV parser has its own quoted-field and malformed-input regression,
+and the bounded HTTP suite proves a path credential never enters the public
+request digest or result.
 
 Target the foundation during iteration with
 `node --import tsx --test test/data-*.test.ts`. The ordinary `npm test` and

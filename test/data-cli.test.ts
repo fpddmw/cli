@@ -46,6 +46,7 @@ describe("data CLI", () => {
         [
           "airnow.hourly-observations",
           "federal-register.documents",
+          "nasa-firms.active-fire",
           "open-meteo.air-quality",
           "open-meteo.flood",
           "open-meteo.historical-weather",

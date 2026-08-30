@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-30
-lastReviewedCommit: b4eb75b
+lastReviewedAt: 2026-08-31
+lastReviewedCommit: a9304b2
 ---
 
 # Tiangong AI CLI
@@ -85,6 +85,10 @@ The built-in capabilities are:
   FederalRegister.gov document metadata by publication date plus term, agency,
   document type, topic, docket, or RIN filters. It does not follow result links,
   fetch document full text, or provide legal interpretation.
+- `nasa-firms.active-fire` / `fetch-area`: retrieves bounded NASA FIRMS MODIS,
+  VIIRS, or Landsat active-fire point detections, optionally validates source
+  availability, and exposes chunk-level partial coverage. Hotspots are thermal
+  anomalies, not fire perimeters or confirmed incident identities.
 - `open-meteo.air-quality` / `fetch-hourly`: retrieves bounded GMT hourly CAMS
   model-grid air-quality series for known coordinates; these are modeled
   background values rather than station observations.
@@ -99,11 +103,14 @@ The built-in capabilities are:
   WaterServices instantaneous observations while preserving site, parameter,
   qualifier, provisional status, and source lifecycle warnings.
 
-All six connectors are keyless. Their exact input and output schemas, endpoint
-scopes and limits are available through the execution manifest, while source
-notes, coverage, selection guidance and license restrictions are available in
-the discovery metadata returned by `data describe`; static `data doctor`
-remains offline.
+The six non-FIRMS connectors are keyless. NASA FIRMS requires
+`NASA_FIRMS_MAP_KEY`; the CLI injects it as a protected provider path segment
+without accepting it in argv or input JSON. Exact input and output schemas,
+endpoint scopes and limits are available through the execution manifest, while
+source notes, coverage, selection guidance and license restrictions are
+available in the discovery metadata returned by `data describe`; static
+`data doctor` remains offline and reports a missing required credential without
+making a network request.
 
 ## KB Ingest
 

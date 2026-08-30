@@ -18,8 +18,8 @@ checkPaths:
   - src/data/**
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
-lastReviewedAt: 2026-08-30
-lastReviewedCommit: b4eb75b
+lastReviewedAt: 2026-08-31
+lastReviewedCommit: a9304b2
 ---
 
 # 原子数据运行时实施计划
@@ -241,6 +241,26 @@ runtime primitive。
   Global 分辨率和变量覆盖差异、公开端点非商业限制以及 Open-Meteo/CAMS attribution。
 - fixture 为按官方响应形状重建的合成数据；connector、catalog、static doctor、
   conformance 与 dist pack 合同全部离线验证。
+
+状态：CLI connector 已完成；对应 Skill 瘦身和候选 binding 正在迁移，正式 binding 等待
+包含全部 connector 的精确 npm 版本发布。
+
+### 后续迁移 5：NASA FIRMS Active Fire
+
+- 新增 `nasa-firms.active-fire/fetch-area`，要求一个 reviewed source、非跨日界线 bbox、
+  最多 31 个闭合 UTC 日期和逻辑 `map-key`；可选先检查 provider source availability。
+- 运行时把日期窗拆成最多七个、每个不超过五天的 FIRMS CSV 请求，并同时约束 bbox、
+  estimated transactions、响应字节与 50,000 records。输出统一坐标、UTC acquisition
+  minute、satellite/instrument、confidence、FRP、footprint 和 MODIS/VIIRS brightness
+  字段；坏 row 或后续 chunk 作为明确 partial 隔离。
+- 为 FIRMS 的 URL-path 认证新增通用 `path-segment` credential injection；manifest、输入
+  JSON、安全 request digest、receipt 与错误只看到逻辑 placeholder，secret 仅在 endpoint
+  校验后注入实际请求，且 provider reflection 继续触发泄漏阻断。
+- Discovery Metadata 明确 hotspot/thermal anomaly 不等于 wildfire、perimeter、burned
+  area、incident 或告警；NRT 为 provisional，历史一致性优先匹配的 Standard Processing
+  source，并保留 NASA FIRMS/底层 dataset citation 要求。
+- fixture 按官方 CSV 字段重建，不包含 live provider 数据或 MAP_KEY；connector、凭证
+  防泄漏、catalog/describe/static doctor、conformance 和 dist pack 合同全部离线验证。
 
 状态：CLI connector 已完成；对应 Skill 瘦身和候选 binding 正在迁移，正式 binding 等待
 包含全部 connector 的精确 npm 版本发布。

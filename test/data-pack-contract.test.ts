@@ -38,6 +38,8 @@ describe("data package contract", () => {
       "data/connectors/airnow-hourly-observations.schemas.js",
       "data/connectors/federal-register-documents.js",
       "data/connectors/federal-register-documents.schemas.js",
+      "data/connectors/nasa-firms-fire.js",
+      "data/connectors/nasa-firms-fire.schemas.js",
       "data/connectors/open-meteo-air-quality.js",
       "data/connectors/open-meteo-air-quality.schemas.js",
       "data/connectors/open-meteo-flood.js",
@@ -46,6 +48,7 @@ describe("data package contract", () => {
       "data/connectors/open-meteo-historical-weather.schemas.js",
       "data/connectors/usgs-water-instantaneous-values.js",
       "data/connectors/usgs-water-instantaneous-values.schemas.js",
+      "data/runtime/csv.js",
     ];
     for (const modulePath of modules) {
       await access(join(repositoryRoot, "dist", ...modulePath.split("/")));
@@ -62,6 +65,7 @@ describe("data package contract", () => {
       [
         "airnow.hourly-observations",
         "federal-register.documents",
+        "nasa-firms.active-fire",
         "open-meteo.air-quality",
         "open-meteo.flood",
         "open-meteo.historical-weather",

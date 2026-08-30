@@ -106,27 +106,37 @@
     "credential": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "credentialId",
-        "environmentVariable",
-        "required",
-        "endpointIds",
-        "injection"
-      ],
+      "required": ["credentialId", "environmentVariable", "required", "endpointIds", "injection"],
       "properties": {
         "credentialId": { "$ref": "#/$defs/id" },
         "environmentVariable": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
         "required": { "type": "boolean" },
         "endpointIds": { "$ref": "#/$defs/stringArray" },
         "injection": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["kind", "name", "prefix"],
-          "properties": {
-            "kind": { "const": "header" },
-            "name": { "type": "string", "minLength": 1 },
-            "prefix": { "type": "string" }
-          }
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "name", "prefix"],
+              "properties": {
+                "kind": { "const": "header" },
+                "name": { "type": "string", "minLength": 1 },
+                "prefix": { "type": "string" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "placeholder"],
+              "properties": {
+                "kind": { "const": "path-segment" },
+                "placeholder": {
+                  "type": "string",
+                  "pattern": "^\\{[a-z][a-z0-9-]*\\}$"
+                }
+              }
+            }
+          ]
         }
       }
     },
@@ -142,13 +152,7 @@
     "operation": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "operationId",
-        "operationVersion",
-        "inputSchema",
-        "outputSchema",
-        "limits"
-      ],
+      "required": ["operationId", "operationVersion", "inputSchema", "outputSchema", "limits"],
       "properties": {
         "operationId": { "$ref": "#/$defs/id" },
         "operationVersion": { "$ref": "#/$defs/version" },

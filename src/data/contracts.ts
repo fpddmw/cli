@@ -74,11 +74,16 @@ export interface DataCredentialDeclaration {
   environmentVariable: string;
   required: boolean;
   endpointIds: string[];
-  injection: {
-    kind: "header";
-    name: string;
-    prefix: string;
-  };
+  injection:
+    | {
+        kind: "header";
+        name: string;
+        prefix: string;
+      }
+    | {
+        kind: "path-segment";
+        placeholder: `{${string}}`;
+      };
 }
 
 export interface DataSchemaReference {

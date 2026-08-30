@@ -1,0 +1,3 @@
+data_id,min_date,max_date
+VIIRS_NOAA20_NRT,2026-01-01,2026-03-31
+MODIS_SP,2000-11-01,2025-10-31

@@ -6,6 +6,7 @@ import type {
   DataSourceObservation,
 } from "../contracts.js";
 import { DATA_MANIFEST_SCHEMA_VERSION } from "../contracts.js";
+import { CsvParseError, parseCsvRows } from "../runtime/csv.js";
 import { DataRuntimeError } from "../runtime/errors.js";
 import {
   AIRNOW_HOURLY_INPUT_SCHEMA,
@@ -430,7 +431,17 @@ function normalizeFile(input: {
   input: AirNowInput;
   remainingRecords: number;
 }): { records: AirNowRecord[]; inputRows: number; issues: string[]; truncated: boolean } {
-  const table = parseCsv(input.text);
+  let table: string[][];
+  try {
+    table = parseCsvRows(input.text);
+  } catch (error) {
+    throw new AirNowFileValidationError(
+      "invalid-csv-value",
+      error instanceof CsvParseError
+        ? error.message.replace(/^The CSV/, "The AirNow CSV")
+        : "The AirNow CSV could not be parsed.",
+    );
+  }
   if (table.length === 0) {
     throw new AirNowFileValidationError("invalid-csv-header", "The AirNow file is empty.");
   }
@@ -551,49 +562,6 @@ function normalizeRow(
     }
   }
   return { records, issues };
-}
-
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = "";
-  let quoted = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index]!;
-    if (quoted) {
-      if (character === '"' && text[index + 1] === '"') {
-        field += '"';
-        index += 1;
-      } else if (character === '"') {
-        quoted = false;
-      } else {
-        field += character;
-      }
-    } else if (character === '"' && field.length === 0) {
-      quoted = true;
-    } else if (character === ",") {
-      row.push(field);
-      field = "";
-    } else if (character === "\n") {
-      row.push(field.replace(/\r$/, ""));
-      rows.push(row);
-      row = [];
-      field = "";
-    } else {
-      field += character;
-    }
-  }
-  if (quoted) {
-    throw new AirNowFileValidationError(
-      "invalid-csv-value",
-      "The AirNow CSV contains an unterminated quoted field.",
-    );
-  }
-  if (field.length > 0 || row.length > 0) {
-    row.push(field.replace(/\r$/, ""));
-    rows.push(row);
-  }
-  return rows;
 }
 
 function parseAirNowDateTime(

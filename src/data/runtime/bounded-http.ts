@@ -58,7 +58,7 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
           { details: { endpointId: endpoint.endpointId, method: request.method } },
         );
       }
-      const target = buildTarget(endpoint, request);
+      const safeTarget = buildTarget(endpoint, request);
       const timeoutMs = boundedOverride(request.timeoutMs, options.limits.timeoutMs, "timeoutMs");
       const maxResponseBytes = boundedOverride(
         request.maxResponseBytes,
@@ -67,6 +67,7 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
       );
       const headers = new Headers({ Accept: endpoint.allowedContentTypes.join(", ") });
       let credential: DataCredentialDeclaration | undefined;
+      let credentialedPath = request.path;
       if (request.credentialId) {
         credential = declarations.get(request.credentialId);
         if (!credential) {
@@ -76,12 +77,23 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
             { details: { credentialId: request.credentialId } },
           );
         }
-        injectLogicalCredential({
+        credentialedPath = injectLogicalCredential({
           declaration: credential,
           value: resolved.values.get(credential.credentialId),
           endpointId: endpoint.endpointId,
           headers,
+          path: request.path,
         });
+      }
+      const target =
+        credentialedPath === request.path
+          ? safeTarget
+          : buildTarget(endpoint, { ...request, path: credentialedPath });
+      if (/%7b|%7d/i.test(target.pathname)) {
+        throw new DataRuntimeError(
+          "endpoint-policy-blocked",
+          "Data HTTP paths must not contain unresolved credential placeholders.",
+        );
       }
       const body = encodeRequestBody(request, options.limits.maxRequestBytes);
       if (body !== undefined) headers.set("Content-Type", "application/json");
@@ -89,8 +101,8 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
         capabilityId: options.capabilityId,
         endpointId: endpoint.endpointId,
         method: request.method,
-        path: target.pathname,
-        query: sortedQuery(target),
+        path: safeTarget.pathname,
+        query: sortedQuery(safeTarget),
         bodyDigest: body === undefined ? null : sha256Bytes(Buffer.from(body, "utf8")),
       });
       const { response, attempts } = await performBoundedFetch({

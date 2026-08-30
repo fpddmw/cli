@@ -49,7 +49,8 @@ export function injectLogicalCredential(input: {
   value: string | undefined;
   endpointId: string;
   headers: Headers;
-}): void {
+  path: string;
+}): string {
   if (!input.declaration.endpointIds.includes(input.endpointId)) {
     throw new DataRuntimeError(
       "endpoint-policy-blocked",
@@ -75,8 +76,30 @@ export function injectLogicalCredential(input: {
       },
     );
   }
-  input.headers.set(
-    input.declaration.injection.name,
-    `${input.declaration.injection.prefix}${input.value}`,
-  );
+  if (input.declaration.injection.kind === "header") {
+    input.headers.set(
+      input.declaration.injection.name,
+      `${input.declaration.injection.prefix}${input.value}`,
+    );
+    return input.path;
+  }
+  const placeholder = input.declaration.injection.placeholder;
+  const segments = input.path.split("/");
+  if (segments.filter((segment) => segment === placeholder).length !== 1) {
+    throw new DataRuntimeError(
+      "endpoint-policy-blocked",
+      "A path-segment credential placeholder must occur exactly once as a complete path segment.",
+      {
+        details: {
+          credentialId: input.declaration.credentialId,
+          endpointId: input.endpointId,
+        },
+      },
+    );
+  }
+  return segments
+    .map((segment) =>
+      segment === placeholder ? encodeURIComponent(input.value as string) : segment,
+    )
+    .join("/");
 }

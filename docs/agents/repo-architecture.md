@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-30
-lastReviewedCommit: b4eb75b
+lastReviewedAt: 2026-08-31
+lastReviewedCommit: a9304b2
 ---
 
 # Repo Architecture
@@ -193,8 +193,10 @@ storage writes, queueing, and document status transitions.
   immutable registry, public JSON Schemas, canonical digest and receipt rules,
   strict command router, logical credential resolution, bounded HTTPS client,
   stable error taxonomy, and connector execution/conformance contracts. Its
-  built-in registry currently ships AirNow hourly observations and Federal
-  Register document metadata as independent consumers of the same runtime.
+  built-in registry currently ships seven independent consumers of the same
+  runtime: AirNow hourly observations, Federal Register document metadata,
+  NASA FIRMS active-fire detections, three Open-Meteo series, and USGS Water
+  instantaneous values.
 - `scripts/**`: validation helpers.
 - `test/**`: Node test runner suites.
 

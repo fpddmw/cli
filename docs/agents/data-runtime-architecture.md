@@ -16,8 +16,8 @@ checkPaths:
   - src/data/**
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
-lastReviewedAt: 2026-08-30
-lastReviewedCommit: b4eb75b
+lastReviewedAt: 2026-08-31
+lastReviewedCommit: a9304b2
 ---
 
 # 原子数据运行时目标架构
@@ -38,7 +38,7 @@ HTTP、认证、分页、重试、缓存或回执实现。Auto Research 复用�
 ## 公共命令契约
 
 以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册两个试点
-connector 和四个后续迁移 connector：
+connector 和五个后续迁移 connector：
 
 ```text
 tiangong-ai data catalog
@@ -208,8 +208,22 @@ timestamp、qualifier 和 provisional 状态；单个坏 series/value row 作为
 Discovery Metadata 同时标明 legacy WaterServices 计划于 2027 年第一季度下线，并指向
 [现代 Water Data APIs](https://www.usgs.gov/tools/usgs-water-data-apis)。
 
-六个 connector 均无凭证、默认 static doctor 完全离线，且互不导入业务函数。测试
-fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制的 live provider 响应。
+`nasa-firms.active-fire/fetch-area` 对应一个受限 NASA FIRMS Area API 工作流，要求一个
+逻辑 `map-key` 凭证、一个 source、非跨日界线 bbox 和最多 31 个闭合 UTC 日期。运行时
+先按 provider 的五天上限拆成至多七个 CSV 请求，可选先查询 source availability，并在
+250 estimated transactions 与 50,000 records 上限内输出统一 active-fire point 字段；
+后续 chunk 或单行失败保留已验证记录并返回明确 partial。Discovery Metadata 区分 NRT
+与 Standard Processing，明确 thermal anomaly/hotspot 不是 fire perimeter、burned area、
+incident identity 或应急告警。接口、source 和 quota 依据官方
+[FIRMS Area API](https://firms.modaps.eosdis.nasa.gov/api/area/) 与
+[API tutorial](https://firms.modaps.eosdis.nasa.gov/content/academy/data_api/firms_api_use.html)，
+引用和使用边界依据
+[NASA Earthdata Data Use and Citation Guidance](https://www.earthdata.nasa.gov/engage/open-data-services-software/data-use-policy)。
+
+七个 connector 的默认 static doctor 均完全离线，且互不导入业务函数。前六个
+connector 无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY` 解析逻辑凭证，缺失时离线报告
+blocked。测试 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制的 live provider
+响应或真实凭证。
 
 ## 机器 Envelope
 
@@ -271,6 +285,9 @@ URL query、header、环境变量值、本地绝对路径和 provider 原始错�
 
 - manifest 只引用逻辑 credential ID；运行时从明确允许的环境变量或未来受审阅的
   owner-only store 解析值。
+- credential injection 只支持 manifest 声明的受控 header 或完整 path-segment
+  placeholder；endpoint 校验和安全 request digest 使用不含 secret 的逻辑 target，实际
+  注入发生在校验后，输出、回执和错误不得暴露注入后的 URL。
 - data 命令不得隐式扩大现有 cwd `.env` 自动加载语义。若保留兼容行为，基础契约 PR
   必须逐项声明来源、优先级、文件权限和禁用方式，并加入泄漏回归测试。
 - endpoint 和重定向必须在 connector 的 HTTPS scope 内；IP literal、降级到 HTTP、

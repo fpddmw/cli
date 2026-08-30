@@ -26,6 +26,7 @@ describe("built-in data connectors", () => {
       [
         "airnow.hourly-observations",
         "federal-register.documents",
+        "nasa-firms.active-fire",
         "open-meteo.air-quality",
         "open-meteo.flood",
         "open-meteo.historical-weather",
@@ -46,6 +47,7 @@ describe("built-in data connectors", () => {
     for (const capabilityId of [
       "airnow.hourly-observations",
       "federal-register.documents",
+      "nasa-firms.active-fire",
       "open-meteo.air-quality",
       "open-meteo.flood",
       "open-meteo.historical-weather",
@@ -80,9 +82,22 @@ describe("built-in data connectors", () => {
           throw new Error("offline doctor must not fetch");
         }) as typeof fetch,
       });
-      assert.equal(exitCode, 0);
+      assert.equal(exitCode, capabilityId === "nasa-firms.active-fire" ? 3 : 0);
       assert.equal(fetched, false);
-      assert.equal(JSON.parse(capture.stdout()).networkAttempted, false);
+      const doctor = JSON.parse(capture.stdout()) as {
+        networkAttempted: boolean;
+        status: string;
+        checks: Array<{ checkId: string; status: string }>;
+      };
+      assert.equal(doctor.networkAttempted, false);
+      assert.equal(doctor.status, capabilityId === "nasa-firms.active-fire" ? "blocked" : "ready");
+      if (capabilityId === "nasa-firms.active-fire") {
+        assert.ok(
+          doctor.checks.some(
+            (check) => check.checkId === "credential:map-key" && check.status === "fail",
+          ),
+        );
+      }
       assert.equal(capture.stderr(), "");
     }
   });
