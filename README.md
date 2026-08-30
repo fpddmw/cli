@@ -99,13 +99,18 @@ The built-in capabilities are:
   daily historical weather reanalysis for one controlled model and known
   coordinates. ERA5 or ERA5-Land should be selected when multi-decade model
   consistency matters.
+- `openaq.air-quality` / `search-locations` and `fetch-sensor-measurements`:
+  discovers filtered OpenAQ v3 locations and retrieves a bounded raw, hourly,
+  or daily series for one sensor. It preserves provider/license context but
+  does not calculate AQI or make health or regulatory determinations.
 - `usgs.water-instantaneous-values` / `fetch`: retrieves bounded legacy USGS
   WaterServices instantaneous observations while preserving site, parameter,
   qualifier, provisional status, and source lifecycle warnings.
 
-The six non-FIRMS connectors are keyless. NASA FIRMS requires
-`NASA_FIRMS_MAP_KEY`; the CLI injects it as a protected provider path segment
-without accepting it in argv or input JSON. Exact input and output schemas,
+Six connectors are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
+CLI injects as a protected provider path segment; OpenAQ requires
+`OPENAQ_API_KEY`, which the CLI injects as an `X-API-Key` header. Neither secret
+is accepted in argv or input JSON. Exact input and output schemas,
 endpoint scopes and limits are available through the execution manifest, while
 source notes, coverage, selection guidance and license restrictions are
 available in the discovery metadata returned by `data describe`; static

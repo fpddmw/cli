@@ -265,6 +265,27 @@ runtime primitive。
 状态：CLI connector 已完成；对应 Skill 瘦身和候选 binding 正在迁移，正式 binding 等待
 包含全部 connector 的精确 npm 版本发布。
 
+### 后续迁移 6：OpenAQ Air Quality
+
+- 新增 `openaq.air-quality/search-locations` 与 `fetch-sensor-measurements` 两个封闭
+  operation，替代旧 Skill 的任意 API path/query 透传；两者统一要求逻辑 `api-key`，由
+  runtime 仅通过 `X-API-Key` header 注入。
+- location search 至少要求一个 country/provider/parameter/license、monitor/mobile、
+  center-radius 或 bbox 条件；measurement fetch 只接受一个 sensor、raw/hourly/daily
+  粒度和最长 366 天的显式 RFC3339 窗口。输出保留 provider pagination、location/sensor
+  provenance、license attribution、aggregate summary 与 coverage。
+- 后续页失败保留已验证记录并返回 partial；page/record cap 产生明确 truncation，缺失
+  credential、无界请求、冲突空间条件和过长窗口在网络访问前阻断。
+- Discovery Metadata 明确 provider/source quality 和许可差异、raw 与预计算 aggregate
+  的选择边界，以及非 AQI/健康/监管用途；旧 Skill 的 public S3 archive list/download
+  不进入原子 JSON connector，留待 content/download 边界统一审计。
+- fixture 按官方 v3 envelope 重建，不含 live provider 数据或 API key；connector、凭证
+  防泄漏、双 operation conformance、catalog/describe/static doctor 和 dist pack 合同均
+  离线验证。
+
+状态：CLI connector 已完成；对应 Skill 瘦身和双 operation 候选 binding 正在迁移，
+正式 binding 等待包含全部 connector 的精确 npm 版本发布。
+
 ### 后续迁移 4：Open-Meteo Historical Weather
 
 - 新增 `open-meteo.historical-weather/fetch`，只使用公开 non-commercial archive

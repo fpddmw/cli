@@ -30,6 +30,7 @@ describe("built-in data connectors", () => {
         "open-meteo.air-quality",
         "open-meteo.flood",
         "open-meteo.historical-weather",
+        "openaq.air-quality",
         "usgs.water-instantaneous-values",
       ],
     );
@@ -51,10 +52,11 @@ describe("built-in data connectors", () => {
       "open-meteo.air-quality",
       "open-meteo.flood",
       "open-meteo.historical-weather",
+      "openaq.air-quality",
       "usgs.water-instantaneous-values",
     ]) {
       const description = builtInDataRegistry.describe(capabilityId);
-      assert.equal(description?.operations.length, 1);
+      assert.equal(description?.operations.length, capabilityId === "openaq.air-quality" ? 2 : 1);
       const discovery = (
         builtInDataRegistry as unknown as {
           discovery(id: string):
@@ -82,7 +84,10 @@ describe("built-in data connectors", () => {
           throw new Error("offline doctor must not fetch");
         }) as typeof fetch,
       });
-      assert.equal(exitCode, capabilityId === "nasa-firms.active-fire" ? 3 : 0);
+      const requiresCredential = ["nasa-firms.active-fire", "openaq.air-quality"].includes(
+        capabilityId,
+      );
+      assert.equal(exitCode, requiresCredential ? 3 : 0);
       assert.equal(fetched, false);
       const doctor = JSON.parse(capture.stdout()) as {
         networkAttempted: boolean;
@@ -90,11 +95,18 @@ describe("built-in data connectors", () => {
         checks: Array<{ checkId: string; status: string }>;
       };
       assert.equal(doctor.networkAttempted, false);
-      assert.equal(doctor.status, capabilityId === "nasa-firms.active-fire" ? "blocked" : "ready");
+      assert.equal(doctor.status, requiresCredential ? "blocked" : "ready");
       if (capabilityId === "nasa-firms.active-fire") {
         assert.ok(
           doctor.checks.some(
             (check) => check.checkId === "credential:map-key" && check.status === "fail",
+          ),
+        );
+      }
+      if (capabilityId === "openaq.air-quality") {
+        assert.ok(
+          doctor.checks.some(
+            (check) => check.checkId === "credential:api-key" && check.status === "fail",
           ),
         );
       }

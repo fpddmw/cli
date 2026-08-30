@@ -220,10 +220,22 @@ incident identity 或应急告警。接口、source 和 quota 依据官方
 引用和使用边界依据
 [NASA Earthdata Data Use and Citation Guidance](https://www.earthdata.nasa.gov/engage/open-data-services-software/data-use-policy)。
 
-七个 connector 的默认 static doctor 均完全离线，且互不导入业务函数。前六个
-connector 无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY` 解析逻辑凭证，缺失时离线报告
-blocked。测试 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制的 live provider
-响应或真实凭证。
+`openaq.air-quality/search-locations` 要求至少一个 country/provider/parameter/license、
+monitor/mobile 或有界空间条件，返回 location、sensor、coverage 和 source-specific
+license/attribution metadata；`fetch-sensor-measurements` 只接受一个 sensor、raw/hourly/daily
+粒度和最长 366 天的 RFC3339 窗口。两个 operation 共用 `OPENAQ_API_KEY` 逻辑凭证、稳定
+分页、record/page cap 和 later-page partial 语义。该 capability 不开放任意 API path，也不
+把公开 S3 archive 的 list/download 混入原子 JSON 执行合同；批量文件获取留给单独治理的
+content/download 工作流。Discovery Metadata 明确来源质量与许可证各异，raw 与预计算
+aggregate 不可无方法混用，也不提供 AQI、健康或监管判断。接口、分页和限流依据官方
+[OpenAQ API 文档](https://docs.openaq.org/)、[pagination](https://docs.openaq.org/using-the-api/pagination)
+与 [rate limits](https://docs.openaq.org/using-the-api/rate-limits)，使用边界依据
+[OpenAQ terms](https://docs.openaq.org/about/terms)。
+
+八个 connector 的默认 static doctor 均完全离线，且互不导入业务函数。六个 connector
+无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY`、OpenAQ 从 `OPENAQ_API_KEY` 解析逻辑凭证，
+缺失时离线报告 blocked。测试 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制
+的 live provider 响应或真实凭证。
 
 ## 机器 Envelope
 

@@ -1,0 +1,30 @@
+{
+  "meta": { "name": "openaq-api", "website": "/", "page": 2, "limit": 2, "found": 3 },
+  "results": [
+    {
+      "id": 103,
+      "name": "Mobile Transect",
+      "locality": "Example City",
+      "timezone": "Europe/Amsterdam",
+      "country": { "id": 7, "code": "NL", "name": "Netherlands" },
+      "owner": { "id": 43, "name": "Example University" },
+      "provider": { "id": 53, "name": "Research Provider" },
+      "isMobile": true,
+      "isMonitor": false,
+      "instruments": [],
+      "sensors": [
+        {
+          "id": 1003,
+          "name": "no2 µg/m³",
+          "parameter": { "id": 7, "name": "no2", "units": "µg/m³", "displayName": "NO₂" }
+        }
+      ],
+      "coordinates": { "latitude": 52.36, "longitude": 4.88 },
+      "licenses": null,
+      "bounds": [4.8, 52.3, 4.95, 52.42],
+      "distance": null,
+      "datetimeFirst": { "utc": "2025-01-01T00:00:00Z", "local": "2025-01-01T01:00:00+01:00" },
+      "datetimeLast": { "utc": "2025-01-02T00:00:00Z", "local": "2025-01-02T01:00:00+01:00" }
+    }
+  ]
+}

@@ -80,6 +80,12 @@ The shared CSV parser has its own quoted-field and malformed-input regression,
 and the bounded HTTP suite proves a path credential never enters the public
 request digest or result.
 
+`test/data-openaq-connector.test.ts` proves required API-key preflight for both
+operations, bounded and stable location filters, raw/hourly/daily sensor route
+selection, pagination metadata validation, attribution/coverage normalization,
+pre-network request rejection, record caps, later-page partial isolation, and
+the explicit S3-download, AQI, health, and regulatory boundaries.
+
 Target the foundation during iteration with
 `node --import tsx --test test/data-*.test.ts`. The ordinary `npm test` and
 coverage commands discover the same suites automatically. A build must emit all

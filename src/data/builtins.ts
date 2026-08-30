@@ -5,6 +5,7 @@ import { nasaFirmsFireConnector } from "./connectors/nasa-firms-fire.js";
 import { openMeteoAirQualityConnector } from "./connectors/open-meteo-air-quality.js";
 import { openMeteoFloodConnector } from "./connectors/open-meteo-flood.js";
 import { openMeteoHistoricalWeatherConnector } from "./connectors/open-meteo-historical-weather.js";
+import { openAqAirQualityConnector } from "./connectors/openaq-air-quality.js";
 import { usgsWaterInstantaneousValuesConnector } from "./connectors/usgs-water-instantaneous-values.js";
 
 export const builtInDataRegistry = createDataRegistry([
@@ -14,5 +15,6 @@ export const builtInDataRegistry = createDataRegistry([
   openMeteoAirQualityConnector,
   openMeteoFloodConnector,
   openMeteoHistoricalWeatherConnector,
+  openAqAirQualityConnector,
   usgsWaterInstantaneousValuesConnector,
 ]);
