@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: a048d6d
+lastReviewedCommit: b4eb75b
 ---
 
 # Tiangong AI CLI
@@ -75,7 +75,7 @@ JSON exits are `0` for success, `2` for request/contract errors, `3` for a
 blocked execution, and `4` for an explicit partial result. Public machine
 schemas ship under `dist/data/schemas/`.
 
-The first built-in capabilities are:
+The built-in capabilities are:
 
 - `airnow.hourly-observations` / `fetch-hourly`: fetches official AirNow
   `HourlyAQObs` files for a bounded UTC-hour window, bounding box, and pollutant
@@ -85,8 +85,21 @@ The first built-in capabilities are:
   FederalRegister.gov document metadata by publication date plus term, agency,
   document type, topic, docket, or RIN filters. It does not follow result links,
   fetch document full text, or provide legal interpretation.
+- `open-meteo.air-quality` / `fetch-hourly`: retrieves bounded GMT hourly CAMS
+  model-grid air-quality series for known coordinates; these are modeled
+  background values rather than station observations.
+- `open-meteo.flood` / `fetch-daily`: retrieves bounded daily GloFAS simulated
+  river-discharge series for the represented river grid; it is neither gauge
+  data nor a flood-alert service.
+- `open-meteo.historical-weather` / `fetch`: retrieves bounded GMT hourly and/or
+  daily historical weather reanalysis for one controlled model and known
+  coordinates. ERA5 or ERA5-Land should be selected when multi-decade model
+  consistency matters.
+- `usgs.water-instantaneous-values` / `fetch`: retrieves bounded legacy USGS
+  WaterServices instantaneous observations while preserving site, parameter,
+  qualifier, provisional status, and source lifecycle warnings.
 
-Both connectors are keyless. Their exact input and output schemas, endpoint
+All six connectors are keyless. Their exact input and output schemas, endpoint
 scopes and limits are available through the execution manifest, while source
 notes, coverage, selection guidance and license restrictions are available in
 the discovery metadata returned by `data describe`; static `data doctor`

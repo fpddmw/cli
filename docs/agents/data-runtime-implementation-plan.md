@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: a048d6d
+lastReviewedCommit: b4eb75b
 ---
 
 # 原子数据运行时实施计划
@@ -241,6 +241,25 @@ runtime primitive。
   Global 分辨率和变量覆盖差异、公开端点非商业限制以及 Open-Meteo/CAMS attribution。
 - fixture 为按官方响应形状重建的合成数据；connector、catalog、static doctor、
   conformance 与 dist pack 合同全部离线验证。
+
+状态：CLI connector 已完成；对应 Skill 瘦身和候选 binding 正在迁移，正式 binding 等待
+包含全部 connector 的精确 npm 版本发布。
+
+### 后续迁移 4：Open-Meteo Historical Weather
+
+- 新增 `open-meteo.historical-weather/fetch`，只使用公开 non-commercial archive
+  endpoint；输入限制为最多十个坐标、一个受控 model、十二个 curated hourly 与十二个
+  curated numeric daily variables、366 个闭合日期。两个变量数组必须显式传入，至少一方
+  非空。
+- 请求固定 GMT、摄氏度、km/h 和 mm，坐标保持调用顺序、变量稳定排序；输出保存
+  requested/model-grid coordinate、elevation、hourly/daily 时间轴、单位和 aligned nullable
+  arrays。record cap 按 location 内 hourly 后 daily 的顺序同步截断时间和值。
+- 单坐标/section/time axis/variable/unit 异常返回 partial，整体 provider error 返回
+  blocked；fixture 按官方响应形状重建。Discovery Metadata 区分 reanalysis/model-grid
+  estimate 与 station observation，并提示多年代趋势使用 ERA5 或 ERA5-Land，避免 Best
+  Match 的模型升级断点。
+- 不透传旧 Skill 的 endpoint、API key、任意 model、timezone 或单位环境配置；商业
+  customer endpoint 必须作为独立能力评审。
 
 状态：CLI connector 已完成；对应 Skill 瘦身和候选 binding 正在迁移，正式 binding 等待
 包含全部 connector 的精确 npm 版本发布。

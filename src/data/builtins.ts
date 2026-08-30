@@ -3,6 +3,7 @@ import { airNowHourlyObservationsConnector } from "./connectors/airnow-hourly-ob
 import { federalRegisterDocumentsConnector } from "./connectors/federal-register-documents.js";
 import { openMeteoAirQualityConnector } from "./connectors/open-meteo-air-quality.js";
 import { openMeteoFloodConnector } from "./connectors/open-meteo-flood.js";
+import { openMeteoHistoricalWeatherConnector } from "./connectors/open-meteo-historical-weather.js";
 import { usgsWaterInstantaneousValuesConnector } from "./connectors/usgs-water-instantaneous-values.js";
 
 export const builtInDataRegistry = createDataRegistry([
@@ -10,5 +11,6 @@ export const builtInDataRegistry = createDataRegistry([
   federalRegisterDocumentsConnector,
   openMeteoAirQualityConnector,
   openMeteoFloodConnector,
+  openMeteoHistoricalWeatherConnector,
   usgsWaterInstantaneousValuesConnector,
 ]);

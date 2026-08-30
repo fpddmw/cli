@@ -48,6 +48,7 @@ describe("data CLI", () => {
           "federal-register.documents",
           "open-meteo.air-quality",
           "open-meteo.flood",
+          "open-meteo.historical-weather",
           "usgs.water-instantaneous-values",
         ],
       );

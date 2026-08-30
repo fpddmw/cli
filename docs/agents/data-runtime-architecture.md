@@ -17,7 +17,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: a048d6d
+lastReviewedCommit: b4eb75b
 ---
 
 # 原子数据运行时目标架构
@@ -38,7 +38,7 @@ HTTP、认证、分页、重试、缓存或回执实现。Auto Research 复用�
 ## 公共命令契约
 
 以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册两个试点
-connector 和三个后续迁移 connector：
+connector 和四个后续迁移 connector：
 
 ```text
 tiangong-ai data catalog
@@ -182,6 +182,21 @@ location-day 同步截断全部列。Discovery Metadata 明确该来源是 GloFA
 [Open-Meteo License](https://open-meteo.com/en/license) 和
 [API Terms](https://open-meteo.com/en/terms)。
 
+`open-meteo.historical-weather/fetch` 对应一个公开 Historical Weather archive 请求，
+接受最多十个显式坐标、一个受控 reanalysis/model、最多十二个 hourly 与十二个 numeric
+daily 变量，以及不超过 366 个日期的闭合窗口；hourly/daily 数组都必须显式传入，
+不需要的粒度使用空数组。请求固定 GMT、摄氏度、km/h 和 mm，输出保存 requested/model
+grid coordinate、elevation、单位和对齐的 nullable series；record cap 按 location 内
+hourly 后 daily 的稳定顺序截断时间行。Discovery Metadata 明确该来源是 gap-filled
+reanalysis/model grid estimate，不是 station observation；跨年代趋势输入应优先选
+ERA5 或 ERA5-Land，避免 Best Match 的模型升级产生非气候断点。公开 endpoint 仅限
+非商业使用并要求 Open-Meteo 与底层数据提供方署名；商业 endpoint/API key 不在该
+capability 中。接口、模型和值域依据官方
+[Historical Weather API 文档](https://open-meteo.com/en/docs/historical-weather-api) 与
+[OpenAPI 规范](https://github.com/open-meteo/open-meteo/blob/main/openapi/historical-weather.yml)，
+许可与端点边界依据 [Open-Meteo License](https://open-meteo.com/en/license) 和
+[API Terms](https://open-meteo.com/en/terms)。
+
 `usgs.water-instantaneous-values/fetch` 对应一个有界的 legacy WaterServices IV 请求。
 它要求 bbox 或最多 100 个显式 site number 二选一，以及 ISO-8601 period 或显式
 RFC3339 起止时间二选一；默认参数为 discharge `00060` 与 gage height `00065`，默认
@@ -193,7 +208,7 @@ timestamp、qualifier 和 provisional 状态；单个坏 series/value row 作为
 Discovery Metadata 同时标明 legacy WaterServices 计划于 2027 年第一季度下线，并指向
 [现代 Water Data APIs](https://www.usgs.gov/tools/usgs-water-data-apis)。
 
-五个 connector 均无凭证、默认 static doctor 完全离线，且互不导入业务函数。测试
+六个 connector 均无凭证、默认 static doctor 完全离线，且互不导入业务函数。测试
 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制的 live provider 响应。
 
 ## 机器 Envelope
