@@ -104,7 +104,7 @@ export const blueskyPublicPostsConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "bluesky.public-posts",
   capabilityVersion: "1.0.0",
-  minimumCliVersion: "0.0.51",
+  minimumCliVersion: "0.0.55",
   provider: { providerId: "bluesky", name: "Bluesky AppView" },
   sourceCategory: "public-social-media-posts",
   endpoints: [

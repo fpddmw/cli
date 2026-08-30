@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: 19b0b179d652305f936a5fb39ca01d3beea7f864
+lastReviewedCommit: 02cd49d7ad45136468bcbd4c8fb3ff23d3eba8eb
 ---
 
 # 原子数据运行时实施计划
@@ -177,6 +177,10 @@ runtime primitive。
 - Skills 离线测试拒绝缺失 capability、错误 digest、过低 CLI 版本和漂移命令面；安装
   smoke 使用隔离 HOME/project，不携带真实凭证。
 - CLI 正式版本发布后更新 exact binding，再合并 Skills PR。
+
+当前公共 `0.0.54` 不暴露 `data` 命令。完整十五项 capability 的本地发布候选统一使用
+`0.0.55`，所有 capability manifest 的 `minimumCliVersion` 也设为 `0.0.55`，避免已发布
+但不兼容的旧版本通过 Skills 的最低版本检查。
 
 完成门槛：安装后的 Skill 调用已发布 CLI，且仓库中不再有第二份首批 connector
 业务逻辑或 Schema。

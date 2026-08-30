@@ -129,7 +129,7 @@ export const airNowHourlyObservationsConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "airnow.hourly-observations",
   capabilityVersion: "1.0.0",
-  minimumCliVersion: "0.0.51",
+  minimumCliVersion: "0.0.55",
   provider: {
     providerId: "airnow",
     name: "U.S. EPA AirNow",

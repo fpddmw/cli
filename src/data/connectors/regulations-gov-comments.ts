@@ -135,7 +135,7 @@ export const regulationsGovCommentsConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "regulations-gov.comments",
   capabilityVersion: "1.0.0",
-  minimumCliVersion: "0.0.51",
+  minimumCliVersion: "0.0.55",
   provider: { providerId: "regulations-gov", name: "Regulations.gov" },
   sourceCategory: "public-regulatory-comments",
   endpoints: [

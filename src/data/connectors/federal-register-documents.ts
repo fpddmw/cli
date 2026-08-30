@@ -86,7 +86,7 @@ export const federalRegisterDocumentsConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "federal-register.documents",
   capabilityVersion: "1.0.0",
-  minimumCliVersion: "0.0.51",
+  minimumCliVersion: "0.0.55",
   provider: {
     providerId: "federal-register",
     name: "FederalRegister.gov",

@@ -116,7 +116,7 @@ export const nasaFirmsFireConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "nasa-firms.active-fire",
   capabilityVersion: "1.0.0",
-  minimumCliVersion: "0.0.51",
+  minimumCliVersion: "0.0.55",
   provider: {
     providerId: "nasa-firms",
     name: "NASA Fire Information for Resource Management System",

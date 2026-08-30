@@ -69,7 +69,7 @@ export const gdeltDocSearchConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "gdelt.doc-search",
   capabilityVersion: "1.0.0",
-  minimumCliVersion: "0.0.51",
+  minimumCliVersion: "0.0.55",
   provider: { providerId: "gdelt", name: "GDELT Project" },
   sourceCategory: "global-news-metadata",
   endpoints: [

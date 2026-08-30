@@ -17,7 +17,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: 19b0b179d652305f936a5fb39ca01d3beea7f864
+lastReviewedCommit: 02cd49d7ad45136468bcbd4c8fb3ff23d3eba8eb
 ---
 
 # 原子数据运行时目标架构

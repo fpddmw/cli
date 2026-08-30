@@ -146,7 +146,7 @@ export const youtubePublicContentConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "youtube.public-content",
   capabilityVersion: "1.0.0",
-  minimumCliVersion: "0.0.51",
+  minimumCliVersion: "0.0.55",
   provider: { providerId: "youtube", name: "YouTube Data API" },
   sourceCategory: "public-video-and-comment-metadata",
   endpoints: [

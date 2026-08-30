@@ -89,7 +89,7 @@ export const openMeteoAirQualityConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "open-meteo.air-quality",
   capabilityVersion: "1.0.0",
-  minimumCliVersion: "0.0.51",
+  minimumCliVersion: "0.0.55",
   provider: {
     providerId: "open-meteo",
     name: "Open-Meteo Air Quality API",

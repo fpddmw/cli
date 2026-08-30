@@ -129,7 +129,7 @@ function createFeedConnector(definition: FeedDefinition): DataConnectorDefinitio
     schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
     capabilityId: definition.capabilityId,
     capabilityVersion: "1.0.0",
-    minimumCliVersion: "0.0.51",
+    minimumCliVersion: "0.0.55",
     provider: { providerId: "gdelt", name: "GDELT Project" },
     sourceCategory: "global-news-structured-feed",
     endpoints: [

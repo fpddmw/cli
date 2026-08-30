@@ -97,7 +97,7 @@ export const openMeteoFloodConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "open-meteo.flood",
   capabilityVersion: "1.0.0",
-  minimumCliVersion: "0.0.51",
+  minimumCliVersion: "0.0.55",
   provider: {
     providerId: "open-meteo",
     name: "Open-Meteo Flood API",

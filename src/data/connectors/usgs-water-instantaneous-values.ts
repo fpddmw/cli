@@ -109,7 +109,7 @@ export const usgsWaterInstantaneousValuesConnector: DataConnectorDefinition = {
   schemaVersion: DATA_MANIFEST_SCHEMA_VERSION,
   capabilityId: "usgs.water-instantaneous-values",
   capabilityVersion: "1.0.0",
-  minimumCliVersion: "0.0.51",
+  minimumCliVersion: "0.0.55",
   provider: {
     providerId: "usgs",
     name: "U.S. Geological Survey Water Data for the Nation",
