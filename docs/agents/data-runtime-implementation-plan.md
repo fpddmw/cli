@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 832e302
+lastReviewedCommit: 79323fa
 ---
 
 # 原子数据运行时实施计划
@@ -223,6 +223,27 @@ runtime primitive。
 - Discovery Metadata 明确该 endpoint 为计划在 2027 年第一季度下线的 legacy 服务，
   并指向现代 Water Data APIs；这项迁移完成当前 Skill 去重，但不假装解决长期 API
   迁移，现代 endpoint 需要单独 capability/operation 评审。
+
+状态：CLI connector 与对应薄 Skill 已在本地完成并验证；正式 Skills binding 仍需等待
+包含该 connector 的精确 npm 版本发布后替换候选包 digest。
+
+### 后续迁移 2：Open-Meteo Air Quality
+
+- 新增 `open-meteo.air-quality/fetch-hourly`，只使用无凭证的公开 non-commercial
+  endpoint；显式移除旧 Skill 中会混淆 public/customer endpoint 的可选 API key，商业
+  endpoint 如有需求必须作为独立受审阅合同加入。
+- 输入限制为最多十个坐标、十六个已知 hourly variable 和 92 个闭合日期；坐标保持请求
+  顺序，变量稳定排序，timezone 固定为 GMT，避免 locale/DST 进入执行合同。
+- 输出按 location-hour 计数，保留 requested/grid coordinate、elevation、timezone、unit
+  和 aligned nullable arrays；单坐标/变量异常返回 partial，record cap 对时间和值同步
+  截断，整体 provider error 返回 blocked。
+- Discovery Metadata 区分 CAMS modeled background 与 station observation，记录 Europe/
+  Global 分辨率和变量覆盖差异、公开端点非商业限制以及 Open-Meteo/CAMS attribution。
+- fixture 为按官方响应形状重建的合成数据；connector、catalog、static doctor、
+  conformance 与 dist pack 合同全部离线验证。
+
+状态：CLI connector 已完成；对应 Skill 瘦身和候选 binding 正在迁移，正式 binding 等待
+包含全部 connector 的精确 npm 版本发布。
 
 ## PR 与提交拆分
 

@@ -17,7 +17,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 832e302
+lastReviewedCommit: 79323fa
 ---
 
 # 原子数据运行时目标架构
@@ -38,7 +38,7 @@ HTTP、认证、分页、重试、缓存或回执实现。Auto Research 复用�
 ## 公共命令契约
 
 以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册两个试点
-connector 和首个后续迁移 connector：
+connector 和两个后续迁移 connector：
 
 ```text
 tiangong-ai data catalog
@@ -158,6 +158,18 @@ document search metadata，不访问结果中的正文、XML 或 PDF 链接，�
 法律使用限制依据其
 [About This Site](https://www.federalregister.gov/reader-aids/government-policy-and-ofr-procedures/about-this-site)。
 
+`open-meteo.air-quality/fetch-hourly` 对应一个公开 Air Quality API 请求，接受最多十个
+显式坐标、最多十六个官方变量，以及不超过 92 个日期的闭合窗口。变量按 code point
+排序而坐标保持调用顺序；请求固定使用 GMT，输出按坐标保存 model grid、时间、单位和
+对齐的 nullable value arrays。单个坐标或变量异常保留其余有效列并返回 `partial`，
+record cap 按 location-hour 截断所有变量列。Discovery Metadata 明确该来源是 CAMS
+模型网格背景值，不是站点观测；公开 endpoint 仅限非商业使用，并要求同时署名
+Open-Meteo 和底层 CAMS 数据提供方。接口和变量依据官方
+[Air Quality API 文档](https://open-meteo.com/en/docs/air-quality-api)，许可与端点边界依据
+[Open-Meteo License](https://open-meteo.com/en/license) 和
+[API Terms](https://open-meteo.com/en/terms)。商业 customer endpoint 与 API key 不在
+该 capability 中隐式切换，若需要必须单独评审。
+
 `usgs.water-instantaneous-values/fetch` 对应一个有界的 legacy WaterServices IV 请求。
 它要求 bbox 或最多 100 个显式 site number 二选一，以及 ISO-8601 period 或显式
 RFC3339 起止时间二选一；默认参数为 discharge `00060` 与 gage height `00065`，默认
@@ -169,7 +181,7 @@ timestamp、qualifier 和 provisional 状态；单个坏 series/value row 作为
 Discovery Metadata 同时标明 legacy WaterServices 计划于 2027 年第一季度下线，并指向
 [现代 Water Data APIs](https://www.usgs.gov/tools/usgs-water-data-apis)。
 
-三个 connector 均无凭证、默认 static doctor 完全离线，且互不导入业务函数。测试
+四个 connector 均无凭证、默认 static doctor 完全离线，且互不导入业务函数。测试
 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制的 live provider 响应。
 
 ## 机器 Envelope

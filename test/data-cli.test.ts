@@ -46,6 +46,7 @@ describe("data CLI", () => {
         [
           "airnow.hourly-observations",
           "federal-register.documents",
+          "open-meteo.air-quality",
           "usgs.water-instantaneous-values",
         ],
       );
