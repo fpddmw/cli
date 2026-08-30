@@ -26,6 +26,10 @@ describe("built-in data connectors", () => {
       [
         "airnow.hourly-observations",
         "federal-register.documents",
+        "gdelt.doc-search",
+        "gdelt.events",
+        "gdelt.gkg",
+        "gdelt.mentions",
         "nasa-firms.active-fire",
         "open-meteo.air-quality",
         "open-meteo.flood",
@@ -49,6 +53,10 @@ describe("built-in data connectors", () => {
     for (const capabilityId of [
       "airnow.hourly-observations",
       "federal-register.documents",
+      "gdelt.doc-search",
+      "gdelt.events",
+      "gdelt.gkg",
+      "gdelt.mentions",
       "nasa-firms.active-fire",
       "open-meteo.air-quality",
       "open-meteo.flood",

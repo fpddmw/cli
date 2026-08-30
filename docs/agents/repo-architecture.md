@@ -193,11 +193,13 @@ storage writes, queueing, and document status transitions.
   immutable registry, public JSON Schemas, canonical digest and receipt rules,
   strict command router, logical credential resolution, bounded HTTPS client,
   stable error taxonomy, and connector execution/conformance contracts. Its
-  built-in registry currently ships nine independent consumers of the same
-  runtime: AirNow hourly observations, Federal Register document metadata,
-  NASA FIRMS active-fire detections, three Open-Meteo series, OpenAQ location
-  and sensor measurements, Regulations.gov public comments, and USGS Water
-  instantaneous values.
+  built-in registry currently ships thirteen independently discoverable
+  capabilities on the same runtime: AirNow hourly observations, Federal
+  Register document metadata, four GDELT DOC/table surfaces, NASA FIRMS
+  active-fire detections, three Open-Meteo series, OpenAQ location and sensor
+  measurements, Regulations.gov public comments, and USGS Water instantaneous
+  values. The three GDELT table capabilities share one bounded ZIP/feed core
+  without collapsing their separate discovery and binding identities.
 - `scripts/**`: validation helpers.
 - `test/**`: Node test runner suites.
 

@@ -85,6 +85,15 @@ The built-in capabilities are:
   FederalRegister.gov document metadata by publication date plus term, agency,
   document type, topic, docket, or RIN filters. It does not follow result links,
   fetch document full text, or provide legal interpretation.
+- `gdelt.doc-search` / `search`: searches the rolling GDELT DOC 2.0 index for
+  bounded article-link metadata or supported aggregate timelines. Automated
+  multilingual extraction and uneven monitored-source coverage are explicit;
+  it does not retrieve article bodies or establish ground-truth facts.
+- `gdelt.events`, `gdelt.gkg`, and `gdelt.mentions` / `fetch`: independently
+  discoverable GDELT 2.0 table capabilities backed by one bounded TypeScript
+  file-feed core. They fetch either the latest provider entry or at most twenty
+  aligned 15-minute files, verify ZIP/CRC and advertised latest-file checksums,
+  and emit closed named columns without persisting downloaded files.
 - `nasa-firms.active-fire` / `fetch-area`: retrieves bounded NASA FIRMS MODIS,
   VIIRS, or Landsat active-fire point detections, optionally validates source
   availability, and exposes chunk-level partial coverage. Hotspots are thermal
@@ -111,7 +120,7 @@ The built-in capabilities are:
   WaterServices instantaneous observations while preserving site, parameter,
   qualifier, provisional status, and source lifecycle warnings.
 
-Six connectors are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
+Ten connectors are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
 CLI injects as a protected provider path segment; OpenAQ requires
 `OPENAQ_API_KEY`, and Regulations.gov requires `REGGOV_API_KEY`; the CLI injects
 the latter two as protected provider headers. No secret is accepted in argv or

@@ -72,6 +72,13 @@ failure. Fixture provenance notes live beside the fixtures under
 `test/fixtures/data/**`; no provider response, credential, or user data is
 checked in.
 
+`test/data-gdelt-connectors.test.ts` generates synthetic DOC JSON and
+single-member ZIP/TSV fixtures in memory. It proves four independent capability
+contracts, exact 15-minute path planning without `masterfilelist.txt`, latest
+size/MD5 verification, bounded ZIP/CRC/UTF-8/column validation, closed named
+fields, later-file partial preservation, record-cap early stop, and the
+automated-coding/non-representative/content-download discovery boundaries.
+
 `test/data-nasa-firms-fire-connector.test.ts` proves required MAP_KEY preflight,
 five-day chunk planning, provider availability checks, bbox/window/transaction
 limits, VIIRS field normalization, no-results, record caps, invalid-row and

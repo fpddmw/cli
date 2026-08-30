@@ -46,6 +46,10 @@ describe("data CLI", () => {
         [
           "airnow.hourly-observations",
           "federal-register.documents",
+          "gdelt.doc-search",
+          "gdelt.events",
+          "gdelt.gkg",
+          "gdelt.mentions",
           "nasa-firms.active-fire",
           "open-meteo.air-quality",
           "open-meteo.flood",

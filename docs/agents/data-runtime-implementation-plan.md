@@ -306,6 +306,26 @@ runtime primitive。
 
 状态：CLI connector 已完成；两个对应 Skill 的瘦身与候选 binding 正在迁移。
 
+### 后续迁移 8：GDELT DOC、Events、GKG 与 Mentions
+
+- 保留 `gdelt.doc-search/search`、`gdelt.events/fetch`、`gdelt.gkg/fetch` 与
+  `gdelt.mentions/fetch` 四个独立 discovery/binding 单元；DOC 使用单独 query connector，
+  三个 15-minute table capability 共享 ZIP、range planning 与 TSV normalization 核心。
+- DOC 只开放 JSON article list 与五种 timeline mode，要求 rolling/absolute window 二选一，
+  CLI 单次限制最长 366 天，并声明 provider 对长窗口 article-list 只考虑末端三个月；不再
+  透传 arbitrary mode、format、provider parameter 或输出文件路径。
+- table fetch 只开放 latest 或最多二十个精确对齐 15 分钟的 UTC timestamps；range 直接
+  生成受限 HTTPS path，不下载大型 master file。latest 校验 provider size/MD5，所有 ZIP
+  校验单 member、安全名称、header 一致性、解压上限、CRC32、UTF-8 和精确 codebook 列数。
+- 输出在内存中归一化为闭合 named fields，并保留 file timestamp/name lineage；缺失后续文件
+  返回 partial，record cap 在下载下一文件前停止。该原子合同不落盘、不下载 article body，
+  也不把 automated coding 当作代表性、事实或因果证据。
+- fixtures 完全由测试生成并在 provenance note 中说明，不包含 live provider 响应；四个
+  connector 的 field description、discovery boundary、range/ZIP failure、conformance、
+  catalog/static doctor 与 dist pack 均离线验证。
+
+状态：CLI connector 已完成；四个对应 Skill 等待瘦身并绑定精确候选包。
+
 ### 后续迁移 4：Open-Meteo Historical Weather
 
 - 新增 `open-meteo.historical-weather/fetch`，只使用公开 non-commercial archive

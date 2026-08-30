@@ -158,6 +158,21 @@ document search metadata，不访问结果中的正文、XML 或 PDF 链接，�
 法律使用限制依据其
 [About This Site](https://www.federalregister.gov/reader-aids/government-policy-and-ofr-procedures/about-this-site)。
 
+GDELT 保留四个独立发现与 binding 单元。`gdelt.doc-search/search` 使用 DOC 2.0 JSON
+endpoint，只接受一个由 CLI 限制为最长 366 天的 rolling 或 absolute window，并封闭为 article list、
+volume/raw volume、tone、language 和 source-country timeline 模式；输出只含链接元数据或
+aggregate points，不下载 article body/image。`gdelt.events/fetch`、`gdelt.gkg/fetch` 与
+`gdelt.mentions/fetch` 则共享一个 TypeScript 文件流核心，但各自发布独立 capability 与
+codebook 字段合同。它们仅接受 latest 或最多二十个、精确对齐 15 分钟的 UTC range；range
+直接生成固定 HTTPS 路径，普通运行不下载约百 MB 的 `masterfilelist.txt`。latest 文件核对
+`lastupdate.txt` 声明的压缩大小与 MD5；所有 ZIP 均限制为单个安全 member，并验证 header、
+解压上限、CRC32、UTF-8 与精确列数。四个 capability 都明确 GDELT 的翻译、entity/theme、
+event 和 mention coding 是自动化结果，coverage 不均衡；provider 的 article-list 模式对长
+窗口只考虑所选窗口末端三个月，而 timeline 可覆盖更长区间。结果不能当作代表性样本、ground truth
+或 causal evidence。接口与 cadence 依据 [GDELT DOC 2.0](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/)、
+[GDELT 2.0 introduction](https://blog.gdeltproject.org/gdelt-2-0-our-global-world-in-realtime/)
+及官方 codebook；fixture 仅为按公开格式重建的合成字节。
+
 `open-meteo.air-quality/fetch-hourly` 对应一个公开 Air Quality API 请求，接受最多十个
 显式坐标、最多十六个官方变量，以及不超过 92 个日期的闭合窗口。变量按 code point
 排序而坐标保持调用顺序；请求固定使用 GMT，输出按坐标保存 model grid、时间、单位和
@@ -246,7 +261,8 @@ Eastern wall-clock last-modified filter 依据官方
 [v4 OpenAPI](https://open.gsa.gov/api/regulationsgov/v4/openapi.yaml)，共享限流依据
 [api.data.gov rate limits](https://api.data.gov/docs/rate-limits/)。
 
-九个 connector 的默认 static doctor 均完全离线，且互不导入业务函数。六个 connector
+十三个 connector 的默认 static doctor 均完全离线。四个 GDELT capability 共享受限的
+文件流机制，但不互相调用 capability 业务入口；其余 connector 也互不导入业务函数。十个 connector
 无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY`、OpenAQ 从 `OPENAQ_API_KEY`、Regulations.gov
 从 `REGGOV_API_KEY` 解析逻辑凭证，
 缺失时离线报告 blocked。测试 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制
