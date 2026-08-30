@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: 02cd49d7ad45136468bcbd4c8fb3ff23d3eba8eb
+lastReviewedCommit: 36df568230534c0c0d35ae459f266e6010f51c4c
 ---
 
 # Repo Validation
@@ -88,8 +88,11 @@ discovery boundaries.
 `test/data-youtube-public-content-connector.test.ts` proves header-only API-key
 injection, bounded video discovery and enrichment, complete reply pagination,
 credential preflight, duplicate-ID and empty-query rejection, per-video partial
-isolation, and the quota, visibility, ranking, and non-representative-public-
-opinion discovery boundaries.
+isolation, explicit empty partial results for disabled comments, and the quota,
+visibility, ranking, and non-representative-public-opinion discovery boundaries.
+The bounded HTTP suite separately proves that only a short machine-readable
+provider reason is retained from an error body; provider prose and unsafe values
+remain excluded.
 
 `test/data-nasa-firms-fire-connector.test.ts` proves required MAP_KEY preflight,
 five-day chunk planning, provider availability checks, bbox/window/transaction

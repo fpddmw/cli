@@ -606,7 +606,8 @@ async function executeCommentsFetch(
     if (intentionalTruncation && videoIndex < query.videoIds.length - 1) break;
   }
 
-  if (records.length === 0 && failures.length > 0) throw failureValues[0];
+  const blockingFailure = failureValues.find((failure) => !isCommentsDisabledFailure(failure));
+  if (records.length === 0 && blockingFailure) throw blockingFailure;
   const partial = failures.length > 0;
   const stopReason = partial
     ? "partial"
@@ -1017,9 +1018,24 @@ function numericString(value: unknown): number | null {
 }
 
 function normalizeProviderFailure(error: unknown): DataRuntimeError {
-  return error instanceof DataRuntimeError
-    ? error
-    : providerInvalid("YouTube response could not be normalized.");
+  if (!(error instanceof DataRuntimeError)) {
+    return providerInvalid("YouTube response could not be normalized.");
+  }
+  if (error.options.details?.providerReason === "commentsDisabled") {
+    return new DataRuntimeError(
+      "provider-response-invalid",
+      "YouTube comments are unavailable for this video.",
+      { details: { providerReason: "commentsDisabled" } },
+    );
+  }
+  return error;
+}
+
+function isCommentsDisabledFailure(error: unknown): boolean {
+  return (
+    error instanceof DataRuntimeError &&
+    error.options.details?.providerReason === "commentsDisabled"
+  );
 }
 
 function providerInvalid(message: string): DataRuntimeError {

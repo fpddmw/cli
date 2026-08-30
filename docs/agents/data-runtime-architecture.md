@@ -17,7 +17,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: 02cd49d7ad45136468bcbd4c8fb3ff23d3eba8eb
+lastReviewedCommit: 36df568230534c0c0d35ae459f266e6010f51c4c
 ---
 
 # 原子数据运行时目标架构
@@ -328,7 +328,8 @@ Regulations.gov 从 `REGGOV_API_KEY`、YouTube 从 `YOUTUBE_API_KEY` 解析逻�
 
 每个机器错误包含 `code`、`retryable`、`userActionRequired` 和最小安全详情。HTTP body、
 URL query、header、环境变量值、本地绝对路径和 provider 原始错误不得未经 allowlist
-进入输出。
+进入输出。bounded HTTP 最多从 JSON 错误体保留一个 64 字符以内、只含字母数字和
+`._-` 的 provider reason 机器码；不保留 provider message 或其他自由文本。
 
 ## 回执与摘要
 

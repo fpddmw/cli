@@ -187,6 +187,50 @@ describe("bounded data HTTP", () => {
     assert.doesNotMatch(JSON.stringify(machine), new RegExp(secret));
   });
 
+  it("retains only a bounded machine-readable provider error reason", async () => {
+    const safe = httpClient({
+      fetchImpl: (async () =>
+        Response.json(
+          { error: { errors: [{ reason: "commentsDisabled" }], message: "ignored prose" } },
+          { status: 403 },
+        )) as typeof fetch,
+    });
+    let safeError: unknown;
+    try {
+      await safe.request({
+        endpointId: "primary",
+        method: "GET",
+        path: "/v1/items",
+        credentialId: "api-token",
+      });
+    } catch (error) {
+      safeError = error;
+    }
+    assert.ok(safeError instanceof DataRuntimeError);
+    assert.equal(safeError.options.details?.providerReason, "commentsDisabled");
+
+    const unsafe = httpClient({
+      fetchImpl: (async () =>
+        Response.json(
+          { error: { errors: [{ reason: "comments disabled for jane@example.test" }] } },
+          { status: 403 },
+        )) as typeof fetch,
+    });
+    let unsafeError: unknown;
+    try {
+      await unsafe.request({
+        endpointId: "primary",
+        method: "GET",
+        path: "/v1/items",
+        credentialId: "api-token",
+      });
+    } catch (error) {
+      unsafeError = error;
+    }
+    assert.ok(unsafeError instanceof DataRuntimeError);
+    assert.equal(unsafeError.options.details?.providerReason, undefined);
+  });
+
   it("blocks a provider response that reflects the injected credential", async () => {
     const client = httpClient({
       fetchImpl: (async () =>

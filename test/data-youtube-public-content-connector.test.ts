@@ -265,7 +265,10 @@ describe("YouTube public-content connector", () => {
       fetchImpl: (async (target) => {
         const url = new URL(String(target));
         if (url.searchParams.get("videoId") === "video-2") {
-          return Response.json({ error: { message: "commentsDisabled" } }, { status: 403 });
+          return Response.json(
+            { error: { errors: [{ reason: "commentsDisabled" }] } },
+            { status: 403 },
+          );
         }
         return Response.json({
           items: [
@@ -294,5 +297,22 @@ describe("YouTube public-content connector", () => {
     assert.equal(result.status, "partial");
     assert.equal(result.summary.recordCount, 1);
     assert.deepEqual(result.summary.missing, [{ kind: "range", identifiers: ["video-2"] }]);
+    assert.deepEqual(result.errors[0]?.details?.causeCodes, ["provider-response-invalid"]);
+  });
+
+  it("returns an explicit empty partial when comments are disabled", async () => {
+    const result = await executeDataRun(commentsRequest(), {
+      registry: createDataRegistry([youtubePublicContentConnector]),
+      environment: { YOUTUBE_API_KEY: "secret-youtube-key" },
+      fetchImpl: (async () =>
+        Response.json(
+          { error: { errors: [{ reason: "commentsDisabled" }] } },
+          { status: 403 },
+        )) as typeof fetch,
+    });
+    assert.equal(result.status, "partial");
+    assert.equal(result.summary.recordCount, 0);
+    assert.deepEqual(result.summary.missing, [{ kind: "range", identifiers: ["video-1"] }]);
+    assert.deepEqual(result.errors[0]?.details?.causeCodes, ["provider-response-invalid"]);
   });
 });

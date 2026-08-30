@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: 02cd49d7ad45136468bcbd4c8fb3ff23d3eba8eb
+lastReviewedCommit: 36df568230534c0c0d35ae459f266e6010f51c4c
 ---
 
 # 原子数据运行时实施计划
@@ -348,7 +348,9 @@ runtime primitive。
 - YouTube key 从 `YOUTUBE_API_KEY` 解析为 logical `api-key`，只经 `X-Goog-Api-Key` header 注入；
   `fetch-comments` 不信任 `commentThreads.list` 的 embedded replies，而对每个有回复的 thread 使用
   `comments.list` 分页。operation-wide request/record limits 叠加 per-video/per-thread page caps；后续
-  video 或 detail batch 失败保留已验证结果并返回 partial。
+  video 或 detail batch 失败保留已验证结果并返回 partial。`commentsDisabled` 只通过通用 HTTP
+  层保留的安全 provider reason 机器码识别，返回明确的 per-video partial；不得误报为 API key
+  无效，也不得把 provider message 带入错误详情。
 - 两个 provider 的 fixture 均为按官方 Lexicon/API 形状构造的虚构内容，不保留 live user data、
   provider response 或 API key。catalog/describe/static doctor、header secret boundary、pagination、
   partial/truncation、output Schema 与 dist pack 都需要离线验证。

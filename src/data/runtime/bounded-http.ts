@@ -131,7 +131,9 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
           "The provider response reflected a configured credential and was blocked.",
         );
       }
-      if (!response.ok) throwHttpStatus(response, credential, options.limits.maxRetryDelayMs);
+      if (!response.ok) {
+        throwHttpStatus(response, credential, options.limits.maxRetryDelayMs, bytes);
+      }
       const contentType = normalizedContentType(response.headers.get("content-type"));
       if (!contentTypeAllowed(contentType, endpoint.allowedContentTypes)) {
         throw new DataRuntimeError(
@@ -357,7 +359,9 @@ function throwHttpStatus(
   response: Response,
   credential: DataCredentialDeclaration | undefined,
   maxRetryDelayMs: number,
+  bytes: Buffer,
 ): never {
+  const providerReason = safeProviderErrorReason(bytes);
   if (response.status === 401 || response.status === 403) {
     throw new DataRuntimeError(
       credential ? "credential-invalid" : "provider-auth-blocked",
@@ -369,6 +373,7 @@ function throwHttpStatus(
         details: {
           status: response.status,
           ...(credential ? { credentialId: credential.credentialId } : {}),
+          ...(providerReason ? { providerReason } : {}),
         },
       },
     );
@@ -381,6 +386,7 @@ function throwHttpStatus(
       details: {
         status: response.status,
         ...(retryAfterMs === null ? {} : { retryAfterMs }),
+        ...(providerReason ? { providerReason } : {}),
       },
     });
   }
@@ -389,9 +395,39 @@ function throwHttpStatus(
     "The provider returned an unsuccessful HTTP response.",
     {
       retryable: response.status >= 500,
-      details: { status: response.status },
+      details: {
+        status: response.status,
+        ...(providerReason ? { providerReason } : {}),
+      },
     },
   );
+}
+
+function safeProviderErrorReason(bytes: Buffer): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } catch {
+    return undefined;
+  }
+  const root = plainRecord(parsed);
+  const error = plainRecord(root?.error);
+  if (!error) return undefined;
+  const candidates: unknown[] = [];
+  if (Array.isArray(error.errors)) {
+    for (const item of error.errors) candidates.push(plainRecord(item)?.reason);
+  }
+  candidates.push(error.reason, error.status);
+  return candidates.find(
+    (candidate): candidate is string =>
+      typeof candidate === "string" && /^[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(candidate),
+  );
+}
+
+function plainRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function createHttpResponse(
