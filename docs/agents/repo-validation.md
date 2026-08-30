@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: a9304b2
+lastReviewedCommit: a5a09aed2f089120de96ce49c76c278ab9e42284
 ---
 
 # Repo Validation
@@ -78,6 +78,18 @@ contracts, exact 15-minute path planning without `masterfilelist.txt`, latest
 size/MD5 verification, bounded ZIP/CRC/UTF-8/column validation, closed named
 fields, later-file partial preservation, record-cap early stop, and the
 automated-coding/non-representative/content-download discovery boundaries.
+
+`test/data-bluesky-cascade-connector.test.ts` proves bounded public search,
+author-feed, custom-feed, and list-feed selection; UTC filtering; optional
+thread expansion; failed-request accounting; seed preservation on partial
+thread failure; and the public-UGC, indexing, moderation, and mutable-metric
+discovery boundaries.
+
+`test/data-youtube-public-content-connector.test.ts` proves header-only API-key
+injection, bounded video discovery and enrichment, complete reply pagination,
+credential preflight, duplicate-ID and empty-query rejection, per-video partial
+isolation, and the quota, visibility, ranking, and non-representative-public-
+opinion discovery boundaries.
 
 `test/data-nasa-firms-fire-connector.test.ts` proves required MAP_KEY preflight,
 five-day chunk planning, provider availability checks, bbox/window/transaction

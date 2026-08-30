@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: a9304b2
+lastReviewedCommit: a5a09aed2f089120de96ce49c76c278ab9e42284
 ---
 
 # Tiangong AI CLI
@@ -81,6 +81,10 @@ The built-in capabilities are:
   `HourlyAQObs` files for a bounded UTC-hour window, bounding box, and pollutant
   list. Results retain source-file lineage and always state that AirNow data are
   preliminary and unsuitable as regulatory-grade AQS evidence.
+- `bluesky.public-posts` / `fetch-cascades`: fetches bounded public Bluesky
+  post seeds from search, an author feed, a custom feed, or a list feed and can
+  flatten visible reply cascades. Ranking, counters, moderation visibility, and
+  missing nodes remain explicit mutable AppView limitations.
 - `federal-register.documents` / `search`: searches bounded
   FederalRegister.gov document metadata by publication date plus term, agency,
   document type, topic, docket, or RIN filters. It does not follow result links,
@@ -119,12 +123,17 @@ The built-in capabilities are:
 - `usgs.water-instantaneous-values` / `fetch`: retrieves bounded legacy USGS
   WaterServices instantaneous observations while preserving site, parameter,
   qualifier, provisional status, and source lifecycle warnings.
+- `youtube.public-content` / `search-videos` and `fetch-comments`: discovers
+  public YouTube videos with detail enrichment and fetches bounded visible
+  comment/reply text for explicit video IDs. It does not download media or
+  transcripts and does not treat ranking or comments as representative opinion.
 
-Ten connectors are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
+Eleven capabilities are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
 CLI injects as a protected provider path segment; OpenAQ requires
-`OPENAQ_API_KEY`, and Regulations.gov requires `REGGOV_API_KEY`; the CLI injects
-the latter two as protected provider headers. No secret is accepted in argv or
-input JSON. Exact input and output schemas,
+`OPENAQ_API_KEY`, Regulations.gov requires `REGGOV_API_KEY`, and YouTube requires
+`YOUTUBE_API_KEY`; the CLI injects all three as protected provider headers, with
+YouTube using `X-Goog-Api-Key` rather than a URL parameter. No secret is accepted
+in argv or input JSON. Exact input and output schemas,
 endpoint scopes and limits are available through the execution manifest, while
 source notes, coverage, selection guidance and license restrictions are
 available in the discovery metadata returned by `data describe`; static

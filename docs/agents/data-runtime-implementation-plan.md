@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: a9304b2
+lastReviewedCommit: a5a09aed2f089120de96ce49c76c278ab9e42284
 ---
 
 # 原子数据运行时实施计划
@@ -325,6 +325,42 @@ runtime primitive。
   catalog/static doctor 与 dist pack 均离线验证。
 
 状态：CLI connector 已完成；四个对应 Skill 等待瘦身并绑定精确候选包。
+
+### 后续迁移 9：Bluesky Cascades 与 YouTube Public Content
+
+- 新增 `bluesky.public-posts/fetch-cascades`，完整保留旧 Skill 的 public search、author-feed、
+  custom-feed、list-feed 与可选 reply-thread expansion 语义；source、UTC window、page size、
+  max threads、depth 与 parent height 均进入闭合 Schema。CLI 不再接受 base URL、optional auth、
+  输出路径、日志路径或任意环境配置；统一 bounded HTTP 负责 retry、endpoint scope 和 receipt。
+- Bluesky 种子按 `record.createdAt`、缺失时 `indexedAt` 执行 optional inclusive/exclusive window；
+  reply tree 输出 post、blocked、not-found 节点及 parent/depth，线程失败保留种子并返回 partial。
+  Discovery Metadata 明确 AppView indexing/ranking/feed/moderation/counters 不是 archive、代表性样本、
+  verified fact、identity 或 causal diffusion evidence。
+- 新增 `youtube.public-content/search-videos` 与 `fetch-comments`。前者保留 channel/time/order/region/
+  language/safe-search 与全部旧 video filters，并始终用 `videos.list` 补齐公开 details；后者只接受
+  显式 video IDs，保留 comment UTC window、published/updated、thread order/search terms 与 replies。
+- YouTube key 从 `YOUTUBE_API_KEY` 解析为 logical `api-key`，只经 `X-Goog-Api-Key` header 注入；
+  `fetch-comments` 不信任 `commentThreads.list` 的 embedded replies，而对每个有回复的 thread 使用
+  `comments.list` 分页。operation-wide request/record limits 叠加 per-video/per-thread page caps；后续
+  video 或 detail batch 失败保留已验证结果并返回 partial。
+- 两个 provider 的 fixture 均为按官方 Lexicon/API 形状构造的虚构内容，不保留 live user data、
+  provider response 或 API key。catalog/describe/static doctor、header secret boundary、pagination、
+  partial/truncation、output Schema 与 dist pack 都需要离线验证。
+
+状态：CLI connector 已完成；三个对应 Skill 正在瘦身并绑定本地精确候选包。
+
+### 内容、下载与持久化候选的边界审计
+
+- 四个 RSS/fulltext Skill 继续保持独立：RSS 核心包含任意 feed/OPML intake、SQLite subscription
+  state、dedupe 与 incremental sync；fulltext 核心包含 HTML/body acquisition、retry queue、正文
+  解析与持久化。把它们替换为 stateless JSON connector 会丢失核心语义，并会引入动态 URL/SSRF、
+  内容安全和本地状态合同，必须在独立内容获取架构中评审。
+- `figshare-data-download` 继续保持 browser/download Skill：其核心交付物是交互式文件下载与本地
+  artifact，不是内存中的原子 JSON 记录。
+- `academic-paper-download` 继续作为 Research companion：它拥有合法开放获取路径选择、浏览器
+  handoff、PDF/manifest/hash/provenance 与下载失败语义，不应降格为 data connector。
+- Tiangong KB、Dify/KB 辅助、email 和本地文件能力继续保持现有产品/隐私边界，除非未来单独
+  评审证明其执行合同属于 data runtime。此决定是语义保真结论，不是尚未完成的迁移占位。
 
 ### 后续迁移 4：Open-Meteo Historical Weather
 

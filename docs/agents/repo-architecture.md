@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: a9304b2
+lastReviewedCommit: a5a09aed2f089120de96ce49c76c278ab9e42284
 ---
 
 # Repo Architecture
@@ -193,13 +193,16 @@ storage writes, queueing, and document status transitions.
   immutable registry, public JSON Schemas, canonical digest and receipt rules,
   strict command router, logical credential resolution, bounded HTTPS client,
   stable error taxonomy, and connector execution/conformance contracts. Its
-  built-in registry currently ships thirteen independently discoverable
-  capabilities on the same runtime: AirNow hourly observations, Federal
-  Register document metadata, four GDELT DOC/table surfaces, NASA FIRMS
-  active-fire detections, three Open-Meteo series, OpenAQ location and sensor
-  measurements, Regulations.gov public comments, and USGS Water instantaneous
-  values. The three GDELT table capabilities share one bounded ZIP/feed core
-  without collapsing their separate discovery and binding identities.
+  built-in registry currently ships fifteen independently discoverable
+  capabilities on the same runtime: AirNow hourly observations, public Bluesky
+  post cascades, Federal Register document metadata, four GDELT DOC/table
+  surfaces, NASA FIRMS active-fire detections, three Open-Meteo series, OpenAQ
+  location and sensor measurements, Regulations.gov public comments, USGS Water
+  instantaneous values, and YouTube public video/comment metadata. The three
+  GDELT table capabilities share one bounded ZIP/feed core without collapsing
+  their separate discovery and binding identities; the two YouTube operations
+  share one provider and credential contract without merging video discovery
+  with explicit-ID comment retrieval.
 - `scripts/**`: validation helpers.
 - `test/**`: Node test runner suites.
 

@@ -45,6 +45,7 @@ describe("data CLI", () => {
         ),
         [
           "airnow.hourly-observations",
+          "bluesky.public-posts",
           "federal-register.documents",
           "gdelt.doc-search",
           "gdelt.events",
@@ -57,6 +58,7 @@ describe("data CLI", () => {
           "openaq.air-quality",
           "regulations-gov.comments",
           "usgs.water-instantaneous-values",
+          "youtube.public-content",
         ],
       );
       assert.match(payload.catalogDigest, /^[a-f0-9]{64}$/);

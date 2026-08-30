@@ -25,6 +25,7 @@ describe("built-in data connectors", () => {
       capabilities.map((item) => item.capabilityId),
       [
         "airnow.hourly-observations",
+        "bluesky.public-posts",
         "federal-register.documents",
         "gdelt.doc-search",
         "gdelt.events",
@@ -37,6 +38,7 @@ describe("built-in data connectors", () => {
         "openaq.air-quality",
         "regulations-gov.comments",
         "usgs.water-instantaneous-values",
+        "youtube.public-content",
       ],
     );
     for (const capability of capabilities) {
@@ -52,6 +54,7 @@ describe("built-in data connectors", () => {
   it("describes and diagnoses each capability offline", async () => {
     for (const capabilityId of [
       "airnow.hourly-observations",
+      "bluesky.public-posts",
       "federal-register.documents",
       "gdelt.doc-search",
       "gdelt.events",
@@ -64,11 +67,16 @@ describe("built-in data connectors", () => {
       "openaq.air-quality",
       "regulations-gov.comments",
       "usgs.water-instantaneous-values",
+      "youtube.public-content",
     ]) {
       const description = builtInDataRegistry.describe(capabilityId);
       assert.equal(
         description?.operations.length,
-        ["openaq.air-quality", "regulations-gov.comments"].includes(capabilityId) ? 2 : 1,
+        ["openaq.air-quality", "regulations-gov.comments", "youtube.public-content"].includes(
+          capabilityId,
+        )
+          ? 2
+          : 1,
       );
       const discovery = (
         builtInDataRegistry as unknown as {
@@ -101,6 +109,7 @@ describe("built-in data connectors", () => {
         "nasa-firms.active-fire",
         "openaq.air-quality",
         "regulations-gov.comments",
+        "youtube.public-content",
       ].includes(capabilityId);
       assert.equal(exitCode, requiresCredential ? 3 : 0);
       assert.equal(fetched, false);
@@ -126,6 +135,13 @@ describe("built-in data connectors", () => {
         );
       }
       if (capabilityId === "regulations-gov.comments") {
+        assert.ok(
+          doctor.checks.some(
+            (check) => check.checkId === "credential:api-key" && check.status === "fail",
+          ),
+        );
+      }
+      if (capabilityId === "youtube.public-content") {
         assert.ok(
           doctor.checks.some(
             (check) => check.checkId === "credential:api-key" && check.status === "fail",

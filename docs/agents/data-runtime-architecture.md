@@ -17,7 +17,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: a9304b2
+lastReviewedCommit: a5a09aed2f089120de96ce49c76c278ab9e42284
 ---
 
 # 原子数据运行时目标架构
@@ -173,6 +173,27 @@ event 和 mention coding 是自动化结果，coverage 不均衡；provider 的 
 [GDELT 2.0 introduction](https://blog.gdeltproject.org/gdelt-2-0-our-global-world-in-realtime/)
 及官方 codebook；fixture 仅为按公开格式重建的合成字节。
 
+`bluesky.public-posts/fetch-cascades` 只使用公开 AppView，保留 search、author feed、
+custom feed 与 list feed 四种明确种子来源；可选 UTC 窗口按 post record `createdAt` 过滤，
+缺失时才回退到 `indexedAt`。线程展开逐个调用稳定的 `app.bsky.feed.getPostThread`，把可见
+reply tree 展平为 URI、parent URI、depth 与 blocked/not-found 状态，共享 operation-wide
+request/record limits，不读取 optional auth、viewer state 或 private feed。Discovery Metadata
+明确 search syntax/ranking/cursor reach、feed 算法、AppView indexing、moderation、删除与 engagement
+counter 都是可变快照，不能代表总体意见、验证身份、证明事实或直接支持因果扩散结论。接口形状
+依据官方 `app.bsky.feed` Lexicon 与 public AppView 文档；fixture 仅使用虚构 DID、handle、AT-URI、
+文本、时间和计数。
+
+`youtube.public-content` 共享一个 `YOUTUBE_API_KEY` 逻辑凭证，但保持两个 operation：
+`search-videos` 用 `search.list` 得到去重 candidate IDs，再以最多 50 个 ID 的 `videos.list`
+批次补齐 snippet/statistics/contentDetails/status 并执行显式公开计数过滤；`fetch-comments` 只接受
+最多 25 个显式 video IDs，以 `commentThreads.list` 获取 top-level comments，并在需要 replies
+时始终使用 `comments.list` 分页，不把 embedded reply sample 当作完整回复。凭证仅经
+`X-Goog-Api-Key` header 注入，绝不进入 URL。两个 operation 共用全局 request/record limits，
+评论还具有 per-video thread page 与 per-thread reply page cap；失败视频保留已经验证的其他记录。
+Discovery Metadata 明确 quota、search ranking、visibility、moderation、统计和用户文本均为可变
+provider 状态，不提供 media/transcript 下载、代表性 opinion、sentiment、身份或事实验证。
+fixture 仅按官方 v3 API 形状构造虚构数据。
+
 `open-meteo.air-quality/fetch-hourly` 对应一个公开 Air Quality API 请求，接受最多十个
 显式坐标、最多十六个官方变量，以及不超过 92 个日期的闭合窗口。变量按 code point
 排序而坐标保持调用顺序；请求固定使用 GMT，输出按坐标保存 model grid、时间、单位和
@@ -261,10 +282,10 @@ Eastern wall-clock last-modified filter 依据官方
 [v4 OpenAPI](https://open.gsa.gov/api/regulationsgov/v4/openapi.yaml)，共享限流依据
 [api.data.gov rate limits](https://api.data.gov/docs/rate-limits/)。
 
-十三个 connector 的默认 static doctor 均完全离线。四个 GDELT capability 共享受限的
-文件流机制，但不互相调用 capability 业务入口；其余 connector 也互不导入业务函数。十个 connector
-无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY`、OpenAQ 从 `OPENAQ_API_KEY`、Regulations.gov
-从 `REGGOV_API_KEY` 解析逻辑凭证，
+十五个 connector 的默认 static doctor 均完全离线。四个 GDELT capability 共享受限的
+文件流机制，但不互相调用 capability 业务入口；其余 connector 也互不导入业务函数。十一个
+connector 无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY`、OpenAQ 从 `OPENAQ_API_KEY`、
+Regulations.gov 从 `REGGOV_API_KEY`、YouTube 从 `YOUTUBE_API_KEY` 解析逻辑凭证，
 缺失时离线报告 blocked。测试 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制
 的 live provider 响应或真实凭证。
 

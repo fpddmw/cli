@@ -36,6 +36,8 @@ describe("data package contract", () => {
       "data/builtins.js",
       "data/connectors/airnow-hourly-observations.js",
       "data/connectors/airnow-hourly-observations.schemas.js",
+      "data/connectors/bluesky-public-posts.js",
+      "data/connectors/bluesky-public-posts.schemas.js",
       "data/connectors/federal-register-documents.js",
       "data/connectors/federal-register-documents.schemas.js",
       "data/connectors/gdelt-doc-search.js",
@@ -56,6 +58,8 @@ describe("data package contract", () => {
       "data/connectors/regulations-gov-comments.schemas.js",
       "data/connectors/usgs-water-instantaneous-values.js",
       "data/connectors/usgs-water-instantaneous-values.schemas.js",
+      "data/connectors/youtube-public-content.js",
+      "data/connectors/youtube-public-content.schemas.js",
       "data/runtime/csv.js",
     ];
     for (const modulePath of modules) {
@@ -72,6 +76,7 @@ describe("data package contract", () => {
       builtins.builtInDataRegistry.catalog().capabilities.map((item) => item.capabilityId),
       [
         "airnow.hourly-observations",
+        "bluesky.public-posts",
         "federal-register.documents",
         "gdelt.doc-search",
         "gdelt.events",
@@ -84,6 +89,7 @@ describe("data package contract", () => {
         "openaq.air-quality",
         "regulations-gov.comments",
         "usgs.water-instantaneous-values",
+        "youtube.public-content",
       ],
     );
   });
