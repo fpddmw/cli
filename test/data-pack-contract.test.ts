@@ -40,6 +40,8 @@ describe("data package contract", () => {
       "data/connectors/federal-register-documents.schemas.js",
       "data/connectors/open-meteo-air-quality.js",
       "data/connectors/open-meteo-air-quality.schemas.js",
+      "data/connectors/open-meteo-flood.js",
+      "data/connectors/open-meteo-flood.schemas.js",
       "data/connectors/usgs-water-instantaneous-values.js",
       "data/connectors/usgs-water-instantaneous-values.schemas.js",
     ];
@@ -59,6 +61,7 @@ describe("data package contract", () => {
         "airnow.hourly-observations",
         "federal-register.documents",
         "open-meteo.air-quality",
+        "open-meteo.flood",
         "usgs.water-instantaneous-values",
       ],
     );

@@ -27,6 +27,7 @@ describe("built-in data connectors", () => {
         "airnow.hourly-observations",
         "federal-register.documents",
         "open-meteo.air-quality",
+        "open-meteo.flood",
         "usgs.water-instantaneous-values",
       ],
     );
@@ -45,6 +46,7 @@ describe("built-in data connectors", () => {
       "airnow.hourly-observations",
       "federal-register.documents",
       "open-meteo.air-quality",
+      "open-meteo.flood",
       "usgs.water-instantaneous-values",
     ]) {
       const description = builtInDataRegistry.describe(capabilityId);

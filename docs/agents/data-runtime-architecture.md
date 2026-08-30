@@ -17,7 +17,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 79323fa
+lastReviewedCommit: a048d6d
 ---
 
 # 原子数据运行时目标架构
@@ -38,7 +38,7 @@ HTTP、认证、分页、重试、缓存或回执实现。Auto Research 复用�
 ## 公共命令契约
 
 以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册两个试点
-connector 和两个后续迁移 connector：
+connector 和三个后续迁移 connector：
 
 ```text
 tiangong-ai data catalog
@@ -170,6 +170,18 @@ Open-Meteo 和底层 CAMS 数据提供方。接口和变量依据官方
 [API Terms](https://open-meteo.com/en/terms)。商业 customer endpoint 与 API key 不在
 该 capability 中隐式切换，若需要必须单独评审。
 
+`open-meteo.flood/fetch-daily` 对应一个公开 Flood API 请求，接受最多十个显式坐标、
+七个官方 discharge 变量、不超过 366 个日期的闭合窗口，以及可选 ensemble members。
+输出按请求坐标顺序保存 selected river-grid coordinate、GMT 日期、单位和对齐的 nullable
+series；单坐标、变量或 member 异常保留其余有效列并返回 `partial`，record cap 按
+location-day 同步截断全部列。Discovery Metadata 明确该来源是 GloFAS v4 约 5 km
+网格模拟值，endpoint 选择坐标附近最大河流，不能替代 gauge observation、告警、严重度
+分类或应急建议。公开 endpoint 仅限非商业使用并要求同时署名 Open-Meteo 与 GloFAS；
+商业 customer endpoint/API key 必须单独评审。接口与限制依据官方
+[Flood API 文档](https://open-meteo.com/en/docs/flood-api)、
+[Open-Meteo License](https://open-meteo.com/en/license) 和
+[API Terms](https://open-meteo.com/en/terms)。
+
 `usgs.water-instantaneous-values/fetch` 对应一个有界的 legacy WaterServices IV 请求。
 它要求 bbox 或最多 100 个显式 site number 二选一，以及 ISO-8601 period 或显式
 RFC3339 起止时间二选一；默认参数为 discharge `00060` 与 gage height `00065`，默认
@@ -181,7 +193,7 @@ timestamp、qualifier 和 provisional 状态；单个坏 series/value row 作为
 Discovery Metadata 同时标明 legacy WaterServices 计划于 2027 年第一季度下线，并指向
 [现代 Water Data APIs](https://www.usgs.gov/tools/usgs-water-data-apis)。
 
-四个 connector 均无凭证、默认 static doctor 完全离线，且互不导入业务函数。测试
+五个 connector 均无凭证、默认 static doctor 完全离线，且互不导入业务函数。测试
 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制的 live provider 响应。
 
 ## 机器 Envelope

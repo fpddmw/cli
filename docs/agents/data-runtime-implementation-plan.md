@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 79323fa
+lastReviewedCommit: a048d6d
 ---
 
 # 原子数据运行时实施计划
@@ -241,6 +241,23 @@ runtime primitive。
   Global 分辨率和变量覆盖差异、公开端点非商业限制以及 Open-Meteo/CAMS attribution。
 - fixture 为按官方响应形状重建的合成数据；connector、catalog、static doctor、
   conformance 与 dist pack 合同全部离线验证。
+
+状态：CLI connector 已完成；对应 Skill 瘦身和候选 binding 正在迁移，正式 binding 等待
+包含全部 connector 的精确 npm 版本发布。
+
+### 后续迁移 3：Open-Meteo Flood
+
+- 新增 `open-meteo.flood/fetch-daily`，只使用公开 non-commercial endpoint；输入限制为
+  最多十个坐标、七个官方 daily discharge variables、366 个闭合日期，以及可选
+  ensemble members。ensemble 必须同时请求 `river_discharge`。
+- 坐标保持调用顺序，变量稳定排序，timezone 固定 GMT；输出按 location-day 计数并保存
+  requested/river-grid coordinate、unit、aligned nullable variables 与带 member identity
+  的 ensemble series。
+- 单坐标/变量/member 异常返回 partial，record cap 同步截断日期和所有 series，整体
+  provider error 返回 blocked；fixture 为按官方响应形状重建的合成数据。
+- Discovery Metadata 明确 GloFAS 约 5 km simulated discharge、附近最大河流选择误差、
+  forecast-only ensemble statistics、非站点观测/非告警边界、公开端点非商业限制与
+  Open-Meteo/GloFAS attribution。
 
 状态：CLI connector 已完成；对应 Skill 瘦身和候选 binding 正在迁移，正式 binding 等待
 包含全部 connector 的精确 npm 版本发布。
