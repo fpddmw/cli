@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: a5a09aed2f089120de96ce49c76c278ab9e42284
+lastReviewedCommit: 19b0b179d652305f936a5fb39ca01d3beea7f864
 ---
 
 # 原子数据运行时实施计划
@@ -242,8 +242,8 @@ runtime primitive。
 - fixture 为按官方响应形状重建的合成数据；connector、catalog、static doctor、
   conformance 与 dist pack 合同全部离线验证。
 
-状态：CLI connector 已完成；对应 Skill 瘦身和候选 binding 正在迁移，正式 binding 等待
-包含全部 connector 的精确 npm 版本发布。
+状态：CLI connector、对应薄 Skill 和候选 binding 已在本地完成并验证；正式 binding
+等待包含全部 connector 的精确 npm 版本发布。
 
 ### 后续迁移 5：NASA FIRMS Active Fire
 
@@ -262,8 +262,8 @@ runtime primitive。
 - fixture 按官方 CSV 字段重建，不包含 live provider 数据或 MAP_KEY；connector、凭证
   防泄漏、catalog/describe/static doctor、conformance 和 dist pack 合同全部离线验证。
 
-状态：CLI connector 已完成；对应 Skill 瘦身和候选 binding 正在迁移，正式 binding 等待
-包含全部 connector 的精确 npm 版本发布。
+状态：CLI connector、对应薄 Skill 和候选 binding 已在本地完成并验证；正式 binding
+等待包含全部 connector 的精确 npm 版本发布。
 
 ### 后续迁移 6：OpenAQ Air Quality
 
@@ -283,7 +283,7 @@ runtime primitive。
   防泄漏、双 operation conformance、catalog/describe/static doctor 和 dist pack 合同均
   离线验证。
 
-状态：CLI connector 已完成；对应 Skill 瘦身和双 operation 候选 binding 正在迁移，
+状态：CLI connector、对应薄 Skill 和双 operation 候选 binding 已在本地完成并验证；
 正式 binding 等待包含全部 connector 的精确 npm 版本发布。
 
 ### 后续迁移 7：Regulations.gov Comments
@@ -304,7 +304,8 @@ runtime primitive。
   API key；connector、凭证防泄漏、双 operation conformance、catalog/static doctor 和
   dist pack 合同均离线验证。
 
-状态：CLI connector 已完成；两个对应 Skill 的瘦身与候选 binding 正在迁移。
+状态：CLI connector、两个对应薄 Skill 和候选 binding 已在本地完成并验证；正式 binding
+等待包含全部 connector 的精确 npm 版本发布。
 
 ### 后续迁移 8：GDELT DOC、Events、GKG 与 Mentions
 
@@ -324,7 +325,8 @@ runtime primitive。
   connector 的 field description、discovery boundary、range/ZIP failure、conformance、
   catalog/static doctor 与 dist pack 均离线验证。
 
-状态：CLI connector 已完成；四个对应 Skill 等待瘦身并绑定精确候选包。
+状态：CLI connector、四个对应薄 Skill 和候选 binding 已在本地完成并验证；正式 binding
+等待包含全部 connector 的精确 npm 版本发布。
 
 ### 后续迁移 9：Bluesky Cascades 与 YouTube Public Content
 
@@ -347,7 +349,8 @@ runtime primitive。
   provider response 或 API key。catalog/describe/static doctor、header secret boundary、pagination、
   partial/truncation、output Schema 与 dist pack 都需要离线验证。
 
-状态：CLI connector 已完成；三个对应 Skill 正在瘦身并绑定本地精确候选包。
+状态：CLI connector、三个对应薄 Skill 和候选 binding 已在本地完成并验证；正式 binding
+等待包含全部 connector 的精确 npm 版本发布。
 
 ### 内容、下载与持久化候选的边界审计
 
@@ -378,8 +381,8 @@ runtime primitive。
 - 不透传旧 Skill 的 endpoint、API key、任意 model、timezone 或单位环境配置；商业
   customer endpoint 必须作为独立能力评审。
 
-状态：CLI connector 已完成；对应 Skill 瘦身和候选 binding 正在迁移，正式 binding 等待
-包含全部 connector 的精确 npm 版本发布。
+状态：CLI connector、对应薄 Skill 和候选 binding 已在本地完成并验证；正式 binding
+等待包含全部 connector 的精确 npm 版本发布。
 
 ### 后续迁移 3：Open-Meteo Flood
 
@@ -395,8 +398,8 @@ runtime primitive。
   forecast-only ensemble statistics、非站点观测/非告警边界、公开端点非商业限制与
   Open-Meteo/GloFAS attribution。
 
-状态：CLI connector 已完成；对应 Skill 瘦身和候选 binding 正在迁移，正式 binding 等待
-包含全部 connector 的精确 npm 版本发布。
+状态：CLI connector、对应薄 Skill 和候选 binding 已在本地完成并验证；正式 binding
+等待包含全部 connector 的精确 npm 版本发布。
 
 ## PR 与提交拆分
 
