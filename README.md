@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-08-20
-lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
+lastReviewedCommit: 97cf02b1a9b215c7fd770cf8a1c00a3e85f5d86f
 ---
 
 # Tiangong AI CLI
@@ -38,6 +38,35 @@ After installation, print the package version with either top-level flag:
 tiangong-ai --version
 tiangong-ai -v
 ```
+
+## Atomic Data Runtime
+
+Inspect the built-in, versioned data capability catalog without network access:
+
+```bash
+tiangong-ai data catalog --json
+tiangong-ai data describe <capability-id> --json
+tiangong-ai data doctor <capability-id> --json
+```
+
+Only explicit `doctor --live` and `run` operations may contact a provider. A
+run accepts one closed request envelope from a file or stdin:
+
+```bash
+tiangong-ai data run <capability-id> <operation-id> \
+  --input /absolute/path/to/request.json --json
+```
+
+The command-line capability and operation must match the versions in the input
+envelope. Credentials are never accepted in argv or input JSON. Each connector
+declares exact logical environment-variable bindings, HTTPS endpoint scopes,
+and execution limits in its manifest. Data commands deliberately do not load a
+cwd `.env` file.
+
+JSON exits are `0` for success, `2` for request/contract errors, `3` for a
+blocked execution, and `4` for an explicit partial result. Public machine
+schemas ship under `dist/data/schemas/`. The foundation initially exposes an
+empty catalog until reviewed built-in connectors are registered.
 
 ## KB Ingest
 
@@ -1191,12 +1220,16 @@ transitions.
 ## Validation
 
 ```bash
+npm run test:clean:cold
 npm run lint
+npm run typecheck
 npm test
 npm run test:platform
 npm run test:coverage
 npm run audit:research-setup-pins
+npm pack --dry-run
 docpact validate-config --root . --strict
+docpact lint --root . --worktree --mode enforce
 ```
 
 ## Release

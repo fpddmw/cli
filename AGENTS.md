@@ -18,7 +18,7 @@ checkPaths:
   - docs/agents/**
   - src/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 0fc51a9fe4ac25582be03fac925738605431af69
+lastReviewedCommit: 97cf02b1a9b215c7fd770cf8a1c00a3e85f5d86f
 ---
 
 # Tiangong AI CLI Contract
@@ -40,6 +40,10 @@ This repository owns the Tiangong AI command-line interface.
 
 - `tiangong-ai --version`
 - `tiangong-ai doctor`
+- `tiangong-ai data catalog`
+- `tiangong-ai data describe`
+- `tiangong-ai data doctor`
+- `tiangong-ai data run`
 - `tiangong-ai kb ingest`
 - `tiangong-ai kb ingest bulk`
 - `tiangong-ai kb ingest jobs`

@@ -1,7 +1,7 @@
 ---
 docType: architecture
 scope: repo
-status: proposed
+status: current
 authoritative: true
 owner: cli
 language: zh-CN
@@ -17,7 +17,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 0fc51a9fe4ac25582be03fac925738605431af69
+lastReviewedCommit: 97cf02b1a9b215c7fd770cf8a1c00a3e85f5d86f
 ---
 
 # 原子数据运行时目标架构
@@ -37,7 +37,8 @@ HTTP、认证、分页、重试、缓存或回执实现。Auto Research 复用�
 
 ## 公共命令契约
 
-以下命令处于 proposed 状态；在基础契约 PR 合并前不属于当前公共命令面：
+以下基础命令已经实现并由闭合 Schema 和合同测试冻结；在真实 connector 注册前，内置
+catalog 有意保持为空：
 
 ```text
 tiangong-ai data catalog
@@ -55,8 +56,9 @@ tiangong-ai data run <capability-id> <operation-id> --input <path|->
   stdout、错误详情或回执。
 - JSON 模式返回稳定 envelope；pretty/人类输出只是投影，不改变退出码和机器语义。
 
-最终命名、选项和 Schema 在基础契约 PR 中由测试冻结。此处的 proposed 命令不得提前
-写入 README 的“当前命令”列表。
+JSON 模式的稳定退出码为：成功 `0`、参数/版本合同错误 `2`、执行阻断 `3`、明确的部分
+结果 `4`。`data` 顶层路由不会调用既有 cwd `.env` 加载器；凭证只能来自 manifest
+声明的环境变量。公共和 operation Schema 随构建产物发布在 `dist/data/schemas/`。
 
 ## 运行时分层
 
@@ -74,8 +76,8 @@ src/data/
 │   ├── canonical-json.ts       # 稳定序列化和语义摘要
 │   ├── errors.ts               # 稳定错误分类和脱敏
 │   ├── receipts.ts             # 核心运行回执
-│   └── cache.ts                # 可选、受控、非研究状态的操作缓存
-├── schemas/                    # 随 dist 发布的闭合 JSON Schema
+│   └── cache.ts                # 后续可选、受控、非研究状态的操作缓存
+├── schemas/                    # 随 dist 发布的八份闭合公共 JSON Schema
 └── connectors/<source>/        # manifest、operation、normalize、validate
 
 src/research/workspace/data-evidence-adapter.ts

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.tiangong.ai/data/run-request.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "capabilityId",
+    "capabilityVersion",
+    "operationId",
+    "operationVersion",
+    "input"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "tiangong.data.run-request.v1" },
+    "capabilityId": { "$ref": "#/$defs/id" },
+    "capabilityVersion": { "$ref": "#/$defs/version" },
+    "operationId": { "$ref": "#/$defs/id" },
+    "operationVersion": { "$ref": "#/$defs/version" },
+    "input": {},
+    "requestId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeoutMs": { "type": "integer", "minimum": 1 },
+        "maxResponseBytes": { "type": "integer", "minimum": 1 },
+        "maxPages": { "type": "integer", "minimum": 1 },
+        "maxRecords": { "type": "integer", "minimum": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$" },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" }
+  }
+}

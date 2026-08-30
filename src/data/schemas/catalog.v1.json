@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.tiangong.ai/data/catalog.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "capabilities", "catalogDigest"],
+  "properties": {
+    "schemaVersion": { "const": "tiangong.data.catalog.v1" },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "capabilityId",
+          "capabilityVersion",
+          "minimumCliVersion",
+          "providerId",
+          "sourceCategory",
+          "manifestDigest",
+          "operations"
+        ],
+        "properties": {
+          "capabilityId": { "type": "string", "minLength": 1 },
+          "capabilityVersion": { "type": "string", "minLength": 1 },
+          "minimumCliVersion": { "type": "string", "minLength": 1 },
+          "providerId": { "type": "string", "minLength": 1 },
+          "sourceCategory": { "type": "string", "minLength": 1 },
+          "manifestDigest": { "$ref": "#/$defs/digest" },
+          "operations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operationId",
+                "operationVersion",
+                "inputSchemaDigest",
+                "outputSchemaDigest"
+              ],
+              "properties": {
+                "operationId": { "type": "string", "minLength": 1 },
+                "operationVersion": { "type": "string", "minLength": 1 },
+                "inputSchemaDigest": { "$ref": "#/$defs/digest" },
+                "outputSchemaDigest": { "$ref": "#/$defs/digest" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "catalogDigest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

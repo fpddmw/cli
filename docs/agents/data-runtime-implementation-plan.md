@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 0fc51a9fe4ac25582be03fac925738605431af69
+lastReviewedCommit: 97cf02b1a9b215c7fd770cf8a1c00a3e85f5d86f
 ---
 
 # 原子数据运行时实施计划
@@ -94,6 +94,8 @@ PR 随后只更新已确认的 exact binding。
 
 ## 工作包 2：空运行时与公共机器契约
 
+状态：完成（2026-08-30）。
+
 先实现没有真实 provider 的骨架：
 
 - 新建 `src/data/**` 分层和顶层路由；不继续扩张 `src/cli.ts` 的业务逻辑。
@@ -108,6 +110,19 @@ PR 随后只更新已确认的 exact binding。
 
 完成门槛：不注册真实来源也能稳定通过 catalog/describe/doctor/run 的成功与失败合同；
 Windows/macOS/Linux/ARM 不因排序、路径或 locale 产生 digest 差异。
+
+实际结果：
+
+- 新增空的内置 registry、`data catalog/describe/doctor/run` 路由和成功/部分/阻断退出码；
+- 发布 manifest、catalog、describe、doctor、run request/result、error 和 core receipt
+  八份闭合 JSON Schema，并由 TypeScript 构建复制到 `dist/data/schemas/`；
+- 建立 locale/路径无关的 canonical JSON、语义 digest 和把审计时间排除在外的核心回执；
+- 建立只允许 DNS 主机 HTTPS scope 的 bounded HTTP，拒绝 IP literal、跨域重定向、
+  credential-like query/body、超时、超限响应和 credential reflection；
+- 凭证只按 manifest 的逻辑 ID 从精确环境变量解析并在 endpoint 校验后注入；`data`
+  命令绕过 cwd dotenv 加载；
+- synthetic conformance 覆盖无凭证、逻辑凭证、分页、部分结果、429、超时、响应超限、
+  跨域重定向和 secret leak，且 pack 合同验证公共 Schema 可发现。
 
 ## 工作包 3：首批 connectors
 
@@ -182,6 +197,9 @@ runtime primitive。
 5. CLI pilot PR：AirNow/Federal Register，可按 connector 再拆分。
 6. Skills pilot PR：在 CLI 候选包可验证后开放，正式包发布后合并。
 7. CLI Research adapter PR：在独立 data contract 稳定后进入。
+
+本次实施按用户要求把 CLI 计划、TS7、foundation 和 pilot 保留为独立本地 commits，
+最终统一进入一个 CLI PR；这不改变每个 commit 的独立审阅和回退边界。
 
 计划 PR 先同步评审；实现 PR 不形成“Skills 先引用未存在的 CLI”或“CLI 发布时依赖
 未合并 Skills pin”的循环。

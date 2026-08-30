@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 0fc51a9fe4ac25582be03fac925738605431af69
+lastReviewedCommit: 97cf02b1a9b215c7fd770cf8a1c00a3e85f5d86f
 ---
 
 # Repo Validation
@@ -39,7 +39,7 @@ lastReviewedCommit: 0fc51a9fe4ac25582be03fac925738605431af69
   keeps Prettier behavior consistent across Linux, macOS, and Windows CI
   runners.
 
-## TypeScript 7 Baseline And Proposed Data Gates
+## TypeScript 7 Baseline And Data Gates
 
 The TypeScript 7 toolchain gate is complete before connector business logic.
 The repository uses the native `tsc` from TypeScript 7.0.2, explicitly loads
@@ -51,14 +51,20 @@ gate runs it before coverage. This includes test sources, while the declaration
 build remains scoped to `src/**`. The migration fixed pre-existing test-only
 inference/nullability failures without changing runtime behavior.
 
-The future data runtime must add a dedicated connector conformance gate rather
-than relying on the repository's aggregate coverage threshold. It must cover
+The data runtime has a dedicated connector conformance harness rather than
+relying only on the repository's aggregate coverage threshold. It covers
 manifest and schema stability, canonical cross-platform digests, endpoint and
 redirect policy, bounded HTTP behavior, logical credential injection,
 redaction, pagination/partial results, stable errors, receipt binding, and npm
 package discovery of the published schemas. Provider live tests remain
 explicit opt-ins; ordinary and clean-container CI use privacy-safe fixtures and
 synthetic connectors only.
+
+Target the foundation during iteration with
+`node --import tsx --test test/data-*.test.ts`. The ordinary `npm test` and
+coverage commands discover the same suites automatically. A build must emit all
+eight public contract files under `dist/data/schemas/`; the package contract
+test compares those bytes with the runtime-loaded documents.
 
 The exact work-package sequence and completion criteria are authoritative in
 `docs/agents/data-runtime-implementation-plan.md`.

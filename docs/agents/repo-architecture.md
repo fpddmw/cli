@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 0fc51a9fe4ac25582be03fac925738605431af69
+lastReviewedCommit: 97cf02b1a9b215c7fd770cf8a1c00a3e85f5d86f
 ---
 
 # Repo Architecture
@@ -189,21 +189,31 @@ storage writes, queueing, and document status transitions.
   `/rest/v1` inputs; builds exact POST request plans with `Content-Type`,
   region, input path, and timeout milliseconds; masks credentials for dry-runs;
   and returns raw edge responses without normalizing them.
+- `src/data/**`: the versioned atomic data machine boundary. It owns the
+  immutable registry, public JSON Schemas, canonical digest and receipt rules,
+  strict command router, logical credential resolution, bounded HTTPS client,
+  stable error taxonomy, and connector execution/conformance contracts. The
+  shipped foundation has an intentionally empty built-in registry until pilot
+  connectors satisfy the same contract.
 - `scripts/**`: validation helpers.
 - `test/**`: Node test runner suites.
 
-## Proposed Atomic Data Runtime
+## Atomic Data Runtime
 
-The proposed `tiangong-ai data ...` family is designed in
+The foundational `tiangong-ai data ...` family is implemented under
+`src/data/**` and designed in
 `docs/agents/data-runtime-architecture.md`; its ordered delivery and cross-repo
-dependencies are in `docs/agents/data-runtime-implementation-plan.md`. Until
-the foundational contract is implemented and merged, these commands are not
-part of the current command surface.
+dependencies are in `docs/agents/data-runtime-implementation-plan.md`.
+`catalog`, `describe`, and static `doctor` are offline; only explicit
+`doctor --live` and `run` may call a provider. `data` routing occurs before the
+legacy cwd dotenv loader, so credentials come only from the exact environment
+variables declared by a manifest.
 
-The CLI will own built-in connector manifests, closed input/output schemas,
+The CLI owns built-in connector manifests, closed input/output schemas,
 bounded HTTP and credential handling, stable errors, canonical digests, and
-core execution receipts under `src/data/**`. A standalone data operation will
-remain independent of Research project/stage state. Research will reuse the
+core execution receipts under `src/data/**`. The public and operation schemas
+are emitted under `dist/data/schemas/`. A standalone data operation remains
+independent of Research project/stage state. Research will reuse the
 same TypeScript service through one explicit adapter and will continue to own
 evidence admission, budgets, journals, persistence, and review.
 
