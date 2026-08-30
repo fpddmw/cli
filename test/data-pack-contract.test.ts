@@ -14,6 +14,7 @@ describe("data package contract", () => {
       catalog: "catalog.v1.json",
       coreReceipt: "core-receipt.v1.json",
       describe: "describe.v1.json",
+      discovery: "discovery.v1.json",
       doctor: "doctor.v1.json",
       error: "error.v1.json",
       manifest: "manifest.v1.json",

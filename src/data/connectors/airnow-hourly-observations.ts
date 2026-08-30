@@ -174,12 +174,63 @@ export const airNowHourlyObservationsConnector: DataConnectorDefinition = {
     "The connector does not geocode, interpret AQI health effects, or combine other sources.",
     "Not every monitoring site reports every pollutant in every hour.",
   ],
+  discovery: {
+    source: {
+      maintainedBy: "U.S. Environmental Protection Agency with participating AirNow agencies",
+      summary:
+        "Preliminary hourly ambient-air observations distributed through official AirNow files.",
+      description:
+        "The HourlyAQObs product aggregates reporting-site observations into one UTC-hour file. Site and pollutant availability varies, and recent values may be revised.",
+      coverage: {
+        geographic:
+          "Monitoring sites present in each official HourlyAQObs file; availability varies by location, hour, and pollutant.",
+        temporal:
+          "UTC-hour file products with recent observations subject to revision and occasional missing files.",
+        granularity: "One monitoring-site, UTC-hour, and pollutant record.",
+      },
+    },
+    summary:
+      "Retrieve bounded AirNow monitoring-site observations by UTC hour, area, and pollutant.",
+    description:
+      "This capability selects a bounded inclusive UTC-hour window, fetches the corresponding HourlyAQObs files, validates them independently, and emits normalized observations with file lineage.",
+    provides: [
+      "Normalized site-hour records for CO, NO2, OZONE, PM10, PM25, and SO2.",
+      "Available AQI and raw-concentration fields from the HourlyAQObs product.",
+      "Per-file status and source-file lineage, including explicit partial coverage.",
+    ],
+    doesNotProvide: [
+      "Air-quality forecasts, exposure estimates, health advice, or causal interpretation.",
+      "Cross-source fusion, geocoding, interpolation, or coverage guarantees for every site and hour.",
+      "Regulatory-grade AQS records suitable for compliance decisions.",
+    ],
+    selectionHints: [
+      "Choose this capability for recent, site-level hourly monitoring observations when an explicit bounding box and pollutant list are available.",
+      "Choose EPA AQS or AirData instead when verified regulatory records are required.",
+      "Treat missing or invalid hourly files as partial coverage rather than as zero pollution.",
+    ],
+    typicalUseCases: [
+      "Collect recent PM2.5 and ozone observations for a regional monitoring window.",
+      "Audit which AirNow hourly source files contributed records to a downstream analysis.",
+    ],
+    sourceDocumentation: [
+      {
+        title: "AirNow Hourly Data Fact Sheet",
+        url: "https://docs.airnowapi.org/docs/HourlyAQObsFactSheet.pdf",
+      },
+      {
+        title: "AirNow FAQ and Data Use Guidelines",
+        url: "https://docs.airnowapi.org/faq",
+      },
+    ],
+  },
   operations: [
     {
       operationId: "fetch-hourly",
       operationVersion: "1.0.0",
       summary:
         "Fetch bounded AirNow HourlyAQObs files and normalize site-hour-pollutant observations.",
+      description:
+        "Plans one official HourlyAQObs file per inclusive UTC hour, validates each file, filters records by WGS84 bounding box and pollutant, and preserves usable records when another file is missing or invalid.",
       inputSchema: AIRNOW_HOURLY_INPUT_SCHEMA,
       outputSchema: AIRNOW_HOURLY_OUTPUT_SCHEMA,
       execute: executeAirNowHourly,

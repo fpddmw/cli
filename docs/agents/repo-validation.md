@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 40396601e751ffecff4c51294e4056d4ac968a5e
+lastReviewedCommit: 7523757200cc863dd07c882a41b0299b8bc712b1
 ---
 
 # Repo Validation
@@ -53,12 +53,13 @@ inference/nullability failures without changing runtime behavior.
 
 The data runtime has a dedicated connector conformance harness rather than
 relying only on the repository's aggregate coverage threshold. It covers
-manifest and schema stability, canonical cross-platform digests, endpoint and
-redirect policy, bounded HTTP behavior, logical credential injection,
-redaction, pagination/partial results, stable errors, receipt binding, and npm
-package discovery of the published schemas. Provider live tests remain
-explicit opt-ins; ordinary and clean-container CI use privacy-safe fixtures and
-synthetic connectors only.
+execution-manifest, discovery-metadata and schema stability; proves that
+discovery-only wording changes do not alter execution bindings; and covers
+canonical cross-platform digests, endpoint and redirect policy, bounded HTTP
+behavior, logical credential injection, redaction, pagination/partial results,
+stable errors, receipt binding, and npm package discovery of the published
+schemas. Provider live tests remain explicit opt-ins; ordinary and
+clean-container CI use privacy-safe fixtures and synthetic connectors only.
 
 `test/data-airnow-connector.test.ts` reconstructs the official HourlyAQObs CSV
 shape and proves multi-file planning, filters, header/value handling, partial
@@ -73,8 +74,9 @@ checked in.
 Target the foundation during iteration with
 `node --import tsx --test test/data-*.test.ts`. The ordinary `npm test` and
 coverage commands discover the same suites automatically. A build must emit all
-eight public contract files under `dist/data/schemas/`; the package contract
-test compares those bytes with the runtime-loaded documents.
+nine public contract files under `dist/data/schemas/`, including the independent
+discovery metadata contract; the package contract test compares those bytes
+with the runtime-loaded documents.
 
 The exact work-package sequence and completion criteria are authoritative in
 `docs/agents/data-runtime-implementation-plan.md`.

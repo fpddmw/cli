@@ -97,11 +97,36 @@ export function syntheticConnector(
       description: "Synthetic fixture data has no freshness guarantee.",
     },
     limitations: ["Not a real provider."],
+    discovery: {
+      source: {
+        maintainedBy: "Tiangong CLI tests",
+        summary: "Synthetic records used only by deterministic runtime tests.",
+        description:
+          "A local test definition that exercises the public data runtime without representing an external source.",
+        coverage: {
+          geographic: "Not applicable.",
+          temporal: "Not applicable.",
+          granularity: "One synthetic echo record.",
+        },
+      },
+      summary: "Exercise one deterministic synthetic data operation.",
+      description:
+        "This test-only capability validates registry, schema, credential, HTTP, and receipt behavior.",
+      provides: ["A deterministic echo result for runtime contract tests."],
+      doesNotProvide: ["Real provider data."],
+      selectionHints: ["Use only in automated tests."],
+      typicalUseCases: ["Verify the atomic data runtime contract."],
+      sourceDocumentation: [
+        { title: "Synthetic provider fixture", url: "https://example.test/docs" },
+      ],
+    },
     operations: [
       {
         operationId: "echo",
         operationVersion: "1.0.0",
         summary: "Echo one validated string.",
+        description:
+          "Validates one non-empty string and returns it unchanged in a closed envelope.",
         inputSchema: SYNTHETIC_INPUT_SCHEMA,
         outputSchema: SYNTHETIC_OUTPUT_SCHEMA,
         execute:

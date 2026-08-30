@@ -60,8 +60,16 @@ tiangong-ai data run <capability-id> <operation-id> \
 The command-line capability and operation must match the versions in the input
 envelope. Credentials are never accepted in argv or input JSON. Each connector
 declares exact logical environment-variable bindings, HTTPS endpoint scopes,
-and execution limits in its manifest. Data commands deliberately do not load a
-cwd `.env` file.
+and execution limits in its execution manifest. Data commands deliberately do
+not load a cwd `.env` file.
+
+`data catalog` also returns a concise capability summary, what the capability
+provides and does not provide, operation summaries, and a separate discovery
+digest. `data describe` expands that layer with source ownership, coverage,
+granularity, selection hints, typical uses, official documentation, freshness,
+license restrictions, and operation descriptions. Narrative discovery changes
+do not change the execution manifest digest used for compatibility binding.
+Operation input schemas include field-level descriptions and examples.
 
 JSON exits are `0` for success, `2` for request/contract errors, `3` for a
 blocked execution, and `4` for an explicit partial result. Public machine
@@ -79,8 +87,10 @@ The first built-in capabilities are:
   fetch document full text, or provide legal interpretation.
 
 Both connectors are keyless. Their exact input and output schemas, endpoint
-scopes, limits, source notes, and license restrictions are available through
-`data describe`; static `data doctor` remains offline.
+scopes and limits are available through the execution manifest, while source
+notes, coverage, selection guidance and license restrictions are available in
+the discovery metadata returned by `data describe`; static `data doctor`
+remains offline.
 
 ## KB Ingest
 

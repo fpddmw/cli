@@ -32,6 +32,7 @@ describe("data public schemas", () => {
       "catalog",
       "coreReceipt",
       "describe",
+      "discovery",
       "doctor",
       "error",
       "manifest",
@@ -47,10 +48,17 @@ describe("data public schemas", () => {
   it("validates a published manifest and rejects undeclared fields", () => {
     const registry = createDataRegistry([syntheticConnector()]);
     const manifest = registry.describe("test.synthetic");
+    const discovery = registry.discovery("test.synthetic");
     assert.ok(manifest);
+    assert.ok(discovery);
     assert.doesNotThrow(() => validateDataPublicContract("manifest", manifest));
+    assert.doesNotThrow(() => validateDataPublicContract("discovery", discovery));
     assert.throws(
       () => validateDataPublicContract("manifest", { ...manifest, unexpected: true }),
+      /additional properties/i,
+    );
+    assert.throws(
+      () => validateDataPublicContract("discovery", { ...discovery, unexpected: true }),
       /additional properties/i,
     );
   });
@@ -74,16 +82,49 @@ describe("data registry", () => {
     assert.match(first?.operations[0]?.outputSchema.digest ?? "", /^[a-f0-9]{64}$/);
   });
 
+  it("keeps execution bindings stable when discovery wording changes", () => {
+    const firstDefinition = syntheticConnector();
+    const secondDefinition = syntheticConnector();
+    secondDefinition.provider.name = "Renamed synthetic provider";
+    secondDefinition.freshness.description = "Updated discovery-only freshness wording.";
+    secondDefinition.limitations = ["Updated discovery-only limitation wording."];
+    secondDefinition.operations[0]!.summary = "Updated operation discovery summary.";
+    secondDefinition.operations[0]!.description = "Updated operation discovery description.";
+
+    const firstRegistry = createDataRegistry([firstDefinition]);
+    const secondRegistry = createDataRegistry([secondDefinition]);
+    const firstManifest = firstRegistry.describe("test.synthetic");
+    const secondManifest = secondRegistry.describe("test.synthetic");
+    assert.equal(firstManifest?.manifestDigest, secondManifest?.manifestDigest);
+    assert.deepEqual(firstManifest?.operations, secondManifest?.operations);
+
+    const firstDiscovery = (
+      firstRegistry as unknown as {
+        discovery(capabilityId: string): { discoveryDigest: string } | undefined;
+      }
+    ).discovery("test.synthetic");
+    const secondDiscovery = (
+      secondRegistry as unknown as {
+        discovery(capabilityId: string): { discoveryDigest: string } | undefined;
+      }
+    ).discovery("test.synthetic");
+    assert.match(firstDiscovery?.discoveryDigest ?? "", /^[a-f0-9]{64}$/);
+    assert.notEqual(firstDiscovery?.discoveryDigest, secondDiscovery?.discoveryDigest);
+  });
+
   it("does not let caller mutation change a registered connector contract", () => {
     const definition = syntheticConnector();
     const registry = createDataRegistry([definition]);
     const before = registry.describe("test.synthetic");
+    const discoveryBefore = registry.discovery("test.synthetic");
     definition.capabilityVersion = "9.9.9";
     definition.endpoints[0]!.baseUrl = "https://changed.example";
+    definition.discovery.description = "Caller mutation must not alter discovery metadata.";
     (definition.operations[0]!.inputSchema.properties as Record<string, unknown>).value = {
       type: "number",
     };
     assert.deepEqual(registry.describe("test.synthetic"), before);
+    assert.deepEqual(registry.discovery("test.synthetic"), discoveryBefore);
     assert.equal(registry.registered("test.synthetic")?.definition.capabilityVersion, "1.0.0");
   });
 });

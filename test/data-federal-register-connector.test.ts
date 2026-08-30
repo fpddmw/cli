@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 
 import { createDataRegistry } from "../src/data/catalog.js";
 import { federalRegisterDocumentsConnector } from "../src/data/connectors/federal-register-documents.js";
+import { FEDERAL_REGISTER_INPUT_SCHEMA } from "../src/data/connectors/federal-register-documents.schemas.js";
 import type { DataRunRequest } from "../src/data/contracts.js";
 import { executeDataRun } from "../src/data/runtime/execute.js";
 
@@ -42,6 +43,19 @@ function responseFor(name: string): Promise<Response> {
 }
 
 describe("Federal Register documents connector", () => {
+  it("documents every input field for agent selection and request construction", () => {
+    for (const [name, schema] of Object.entries(FEDERAL_REGISTER_INPUT_SCHEMA.properties)) {
+      assert.equal(typeof (schema as Record<string, unknown>).description, "string", name);
+      assert.ok(Array.isArray((schema as Record<string, unknown>).examples), name);
+    }
+    for (const [name, schema] of Object.entries(
+      FEDERAL_REGISTER_INPUT_SCHEMA.properties.publicationDate.properties,
+    )) {
+      assert.equal(typeof (schema as Record<string, unknown>).description, "string", name);
+      assert.ok(Array.isArray((schema as Record<string, unknown>).examples), name);
+    }
+  });
+
   it("encodes all filters deterministically and returns bounded paginated metadata", async () => {
     const requestedUrls: string[] = [];
     const result = await executeDataRun(request(), {

@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 40396601e751ffecff4c51294e4056d4ac968a5e
+lastReviewedCommit: 7523757200cc863dd07c882a41b0299b8bc712b1
 ---
 
 # Repo Architecture
@@ -209,14 +209,18 @@ dependencies are in `docs/agents/data-runtime-implementation-plan.md`.
 legacy cwd dotenv loader, so credentials come only from the exact environment
 variables declared by a manifest.
 
-The CLI owns built-in connector manifests, closed input/output schemas,
-bounded HTTP and credential handling, stable errors, canonical digests, and
-core execution receipts under `src/data/**`. Public envelope schemas are emitted
-under `dist/data/schemas/`; operation schemas compile with their connector and
-are exposed by offline `data describe`. A standalone data operation remains
-independent of Research project/stage state. Research will reuse the same
-TypeScript service through one explicit adapter and will continue to own evidence
-admission, budgets, journals, persistence, and review.
+The CLI owns built-in execution manifests, discovery metadata, closed
+input/output schemas, bounded HTTP and credential handling, stable errors,
+canonical digests, and core execution receipts under `src/data/**`. Public
+contract schemas are emitted under `dist/data/schemas/`; operation schemas
+compile with their connector and are exposed by offline `data describe`.
+Execution manifests cover versions, endpoints, credentials, limits and schema
+bindings. Discovery metadata separately covers the external source, coverage,
+granularity, selection guidance, license, freshness and limitations, so prose
+changes do not invalidate execution bindings. A standalone data operation
+remains independent of Research project/stage state. Research will reuse the
+same TypeScript service through one explicit adapter and will continue to own
+evidence admission, budgets, journals, persistence, and review.
 
 Skills will remain semantic entrypoints and exact compatibility bindings. They
 must not duplicate connector execution or machine schemas. The implementation

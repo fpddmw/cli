@@ -131,12 +131,61 @@ export const federalRegisterDocumentsConnector: DataConnectorDefinition = {
     "The connector does not provide legal interpretation or determine the current force of law.",
     "FederalRegister.gov metadata should be verified against an official edition for legal reliance.",
   ],
+  discovery: {
+    source: {
+      maintainedBy: "Office of the Federal Register, National Archives and Records Administration",
+      summary:
+        "Official FederalRegister.gov metadata for documents published in the Federal Register.",
+      description:
+        "FederalRegister.gov exposes searchable metadata for notices, proposed rules, final rules, and presidential documents published by the United States federal government.",
+      coverage: {
+        geographic: "United States federal-government publications.",
+        temporal:
+          "Publication-date searchable holdings exposed by the FederalRegister.gov documents API.",
+        granularity: "One published Federal Register document metadata record.",
+      },
+    },
+    summary: "Search bounded Federal Register document metadata by date and regulatory filters.",
+    description:
+      "This capability queries the FederalRegister.gov documents API with an explicit publication-date bound and at least one narrowing filter, then returns validated metadata under page and record limits.",
+    provides: [
+      "Document titles, numbers, publication/effective dates, agencies, topics, dockets, and RIN metadata when available.",
+      "Bounded pagination with explicit empty, truncated, and later-page partial states.",
+      "Links supplied in provider metadata for subsequent separately governed retrieval.",
+    ],
+    doesNotProvide: [
+      "Document body text, XML, PDF bytes, public comments, or docket attachments.",
+      "Legal interpretation, current legal force, compliance advice, or completeness beyond the provider API.",
+      "Regulations.gov comment evidence or public sentiment about a rulemaking.",
+    ],
+    selectionHints: [
+      "Choose this capability to identify official notices, rules, proposed rules, or presidential documents and their publication metadata.",
+      "Choose Regulations.gov for docket comments and attachments rather than Federal Register publication metadata.",
+      "Use a separately reviewed content-retrieval workflow when full document text is required.",
+    ],
+    typicalUseCases: [
+      "Find EPA rules published within a bounded quarter and capture their document numbers and dockets.",
+      "Verify whether a federal agency published a notice or proposed rule in a specified period.",
+    ],
+    sourceDocumentation: [
+      {
+        title: "FederalRegister.gov API v1 documentation",
+        url: "https://www.federalregister.gov/developers/documentation/api/v1",
+      },
+      {
+        title: "About FederalRegister.gov",
+        url: "https://www.federalregister.gov/reader-aids/government-policy-and-ofr-procedures/about-this-site",
+      },
+    ],
+  },
   operations: [
     {
       operationId: "search",
       operationVersion: "1.0.0",
       summary:
         "Search bounded FederalRegister.gov document metadata by date and explicit narrowing filters.",
+      description:
+        "Builds a stable provider query from publication dates and explicit narrowing filters, follows validated same-origin pagination, and emits metadata only within runtime page and record limits.",
       inputSchema: FEDERAL_REGISTER_INPUT_SCHEMA,
       outputSchema: FEDERAL_REGISTER_OUTPUT_SCHEMA,
       execute: executeFederalRegisterSearch,

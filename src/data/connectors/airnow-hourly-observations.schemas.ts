@@ -10,17 +10,61 @@ export const AIRNOW_HOURLY_INPUT_SCHEMA = {
   additionalProperties: false,
   required: ["startDateTimeUtc", "endDateTimeUtc", "boundingBox", "parameters"],
   properties: {
-    startDateTimeUtc: { type: "string", pattern: UTC_HOUR_PATTERN },
-    endDateTimeUtc: { type: "string", pattern: UTC_HOUR_PATTERN },
+    startDateTimeUtc: {
+      type: "string",
+      pattern: UTC_HOUR_PATTERN,
+      description: "Inclusive first UTC hour to retrieve. Minutes and seconds must both be zero.",
+      examples: ["2026-03-22T00:00:00Z"],
+    },
+    endDateTimeUtc: {
+      type: "string",
+      pattern: UTC_HOUR_PATTERN,
+      description: "Inclusive last UTC hour to retrieve. It must not precede startDateTimeUtc.",
+      examples: ["2026-03-22T06:00:00Z"],
+    },
     boundingBox: {
       type: "object",
       additionalProperties: false,
       required: ["minLongitude", "minLatitude", "maxLongitude", "maxLatitude"],
+      description:
+        "Geographic filter in WGS84 decimal degrees; minimum coordinates must not exceed maximum coordinates.",
+      examples: [
+        {
+          minLongitude: -123.5,
+          minLatitude: 37,
+          maxLongitude: -121.5,
+          maxLatitude: 38.8,
+        },
+      ],
       properties: {
-        minLongitude: { type: "number", minimum: -180, maximum: 180 },
-        minLatitude: { type: "number", minimum: -90, maximum: 90 },
-        maxLongitude: { type: "number", minimum: -180, maximum: 180 },
-        maxLatitude: { type: "number", minimum: -90, maximum: 90 },
+        minLongitude: {
+          type: "number",
+          minimum: -180,
+          maximum: 180,
+          description: "Western longitude boundary in WGS84 decimal degrees.",
+          examples: [-123.5],
+        },
+        minLatitude: {
+          type: "number",
+          minimum: -90,
+          maximum: 90,
+          description: "Southern latitude boundary in WGS84 decimal degrees.",
+          examples: [37],
+        },
+        maxLongitude: {
+          type: "number",
+          minimum: -180,
+          maximum: 180,
+          description: "Eastern longitude boundary in WGS84 decimal degrees.",
+          examples: [-121.5],
+        },
+        maxLatitude: {
+          type: "number",
+          minimum: -90,
+          maximum: 90,
+          description: "Northern latitude boundary in WGS84 decimal degrees.",
+          examples: [38.8],
+        },
       },
     },
     parameters: {
@@ -28,7 +72,13 @@ export const AIRNOW_HOURLY_INPUT_SCHEMA = {
       minItems: 1,
       maxItems: 6,
       uniqueItems: true,
-      items: { enum: ["CO", "NO2", "OZONE", "PM10", "PM25", "SO2"] },
+      description:
+        "Pollutant records to emit. PM25 means PM2.5 and OZONE is the AirNow file-product label.",
+      examples: [["PM25", "OZONE"]],
+      items: {
+        enum: ["CO", "NO2", "OZONE", "PM10", "PM25", "SO2"],
+        description: "One pollutant identifier supported by the HourlyAQObs product.",
+      },
     },
   },
 } as const satisfies JsonSchema;

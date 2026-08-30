@@ -85,6 +85,7 @@ describe("data CLI", () => {
     assert.equal(exitCode, 0);
     assert.equal(payload.schemaVersion, "tiangong.data.describe.v1");
     assert.ok(payload.manifest);
+    assert.ok(payload.discovery);
     assert.ok(payload.schemas);
     assert.equal(capture.output().stderr, "");
   });

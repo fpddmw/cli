@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.tiangong.ai/data/discovery.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "capabilityId",
+    "capabilityVersion",
+    "source",
+    "summary",
+    "description",
+    "provides",
+    "doesNotProvide",
+    "selectionHints",
+    "typicalUseCases",
+    "sourceDocumentation",
+    "license",
+    "freshness",
+    "limitations",
+    "operations",
+    "discoveryDigest"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "tiangong.data.discovery.v1" },
+    "capabilityId": { "$ref": "#/$defs/id" },
+    "capabilityVersion": { "$ref": "#/$defs/version" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "providerId",
+        "name",
+        "maintainedBy",
+        "sourceCategory",
+        "summary",
+        "description",
+        "coverage"
+      ],
+      "properties": {
+        "providerId": { "$ref": "#/$defs/id" },
+        "name": { "$ref": "#/$defs/nonEmptyString" },
+        "maintainedBy": { "$ref": "#/$defs/nonEmptyString" },
+        "sourceCategory": { "$ref": "#/$defs/nonEmptyString" },
+        "summary": { "$ref": "#/$defs/nonEmptyString" },
+        "description": { "$ref": "#/$defs/nonEmptyString" },
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["geographic", "temporal", "granularity"],
+          "properties": {
+            "geographic": { "$ref": "#/$defs/nonEmptyString" },
+            "temporal": { "$ref": "#/$defs/nonEmptyString" },
+            "granularity": { "$ref": "#/$defs/nonEmptyString" }
+          }
+        }
+      }
+    },
+    "summary": { "$ref": "#/$defs/nonEmptyString" },
+    "description": { "$ref": "#/$defs/nonEmptyString" },
+    "provides": { "$ref": "#/$defs/nonEmptyStringArray" },
+    "doesNotProvide": { "$ref": "#/$defs/nonEmptyStringArray" },
+    "selectionHints": { "$ref": "#/$defs/nonEmptyStringArray" },
+    "typicalUseCases": { "$ref": "#/$defs/nonEmptyStringArray" },
+    "sourceDocumentation": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "url"],
+        "properties": {
+          "title": { "$ref": "#/$defs/nonEmptyString" },
+          "url": { "type": "string", "pattern": "^https://" }
+        }
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "url", "restrictions"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonEmptyString" },
+        "url": { "type": "string", "pattern": "^https://" },
+        "restrictions": { "$ref": "#/$defs/nonEmptyStringArray" }
+      }
+    },
+    "freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "description"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/nonEmptyString" },
+        "description": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "limitations": { "$ref": "#/$defs/nonEmptyStringArray" },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operationId", "summary", "description"],
+        "properties": {
+          "operationId": { "$ref": "#/$defs/id" },
+          "summary": { "$ref": "#/$defs/nonEmptyString" },
+          "description": { "$ref": "#/$defs/nonEmptyString" }
+        }
+      }
+    },
+    "discoveryDigest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$" },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+    },
+    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "nonEmptyStringArray": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/nonEmptyString" }
+    }
+  }
+}

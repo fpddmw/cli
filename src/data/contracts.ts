@@ -1,4 +1,5 @@
 export const DATA_MANIFEST_SCHEMA_VERSION = "tiangong.data.manifest.v1" as const;
+export const DATA_DISCOVERY_SCHEMA_VERSION = "tiangong.data.discovery.v1" as const;
 export const DATA_CATALOG_SCHEMA_VERSION = "tiangong.data.catalog.v1" as const;
 export const DATA_DESCRIBE_SCHEMA_VERSION = "tiangong.data.describe.v1" as const;
 export const DATA_DOCTOR_SCHEMA_VERSION = "tiangong.data.doctor.v1" as const;
@@ -88,41 +89,74 @@ export interface DataSchemaReference {
 export interface DataOperationManifest {
   operationId: string;
   operationVersion: string;
-  summary: string;
   inputSchema: DataSchemaReference;
   outputSchema: DataSchemaReference;
   limits: DataExecutionLimits;
 }
 
+/** The capability's execution contract. Discovery prose is intentionally excluded. */
 export interface DataCapabilityManifest {
   schemaVersion: typeof DATA_MANIFEST_SCHEMA_VERSION;
   capabilityId: string;
   capabilityVersion: string;
   minimumCliVersion: string;
-  provider: {
-    providerId: string;
-    name: string;
-  };
-  sourceCategory: string;
+  providerId: string;
   endpoints: DataEndpointScope[];
-  license: {
-    name: string;
-    url: string;
-    restrictions: string[];
-  };
   credentials: DataCredentialDeclaration[];
   limits: DataExecutionLimits;
   diagnostics: {
     static: true;
     live: boolean;
   };
+  operations: DataOperationManifest[];
+  manifestDigest: string;
+}
+
+export interface DataSourceDocumentation {
+  title: string;
+  url: string;
+}
+
+export interface DataCapabilityDiscovery {
+  schemaVersion: typeof DATA_DISCOVERY_SCHEMA_VERSION;
+  capabilityId: string;
+  capabilityVersion: string;
+  source: {
+    providerId: string;
+    name: string;
+    maintainedBy: string;
+    sourceCategory: string;
+    summary: string;
+    description: string;
+    coverage: {
+      geographic: string;
+      temporal: string;
+      granularity: string;
+    };
+  };
+  summary: string;
+  description: string;
+  provides: string[];
+  doesNotProvide: string[];
+  selectionHints: string[];
+  typicalUseCases: string[];
+  sourceDocumentation: DataSourceDocumentation[];
+  license: {
+    name: string;
+    url: string;
+    restrictions: string[];
+  };
   freshness: {
     kind: string;
     description: string;
   };
   limitations: string[];
-  operations: DataOperationManifest[];
-  manifestDigest: string;
+  operations: Array<{
+    operationId: string;
+    summary: string;
+    description: string;
+  }>;
+  discoveryDigest: string;
 }
 
 export interface DataCatalogCapability {
@@ -131,10 +165,15 @@ export interface DataCatalogCapability {
   minimumCliVersion: string;
   providerId: string;
   sourceCategory: string;
+  summary: string;
+  provides: string[];
+  doesNotProvide: string[];
   manifestDigest: string;
+  discoveryDigest: string;
   operations: Array<{
     operationId: string;
     operationVersion: string;
+    summary: string;
     inputSchemaDigest: string;
     outputSchemaDigest: string;
   }>;
@@ -149,6 +188,7 @@ export interface DataCatalogResult {
 export interface DataDescribeResult {
   schemaVersion: typeof DATA_DESCRIBE_SCHEMA_VERSION;
   manifest: DataCapabilityManifest;
+  discovery: DataCapabilityDiscovery;
   schemas: Record<string, JsonSchema>;
 }
 
@@ -293,6 +333,7 @@ export interface DataOperationDefinition {
   operationId: string;
   operationVersion: string;
   summary: string;
+  description: string;
   inputSchema: JsonSchema;
   outputSchema: JsonSchema;
   limits?: Partial<DataExecutionLimits> | undefined;
@@ -338,6 +379,25 @@ export interface DataConnectorDefinition {
     description: string;
   };
   limitations: string[];
+  discovery: {
+    source: {
+      maintainedBy: string;
+      summary: string;
+      description: string;
+      coverage: {
+        geographic: string;
+        temporal: string;
+        granularity: string;
+      };
+    };
+    summary: string;
+    description: string;
+    provides: string[];
+    doesNotProvide: string[];
+    selectionHints: string[];
+    typicalUseCases: string[];
+    sourceDocumentation: DataSourceDocumentation[];
+  };
   operations: DataOperationDefinition[];
   liveDoctor?:
     | ((

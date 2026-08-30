@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 40396601e751ffecff4c51294e4056d4ac968a5e
+lastReviewedCommit: 7523757200cc863dd07c882a41b0299b8bc712b1
 ---
 
 # 原子数据运行时实施计划
@@ -114,8 +114,9 @@ Windows/macOS/Linux/ARM 不因排序、路径或 locale 产生 digest 差异。
 实际结果：
 
 - 新增空的内置 registry、`data catalog/describe/doctor/run` 路由和成功/部分/阻断退出码；
-- 发布 manifest、catalog、describe、doctor、run request/result、error 和 core receipt
-  八份闭合 JSON Schema，并由 TypeScript 构建复制到 `dist/data/schemas/`；
+- 发布 execution manifest、discovery、catalog、describe、doctor、run request/result、
+  error 和 core receipt 九份闭合 JSON Schema，并由 TypeScript 构建复制到
+  `dist/data/schemas/`；
 - 建立 locale/路径无关的 canonical JSON、语义 digest 和把审计时间排除在外的核心回执；
 - 建立只允许 DNS 主机 HTTPS scope 的 bounded HTTP，拒绝 IP literal、跨域重定向、
   credential-like query/body、超时、超限响应和 credential reflection；
@@ -154,16 +155,23 @@ runtime primitive。
 - 注册 `federal-register.documents/search`，要求日期边界和收窄条件，稳定编码 term、
   agency、type、topic、docket、RIN，验证 provider pagination metadata，并明确区分
   complete、no-results、max-pages、max-records 与 later-page partial；
-- 两个 connector 均使用独立 manifest、闭合 input/output Schema、重建 fixture、来源/
-  license 限制和 contract tests；实现仅依赖公共 data runtime，彼此无业务导入；
+- 两个 connector 均使用独立 execution manifest、discovery metadata、闭合 input/output
+  Schema、重建 fixture、来源/license 限制和 contract tests；实现仅依赖公共 data
+  runtime，彼此无业务导入；
 - 增加内置 registry 离线 catalog/describe/static-doctor 证明，并补强 public run request
   对 `undefined` 等非 JSON 值的 fail-closed 处理；
-- 本工作包仍只形成独立本地提交；按约定在 CLI 工作全部完成后统一推送和创建一个 PR。
+- 根据 PR #71 审阅意见补充 Data Source/Capability/Operation 三层发现语义；`catalog`
+  投影 summary、provides/does-not-provide 和 operation summary，`describe` 返回完整
+  Discovery Metadata、官方资料、覆盖范围、选择提示和带字段说明/示例的输入 Schema；
+- discovery wording 使用独立 `discoveryDigest`，回归测试证明其变化不会改变 execution
+  manifest 或 operation Schema binding；
+- 本工作包已作为四个可独立审阅提交进入统一 CLI PR #71，审阅修订继续追加到同一 PR。
 
 ## 工作包 4：候选发布和 Skills 薄化
 
 - 发布包含 TS7 基线、基础 data contract 和首批 connectors 的 CLI 候选版本。
-- 从候选包导出 canonical manifest/Schema digest，作为 Skills 迁移的唯一输入。
+- 从候选包导出 canonical execution manifest/Schema digest，作为 Skills 运行兼容绑定；
+  Discovery Metadata 供 Agent 选择和内容审计，但说明文字漂移不阻断执行。
 - Skills PR 删除首批 Python 执行脚本和 OpenClaw/eco-council 模板，只保留触发语义、
   参数说明、来源限制和 CLI 调用。
 - Skills 离线测试拒绝缺失 capability、错误 digest、过低 CLI 版本和漂移命令面；安装

@@ -17,7 +17,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 40396601e751ffecff4c51294e4056d4ac968a5e
+lastReviewedCommit: 7523757200cc863dd07c882a41b0299b8bc712b1
 ---
 
 # 原子数据运行时目标架构
@@ -47,8 +47,10 @@ tiangong-ai data doctor <capability-id> [--live]
 tiangong-ai data run <capability-id> <operation-id> --input <path|->
 ```
 
-- `catalog` 离线、无副作用，只返回内置能力及稳定版本/Schema 摘要。
-- `describe` 离线、无副作用，返回一个能力的公开 manifest 和 operation Schema。
+- `catalog` 离线、无副作用，返回内置能力、稳定版本/Schema 摘要，以及供 Agent
+  初筛的 capability summary、`provides`、`doesNotProvide` 和 operation summary。
+- `describe` 离线、无副作用，返回一个能力的 Execution Manifest、Discovery Metadata
+  和带字段说明/示例的 operation Schema。
 - `doctor` 默认只做静态配置诊断；只有显式 `--live` 才允许有界的 provider 探测。
 - `run` 每次只执行一个 capability 的一个 operation。一个来源内部的分页、分块文件或
   重试仍属于该原子操作；跨来源 fan-out 或结果组合不属于它。
@@ -58,7 +60,7 @@ tiangong-ai data run <capability-id> <operation-id> --input <path|->
 
 JSON 模式的稳定退出码为：成功 `0`、参数/版本合同错误 `2`、执行阻断 `3`、明确的部分
 结果 `4`。`data` 顶层路由不会调用既有 cwd `.env` 加载器；凭证只能来自 manifest
-声明的环境变量。八份公共 envelope Schema 发布在 `dist/data/schemas/`；各 operation
+声明的环境变量。九份公共 contract Schema 发布在 `dist/data/schemas/`；各 operation
 Schema 编译进对应 connector，并由离线 `data describe` 公开。
 
 ## 运行时分层
@@ -79,7 +81,7 @@ src/data/
 │   ├── errors.ts               # 稳定错误分类和脱敏
 │   ├── receipts.ts             # 核心运行回执
 │   └── cache.ts                # 后续可选、受控、非研究状态的操作缓存
-├── schemas/                    # 随 dist 发布的八份闭合公共 JSON Schema
+├── schemas/                    # 随 dist 发布的九份闭合公共 JSON Schema
 └── connectors/                 # 各来源独立的 manifest、Schema、normalize、validate
 
 src/research/workspace/data-evidence-adapter.ts
@@ -92,30 +94,56 @@ stage、journal、candidate、budget 和 evidence 状态不能下沉到 `src/dat
 Research `CapabilityDeclaration` 也不直接扩充为数据 manifest；二者使用场景和生命周期
 不同，应由显式 adapter 连接。
 
-## 能力 Manifest
+## 三层发现语义
 
-每个内置 connector 声明一个不可变 `DataCapabilityManifest`，至少包含：
+CLI 明确区分三层语义，避免把 provider、capability 和 operation 混成一个名称：
 
-- `schemaVersion`、命名空间化的 `capabilityId` 和独立 `capabilityVersion`；
-- `minimumCliVersion`，以及 manifest 的语义 digest；
-- provider、来源类别、官方 endpoint scope、许可证和使用限制；
-- 认证类型和逻辑 credential ID，只声明名称和用途，不保存值；
-- 一个或多个闭合 operation：`operationId`、`operationVersion`、输入/输出 Schema ID
-  与 digest；
-- 超时、请求/响应字节、分页/分块、重试、速率和记录数上限；
-- 支持的诊断模式、数据时效语义和已知限制。
+1. **Data Source**：外部数据集由谁维护，覆盖哪些地域/时间，原始粒度和官方资料是什么；
+2. **Capability**：CLI 从该数据源开放的受限子集，提供与不提供什么，何时应选择或避开；
+3. **Operation**：一次调用执行的具体动作、版本、输入输出和执行 limits。
 
-catalog 的排序、canonical JSON 和 digest 计算必须与 locale、路径分隔符和运行主机
-无关。manifest 可以共同编译进一个 npm 包，但 connector 不得导入另一个 connector
-的业务实现。
+CLI 拥有与 connector 实现直接相关的客观来源语义、覆盖范围和限制。Skills 继续拥有
+“用户表达什么意图时触发该能力”以及如何组合进上层工作流，不复制来源执行逻辑。
+
+## Execution Manifest 与 Discovery Metadata
+
+每个内置 connector 发布两个闭合、不可变但 digest 独立的公共对象。
+
+`DataCapabilityManifest` 是 **Execution Manifest**，至少包含：
+
+- `schemaVersion`、命名空间化的 `capabilityId`、`capabilityVersion` 和
+  `minimumCliVersion`；
+- 稳定的 `providerId`、官方 endpoint scope、认证类型和逻辑 credential ID；
+- operation ID/version、输入/输出 Schema ID/digest 和执行 limits；
+- capability 级超时、请求/响应字节、分页/分块、重试、速率、记录数和诊断上限；
+- 仅覆盖上述执行字段的 `manifestDigest`。
+
+`DataCapabilityDiscovery` 是 **Discovery Metadata**，至少包含：
+
+- Data Source 的名称、维护者、类别、summary/description；
+- geographic/temporal coverage 和数据 granularity；
+- capability 的 summary/description、`provides`、`doesNotProvide`；
+- `selectionHints`、`typicalUseCases` 和 `sourceDocumentation`；
+- 许可证、时效、限制和每个 operation 的 summary/description；
+- 仅覆盖发现语义的 `discoveryDigest`。
+
+`catalog` 为低成本 Agent 初筛投影必要的发现字段，同时发布 manifest/discovery 两个
+digest；`describe` 发布两个完整对象和 operation Schema。修改来源说明或选择文案只改变
+`discoveryDigest`，不得改变 `manifestDigest`、operation Schema digest 或运行回执。
+operation 输入 Schema 自身的字段语义仍通过 `description` 和 `examples` 就地公开。
+
+catalog、两个公共对象、canonical JSON 和 digest 计算必须与 locale、路径分隔符和运行
+主机无关。connector 可以共同编译进一个 npm 包，但不得导入另一个 connector 的业务
+实现。
 
 ## 首批内置 Connectors
 
 `airnow.hourly-observations/fetch-hourly` 从
 `https://files.airnowtech.org/airnow/` 按 UTC 小时规划官方 `HourlyAQObs` 文件，校验
 CSV header/值并按 bbox、时间和 pollutant 过滤。每条记录和文件摘要保留 source-file
-lineage；缺文件、坏文件以 `partial` 和明确 missing file 返回。manifest 固化 AirNow
-数据为 preliminary、subject to change，并禁止把它当作 regulatory-grade AQS 数据。
+lineage；缺文件、坏文件以 `partial` 和明确 missing file 返回。Discovery Metadata 固化
+AirNow 数据为 preliminary、subject to change，并禁止把它当作 regulatory-grade AQS
+数据。
 字段依据官方
 [`HourlyAQObs` 格式说明](https://docs.airnowapi.org/docs/HourlyAQObsFactSheet.pdf)，使用
 限制依据 [AirNow FAQ/Data Use Guidelines](https://docs.airnowapi.org/faq)。
@@ -208,7 +236,8 @@ URL query、header、环境变量值、本地绝对路径和 provider 原始错�
 
 - `capabilityId`、`capabilityVersion`、`operationId`；
 - `minimumCliVersion`；
-- 公开 manifest/输入/输出 Schema digest；
+- 公开 execution manifest/输入/输出 Schema digest；Discovery digest 可用于内容审计，
+  但不作为运行兼容性阻断条件；
 - 面向 agent 的触发条件、参数解释、来源限制和调用示例。
 
 Skill 不复制闭合 Schema 或 connector 逻辑。Skills CI 从已发布/候选 CLI 导出 manifest，
@@ -229,6 +258,7 @@ lock、预算、候选/来源准入、永久证据、journal 和 review 规则�
 
 ## 架构完成条件
 
-基础架构只有在没有具体 provider 也能通过 catalog/describe、闭合 Schema、空 registry、
-稳定错误、脱敏、canonical digest 和 connector conformance 测试时才成立。任何首批
-connector 都必须是这个合同的消费者，而不是反过来决定一份只适用于自己的公共契约。
+基础架构只有在没有具体 provider 也能通过 catalog/describe、闭合 Execution Manifest
+与 Discovery Metadata、空 registry、稳定错误、脱敏、canonical digest 和 connector
+conformance 测试时才成立。任何首批 connector 都必须是这个合同的消费者，而不是
+反过来决定一份只适用于自己的公共契约。

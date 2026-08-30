@@ -9,13 +9,32 @@ export const FEDERAL_REGISTER_INPUT_SCHEMA = {
   additionalProperties: false,
   required: ["publicationDate"],
   properties: {
-    term: { type: "string", minLength: 1, maxLength: 500 },
+    term: {
+      type: "string",
+      minLength: 1,
+      maxLength: 500,
+      description: "Free-text term passed to the FederalRegister.gov documents search.",
+      examples: ["clean air"],
+    },
     publicationDate: {
       type: "object",
       additionalProperties: false,
+      description:
+        "Inclusive publication-date boundary. At least from or to is required by the operation.",
+      examples: [{ from: "2026-01-01", to: "2026-03-31" }],
       properties: {
-        from: { type: "string", pattern: DATE_PATTERN },
-        to: { type: "string", pattern: DATE_PATTERN },
+        from: {
+          type: "string",
+          pattern: DATE_PATTERN,
+          description: "Earliest publication date to include, formatted YYYY-MM-DD.",
+          examples: ["2026-01-01"],
+        },
+        to: {
+          type: "string",
+          pattern: DATE_PATTERN,
+          description: "Latest publication date to include, formatted YYYY-MM-DD.",
+          examples: ["2026-03-31"],
+        },
       },
     },
     agencies: {
@@ -23,6 +42,8 @@ export const FEDERAL_REGISTER_INPUT_SCHEMA = {
       minItems: 1,
       maxItems: 20,
       uniqueItems: true,
+      description: "FederalRegister.gov agency slugs used to narrow the search.",
+      examples: [["environmental-protection-agency"]],
       items: { type: "string", minLength: 1, maxLength: 200 },
     },
     documentTypes: {
@@ -30,6 +51,8 @@ export const FEDERAL_REGISTER_INPUT_SCHEMA = {
       minItems: 1,
       maxItems: 4,
       uniqueItems: true,
+      description: "Federal Register document-type codes to include.",
+      examples: [["RULE", "PRORULE"]],
       items: { enum: ["NOTICE", "PRESDOCU", "PRORULE", "RULE"] },
     },
     topics: {
@@ -37,12 +60,38 @@ export const FEDERAL_REGISTER_INPUT_SCHEMA = {
       minItems: 1,
       maxItems: 20,
       uniqueItems: true,
+      description: "FederalRegister.gov topic names used to narrow the search.",
+      examples: [["Air Pollution Control"]],
       items: { type: "string", minLength: 1, maxLength: 200 },
     },
-    docketId: { type: "string", minLength: 1, maxLength: 200 },
-    regulationIdNumber: { type: "string", minLength: 1, maxLength: 200 },
-    order: { enum: ["newest", "oldest", "relevance"] },
-    pageSize: { type: "integer", minimum: 1, maximum: 1000 },
+    docketId: {
+      type: "string",
+      minLength: 1,
+      maxLength: 200,
+      description: "Exact docket identifier associated with matching documents.",
+      examples: ["EPA-HQ-OAR-2024-0001"],
+    },
+    regulationIdNumber: {
+      type: "string",
+      minLength: 1,
+      maxLength: 200,
+      description: "Exact Regulation Identifier Number (RIN) used to narrow matching documents.",
+      examples: ["2060-AV01"],
+    },
+    order: {
+      enum: ["newest", "oldest", "relevance"],
+      description:
+        "Provider result ordering. Relevance is most useful with term; newest is the default.",
+      examples: ["newest"],
+    },
+    pageSize: {
+      type: "integer",
+      minimum: 1,
+      maximum: 1000,
+      description:
+        "Requested provider page size; the runtime record limit still caps emitted records.",
+      examples: [100],
+    },
   },
 } as const satisfies JsonSchema;
 

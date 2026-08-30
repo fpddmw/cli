@@ -3,6 +3,7 @@ import { Ajv2020, type ErrorObject, type ValidateFunction } from "ajv/dist/2020.
 import catalogSchemaDocument from "./schemas/catalog.v1.json" with { type: "json" };
 import coreReceiptSchemaDocument from "./schemas/core-receipt.v1.json" with { type: "json" };
 import describeSchemaDocument from "./schemas/describe.v1.json" with { type: "json" };
+import discoverySchemaDocument from "./schemas/discovery.v1.json" with { type: "json" };
 import doctorSchemaDocument from "./schemas/doctor.v1.json" with { type: "json" };
 import errorSchemaDocument from "./schemas/error.v1.json" with { type: "json" };
 import manifestSchemaDocument from "./schemas/manifest.v1.json" with { type: "json" };
@@ -14,6 +15,7 @@ export type DataPublicSchemaName =
   | "catalog"
   | "coreReceipt"
   | "describe"
+  | "discovery"
   | "doctor"
   | "error"
   | "manifest"
@@ -24,6 +26,7 @@ export const DATA_PUBLIC_SCHEMA_IDS = {
   catalog: "https://schemas.tiangong.ai/data/catalog.v1.json",
   coreReceipt: "https://schemas.tiangong.ai/data/core-receipt.v1.json",
   describe: "https://schemas.tiangong.ai/data/describe.v1.json",
+  discovery: "https://schemas.tiangong.ai/data/discovery.v1.json",
   doctor: "https://schemas.tiangong.ai/data/doctor.v1.json",
   error: "https://schemas.tiangong.ai/data/error.v1.json",
   manifest: "https://schemas.tiangong.ai/data/manifest.v1.json",
@@ -36,6 +39,7 @@ type PublicSchemaDocument = JsonSchema & { $id: string; $schema: string };
 export const dataPublicSchemas = {
   catalog: catalogSchemaDocument,
   coreReceipt: coreReceiptSchemaDocument,
+  discovery: discoverySchemaDocument,
   describe: describeSchemaDocument,
   doctor: doctorSchemaDocument,
   error: errorSchemaDocument,

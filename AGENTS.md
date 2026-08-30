@@ -18,7 +18,7 @@ checkPaths:
   - docs/agents/**
   - src/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 40396601e751ffecff4c51294e4056d4ac968a5e
+lastReviewedCommit: 7523757200cc863dd07c882a41b0299b8bc712b1
 ---
 
 # Tiangong AI CLI Contract
@@ -69,7 +69,9 @@ The built-in atomic data catalog currently contains
 `airnow.hourly-observations/fetch-hourly` and
 `federal-register.documents/search`. Connector execution, normalization,
 schemas, provider limits, and source/license restrictions belong under
-`src/data/**`; Skills may bind to these contracts but must not copy them.
+`src/data/**`. The execution manifest digest is deliberately separate from the
+Agent-facing discovery metadata digest; Skills may bind to execution contracts
+but must not copy connector logic or treat discovery wording as runtime drift.
 
 ## Validation
 

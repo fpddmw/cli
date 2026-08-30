@@ -5,6 +5,7 @@ import { describe, it } from "node:test";
 
 import { createDataRegistry } from "../src/data/catalog.js";
 import { airNowHourlyObservationsConnector } from "../src/data/connectors/airnow-hourly-observations.js";
+import { AIRNOW_HOURLY_INPUT_SCHEMA } from "../src/data/connectors/airnow-hourly-observations.schemas.js";
 import type { DataRunRequest } from "../src/data/contracts.js";
 import { executeDataRun } from "../src/data/runtime/execute.js";
 
@@ -38,6 +39,19 @@ async function fixture(name: string): Promise<string> {
 }
 
 describe("AirNow hourly observations connector", () => {
+  it("documents every input field for agent selection and request construction", () => {
+    for (const [name, schema] of Object.entries(AIRNOW_HOURLY_INPUT_SCHEMA.properties)) {
+      assert.equal(typeof (schema as Record<string, unknown>).description, "string", name);
+      assert.ok(Array.isArray((schema as Record<string, unknown>).examples), name);
+    }
+    for (const [name, schema] of Object.entries(
+      AIRNOW_HOURLY_INPUT_SCHEMA.properties.boundingBox.properties,
+    )) {
+      assert.equal(typeof (schema as Record<string, unknown>).description, "string", name);
+      assert.ok(Array.isArray((schema as Record<string, unknown>).examples), name);
+    }
+  });
+
   it("plans multiple UTC files and filters rows by bbox, time, and parameter", async () => {
     const requestedPaths: string[] = [];
     const result = await executeDataRun(request(), {
@@ -190,16 +204,21 @@ describe("AirNow hourly observations connector", () => {
   });
 
   it("publishes the preliminary-data and regulatory-use restrictions", () => {
-    const manifest = createDataRegistry([airNowHourlyObservationsConnector]).describe(
-      "airnow.hourly-observations",
-    );
-    assert.equal(manifest?.license.url, "https://docs.airnowapi.org/faq");
+    const registry = createDataRegistry([airNowHourlyObservationsConnector]);
+    const discovery = (
+      registry as unknown as {
+        discovery(
+          id: string,
+        ): { license: { url: string; restrictions: string[] }; limitations: string[] } | undefined;
+      }
+    ).discovery("airnow.hourly-observations");
+    assert.equal(discovery?.license.url, "https://docs.airnowapi.org/faq");
     assert.equal(
-      manifest?.license.restrictions.some((item) => item.includes("preliminary")),
+      discovery?.license.restrictions.some((item) => item.includes("preliminary")),
       true,
     );
     assert.equal(
-      manifest?.limitations.some((item) => item.includes("regulatory")),
+      discovery?.limitations.some((item) => item.includes("regulatory")),
       true,
     );
   });

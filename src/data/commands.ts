@@ -110,7 +110,7 @@ function runCatalog(argv: string[], io: CliIO, registry: DataRegistry): number {
     for (const capability of result.capabilities) {
       write(
         io.stdout,
-        `${capability.capabilityId}\t${capability.capabilityVersion}\t${capability.providerId}\n`,
+        `${capability.capabilityId}\t${capability.capabilityVersion}\t${capability.providerId}\t${capability.summary}\n`,
       );
     }
   }
@@ -126,8 +126,9 @@ function runDescribe(argv: string[], io: CliIO, registry: DataRegistry): number 
   assertPositionals(args.positionals, 1, "data describe");
   const capabilityId = args.positionals[0]!;
   const manifest = registry.describe(capabilityId);
+  const discovery = registry.discovery(capabilityId);
   const schemas = registry.schemas(capabilityId);
-  if (!manifest || !schemas) {
+  if (!manifest || !discovery || !schemas) {
     throw new DataRuntimeError(
       "invalid-request",
       "The requested data capability is not registered.",
@@ -139,6 +140,7 @@ function runDescribe(argv: string[], io: CliIO, registry: DataRegistry): number 
   const result: DataDescribeResult = {
     schemaVersion: DATA_DESCRIBE_SCHEMA_VERSION,
     manifest,
+    discovery,
     schemas,
   };
   validateDataPublicContract("describe", result);
@@ -146,9 +148,22 @@ function runDescribe(argv: string[], io: CliIO, registry: DataRegistry): number 
     write(io.stdout, stringifyJson(result, true));
   } else {
     write(io.stdout, `${manifest.capabilityId} ${manifest.capabilityVersion}\n`);
+    write(io.stdout, `${discovery.summary}\n`);
+    write(io.stdout, `source ${discovery.source.name}\n`);
     write(io.stdout, `manifest ${manifest.manifestDigest}\n`);
+    write(io.stdout, `discovery ${discovery.discoveryDigest}\n`);
+    for (const item of discovery.provides) write(io.stdout, `provides ${item}\n`);
+    for (const item of discovery.doesNotProvide) {
+      write(io.stdout, `does-not-provide ${item}\n`);
+    }
     for (const operation of manifest.operations) {
-      write(io.stdout, `${operation.operationId} ${operation.operationVersion}\n`);
+      const operationDiscovery = discovery.operations.find(
+        (item) => item.operationId === operation.operationId,
+      );
+      write(
+        io.stdout,
+        `${operation.operationId} ${operation.operationVersion}\t${operationDiscovery?.summary ?? ""}\n`,
+      );
     }
   }
   return 0;

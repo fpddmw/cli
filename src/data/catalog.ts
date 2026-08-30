@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 
 import type {
+  DataCapabilityDiscovery,
   DataCapabilityManifest,
   DataCatalogCapability,
   DataCatalogResult,
@@ -12,7 +13,11 @@ import type {
   DataOperationManifest,
   JsonSchema,
 } from "./contracts.js";
-import { DATA_CATALOG_SCHEMA_VERSION, DATA_MANIFEST_SCHEMA_VERSION } from "./contracts.js";
+import {
+  DATA_CATALOG_SCHEMA_VERSION,
+  DATA_DISCOVERY_SCHEMA_VERSION,
+  DATA_MANIFEST_SCHEMA_VERSION,
+} from "./contracts.js";
 import { sha256CanonicalJson } from "./runtime/canonical-json.js";
 import { DataRuntimeError } from "./runtime/errors.js";
 import { validateDataPublicContract } from "./schemas.js";
@@ -27,6 +32,7 @@ export interface RegisteredDataOperation {
 export interface RegisteredDataConnector {
   definition: DataConnectorDefinition;
   manifest: DataCapabilityManifest;
+  discovery: DataCapabilityDiscovery;
   operations: Map<string, RegisteredDataOperation>;
   schemas: Record<string, JsonSchema>;
 }
@@ -66,6 +72,11 @@ export class DataRegistry {
     return manifest ? structuredClone(manifest) : undefined;
   }
 
+  discovery(capabilityId: string): DataCapabilityDiscovery | undefined {
+    const discovery = this.#connectors.get(capabilityId)?.discovery;
+    return discovery ? structuredClone(discovery) : undefined;
+  }
+
   schemas(capabilityId: string): Record<string, JsonSchema> | undefined {
     const schemas = this.#connectors.get(capabilityId)?.schemas;
     return schemas ? structuredClone(schemas) : undefined;
@@ -88,6 +99,7 @@ function registerConnector(source: DataConnectorDefinition): RegisteredDataConne
   const operations = new Map<string, RegisteredDataOperation>();
   const schemaDocuments: Record<string, JsonSchema> = {};
   const operationManifests: DataOperationManifest[] = [];
+  const operationDiscoveries: DataCapabilityDiscovery["operations"] = [];
   for (const operation of [...definition.operations].sort((left, right) =>
     codePointOrder(left.operationId, right.operationId),
   )) {
@@ -109,7 +121,6 @@ function registerConnector(source: DataConnectorDefinition): RegisteredDataConne
     const manifest: DataOperationManifest = {
       operationId: operation.operationId,
       operationVersion: operation.operationVersion,
-      summary: operation.summary,
       inputSchema: {
         schemaId: inputSchemaId,
         digest: sha256CanonicalJson(operation.inputSchema),
@@ -133,6 +144,11 @@ function registerConnector(source: DataConnectorDefinition): RegisteredDataConne
     schemaDocuments[inputSchemaId] = structuredClone(operation.inputSchema);
     schemaDocuments[outputSchemaId] = structuredClone(operation.outputSchema);
     operationManifests.push(manifest);
+    operationDiscoveries.push({
+      operationId: operation.operationId,
+      summary: operation.summary,
+      description: operation.description,
+    });
   }
 
   const stableManifest = {
@@ -140,8 +156,7 @@ function registerConnector(source: DataConnectorDefinition): RegisteredDataConne
     capabilityId: definition.capabilityId,
     capabilityVersion: definition.capabilityVersion,
     minimumCliVersion: definition.minimumCliVersion,
-    provider: structuredClone(definition.provider),
-    sourceCategory: definition.sourceCategory,
+    providerId: definition.provider.providerId,
     endpoints: [...definition.endpoints]
       .sort((left, right) => codePointOrder(left.endpointId, right.endpointId))
       .map((endpoint) => ({
@@ -150,10 +165,6 @@ function registerConnector(source: DataConnectorDefinition): RegisteredDataConne
         allowedMethods: [...endpoint.allowedMethods].sort(codePointOrder),
         allowedContentTypes: [...endpoint.allowedContentTypes].sort(codePointOrder),
       })),
-    license: {
-      ...structuredClone(definition.license),
-      restrictions: [...definition.license.restrictions].sort(codePointOrder),
-    },
     credentials: [...definition.credentials]
       .sort((left, right) => codePointOrder(left.credentialId, right.credentialId))
       .map((credential) => ({
@@ -162,8 +173,6 @@ function registerConnector(source: DataConnectorDefinition): RegisteredDataConne
       })),
     limits: structuredClone(definition.limits),
     diagnostics: structuredClone(definition.diagnostics),
-    freshness: structuredClone(definition.freshness),
-    limitations: [...definition.limitations].sort(codePointOrder),
     operations: operationManifests,
   };
   const published: DataCapabilityManifest = {
@@ -171,9 +180,48 @@ function registerConnector(source: DataConnectorDefinition): RegisteredDataConne
     manifestDigest: sha256CanonicalJson(stableManifest),
   };
   validateDataPublicContract("manifest", published);
+  const stableDiscovery = {
+    schemaVersion: DATA_DISCOVERY_SCHEMA_VERSION,
+    capabilityId: definition.capabilityId,
+    capabilityVersion: definition.capabilityVersion,
+    source: {
+      providerId: definition.provider.providerId,
+      name: definition.provider.name,
+      maintainedBy: definition.discovery.source.maintainedBy,
+      sourceCategory: definition.sourceCategory,
+      summary: definition.discovery.source.summary,
+      description: definition.discovery.source.description,
+      coverage: structuredClone(definition.discovery.source.coverage),
+    },
+    summary: definition.discovery.summary,
+    description: definition.discovery.description,
+    provides: [...definition.discovery.provides].sort(codePointOrder),
+    doesNotProvide: [...definition.discovery.doesNotProvide].sort(codePointOrder),
+    selectionHints: [...definition.discovery.selectionHints].sort(codePointOrder),
+    typicalUseCases: [...definition.discovery.typicalUseCases].sort(codePointOrder),
+    sourceDocumentation: [...definition.discovery.sourceDocumentation]
+      .sort(
+        (left, right) =>
+          codePointOrder(left.url, right.url) || codePointOrder(left.title, right.title),
+      )
+      .map((document) => structuredClone(document)),
+    license: {
+      ...structuredClone(definition.license),
+      restrictions: [...definition.license.restrictions].sort(codePointOrder),
+    },
+    freshness: structuredClone(definition.freshness),
+    limitations: [...definition.limitations].sort(codePointOrder),
+    operations: operationDiscoveries,
+  };
+  const discovery: DataCapabilityDiscovery = {
+    ...stableDiscovery,
+    discoveryDigest: sha256CanonicalJson(stableDiscovery),
+  };
+  validateDataPublicContract("discovery", discovery);
   return {
     definition,
     manifest: published,
+    discovery,
     operations,
     schemas: schemaDocuments,
   };
@@ -190,6 +238,7 @@ function cloneAndFreezeConnector(source: DataConnectorDefinition): DataConnector
     diagnostics: structuredClone(source.diagnostics),
     freshness: structuredClone(source.freshness),
     limitations: [...source.limitations],
+    discovery: structuredClone(source.discovery),
     operations: source.operations.map((operation) => ({
       ...operation,
       inputSchema: structuredClone(operation.inputSchema),
@@ -320,16 +369,24 @@ function operationAjv(): Ajv2020 {
 
 function toCatalogCapability(connector: RegisteredDataConnector): DataCatalogCapability {
   const manifest = connector.manifest;
+  const discovery = connector.discovery;
   return {
     capabilityId: manifest.capabilityId,
     capabilityVersion: manifest.capabilityVersion,
     minimumCliVersion: manifest.minimumCliVersion,
-    providerId: manifest.provider.providerId,
-    sourceCategory: manifest.sourceCategory,
+    providerId: manifest.providerId,
+    sourceCategory: discovery.source.sourceCategory,
+    summary: discovery.summary,
+    provides: [...discovery.provides],
+    doesNotProvide: [...discovery.doesNotProvide],
     manifestDigest: manifest.manifestDigest,
+    discoveryDigest: discovery.discoveryDigest,
     operations: manifest.operations.map((operation) => ({
       operationId: operation.operationId,
       operationVersion: operation.operationVersion,
+      summary:
+        discovery.operations.find((item) => item.operationId === operation.operationId)?.summary ??
+        operation.operationId,
       inputSchemaDigest: operation.inputSchema.digest,
       outputSchemaDigest: operation.outputSchema.digest,
     })),
