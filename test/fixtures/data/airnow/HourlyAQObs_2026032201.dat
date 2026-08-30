@@ -1,0 +1,2 @@
+AQSID,SiteName,Status,EPARegion,Latitude,Longitude,Elevation,GMTOffset,CountryCode,StateName,ValidDate,ValidTime,DataSource,ReportingArea_PipeDelimited,OZONE_AQI,PM10_AQI,PM25_AQI,NO2_AQI,OZONE_Measured,PM10_Measured,PM25_Measured,NO2_Measured,PM25,PM25_Unit,OZONE,OZONE_Unit,NO2,NO2_Unit,CO,CO_Unit,SO2,SO2_Unit,PM10,PM10_Unit
+060750001,"Bay, Test Site",Active,R9,37.7749,-122.4194,16.0,-8.0,US,CA,03/22/26,01:00,Synthetic Bay Agency,San Francisco|Oakland,40,,9,6,1,0,1,1,-1.2,UG/M3,29.0,PPB,7.0,PPB,0.1,PPM,0.3,PPB,,

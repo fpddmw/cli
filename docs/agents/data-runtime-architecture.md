@@ -17,7 +17,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 97cf02b1a9b215c7fd770cf8a1c00a3e85f5d86f
+lastReviewedCommit: 40396601e751ffecff4c51294e4056d4ac968a5e
 ---
 
 # 原子数据运行时目标架构
@@ -37,8 +37,8 @@ HTTP、认证、分页、重试、缓存或回执实现。Auto Research 复用�
 
 ## 公共命令契约
 
-以下基础命令已经实现并由闭合 Schema 和合同测试冻结；在真实 connector 注册前，内置
-catalog 有意保持为空：
+以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册首批两个
+connector：
 
 ```text
 tiangong-ai data catalog
@@ -58,7 +58,8 @@ tiangong-ai data run <capability-id> <operation-id> --input <path|->
 
 JSON 模式的稳定退出码为：成功 `0`、参数/版本合同错误 `2`、执行阻断 `3`、明确的部分
 结果 `4`。`data` 顶层路由不会调用既有 cwd `.env` 加载器；凭证只能来自 manifest
-声明的环境变量。公共和 operation Schema 随构建产物发布在 `dist/data/schemas/`。
+声明的环境变量。八份公共 envelope Schema 发布在 `dist/data/schemas/`；各 operation
+Schema 编译进对应 connector，并由离线 `data describe` 公开。
 
 ## 运行时分层
 
@@ -66,6 +67,7 @@ JSON 模式的稳定退出码为：成功 `0`、参数/版本合同错误 `2`、
 
 ```text
 src/data/
+├── builtins.ts                 # 首批内置 connector 的显式注册点
 ├── commands.ts                 # data 命令解析和展示投影
 ├── contracts.ts                # 公共 TypeScript 类型与版本常量
 ├── catalog.ts                  # 内置、静态、可排序的 connector registry
@@ -78,7 +80,7 @@ src/data/
 │   ├── receipts.ts             # 核心运行回执
 │   └── cache.ts                # 后续可选、受控、非研究状态的操作缓存
 ├── schemas/                    # 随 dist 发布的八份闭合公共 JSON Schema
-└── connectors/<source>/        # manifest、operation、normalize、validate
+└── connectors/                 # 各来源独立的 manifest、Schema、normalize、validate
 
 src/research/workspace/data-evidence-adapter.ts
                                 # DataResult -> Research evidence 的单向适配
@@ -106,6 +108,30 @@ Research `CapabilityDeclaration` 也不直接扩充为数据 manifest；二者�
 catalog 的排序、canonical JSON 和 digest 计算必须与 locale、路径分隔符和运行主机
 无关。manifest 可以共同编译进一个 npm 包，但 connector 不得导入另一个 connector
 的业务实现。
+
+## 首批内置 Connectors
+
+`airnow.hourly-observations/fetch-hourly` 从
+`https://files.airnowtech.org/airnow/` 按 UTC 小时规划官方 `HourlyAQObs` 文件，校验
+CSV header/值并按 bbox、时间和 pollutant 过滤。每条记录和文件摘要保留 source-file
+lineage；缺文件、坏文件以 `partial` 和明确 missing file 返回。manifest 固化 AirNow
+数据为 preliminary、subject to change，并禁止把它当作 regulatory-grade AQS 数据。
+字段依据官方
+[`HourlyAQObs` 格式说明](https://docs.airnowapi.org/docs/HourlyAQObsFactSheet.pdf)，使用
+限制依据 [AirNow FAQ/Data Use Guidelines](https://docs.airnowapi.org/faq)。
+
+`federal-register.documents/search` 只调用
+`https://www.federalregister.gov/api/v1/documents.json`，要求 publication date bound
+和至少一个 term/agency/type/topic/docket/RIN 收窄条件。数组过滤先按 code point
+归一化，再由 bounded HTTP 稳定编码；页数和记录数受统一 limits 约束。输出只保留
+document search metadata，不访问结果中的正文、XML 或 PDF 链接，也不作法律解释；
+后续页失败保留已验证页并返回 `partial`。接口依据官方
+[FederalRegister.gov API v1 文档](https://www.federalregister.gov/developers/documentation/api/v1)，
+法律使用限制依据其
+[About This Site](https://www.federalregister.gov/reader-aids/government-policy-and-ofr-procedures/about-this-site)。
+
+两个 connector 均无凭证、默认 static doctor 完全离线，且互不导入业务函数。测试
+fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制的 live provider 响应。
 
 ## 机器 Envelope
 

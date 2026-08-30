@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 97cf02b1a9b215c7fd770cf8a1c00a3e85f5d86f
+lastReviewedCommit: 40396601e751ffecff4c51294e4056d4ac968a5e
 ---
 
 # 原子数据运行时实施计划
@@ -145,6 +145,20 @@ runtime primitive。
 
 完成门槛：各自可离线 catalog/describe/doctor，可用 fixture 完整测试 `run`，live smoke
 为显式、非 CI 必需项；全仓门禁和 npm pack 通过。
+
+实际结果：
+
+- 注册 `airnow.hourly-observations/fetch-hourly`，按 UTC 小时生成最多 168 个官方文件
+  路径，校验官方 CSV 字段并执行 bbox/time/pollutant 过滤；缺失或无效文件保留可用
+  记录并返回显式 partial/file lineage；
+- 注册 `federal-register.documents/search`，要求日期边界和收窄条件，稳定编码 term、
+  agency、type、topic、docket、RIN，验证 provider pagination metadata，并明确区分
+  complete、no-results、max-pages、max-records 与 later-page partial；
+- 两个 connector 均使用独立 manifest、闭合 input/output Schema、重建 fixture、来源/
+  license 限制和 contract tests；实现仅依赖公共 data runtime，彼此无业务导入；
+- 增加内置 registry 离线 catalog/describe/static-doctor 证明，并补强 public run request
+  对 `undefined` 等非 JSON 值的 fail-closed 处理；
+- 本工作包仍只形成独立本地提交；按约定在 CLI 工作全部完成后统一推送和创建一个 PR。
 
 ## 工作包 4：候选发布和 Skills 薄化
 

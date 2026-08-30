@@ -55,6 +55,20 @@ describe("data execution", () => {
     assert.equal(result.receipt.completionStatus, "blocked");
   });
 
+  it("rejects non-JSON values before semantic receipt hashing", async () => {
+    const result = await executeDataRun(
+      request({ input: { value: "hello", unsupported: undefined } }),
+      {
+        registry: createDataRegistry([syntheticConnector()]),
+        environment: {},
+      },
+    );
+
+    assert.equal(result.status, "blocked");
+    assert.equal(result.errors[0]?.code, "invalid-request");
+    assert.match(result.receipt.receiptDigest, /^[a-f0-9]{64}$/);
+  });
+
   it("rejects capability and operation version drift", async () => {
     const registry = createDataRegistry([syntheticConnector()]);
     const capability = await executeDataRun(request({ capabilityVersion: "2.0.0" }), {

@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 97cf02b1a9b215c7fd770cf8a1c00a3e85f5d86f
+lastReviewedCommit: 40396601e751ffecff4c51294e4056d4ac968a5e
 ---
 
 # Repo Architecture
@@ -192,9 +192,9 @@ storage writes, queueing, and document status transitions.
 - `src/data/**`: the versioned atomic data machine boundary. It owns the
   immutable registry, public JSON Schemas, canonical digest and receipt rules,
   strict command router, logical credential resolution, bounded HTTPS client,
-  stable error taxonomy, and connector execution/conformance contracts. The
-  shipped foundation has an intentionally empty built-in registry until pilot
-  connectors satisfy the same contract.
+  stable error taxonomy, and connector execution/conformance contracts. Its
+  built-in registry currently ships AirNow hourly observations and Federal
+  Register document metadata as independent consumers of the same runtime.
 - `scripts/**`: validation helpers.
 - `test/**`: Node test runner suites.
 
@@ -211,16 +211,24 @@ variables declared by a manifest.
 
 The CLI owns built-in connector manifests, closed input/output schemas,
 bounded HTTP and credential handling, stable errors, canonical digests, and
-core execution receipts under `src/data/**`. The public and operation schemas
-are emitted under `dist/data/schemas/`. A standalone data operation remains
-independent of Research project/stage state. Research will reuse the
-same TypeScript service through one explicit adapter and will continue to own
-evidence admission, budgets, journals, persistence, and review.
+core execution receipts under `src/data/**`. Public envelope schemas are emitted
+under `dist/data/schemas/`; operation schemas compile with their connector and
+are exposed by offline `data describe`. A standalone data operation remains
+independent of Research project/stage state. Research will reuse the same
+TypeScript service through one explicit adapter and will continue to own evidence
+admission, budgets, journals, persistence, and review.
 
 Skills will remain semantic entrypoints and exact compatibility bindings. They
 must not duplicate connector execution or machine schemas. The implementation
 baseline is Node 24 with the native TypeScript 7.0.2 compiler; that toolchain
 gate is complete before data business logic begins.
+
+The first connector pair deliberately exercises different atomic shapes.
+AirNow plans one official hourly file per UTC hour and isolates missing or
+invalid files while retaining file lineage. Federal Register builds stable,
+bounded query parameters and paginates metadata without retrieving linked
+content. Neither connector imports the other, performs interpretation, or
+writes Research state.
 
 ## Bulk Ingest Boundary
 

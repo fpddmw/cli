@@ -4,7 +4,8 @@ import { CliError } from "../errors.js";
 import type { CliIO } from "../io.js";
 import { stringifyJson, write } from "../io.js";
 import { parseStrictArgs, strictBoolean, strictString } from "../strict-args.js";
-import { builtInDataRegistry, type DataRegistry } from "./catalog.js";
+import { builtInDataRegistry } from "./builtins.js";
+import type { DataRegistry } from "./catalog.js";
 import type {
   DataDescribeResult,
   DataDoctorCheck,

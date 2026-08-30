@@ -18,7 +18,7 @@ checkPaths:
   - docs/agents/**
   - src/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 97cf02b1a9b215c7fd770cf8a1c00a3e85f5d86f
+lastReviewedCommit: 40396601e751ffecff4c51294e4056d4ac968a5e
 ---
 
 # Tiangong AI CLI Contract
@@ -64,6 +64,12 @@ This repository owns the Tiangong AI command-line interface.
 - `tiangong-ai research run`
 - `tiangong-ai research search`
 - `tiangong-ai education search`
+
+The built-in atomic data catalog currently contains
+`airnow.hourly-observations/fetch-hourly` and
+`federal-register.documents/search`. Connector execution, normalization,
+schemas, provider limits, and source/license restrictions belong under
+`src/data/**`; Skills may bind to these contracts but must not copy them.
 
 ## Validation
 

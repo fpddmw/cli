@@ -82,8 +82,6 @@ export function createDataRegistry(
   return new DataRegistry(definitions);
 }
 
-export const builtInDataRegistry = createDataRegistry([]);
-
 function registerConnector(source: DataConnectorDefinition): RegisteredDataConnector {
   const definition = cloneAndFreezeConnector(source);
   assertConnectorDefinition(definition);

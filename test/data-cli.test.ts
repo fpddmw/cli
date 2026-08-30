@@ -24,7 +24,7 @@ function captureIo(environment: NodeJS.ProcessEnv = {}) {
 }
 
 describe("data CLI", () => {
-  it("routes an offline empty catalog through the top-level CLI", async () => {
+  it("routes the offline built-in catalog through the top-level CLI", async () => {
     const capture = captureIo();
     const previousFetch = globalThis.fetch;
     globalThis.fetch = (async () => {
@@ -39,7 +39,12 @@ describe("data CLI", () => {
         catalogDigest: string;
       };
       assert.equal(payload.schemaVersion, "tiangong.data.catalog.v1");
-      assert.deepEqual(payload.capabilities, []);
+      assert.deepEqual(
+        (payload.capabilities as Array<{ capabilityId: string }>).map(
+          (capability) => capability.capabilityId,
+        ),
+        ["airnow.hourly-observations", "federal-register.documents"],
+      );
       assert.match(payload.catalogDigest, /^[a-f0-9]{64}$/);
       assert.equal(capture.output().stderr, "");
     } finally {

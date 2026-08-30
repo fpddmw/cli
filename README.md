@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-20
-lastReviewedCommit: 97cf02b1a9b215c7fd770cf8a1c00a3e85f5d86f
+lastReviewedAt: 2026-08-30
+lastReviewedCommit: 40396601e751ffecff4c51294e4056d4ac968a5e
 ---
 
 # Tiangong AI CLI
@@ -65,8 +65,22 @@ cwd `.env` file.
 
 JSON exits are `0` for success, `2` for request/contract errors, `3` for a
 blocked execution, and `4` for an explicit partial result. Public machine
-schemas ship under `dist/data/schemas/`. The foundation initially exposes an
-empty catalog until reviewed built-in connectors are registered.
+schemas ship under `dist/data/schemas/`.
+
+The first built-in capabilities are:
+
+- `airnow.hourly-observations` / `fetch-hourly`: fetches official AirNow
+  `HourlyAQObs` files for a bounded UTC-hour window, bounding box, and pollutant
+  list. Results retain source-file lineage and always state that AirNow data are
+  preliminary and unsuitable as regulatory-grade AQS evidence.
+- `federal-register.documents` / `search`: searches bounded
+  FederalRegister.gov document metadata by publication date plus term, agency,
+  document type, topic, docket, or RIN filters. It does not follow result links,
+  fetch document full text, or provide legal interpretation.
+
+Both connectors are keyless. Their exact input and output schemas, endpoint
+scopes, limits, source notes, and license restrictions are available through
+`data describe`; static `data doctor` remains offline.
 
 ## KB Ingest
 

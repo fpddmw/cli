@@ -44,6 +44,7 @@ export async function executeDataRun(
   let request: DataRunRequest;
   try {
     validateDataPublicContract("runRequest", rawRequest);
+    canonicalJson(rawRequest);
     request = rawRequest as DataRunRequest;
   } catch (error) {
     request = fallbackRequest(rawRequest);

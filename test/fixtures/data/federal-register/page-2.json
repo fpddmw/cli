@@ -1,0 +1,30 @@
+{
+  "description": "Documents matching synthetic test filters",
+  "count": 3,
+  "total_pages": 2,
+  "next_page_url": null,
+  "results": [
+    {
+      "title": "Synthetic Proposed Emissions Rule",
+      "type": "Proposed Rule",
+      "abstract": "A second-page metadata record.",
+      "document_number": "2026-TEST03",
+      "html_url": "https://www.federalregister.gov/documents/2026/03/18/2026-TEST03/synthetic-proposed-emissions-rule",
+      "pdf_url": "https://www.govinfo.gov/content/pkg/FR-2026-03-18/pdf/2026-TEST03.pdf",
+      "public_inspection_pdf_url": null,
+      "publication_date": "2026-03-18",
+      "effective_on": null,
+      "agencies": [
+        {
+          "id": 145,
+          "name": "Environmental Protection Agency",
+          "slug": "environmental-protection-agency"
+        }
+      ],
+      "topics": ["Air Pollution Control"],
+      "docket_ids": ["EPA-HQ-OAR-2024-0001"],
+      "regulation_id_numbers": ["2060-AV01"],
+      "significant": false
+    }
+  ]
+}

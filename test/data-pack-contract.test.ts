@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, it } from "node:test";
 
 import { DATA_PUBLIC_SCHEMA_IDS, dataPublicSchemas } from "../src/data/schemas.js";
@@ -28,5 +28,29 @@ describe("data package contract", () => {
       assert.equal(parsed.$id, DATA_PUBLIC_SCHEMA_IDS[typedName]);
       assert.deepEqual(parsed, dataPublicSchemas[typedName]);
     }
+  });
+
+  it("emits the built-in registry and both connector contracts into dist", async () => {
+    const modules = [
+      "data/builtins.js",
+      "data/connectors/airnow-hourly-observations.js",
+      "data/connectors/airnow-hourly-observations.schemas.js",
+      "data/connectors/federal-register-documents.js",
+      "data/connectors/federal-register-documents.schemas.js",
+    ];
+    for (const modulePath of modules) {
+      await access(join(repositoryRoot, "dist", ...modulePath.split("/")));
+    }
+    const builtins = (await import(
+      pathToFileURL(join(repositoryRoot, "dist", "data", "builtins.js")).href
+    )) as {
+      builtInDataRegistry: {
+        catalog(): { capabilities: Array<{ capabilityId: string }> };
+      };
+    };
+    assert.deepEqual(
+      builtins.builtInDataRegistry.catalog().capabilities.map((item) => item.capabilityId),
+      ["airnow.hourly-observations", "federal-register.documents"],
+    );
   });
 });

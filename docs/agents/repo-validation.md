@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-08-30
-lastReviewedCommit: 97cf02b1a9b215c7fd770cf8a1c00a3e85f5d86f
+lastReviewedCommit: 40396601e751ffecff4c51294e4056d4ac968a5e
 ---
 
 # Repo Validation
@@ -59,6 +59,16 @@ redaction, pagination/partial results, stable errors, receipt binding, and npm
 package discovery of the published schemas. Provider live tests remain
 explicit opt-ins; ordinary and clean-container CI use privacy-safe fixtures and
 synthetic connectors only.
+
+`test/data-airnow-connector.test.ts` reconstructs the official HourlyAQObs CSV
+shape and proves multi-file planning, filters, header/value handling, partial
+file coverage, source lineage, and preliminary-use restrictions.
+`test/data-federal-register-connector.test.ts` uses metadata-only JSON fixtures
+to prove stable filter encoding, pagination, empty results, record/page caps,
+provider metadata validation, and preservation of earlier pages after a later
+failure. Fixture provenance notes live beside the fixtures under
+`test/fixtures/data/**`; no provider response, credential, or user data is
+checked in.
 
 Target the foundation during iteration with
 `node --import tsx --test test/data-*.test.ts`. The ordinary `npm test` and
