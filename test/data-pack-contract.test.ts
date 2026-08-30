@@ -48,6 +48,8 @@ describe("data package contract", () => {
       "data/connectors/open-meteo-historical-weather.schemas.js",
       "data/connectors/openaq-air-quality.js",
       "data/connectors/openaq-air-quality.schemas.js",
+      "data/connectors/regulations-gov-comments.js",
+      "data/connectors/regulations-gov-comments.schemas.js",
       "data/connectors/usgs-water-instantaneous-values.js",
       "data/connectors/usgs-water-instantaneous-values.schemas.js",
       "data/runtime/csv.js",
@@ -72,6 +74,7 @@ describe("data package contract", () => {
         "open-meteo.flood",
         "open-meteo.historical-weather",
         "openaq.air-quality",
+        "regulations-gov.comments",
         "usgs.water-instantaneous-values",
       ],
     );

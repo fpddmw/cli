@@ -286,6 +286,26 @@ runtime primitive。
 状态：CLI connector 已完成；对应 Skill 瘦身和双 operation 候选 binding 正在迁移，
 正式 binding 等待包含全部 connector 的精确 npm 版本发布。
 
+### 后续迁移 7：Regulations.gov Comments
+
+- 新增 `regulations-gov.comments/search` 与 `fetch-details` 两个只读 operation；前者要求
+  posted 或 last-modified 二选一的最长 366 天窗口并使用稳定排序，后者只接受最多 100
+  个显式 comment ID，可选择返回 attachment metadata，但不下载文件。
+- 两个 operation 统一要求逻辑 `api-key`，runtime 只通过 `X-Api-Key` header 注入
+  `REGGOV_API_KEY`；provider 分页限制为 20 页/5000 条，详情按 caller 顺序逐 ID 执行，
+  后续页或部分 ID 失败保留已验证结果并返回明确 partial。
+- 详情 normalization 采用 allowlist，只保留 comment/docket/document evidence、日期、
+  withdrawal/restriction、组织/政府机构上下文、duplicate count 和 attachment metadata；
+  不扩散姓名、邮箱、电话、地址、locality 等个人 profile 字段，自由文本仍按潜在个人和
+  不安全内容处理。
+- Discovery Metadata 明确 agency-configurable 字段、duplicate/mass-mail、withdrawn 和
+  自选择边界；不提供 post/submit/modify、attachment download、代表性公众意见、统计
+  sentiment 或法律判断。fixture 按官方 JSON:API 形状重建，不含 live provider 数据或
+  API key；connector、凭证防泄漏、双 operation conformance、catalog/static doctor 和
+  dist pack 合同均离线验证。
+
+状态：CLI connector 已完成；两个对应 Skill 的瘦身与候选 binding 正在迁移。
+
 ### 后续迁移 4：Open-Meteo Historical Weather
 
 - 新增 `open-meteo.historical-weather/fetch`，只使用公开 non-commercial archive

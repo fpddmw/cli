@@ -6,6 +6,7 @@ import { openMeteoAirQualityConnector } from "./connectors/open-meteo-air-qualit
 import { openMeteoFloodConnector } from "./connectors/open-meteo-flood.js";
 import { openMeteoHistoricalWeatherConnector } from "./connectors/open-meteo-historical-weather.js";
 import { openAqAirQualityConnector } from "./connectors/openaq-air-quality.js";
+import { regulationsGovCommentsConnector } from "./connectors/regulations-gov-comments.js";
 import { usgsWaterInstantaneousValuesConnector } from "./connectors/usgs-water-instantaneous-values.js";
 
 export const builtInDataRegistry = createDataRegistry([
@@ -16,5 +17,6 @@ export const builtInDataRegistry = createDataRegistry([
   openMeteoFloodConnector,
   openMeteoHistoricalWeatherConnector,
   openAqAirQualityConnector,
+  regulationsGovCommentsConnector,
   usgsWaterInstantaneousValuesConnector,
 ]);

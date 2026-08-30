@@ -103,14 +103,19 @@ The built-in capabilities are:
   discovers filtered OpenAQ v3 locations and retrieves a bounded raw, hourly,
   or daily series for one sensor. It preserves provider/license context but
   does not calculate AQI or make health or regulatory determinations.
+- `regulations-gov.comments` / `search` and `fetch-details`: searches bounded
+  Regulations.gov public-comment metadata and retrieves curated details for
+  explicit comment IDs. It omits named personal-profile fields, never submits
+  comments, and returns attachment metadata without downloading file bytes.
 - `usgs.water-instantaneous-values` / `fetch`: retrieves bounded legacy USGS
   WaterServices instantaneous observations while preserving site, parameter,
   qualifier, provisional status, and source lifecycle warnings.
 
 Six connectors are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
 CLI injects as a protected provider path segment; OpenAQ requires
-`OPENAQ_API_KEY`, which the CLI injects as an `X-API-Key` header. Neither secret
-is accepted in argv or input JSON. Exact input and output schemas,
+`OPENAQ_API_KEY`, and Regulations.gov requires `REGGOV_API_KEY`; the CLI injects
+the latter two as protected provider headers. No secret is accepted in argv or
+input JSON. Exact input and output schemas,
 endpoint scopes and limits are available through the execution manifest, while
 source notes, coverage, selection guidance and license restrictions are
 available in the discovery metadata returned by `data describe`; static

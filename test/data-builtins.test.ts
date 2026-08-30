@@ -31,6 +31,7 @@ describe("built-in data connectors", () => {
         "open-meteo.flood",
         "open-meteo.historical-weather",
         "openaq.air-quality",
+        "regulations-gov.comments",
         "usgs.water-instantaneous-values",
       ],
     );
@@ -53,10 +54,14 @@ describe("built-in data connectors", () => {
       "open-meteo.flood",
       "open-meteo.historical-weather",
       "openaq.air-quality",
+      "regulations-gov.comments",
       "usgs.water-instantaneous-values",
     ]) {
       const description = builtInDataRegistry.describe(capabilityId);
-      assert.equal(description?.operations.length, capabilityId === "openaq.air-quality" ? 2 : 1);
+      assert.equal(
+        description?.operations.length,
+        ["openaq.air-quality", "regulations-gov.comments"].includes(capabilityId) ? 2 : 1,
+      );
       const discovery = (
         builtInDataRegistry as unknown as {
           discovery(id: string):
@@ -84,9 +89,11 @@ describe("built-in data connectors", () => {
           throw new Error("offline doctor must not fetch");
         }) as typeof fetch,
       });
-      const requiresCredential = ["nasa-firms.active-fire", "openaq.air-quality"].includes(
-        capabilityId,
-      );
+      const requiresCredential = [
+        "nasa-firms.active-fire",
+        "openaq.air-quality",
+        "regulations-gov.comments",
+      ].includes(capabilityId);
       assert.equal(exitCode, requiresCredential ? 3 : 0);
       assert.equal(fetched, false);
       const doctor = JSON.parse(capture.stdout()) as {
@@ -104,6 +111,13 @@ describe("built-in data connectors", () => {
         );
       }
       if (capabilityId === "openaq.air-quality") {
+        assert.ok(
+          doctor.checks.some(
+            (check) => check.checkId === "credential:api-key" && check.status === "fail",
+          ),
+        );
+      }
+      if (capabilityId === "regulations-gov.comments") {
         assert.ok(
           doctor.checks.some(
             (check) => check.checkId === "credential:api-key" && check.status === "fail",

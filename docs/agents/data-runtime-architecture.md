@@ -232,8 +232,23 @@ aggregate 不可无方法混用，也不提供 AQI、健康或监管判断。接
 与 [rate limits](https://docs.openaq.org/using-the-api/rate-limits)，使用边界依据
 [OpenAQ terms](https://docs.openaq.org/about/terms)。
 
-八个 connector 的默认 static doctor 均完全离线，且互不导入业务函数。六个 connector
-无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY`、OpenAQ 从 `OPENAQ_API_KEY` 解析逻辑凭证，
+`regulations-gov.comments/search` 要求 posted 或 last-modified 二选一的最长 366 天窗口，
+按对应日期字段与 document ID 稳定排序，并可用 agency、comment-on ID 和 search term
+收窄；`fetch-details` 只接受最多 100 个显式 comment ID，可选择返回 attachment metadata，
+但不下载文件。两个 operation 共用 `REGGOV_API_KEY` 逻辑凭证。详情输出只保留评论证据、
+docket/document linkage、日期、withdrawal/restriction、组织/政府机构上下文和 duplicate
+计数，不扩散姓名、邮箱、电话、地址或 locality 等个人 profile 字段；自由文本仍须按可能
+包含个人或不安全内容处理。Discovery Metadata 明确跨 agency 字段与发布实践不一致，
+mass-mail、duplicate、withdrawn 与自选择机制使评论数量不能代表公众意见或统计 sentiment，
+并明确不提供 post/submit/modify、attachment download 或法律判断。接口、分页、字段和
+Eastern wall-clock last-modified filter 依据官方
+[Regulations.gov API 文档](https://open.gsa.gov/api/regulationsgov/) 与
+[v4 OpenAPI](https://open.gsa.gov/api/regulationsgov/v4/openapi.yaml)，共享限流依据
+[api.data.gov rate limits](https://api.data.gov/docs/rate-limits/)。
+
+九个 connector 的默认 static doctor 均完全离线，且互不导入业务函数。六个 connector
+无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY`、OpenAQ 从 `OPENAQ_API_KEY`、Regulations.gov
+从 `REGGOV_API_KEY` 解析逻辑凭证，
 缺失时离线报告 blocked。测试 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制
 的 live provider 响应或真实凭证。
 
