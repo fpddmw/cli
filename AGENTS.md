@@ -17,8 +17,8 @@ checkPaths:
   - .docpact/config.yaml
   - docs/agents/**
   - src/**
-lastReviewedAt: 2026-08-29
-lastReviewedCommit: ffebfa6f3e37c0b2d3a20a88dd348ed055501d27
+lastReviewedAt: 2026-08-30
+lastReviewedCommit: 7b7fc682698778edf5b77d69f0fa3f944e6da4a6
 ---
 
 # Tiangong AI CLI Contract
@@ -106,3 +106,8 @@ test, coverage, and pack checks before publishing.
   skill handoff boundaries.
 - Read `docs/agents/repo-validation.md` before changing package scripts,
   coverage thresholds, CI, or docpact configuration.
+- Read `docs/agents/data-runtime-architecture.md` before changing proposed
+  atomic data commands, connectors, machine schemas, receipts, credentials, or
+  the Skills/Research data boundary.
+- Read `docs/agents/data-runtime-implementation-plan.md` before starting or
+  sequencing the TypeScript 7 and atomic data migration work packages.

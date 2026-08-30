@@ -1,7 +1,7 @@
 version: 1
 layout: repo
-lastReviewedAt: "2026-08-29"
-lastReviewedCommit: "ffebfa6f3e37c0b2d3a20a88dd348ed055501d27"
+lastReviewedAt: "2026-08-30"
+lastReviewedCommit: "7b7fc682698778edf5b77d69f0fa3f944e6da4a6"
 
 catalog:
   repos:
@@ -12,6 +12,8 @@ catalog:
       workflowDocs:
         - docs/agents/repo-validation.md
         - docs/agents/repo-architecture.md
+        - docs/agents/data-runtime-architecture.md
+        - docs/agents/data-runtime-implementation-plan.md
         - README.md
       workspaceIntegrationRequired: true
 
@@ -52,6 +54,15 @@ ownership:
           - test/**
           - scripts/**
       ownerRepo: cli
+    - id: atomic-data-runtime
+      paths:
+        include:
+          - docs/agents/data-runtime-architecture.md
+          - docs/agents/data-runtime-implementation-plan.md
+          - src/data/**
+          - src/research/workspace/data-evidence-adapter.ts
+          - test/data-*.test.ts
+      ownerRepo: cli
 
 routing:
   intents:
@@ -81,6 +92,19 @@ routing:
         - README.md
         - .docpact/config.yaml
         - docs/agents/**
+    data-runtime:
+      paths:
+        - docs/agents/data-runtime-architecture.md
+        - docs/agents/data-runtime-implementation-plan.md
+        - src/data/**
+        - src/research/workspace/data-evidence-adapter.ts
+        - test/data-*.test.ts
+        - package.json
+        - package-lock.json
+        - tsconfig.json
+        - tsconfig.build.json
+        - Dockerfile.clean-test
+        - .github/workflows/**
 
 coverage:
   include:
@@ -117,6 +141,8 @@ docInventory:
     - .docpact/config.yaml
     - docs/agents/repo-validation.md
     - docs/agents/repo-architecture.md
+    - docs/agents/data-runtime-architecture.md
+    - docs/agents/data-runtime-implementation-plan.md
   exclude:
     - .git/**
     - .docpact/runs/**
@@ -204,3 +230,29 @@ rules:
       - path: docs/agents/repo-validation.md
         mode: review_or_update
     reason: Node baseline, quality gates, coverage, and CI define how CLI changes are validated.
+  - id: cli-data-runtime-contract
+    scope: repo
+    repo: cli
+    triggers:
+      - path: docs/agents/data-runtime-architecture.md
+        kind: proposed-data-architecture
+      - path: docs/agents/data-runtime-implementation-plan.md
+        kind: proposed-data-runbook
+      - path: src/data/**
+        kind: atomic-data-runtime
+      - path: src/research/workspace/data-evidence-adapter.ts
+        kind: research-data-adapter
+      - path: test/data-*.test.ts
+        kind: atomic-data-contract-test
+    requiredDocs:
+      - path: AGENTS.md
+        mode: review_or_update
+      - path: docs/agents/repo-architecture.md
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+      - path: docs/agents/data-runtime-architecture.md
+        mode: review_or_update
+      - path: docs/agents/data-runtime-implementation-plan.md
+        mode: review_or_update
+    reason: Atomic data commands, contracts, connectors, and Research adaptation must preserve one CLI-owned machine boundary.

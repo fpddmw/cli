@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-20
-lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
+lastReviewedAt: 2026-08-30
+lastReviewedCommit: 7b7fc682698778edf5b77d69f0fa3f944e6da4a6
 ---
 
 # Repo Architecture
@@ -191,6 +191,26 @@ storage writes, queueing, and document status transitions.
   and returns raw edge responses without normalizing them.
 - `scripts/**`: validation helpers.
 - `test/**`: Node test runner suites.
+
+## Proposed Atomic Data Runtime
+
+The proposed `tiangong-ai data ...` family is designed in
+`docs/agents/data-runtime-architecture.md`; its ordered delivery and cross-repo
+dependencies are in `docs/agents/data-runtime-implementation-plan.md`. Until
+the foundational contract is implemented and merged, these commands are not
+part of the current command surface.
+
+The CLI will own built-in connector manifests, closed input/output schemas,
+bounded HTTP and credential handling, stable errors, canonical digests, and
+core execution receipts under `src/data/**`. A standalone data operation will
+remain independent of Research project/stage state. Research will reuse the
+same TypeScript service through one explicit adapter and will continue to own
+evidence admission, budgets, journals, persistence, and review.
+
+Skills will remain semantic entrypoints and exact compatibility bindings. They
+must not duplicate connector execution or machine schemas. The implementation
+baseline is Node 24 with TypeScript 7.x; the toolchain migration is a separate
+gate before data business logic.
 
 ## Bulk Ingest Boundary
 

@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-20
-lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
+lastReviewedAt: 2026-08-30
+lastReviewedCommit: 7b7fc682698778edf5b77d69f0fa3f944e6da4a6
 ---
 
 # Repo Validation
@@ -37,6 +37,25 @@ lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
 - Repository text checkout uses LF line endings through `.gitattributes`; this
   keeps Prettier behavior consistent across Linux, macOS, and Windows CI
   runners.
+
+## Proposed TypeScript 7 And Data Gates
+
+The atomic data implementation plan requires a TypeScript 7.x toolchain gate
+before any connector business logic. That migration remains proposed until its
+own reviewed change updates `package.json`, the lockfile, build configuration,
+and clean-container dependency inputs. Node stays on `>=24 <25`.
+
+The future data runtime must add a dedicated connector conformance gate rather
+than relying on the repository's aggregate coverage threshold. It must cover
+manifest and schema stability, canonical cross-platform digests, endpoint and
+redirect policy, bounded HTTP behavior, logical credential injection,
+redaction, pagination/partial results, stable errors, receipt binding, and npm
+package discovery of the published schemas. Provider live tests remain
+explicit opt-ins; ordinary and clean-container CI use privacy-safe fixtures and
+synthetic connectors only.
+
+The exact work-package sequence and completion criteria are authoritative in
+`docs/agents/data-runtime-implementation-plan.md`.
 
 ## Hosted CI Matrix
 
