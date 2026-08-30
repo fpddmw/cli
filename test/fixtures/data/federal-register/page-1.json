@@ -1,0 +1,52 @@
+{
+  "description": "Documents matching synthetic test filters",
+  "count": 3,
+  "total_pages": 2,
+  "next_page_url": "https://www.federalregister.gov/api/v1/documents?format=json&page=2",
+  "results": [
+    {
+      "title": "Synthetic Clean Air Test Rule",
+      "type": "Rule",
+      "abstract": "Metadata-only abstract for connector testing.",
+      "document_number": "2026-TEST01",
+      "html_url": "https://www.federalregister.gov/documents/2026/03/20/2026-TEST01/synthetic-clean-air-test-rule",
+      "pdf_url": "https://www.govinfo.gov/content/pkg/FR-2026-03-20/pdf/2026-TEST01.pdf",
+      "public_inspection_pdf_url": null,
+      "publication_date": "2026-03-20",
+      "effective_on": "2026-04-20",
+      "agencies": [
+        {
+          "id": 145,
+          "name": "Environmental Protection Agency",
+          "slug": "environmental-protection-agency"
+        }
+      ],
+      "topics": ["Air Pollution Control"],
+      "docket_ids": ["EPA-HQ-OAR-2024-0001"],
+      "regulation_id_numbers": ["2060-AV01"],
+      "significant": true
+    },
+    {
+      "title": "Synthetic Monitoring Notice",
+      "type": "Notice",
+      "abstract": null,
+      "document_number": "2026-TEST02",
+      "html_url": "https://www.federalregister.gov/documents/2026/03/19/2026-TEST02/synthetic-monitoring-notice",
+      "pdf_url": "https://www.govinfo.gov/content/pkg/FR-2026-03-19/pdf/2026-TEST02.pdf",
+      "public_inspection_pdf_url": null,
+      "publication_date": "2026-03-19",
+      "effective_on": null,
+      "agencies": [
+        {
+          "id": 145,
+          "name": "Environmental Protection Agency",
+          "slug": "environmental-protection-agency"
+        }
+      ],
+      "topics": ["Environmental Protection"],
+      "docket_ids": [],
+      "regulation_id_numbers": [],
+      "significant": false
+    }
+  ]
+}

@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-20
-lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
+lastReviewedAt: 2026-08-30
+lastReviewedCommit: 7523757200cc863dd07c882a41b0299b8bc712b1
 ---
 
 # Repo Validation
@@ -28,7 +28,8 @@ lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
 
 - Node: `>=24 <25`
 - Package manager: `npm`
-- Source: TypeScript
+- Source: TypeScript 7.0.2 native compiler (`typescript` range `^7.0.2`, exact
+  resolution locked by `package-lock.json`)
 - Stable launcher: `bin/tiangong-ai.js`
 - Research execution sandbox: macOS `sandbox-exec` or Linux Bubblewrap
 - Windows validates setup and deterministic logic in smoke-test mode, but
@@ -37,6 +38,48 @@ lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
 - Repository text checkout uses LF line endings through `.gitattributes`; this
   keeps Prettier behavior consistent across Linux, macOS, and Windows CI
   runners.
+
+## TypeScript 7 Baseline And Data Gates
+
+The TypeScript 7 toolchain gate is complete before connector business logic.
+The repository uses the native `tsc` from TypeScript 7.0.2, explicitly loads
+Node declarations through `types: ["node"]`, and does not import the compiler's
+programmatic API. Node stays on `>=24 <25`.
+
+Every hosted matrix row runs the full TypeScript check, and the clean-container
+gate runs it before coverage. This includes test sources, while the declaration
+build remains scoped to `src/**`. The migration fixed pre-existing test-only
+inference/nullability failures without changing runtime behavior.
+
+The data runtime has a dedicated connector conformance harness rather than
+relying only on the repository's aggregate coverage threshold. It covers
+execution-manifest, discovery-metadata and schema stability; proves that
+discovery-only wording changes do not alter execution bindings; and covers
+canonical cross-platform digests, endpoint and redirect policy, bounded HTTP
+behavior, logical credential injection, redaction, pagination/partial results,
+stable errors, receipt binding, and npm package discovery of the published
+schemas. Provider live tests remain explicit opt-ins; ordinary and
+clean-container CI use privacy-safe fixtures and synthetic connectors only.
+
+`test/data-airnow-connector.test.ts` reconstructs the official HourlyAQObs CSV
+shape and proves multi-file planning, filters, header/value handling, partial
+file coverage, source lineage, and preliminary-use restrictions.
+`test/data-federal-register-connector.test.ts` uses metadata-only JSON fixtures
+to prove stable filter encoding, pagination, empty results, record/page caps,
+provider metadata validation, and preservation of earlier pages after a later
+failure. Fixture provenance notes live beside the fixtures under
+`test/fixtures/data/**`; no provider response, credential, or user data is
+checked in.
+
+Target the foundation during iteration with
+`node --import tsx --test test/data-*.test.ts`. The ordinary `npm test` and
+coverage commands discover the same suites automatically. A build must emit all
+nine public contract files under `dist/data/schemas/`, including the independent
+discovery metadata contract; the package contract test compares those bytes
+with the runtime-loaded documents.
+
+The exact work-package sequence and completion criteria are authoritative in
+`docs/agents/data-runtime-implementation-plan.md`.
 
 ## Hosted CI Matrix
 
@@ -51,11 +94,12 @@ used by the reference workspace CLI:
 
 The runner label selects the actual GitHub-hosted architecture; the explicit
 `arch` value keeps job names and matrix intent auditable. Both Linux rows
-install Bubblewrap and smoke-test an unprivileged capsule. Every row runs lint,
-but each row runs the full test suite only once: Ubuntu x64 obtains that result
-through coverage, Ubuntu ARM runs `npm test`, and macOS/Windows run `npm test`
-plus the small pure `test:platform` contract. Coverage therefore runs only on
-Linux x64 and never follows a duplicate `npm test` in that job.
+install Bubblewrap and smoke-test an unprivileged capsule. Every row runs lint
+and the full TypeScript check, but each row runs the full runtime test suite only
+once: Ubuntu x64 obtains that result through coverage, Ubuntu ARM runs
+`npm test`, and macOS/Windows run `npm test` plus the small pure
+`test:platform` contract. Coverage therefore runs only on Linux x64 and never
+follows a duplicate `npm test` in that job.
 
 The pure platform contract models Windows drive letters, separators,
 case-insensitive containment and cross-drive paths plus the macOS `/var` to
@@ -75,6 +119,7 @@ Run before delivery:
 ```bash
 npm run test:clean:cold
 npm run lint
+npm run typecheck
 npm test
 npm run test:platform
 npm run test:coverage
@@ -86,7 +131,7 @@ docpact lint --root . --worktree --mode enforce
 `npm run test:clean` is the iterative red/green/refactor entrypoint. It builds
 from the digest-pinned Node 24 image, may reuse Docker layers whose declared
 inputs still match, copies only the `.dockerignore`-filtered checkout, and runs
-the full lint/coverage gate as a non-root user in a newly created,
+the full lint/typecheck/coverage gate as a non-root user in a newly created,
 runtime-offline container. Tests run after container creation and are never a
 build-cache result. Host tests cannot replace this gate.
 

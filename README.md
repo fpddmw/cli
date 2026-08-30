@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-20
-lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
+lastReviewedAt: 2026-08-30
+lastReviewedCommit: 40396601e751ffecff4c51294e4056d4ac968a5e
 ---
 
 # Tiangong AI CLI
@@ -38,6 +38,59 @@ After installation, print the package version with either top-level flag:
 tiangong-ai --version
 tiangong-ai -v
 ```
+
+## Atomic Data Runtime
+
+Inspect the built-in, versioned data capability catalog without network access:
+
+```bash
+tiangong-ai data catalog --json
+tiangong-ai data describe <capability-id> --json
+tiangong-ai data doctor <capability-id> --json
+```
+
+Only explicit `doctor --live` and `run` operations may contact a provider. A
+run accepts one closed request envelope from a file or stdin:
+
+```bash
+tiangong-ai data run <capability-id> <operation-id> \
+  --input /absolute/path/to/request.json --json
+```
+
+The command-line capability and operation must match the versions in the input
+envelope. Credentials are never accepted in argv or input JSON. Each connector
+declares exact logical environment-variable bindings, HTTPS endpoint scopes,
+and execution limits in its execution manifest. Data commands deliberately do
+not load a cwd `.env` file.
+
+`data catalog` also returns a concise capability summary, what the capability
+provides and does not provide, operation summaries, and a separate discovery
+digest. `data describe` expands that layer with source ownership, coverage,
+granularity, selection hints, typical uses, official documentation, freshness,
+license restrictions, and operation descriptions. Narrative discovery changes
+do not change the execution manifest digest used for compatibility binding.
+Operation input schemas include field-level descriptions and examples.
+
+JSON exits are `0` for success, `2` for request/contract errors, `3` for a
+blocked execution, and `4` for an explicit partial result. Public machine
+schemas ship under `dist/data/schemas/`.
+
+The first built-in capabilities are:
+
+- `airnow.hourly-observations` / `fetch-hourly`: fetches official AirNow
+  `HourlyAQObs` files for a bounded UTC-hour window, bounding box, and pollutant
+  list. Results retain source-file lineage and always state that AirNow data are
+  preliminary and unsuitable as regulatory-grade AQS evidence.
+- `federal-register.documents` / `search`: searches bounded
+  FederalRegister.gov document metadata by publication date plus term, agency,
+  document type, topic, docket, or RIN filters. It does not follow result links,
+  fetch document full text, or provide legal interpretation.
+
+Both connectors are keyless. Their exact input and output schemas, endpoint
+scopes and limits are available through the execution manifest, while source
+notes, coverage, selection guidance and license restrictions are available in
+the discovery metadata returned by `data describe`; static `data doctor`
+remains offline.
 
 ## KB Ingest
 
@@ -1191,12 +1244,16 @@ transitions.
 ## Validation
 
 ```bash
+npm run test:clean:cold
 npm run lint
+npm run typecheck
 npm test
 npm run test:platform
 npm run test:coverage
 npm run audit:research-setup-pins
+npm pack --dry-run
 docpact validate-config --root . --strict
+docpact lint --root . --worktree --mode enforce
 ```
 
 ## Release

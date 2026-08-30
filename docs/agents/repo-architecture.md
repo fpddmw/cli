@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-20
-lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
+lastReviewedAt: 2026-08-30
+lastReviewedCommit: 7523757200cc863dd07c882a41b0299b8bc712b1
 ---
 
 # Repo Architecture
@@ -189,8 +189,50 @@ storage writes, queueing, and document status transitions.
   `/rest/v1` inputs; builds exact POST request plans with `Content-Type`,
   region, input path, and timeout milliseconds; masks credentials for dry-runs;
   and returns raw edge responses without normalizing them.
+- `src/data/**`: the versioned atomic data machine boundary. It owns the
+  immutable registry, public JSON Schemas, canonical digest and receipt rules,
+  strict command router, logical credential resolution, bounded HTTPS client,
+  stable error taxonomy, and connector execution/conformance contracts. Its
+  built-in registry currently ships AirNow hourly observations and Federal
+  Register document metadata as independent consumers of the same runtime.
 - `scripts/**`: validation helpers.
 - `test/**`: Node test runner suites.
+
+## Atomic Data Runtime
+
+The foundational `tiangong-ai data ...` family is implemented under
+`src/data/**` and designed in
+`docs/agents/data-runtime-architecture.md`; its ordered delivery and cross-repo
+dependencies are in `docs/agents/data-runtime-implementation-plan.md`.
+`catalog`, `describe`, and static `doctor` are offline; only explicit
+`doctor --live` and `run` may call a provider. `data` routing occurs before the
+legacy cwd dotenv loader, so credentials come only from the exact environment
+variables declared by a manifest.
+
+The CLI owns built-in execution manifests, discovery metadata, closed
+input/output schemas, bounded HTTP and credential handling, stable errors,
+canonical digests, and core execution receipts under `src/data/**`. Public
+contract schemas are emitted under `dist/data/schemas/`; operation schemas
+compile with their connector and are exposed by offline `data describe`.
+Execution manifests cover versions, endpoints, credentials, limits and schema
+bindings. Discovery metadata separately covers the external source, coverage,
+granularity, selection guidance, license, freshness and limitations, so prose
+changes do not invalidate execution bindings. A standalone data operation
+remains independent of Research project/stage state. Research will reuse the
+same TypeScript service through one explicit adapter and will continue to own
+evidence admission, budgets, journals, persistence, and review.
+
+Skills will remain semantic entrypoints and exact compatibility bindings. They
+must not duplicate connector execution or machine schemas. The implementation
+baseline is Node 24 with the native TypeScript 7.0.2 compiler; that toolchain
+gate is complete before data business logic begins.
+
+The first connector pair deliberately exercises different atomic shapes.
+AirNow plans one official hourly file per UTC hour and isolates missing or
+invalid files while retaining file lineage. Federal Register builds stable,
+bounded query parameters and paginates metadata without retrieving linked
+content. Neither connector imports the other, performs interpretation, or
+writes Research state.
 
 ## Bulk Ingest Boundary
 

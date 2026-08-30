@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.tiangong.ai/data/run-result.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "requestId",
+    "contract",
+    "data",
+    "summary",
+    "warnings",
+    "errors",
+    "receipt"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "tiangong.data.run-result.v1" },
+    "status": { "enum": ["success", "partial", "blocked"] },
+    "requestId": { "type": ["string", "null"] },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cliVersion",
+        "capabilityId",
+        "capabilityVersion",
+        "operationId",
+        "operationVersion",
+        "manifestDigest",
+        "inputSchema",
+        "outputSchema"
+      ],
+      "properties": {
+        "cliVersion": { "type": "string", "minLength": 1 },
+        "capabilityId": { "type": "string", "minLength": 1 },
+        "capabilityVersion": { "type": "string", "minLength": 1 },
+        "operationId": { "type": "string", "minLength": 1 },
+        "operationVersion": { "type": "string", "minLength": 1 },
+        "manifestDigest": { "$ref": "#/$defs/nullableDigest" },
+        "inputSchema": { "$ref": "#/$defs/nullableSchemaRef" },
+        "outputSchema": { "$ref": "#/$defs/nullableSchemaRef" }
+      }
+    },
+    "data": {},
+    "summary": {
+      "$ref": "https://schemas.tiangong.ai/data/core-receipt.v1.json#/$defs/summary"
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "errors": {
+      "type": "array",
+      "items": { "$ref": "https://schemas.tiangong.ai/data/error.v1.json#/$defs/error" }
+    },
+    "receipt": { "$ref": "https://schemas.tiangong.ai/data/core-receipt.v1.json" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "nullableDigest": {
+      "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }]
+    },
+    "schemaRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaId", "digest"],
+      "properties": {
+        "schemaId": { "type": "string", "minLength": 1 },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "nullableSchemaRef": {
+      "anyOf": [{ "$ref": "#/$defs/schemaRef" }, { "type": "null" }]
+    }
+  }
+}

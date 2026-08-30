@@ -545,7 +545,9 @@ async function postUnix(
 }
 
 async function firstLine(child: ChildProcess): Promise<string> {
-  if (!child.stdout || !child.stderr) throw new Error("sidecar stdio is unavailable");
+  const stdoutStream = child.stdout;
+  const stderrStream = child.stderr;
+  if (!stdoutStream || !stderrStream) throw new Error("sidecar stdio is unavailable");
   return new Promise<string>((resolvePromise, reject) => {
     let stdout = "";
     let stderr = "";
@@ -554,8 +556,8 @@ async function firstLine(child: ChildProcess): Promise<string> {
     }, 15_000);
     const cleanup = () => {
       clearTimeout(timeout);
-      child.stdout?.off("data", onStdout);
-      child.stderr?.off("data", onStderr);
+      stdoutStream.off("data", onStdout);
+      stderrStream.off("data", onStderr);
       child.off("exit", onExit);
     };
     const onStdout = (chunk: Buffer) => {
@@ -572,8 +574,8 @@ async function firstLine(child: ChildProcess): Promise<string> {
       cleanup();
       reject(new Error(`sidecar exited ${String(code)} before ready: ${stderr.slice(0, 500)}`));
     };
-    child.stdout.on("data", onStdout);
-    child.stderr.on("data", onStderr);
+    stdoutStream.on("data", onStdout);
+    stderrStream.on("data", onStderr);
     child.once("exit", onExit);
   });
 }

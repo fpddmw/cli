@@ -12,6 +12,7 @@ import {
   preparePublicationReview,
   submitPublicationReview,
   type PublicationReviewRole,
+  type PublicationSubmissionRole,
 } from "../src/research/workspace/publication-workflow.js";
 import type { PublicationAssessment } from "../src/research/workspace/publication.js";
 import { initializeProject, loadProject, saveProject } from "../src/research/workspace/projects.js";
@@ -935,7 +936,7 @@ async function publicationFixture(
   const manuscript = join(root, "final-manuscript.md");
   const supplement = join(root, "supplement.csv");
   const assessment = join(root, "publication-assessment.json");
-  const submissionFiles = [
+  const submissionFiles: Array<{ role: PublicationSubmissionRole; path: string }> = [
     { role: "cover-letter", path: join(root, "cover-letter.md") },
     { role: "title-page", path: join(root, "title-page.md") },
     { role: "reporting-checklist", path: join(root, "reporting-checklist.md") },

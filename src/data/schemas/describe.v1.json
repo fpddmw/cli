@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.tiangong.ai/data/describe.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "manifest", "discovery", "schemas"],
+  "properties": {
+    "schemaVersion": { "const": "tiangong.data.describe.v1" },
+    "manifest": { "$ref": "https://schemas.tiangong.ai/data/manifest.v1.json" },
+    "discovery": { "$ref": "https://schemas.tiangong.ai/data/discovery.v1.json" },
+    "schemas": {
+      "type": "object",
+      "minProperties": 2,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["$schema", "$id"],
+        "properties": {
+          "$schema": { "type": "string", "minLength": 1 },
+          "$id": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

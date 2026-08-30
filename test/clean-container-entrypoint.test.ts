@@ -113,6 +113,10 @@ describe("clean-container entrypoint", () => {
       packageJson.scripts["test:clean:cold"],
       "sh ./scripts/test-clean-container.sh --cold-build",
     );
+    assert.equal(
+      packageJson.scripts["test:container"],
+      "node ./scripts/assert-clean-container.mjs && npm run lint && npm run typecheck && npm run test:coverage",
+    );
     assert.match(qualityWorkflow, /run: npm run test:clean:cold/);
     assert.match(publishWorkflow, /run: npm run test:clean:cold/);
   });

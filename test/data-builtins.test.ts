@@ -1,0 +1,75 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+import { builtInDataRegistry } from "../src/data/builtins.js";
+import { runDataCommand } from "../src/data/commands.js";
+
+function captureIo() {
+  let stdout = "";
+  let stderr = "";
+  return {
+    io: {
+      env: {},
+      stdout: { write: (chunk: string) => void (stdout += chunk) },
+      stderr: { write: (chunk: string) => void (stderr += chunk) },
+    },
+    stdout: () => stdout,
+    stderr: () => stderr,
+  };
+}
+
+describe("built-in data connectors", () => {
+  it("publishes both first-batch capabilities in deterministic order", () => {
+    const capabilities = builtInDataRegistry.catalog().capabilities;
+    assert.deepEqual(
+      capabilities.map((item) => item.capabilityId),
+      ["airnow.hourly-observations", "federal-register.documents"],
+    );
+    for (const capability of capabilities) {
+      assert.equal(typeof capability.summary, "string");
+      assert.ok(capability.summary.length > 0);
+      assert.ok(Array.isArray(capability.provides));
+      assert.ok(capability.provides.length > 0);
+      assert.ok(Array.isArray(capability.doesNotProvide));
+      assert.match(String(capability.discoveryDigest), /^[a-f0-9]{64}$/);
+    }
+  });
+
+  it("describes and diagnoses each capability offline", async () => {
+    for (const capabilityId of ["airnow.hourly-observations", "federal-register.documents"]) {
+      const description = builtInDataRegistry.describe(capabilityId);
+      assert.equal(description?.operations.length, 1);
+      const discovery = (
+        builtInDataRegistry as unknown as {
+          discovery(id: string):
+            | {
+                summary: string;
+                provides: string[];
+                doesNotProvide: string[];
+                sourceDocumentation: Array<{ title: string; url: string }>;
+                discoveryDigest: string;
+              }
+            | undefined;
+        }
+      ).discovery(capabilityId);
+      assert.ok(discovery);
+      assert.ok(discovery.summary.length > 0);
+      assert.ok(discovery.provides.length > 0);
+      assert.ok(discovery.doesNotProvide.length > 0);
+      assert.ok(discovery.sourceDocumentation.length > 0);
+      assert.match(discovery.discoveryDigest, /^[a-f0-9]{64}$/);
+      let fetched = false;
+      const capture = captureIo();
+      const exitCode = await runDataCommand(["doctor", capabilityId, "--json"], capture.io, {
+        fetchImpl: (async () => {
+          fetched = true;
+          throw new Error("offline doctor must not fetch");
+        }) as typeof fetch,
+      });
+      assert.equal(exitCode, 0);
+      assert.equal(fetched, false);
+      assert.equal(JSON.parse(capture.stdout()).networkAttempted, false);
+      assert.equal(capture.stderr(), "");
+    }
+  });
+});

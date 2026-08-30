@@ -17,8 +17,8 @@ checkPaths:
   - .docpact/config.yaml
   - docs/agents/**
   - src/**
-lastReviewedAt: 2026-08-29
-lastReviewedCommit: ffebfa6f3e37c0b2d3a20a88dd348ed055501d27
+lastReviewedAt: 2026-08-30
+lastReviewedCommit: 7523757200cc863dd07c882a41b0299b8bc712b1
 ---
 
 # Tiangong AI CLI Contract
@@ -40,6 +40,10 @@ This repository owns the Tiangong AI command-line interface.
 
 - `tiangong-ai --version`
 - `tiangong-ai doctor`
+- `tiangong-ai data catalog`
+- `tiangong-ai data describe`
+- `tiangong-ai data doctor`
+- `tiangong-ai data run`
 - `tiangong-ai kb ingest`
 - `tiangong-ai kb ingest bulk`
 - `tiangong-ai kb ingest jobs`
@@ -61,6 +65,14 @@ This repository owns the Tiangong AI command-line interface.
 - `tiangong-ai research search`
 - `tiangong-ai education search`
 
+The built-in atomic data catalog currently contains
+`airnow.hourly-observations/fetch-hourly` and
+`federal-register.documents/search`. Connector execution, normalization,
+schemas, provider limits, and source/license restrictions belong under
+`src/data/**`. The execution manifest digest is deliberately separate from the
+Agent-facing discovery metadata digest; Skills may bind to execution contracts
+but must not copy connector logic or treat discovery wording as runtime drift.
+
 ## Validation
 
 Run before delivery:
@@ -68,6 +80,7 @@ Run before delivery:
 ```bash
 npm run test:clean:cold
 npm run lint
+npm run typecheck
 npm run build
 npm test
 npm run test:platform
@@ -106,3 +119,8 @@ test, coverage, and pack checks before publishing.
   skill handoff boundaries.
 - Read `docs/agents/repo-validation.md` before changing package scripts,
   coverage thresholds, CI, or docpact configuration.
+- Read `docs/agents/data-runtime-architecture.md` before changing proposed
+  atomic data commands, connectors, machine schemas, receipts, credentials, or
+  the Skills/Research data boundary.
+- Read `docs/agents/data-runtime-implementation-plan.md` before starting or
+  sequencing the TypeScript 7 and atomic data migration work packages.

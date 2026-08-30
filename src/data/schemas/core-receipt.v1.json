@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.tiangong.ai/data/core-receipt.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "cliVersion",
+    "capabilityId",
+    "capabilityVersion",
+    "operationId",
+    "operationVersion",
+    "requestDigest",
+    "manifestDigest",
+    "inputSchemaDigest",
+    "outputSchemaDigest",
+    "inputDigest",
+    "aggregateResponseDigest",
+    "normalizedDataDigest",
+    "observations",
+    "completionStatus",
+    "summary",
+    "generatedAt",
+    "receiptDigest"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "tiangong.data.core-receipt.v1" },
+    "cliVersion": { "type": "string", "minLength": 1 },
+    "capabilityId": { "type": "string", "minLength": 1 },
+    "capabilityVersion": { "type": "string", "minLength": 1 },
+    "operationId": { "type": "string", "minLength": 1 },
+    "operationVersion": { "type": "string", "minLength": 1 },
+    "requestDigest": { "$ref": "#/$defs/digest" },
+    "manifestDigest": { "$ref": "#/$defs/nullableDigest" },
+    "inputSchemaDigest": { "$ref": "#/$defs/nullableDigest" },
+    "outputSchemaDigest": { "$ref": "#/$defs/nullableDigest" },
+    "inputDigest": { "$ref": "#/$defs/digest" },
+    "aggregateResponseDigest": { "$ref": "#/$defs/nullableDigest" },
+    "normalizedDataDigest": { "$ref": "#/$defs/nullableDigest" },
+    "observations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/observation" }
+    },
+    "completionStatus": { "enum": ["success", "partial", "blocked"] },
+    "summary": { "$ref": "#/$defs/summary" },
+    "generatedAt": { "type": "string", "minLength": 1 },
+    "receiptDigest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "nullableDigest": {
+      "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }]
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observationId",
+        "sourceId",
+        "endpointId",
+        "requestDigest",
+        "responseDigest",
+        "responseBytes",
+        "status",
+        "contentType",
+        "attempts"
+      ],
+      "properties": {
+        "observationId": { "type": "string", "minLength": 1 },
+        "sourceId": { "type": "string", "minLength": 1 },
+        "endpointId": { "type": "string", "minLength": 1 },
+        "requestDigest": { "$ref": "#/$defs/digest" },
+        "responseDigest": { "$ref": "#/$defs/digest" },
+        "responseBytes": { "type": "integer", "minimum": 0 },
+        "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "contentType": { "type": "string", "minLength": 1 },
+        "attempts": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "missing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "identifiers"],
+      "properties": {
+        "kind": { "enum": ["chunk", "field", "file", "page", "range"] },
+        "identifiers": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recordCount",
+        "pageCount",
+        "chunkCount",
+        "truncated",
+        "completeness"
+      ],
+      "properties": {
+        "recordCount": { "type": "integer", "minimum": 0 },
+        "pageCount": { "type": "integer", "minimum": 0 },
+        "chunkCount": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "completeness": { "enum": ["complete", "partial", "blocked"] },
+        "missing": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/missing" }
+        }
+      }
+    }
+  }
+}
