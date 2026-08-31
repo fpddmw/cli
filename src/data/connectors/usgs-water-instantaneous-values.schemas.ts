@@ -3,7 +3,8 @@ import type { JsonSchema } from "../contracts.js";
 const RFC3339_PATTERN =
   "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$";
 const UTC_SECOND_PATTERN = "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$";
-const PERIOD_PATTERN = "^P(?=.*\\d)(?:\\d+(?:\\.\\d+)?[YMWD])*(?:T(?:\\d+(?:\\.\\d+)?[HMS])*)?$";
+const PERIOD_PATTERN =
+  "^P(?=.*\\d)(?:\\d+(?:\\.\\d+)?Y)?(?:\\d+(?:\\.\\d+)?M)?(?:\\d+(?:\\.\\d+)?W)?(?:\\d+(?:\\.\\d+)?D)?(?:T(?=\\d)(?:\\d+(?:\\.\\d+)?H)?(?:\\d+(?:\\.\\d+)?M)?(?:\\d+(?:\\.\\d+)?S)?)?$";
 
 const BOUNDING_BOX_SCHEMA = {
   type: "object",
@@ -95,7 +96,7 @@ export const USGS_WATER_IV_INPUT_SCHEMA = {
       maxLength: 64,
       pattern: PERIOD_PATTERN,
       description:
-        "Positive ISO-8601 duration ending at the provider's most recent value. Use instead of an explicit start/end window.",
+        "Positive ISO-8601 duration ending at the provider's most recent value. Week notation cannot be mixed with other duration components. Use instead of an explicit start/end window.",
       examples: ["P1D", "PT2H"],
     },
     startDateTimeUtc: {

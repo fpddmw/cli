@@ -16,6 +16,8 @@ const MAX_TIME_SERIES = 500;
 const MAX_VALUES_PER_SERIES = 10_000;
 const MAX_VALIDATION_ISSUES = 50;
 const DEFAULT_PARAMETER_CODES = ["00060", "00065"] as const;
+const ISO_DURATION_PATTERN =
+  /^P(?:(\d+(?:\.\d+)?)Y)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)W)?(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/;
 
 type SiteStatus = "active" | "all" | "inactive";
 
@@ -152,7 +154,9 @@ export const usgsWaterInstantaneousValuesConnector: DataConnectorDefinition = {
   },
   limitations: [
     "This connector targets the legacy WaterServices Instantaneous Values endpoint, which USGS plans to decommission in the first quarter of 2027.",
+    "USGS warns that decommission preparation may include intentional service degradation or blackouts during the second half of 2026, so availability before final retirement is not guaranteed.",
     "The endpoint exposes USGS-served regular time-series parameters; it is not a station catalog, daily-values service, or statistical service.",
+    "Some operational data that are not quality assured, commonly including temperature and precipitation, can be limited by the responsible USGS water science center to 120 days or less.",
     "Bounding-box selection can omit sites whose coordinates are unavailable or not referenced as required by the legacy service.",
     "The connector does not interpret flood thresholds, return periods, hydrologic causes, or policy implications.",
   ],
@@ -178,7 +182,7 @@ export const usgsWaterInstantaneousValuesConnector: DataConnectorDefinition = {
     provides: [
       "Normalized site, location, parameter, unit, timestamp, value, qualifier, and provisional fields.",
       "Selection by at most 100 explicit site identifiers or one bounding box whose span product is at most 25 square degrees.",
-      "Selection by positive ISO-8601 period or an explicit RFC3339 start/end window.",
+      "Selection by one to eight five-digit parameter codes and a positive ISO-8601 period or explicit RFC3339 start/end window.",
       "Explicit partial status when isolated provider rows or series cannot be normalized.",
     ],
     doesNotProvide: [
@@ -286,6 +290,7 @@ async function executeUsgsWaterInstantaneousValues(
     warnings: [
       "USGS instantaneous values may be provisional; retain and evaluate provider qualifiers.",
       "USGS plans to decommission the legacy WaterServices API in the first quarter of 2027.",
+      "USGS has warned that decommission preparation may cause intentional degradation or blackouts during the second half of 2026.",
       ...(normalized.truncated
         ? ["The normalized observation set reached the requested record limit."]
         : []),
@@ -310,7 +315,7 @@ function normalizeInput(input: UsgsWaterInput): NormalizedUsgsWaterInput {
   const time = input.period
     ? {
         kind: "period" as const,
-        period: input.period.toUpperCase(),
+        period: normalizePositivePeriod(input.period),
         startDateTimeUtc: null,
         endDateTimeUtc: null,
       }
@@ -323,6 +328,25 @@ function normalizeInput(input: UsgsWaterInput): NormalizedUsgsWaterInput {
     siteStatus: input.siteStatus ?? "active",
     agencyCode: input.agencyCode ? input.agencyCode.toUpperCase() : null,
   };
+}
+
+function normalizePositivePeriod(value: string): string {
+  const normalized = value.toUpperCase();
+  const match = ISO_DURATION_PATTERN.exec(normalized);
+  const components = match?.slice(1).map((component) => Number(component ?? 0)) ?? [];
+  const week = components[2] ?? 0;
+  const hasNonWeekComponent = components.some((component, index) => index !== 2 && component > 0);
+  if (
+    !match ||
+    !components.some((component) => Number.isFinite(component) && component > 0) ||
+    (week > 0 && hasNonWeekComponent)
+  ) {
+    throw new DataRuntimeError(
+      "invalid-request",
+      "USGS period must be a positive ISO-8601 duration; week notation cannot be mixed with other duration components.",
+    );
+  }
+  return normalized;
 }
 
 function normalizeBoundingBox(box: BoundingBox): BoundingBox {

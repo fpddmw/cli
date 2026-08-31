@@ -208,6 +208,34 @@ describe("USGS WaterServices instantaneous-values connector", () => {
     }
   });
 
+  it("rejects non-positive and malformed ISO duration periods before fetch", async () => {
+    for (const period of ["P0D", "PT0S", "P1DT", "P1W1D", "P1WT2H"]) {
+      let fetched = false;
+      const result = await executeDataRun(request({ period }), {
+        registry: createDataRegistry([usgsWaterInstantaneousValuesConnector]),
+        environment: {},
+        fetchImpl: (async () => {
+          fetched = true;
+          throw new Error("must not fetch");
+        }) as typeof fetch,
+      });
+      assert.equal(result.status, "blocked", period);
+      assert.equal(result.errors[0]?.code, "invalid-request", period);
+      assert.equal(fetched, false, period);
+    }
+  });
+
+  it("publishes current legacy-service and operational-data limits", () => {
+    assert.ok(
+      usgsWaterInstantaneousValuesConnector.limitations.some((item) =>
+        /degradation|blackout/i.test(item),
+      ),
+    );
+    assert.ok(
+      usgsWaterInstantaneousValuesConnector.limitations.some((item) => /120 days/i.test(item)),
+    );
+  });
+
   it("blocks a malformed WaterML response envelope", async () => {
     const result = await executeDataRun(request(), {
       registry: createDataRegistry([usgsWaterInstantaneousValuesConnector]),
