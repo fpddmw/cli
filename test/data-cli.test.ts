@@ -46,6 +46,7 @@ describe("data CLI", () => {
         [
           "airnow.hourly-observations",
           "bluesky.public-posts",
+          "epa.eis-records",
           "federal-register.documents",
           "gdelt.doc-search",
           "gdelt.events",

@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: 77d6be1a86bfc33aa64c0f1ae91938e00c589948
+lastReviewedCommit: 34874c904badd06bba0a54250473ec8be11a52eb
 ---
 
 # 原子数据运行时实施计划
@@ -178,7 +178,7 @@ runtime primitive。
   smoke 使用隔离 HOME/project，不携带真实凭证。
 - CLI 正式版本发布后更新 exact binding，再合并 Skills PR。
 
-当前公共 `0.0.54` 不暴露 `data` 命令。完整十六项 capability 的本地发布候选统一使用
+当前公共 `0.0.54` 不暴露 `data` 命令。完整十七项 capability 的本地发布候选统一使用
 `0.0.55`，所有 capability manifest 的 `minimumCliVersion` 也设为 `0.0.55`，避免已发布
 但不兼容的旧版本通过 Skills 的最低版本检查。
 
@@ -381,6 +381,32 @@ runtime primitive。
 状态：CLI connector、对应薄 Skill 和双 operation 候选 binding 已在本地完成；当前正
 在收口全量 clean-container、docpact 和提交门禁，正式 binding 仍须等待包含全部迁移
 connector 的精确 npm 版本发布。
+
+### 后续迁移 11：EPA EIS Database Records
+
+- 新增 `epa.eis-records/search`，保留权威 EcoCouncil Skill 的 `lastWeek`、
+  `openComment`、`last60Issued`、`last30Published` 四种官方 common search；同时接受
+  调用者已在 EPA EIS Database UI 中构造的显式搜索 URL，但只允许
+  `https://cdxapps.epa.gov/cdx-enepa-II/public/action/eis/search` 的精确 origin/path，
+  拒绝凭证、custom port、fragment 和其他 host/path。
+- 用无第三方运行时依赖的有界 HTML tokenizer 识别 `submissionsTable` 与 page banner，
+  归一化 title、CEQ number、unique ID、document type、EPA comment-letter/Federal
+  Register dates、lead/cooperating agencies、state、detail URL、download links/IDs，并
+  按官方标识去重；链接只作为 availability cue 返回，不下载文件。
+- common search 先于 explicit URL、两组内部均保持 caller order。运行时 page/record cap
+  可继续收紧；到达上限不再发送下一请求，后续搜索失败保留已验证记录并返回 partial。
+  明确报告 0-item 页面；缺失目标表或 banner 宣称有记录但无可解析行时 fail closed，避免
+  把 provider HTML 漂移误报为真实空结果。
+- Discovery Metadata 说明结果页最多 500 条且搜索面可能稀疏或过期；该 capability 只
+  提供官方 metadata 和文档线索，不判断 NEPA/EIS adequacy、legal sufficiency、
+  environmental effects、agency compliance、policy responsibility 或 report conclusion。
+- fixture 完全为合成 HTML；先在新 clean container 中观察缺失 connector/schema 的有效
+  typecheck RED，再由 parser、安全 URL、limit/partial、0-result/markup-drift、conformance、
+  catalog 和 dist pack 测试转 GREEN。
+
+状态：CLI connector 已在本地实现并通过 499 项 clean-container；薄 Skill、候选 binding、
+`quick_validate.py` 与 thin-skill contract 已通过。统一 copy/symlink 安装 smoke 和两仓
+cold gate 等全部缺失项落地后在最终树执行，正式 binding 等待精确 CLI 发布版本。
 
 ### 内容、下载与持久化候选的边界审计
 

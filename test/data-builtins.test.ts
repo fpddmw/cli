@@ -26,6 +26,7 @@ describe("built-in data connectors", () => {
       [
         "airnow.hourly-observations",
         "bluesky.public-posts",
+        "epa.eis-records",
         "federal-register.documents",
         "gdelt.doc-search",
         "gdelt.events",
@@ -56,6 +57,7 @@ describe("built-in data connectors", () => {
     for (const capabilityId of [
       "airnow.hourly-observations",
       "bluesky.public-posts",
+      "epa.eis-records",
       "federal-register.documents",
       "gdelt.doc-search",
       "gdelt.events",

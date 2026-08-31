@@ -38,6 +38,8 @@ describe("data package contract", () => {
       "data/connectors/airnow-hourly-observations.schemas.js",
       "data/connectors/bluesky-public-posts.js",
       "data/connectors/bluesky-public-posts.schemas.js",
+      "data/connectors/epa-eis-records.js",
+      "data/connectors/epa-eis-records.schemas.js",
       "data/connectors/federal-register-documents.js",
       "data/connectors/federal-register-documents.schemas.js",
       "data/connectors/gdelt-doc-search.js",
@@ -79,6 +81,7 @@ describe("data package contract", () => {
       [
         "airnow.hourly-observations",
         "bluesky.public-posts",
+        "epa.eis-records",
         "federal-register.documents",
         "gdelt.doc-search",
         "gdelt.events",

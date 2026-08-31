@@ -1,6 +1,7 @@
 import { createDataRegistry } from "./catalog.js";
 import { airNowHourlyObservationsConnector } from "./connectors/airnow-hourly-observations.js";
 import { blueskyPublicPostsConnector } from "./connectors/bluesky-public-posts.js";
+import { epaEisRecordsConnector } from "./connectors/epa-eis-records.js";
 import { federalRegisterDocumentsConnector } from "./connectors/federal-register-documents.js";
 import { gdeltDocSearchConnector } from "./connectors/gdelt-doc-search.js";
 import {
@@ -21,6 +22,7 @@ import { youtubePublicContentConnector } from "./connectors/youtube-public-conte
 export const builtInDataRegistry = createDataRegistry([
   airNowHourlyObservationsConnector,
   blueskyPublicPostsConnector,
+  epaEisRecordsConnector,
   federalRegisterDocumentsConnector,
   gdeltDocSearchConnector,
   gdeltEventsConnector,

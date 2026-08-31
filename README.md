@@ -85,6 +85,10 @@ The built-in capabilities are:
   post seeds from search, an author feed, a custom feed, or a list feed and can
   flatten visible reply cascades. Ranking, counters, moderation visibility, and
   missing nodes remain explicit mutable AppView limitations.
+- `epa.eis-records` / `search`: retrieves bounded official EPA EIS Database
+  common-search or UI-created search pages and parses title, CEQ/provider IDs,
+  document type, dates, agencies, state, detail links, and document-availability
+  cues. It does not fetch or assess linked EIS documents.
 - `federal-register.documents` / `search`: searches bounded
   FederalRegister.gov document metadata by publication date plus term, agency,
   document type, topic, docket, or RIN filters. It does not follow result links,
@@ -133,7 +137,7 @@ The built-in capabilities are:
   comment/reply text for explicit video IDs. It does not download media or
   transcripts and does not treat ranking or comments as representative opinion.
 
-Twelve capabilities are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
+Thirteen capabilities are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
 CLI injects as a protected provider path segment; OpenAQ requires
 `OPENAQ_API_KEY`, Regulations.gov requires `REGGOV_API_KEY`, and YouTube requires
 `YOUTUBE_API_KEY`; the CLI injects all three as protected provider headers, with
