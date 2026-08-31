@@ -566,6 +566,16 @@ function parseFireChunk(
     };
   }
   const issues: string[] = [];
+  const duplicateHeaders = [
+    ...new Set(header.filter((name, index) => header.indexOf(name) !== index)),
+  ]
+    .filter((name) => name.length > 0)
+    .sort();
+  if (duplicateHeaders.length > 0) {
+    const message = `CSV header has duplicate columns: ${duplicateHeaders.join(", ")}.`;
+    collector.add(`chunks[${plan.chunkIndex}].header`, message);
+    addIssue(issues, message);
+  }
   const records: FireRecord[] = [];
   const rows = table.slice(1).filter(nonEmptyRow);
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {

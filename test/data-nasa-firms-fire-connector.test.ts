@@ -225,6 +225,36 @@ describe("NASA FIRMS active-fire connector", () => {
     ]);
   });
 
+  it("reports a duplicate provider header without discarding otherwise valid detections", async () => {
+    const lines = (await fixture("chunk-1.csv")).trimEnd().split("\n");
+    const duplicated = [
+      `${lines[0]},frp`,
+      ...lines.slice(1).map((line) => `${line},4.52`),
+      "",
+    ].join("\n");
+    const result = await executeDataRun(
+      request({ endDate: "2026-03-05", checkAvailability: false }),
+      {
+        registry: createDataRegistry([nasaFirmsFireConnector]),
+        environment: { NASA_FIRMS_MAP_KEY: MAP_KEY },
+        fetchImpl: (async () => csvResponse(duplicated)) as typeof fetch,
+      },
+    );
+
+    assert.equal(result.status, "partial");
+    assert.equal(result.summary.recordCount, 3);
+    assert.deepEqual(result.summary.missing, [
+      { kind: "field", identifiers: ["chunks[0].header"] },
+    ]);
+    assert.match(
+      String(
+        (result.data as { validation: { issues: Array<{ message: string }> } }).validation.issues[0]
+          ?.message,
+      ),
+      /duplicate columns: frp/,
+    );
+  });
+
   it("treats a header-only CSV as a complete no-results response", async () => {
     const header = (await fixture("chunk-1.csv")).split("\n", 1)[0] as string;
     const result = await executeDataRun(
