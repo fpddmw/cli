@@ -227,6 +227,50 @@ describe("Open-Meteo historical weather connector", () => {
     assert.equal(location?.daily.variables.length, 3);
   });
 
+  it("marks an incomplete GMT hourly axis as partial while preserving daily data", async () => {
+    const payload = await fixture();
+    const hourly = payload.hourly as Record<string, unknown[]>;
+    for (const field of ["time", "temperature_2m", "precipitation"]) hourly[field]?.pop();
+    const result = await executeDataRun(request(), {
+      registry: createDataRegistry([openMeteoHistoricalWeatherConnector]),
+      environment: {},
+      fetchImpl: (async () => jsonResponse(payload)) as typeof fetch,
+    });
+
+    assert.equal(result.status, "partial");
+    assert.equal(result.summary.recordCount, 24);
+    assert.deepEqual(result.summary.missing, [
+      { kind: "field", identifiers: ["$[0].hourly.time"] },
+    ]);
+    assert.deepEqual(
+      (
+        result.data as {
+          locations: Array<{ hourly: { timesUtc: string[] }; daily: { dates: string[] } }>;
+        }
+      ).locations[0]?.daily.dates,
+      ["2024-01-01"],
+    );
+  });
+
+  it("reports provider timezone drift instead of silently treating it as GMT", async () => {
+    const payload = await fixture();
+    payload.timezone = "Europe/Berlin";
+    payload.utc_offset_seconds = 3600;
+    const result = await executeDataRun(request(), {
+      registry: createDataRegistry([openMeteoHistoricalWeatherConnector]),
+      environment: {},
+      fetchImpl: (async () => jsonResponse(payload)) as typeof fetch,
+    });
+
+    assert.equal(result.status, "partial");
+    assert.deepEqual(result.summary.missing, [
+      {
+        kind: "field",
+        identifiers: ["$[0].timezone", "$[0].utc_offset_seconds"],
+      },
+    ]);
+  });
+
   it("rejects a normalized-but-impossible provider timestamp without discarding daily data", async () => {
     const payload = await fixture();
     (payload.hourly as { time: string[] }).time[23] = "2024-01-01T24:00";

@@ -477,20 +477,33 @@ function normalizeLocation(
         )
       : null;
 
+  const hasTimezone = typeof item.timezone === "string" && item.timezone.length > 0;
+  const timezone = hasTimezone ? (item.timezone as string) : "GMT";
+  if (!hasTimezone) {
+    collector.add(`${path}.timezone`, "Provider timezone metadata is missing.");
+  } else if (!["GMT", "UTC", "Etc/UTC"].includes(timezone)) {
+    collector.add(`${path}.timezone`, "Provider timezone must remain GMT/UTC for this operation.");
+  }
+  const hasUtcOffset =
+    typeof item.utc_offset_seconds === "number" && Number.isInteger(item.utc_offset_seconds);
+  const utcOffsetSeconds = hasUtcOffset ? (item.utc_offset_seconds as number) : 0;
+  if (!hasUtcOffset) {
+    collector.add(`${path}.utc_offset_seconds`, "Provider UTC offset metadata must be an integer.");
+  } else if (utcOffsetSeconds !== 0) {
+    collector.add(`${path}.utc_offset_seconds`, "Provider UTC offset must be zero in GMT mode.");
+  }
+
   return {
     requestedLocationIndex: index,
     requestedLocation,
     gridLocation: { latitude, longitude },
     elevation: finiteNumber(item.elevation),
-    timezone: typeof item.timezone === "string" && item.timezone ? item.timezone : "GMT",
+    timezone,
     timezoneAbbreviation:
       typeof item.timezone_abbreviation === "string" && item.timezone_abbreviation
         ? item.timezone_abbreviation
         : "GMT",
-    utcOffsetSeconds:
-      typeof item.utc_offset_seconds === "number" && Number.isInteger(item.utc_offset_seconds)
-        ? item.utc_offset_seconds
-        : 0,
+    utcOffsetSeconds,
     hourly,
     daily,
   };
@@ -547,8 +560,11 @@ function normalizeTimes(
       `Expected ${expectedDailyCount} daily dates but received ${values.length}.`,
     );
   }
-  if (kind === "hourly" && values.length > expectedDailyCount * 24) {
-    collector.add(`${path}.time`, "Hourly time axis exceeds the bounded GMT date window.");
+  if (kind === "hourly" && values.length !== expectedDailyCount * 24) {
+    collector.add(
+      `${path}.time`,
+      `Expected ${expectedDailyCount * 24} GMT hours but received ${values.length}.`,
+    );
   }
   const times: string[] = [];
   let previous = "";
