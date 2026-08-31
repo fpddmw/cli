@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-30
-lastReviewedCommit: 7523757200cc863dd07c882a41b0299b8bc712b1
+lastReviewedAt: 2026-08-31
+lastReviewedCommit: 832e302cca46bc7fbf69b76a41c2e2429e0b74c2
 ---
 
 # Repo Architecture
@@ -355,7 +355,25 @@ commands whose request files contain logical IDs only. It records candidate
 judgments in bounded append-only batches instead of returning a source-sized
 JSON document. Native Web/Browser discovery remains visible as hashed activity
 and supplemental candidates; the same URL or DOI must be formalized through
-the broker before admission. Acquisition binds a completed network download to
+the broker before admission.
+
+A bounded Discover recovery is a distinct authoritative fork mode, not a
+partially inherited stage. Its immutable object names one completed ancestor
+ledger and the closest-prior-work role that remains open under the new design.
+The fork clones verified ledger and receipt history, preserves the ancestor
+Discover output under a separate inherited locator, and leaves the current
+Discover output absent until the recovery closes. Runtime route resolution then
+reduces authority to citation tracing from frozen candidate seeds. Broker access
+is limited to one-candidate identity formalization after a recorded trace, and
+the ledger requires the returned canonical URL or DOI to match that candidate.
+The new candidate becomes eligible only after an explicit role-bound admission.
+Once the frozen distinct-candidate floor is reached, later native activity and
+broker formalization fail closed. A novelty-defeating prior produces a
+design-review stop instead of a Discover closeout. The recovery object and its
+binding are hash-checked whenever the project is loaded, and the complete
+binding is included in the new generation's research-design review packet.
+
+Acquisition binds a completed network download to
 the exact selected file and download event before artifact registration,
 requires derived text to name its parent artifact, and lets that derivative
 inherit only the parent's canonical source URL instead of fabricating a second

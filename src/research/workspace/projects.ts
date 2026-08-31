@@ -10,12 +10,15 @@ import {
   recordArtifactDecomposition,
   registerEvidenceAtom,
 } from "./content-evidence.js";
-import { appendJournalEvent } from "./journal.js";
-import { cloneProjectEvidenceReceipts } from "./evidence.js";
+import { appendJournalEvent, readJournal } from "./journal.js";
+import { cloneProjectEvidenceReceipts, loadProjectEvidenceReceipts } from "./evidence.js";
 import {
   appendEvidenceLedgerEvent,
   cloneEvidenceLedger,
+  evidenceLedgerPath,
+  listEvidenceCandidates,
   registerProjectInputCandidates,
+  verifyEvidenceLedger,
 } from "./evidence-ledger.js";
 import { cloneProjectArtifactRecords } from "./artifacts.js";
 import {
@@ -26,6 +29,10 @@ import {
 import { projectInputsFromPlan, reverifyProjectInputPlan } from "./input-plan.js";
 import { evaluateProjectPreflight } from "./preflight.js";
 import {
+  assertDiscoveryRecoveryObjectBinding,
+  type VerifiedDiscoveryRecovery,
+} from "./discovery-recovery.js";
+import {
   evaluateScientificDesign,
   scientificDesignPolicyGaps,
   type VerifiedScientificDesign,
@@ -33,6 +40,7 @@ import {
 import { assertScientificDesignObjectBindings } from "./scientific-objects.js";
 import {
   ensureDirectory,
+  canonicalJson,
   fileRecord,
   fileSize,
   isObject,
@@ -47,6 +55,7 @@ import {
 import type {
   AgentKind,
   ProjectEvidenceRequirements,
+  DiscoveryRecoveryBinding,
   ProjectInput,
   ProjectInputTrustStatus,
   ResearchPolicyBinding,
@@ -297,6 +306,7 @@ export async function loadProject(root: string, projectId: string): Promise<Proj
     `Research project ${projectId}`,
   );
   validateProjectShape(project, projectId);
+  await assertDiscoveryRecoveryObjectBinding(root, project);
   return project;
 }
 
@@ -437,6 +447,7 @@ export async function forkProject(
       producerSessionId: string;
     };
   },
+  discoveryRecovery?: VerifiedDiscoveryRecovery,
 ): Promise<ProjectState> {
   validateProjectId(sourceProjectId);
   validateProjectId(targetProjectId);
@@ -462,6 +473,18 @@ export async function forkProject(
         code: "RESEARCH_SCIENTIFIC_DESIGN_REAPPROVAL_INVALID",
         exitCode: 2,
       });
+    }
+    if (discoveryRecovery && resumeThrough) {
+      throw new CliError(
+        "A bounded Discover recovery cannot also inherit completed stages through --resume-through.",
+        { code: "RESEARCH_DISCOVERY_RECOVERY_INVALID", exitCode: 2 },
+      );
+    }
+    if (discoveryRecovery && !scientificReapproval) {
+      throw new CliError(
+        "A bounded Discover recovery requires a target-specific approved policy and scientific design.",
+        { code: "RESEARCH_SCIENTIFIC_DESIGN_REAPPROVAL_REQUIRED", exitCode: 3 },
+      );
     }
     if (source.lineage.supersededBy) {
       throw new CliError(
@@ -502,6 +525,15 @@ export async function forkProject(
           scientificReapproval.publicationPolicy,
           scientificReapproval.scientificDesign,
         )
+      : null;
+    const discoveryRecoveryBinding = discoveryRecovery
+      ? await prepareDiscoveryRecoveryBinding({
+          root,
+          authoritativeSource: source,
+          targetProjectId,
+          targetDesign: scientificReapproval!.scientificDesign.design,
+          recovery: discoveryRecovery,
+        })
       : null;
     if (scientificReapproval) {
       await assertScientificDesignObjectBindings(
@@ -598,6 +630,7 @@ export async function forkProject(
       },
       publicationPolicy: targetPolicy,
       scientificDesign: targetScientificDesign,
+      discoveryRecovery: discoveryRecoveryBinding,
       packages,
       usage: {
         tokens: 0,
@@ -631,6 +664,12 @@ export async function forkProject(
           scientificReapproval.scientificDesign.design.contract,
         );
       }
+      if (discoveryRecoveryBinding && discoveryRecovery) {
+        await writeJsonAtomic(
+          join(workspacePaths(root).control, discoveryRecoveryBinding.objectLocator),
+          discoveryRecovery.contract,
+        );
+      }
       const inheritedOutputs: Array<{ path: string; sha256: string; bytes: number }> = [];
       const stageOutput: Record<string, string> = {
         discover: "outputs/evidence.json",
@@ -646,6 +685,32 @@ export async function forkProject(
         await ensureDirectory(dirname(destination));
         await cp(sourcePath, destination, { errorOnExist: true, force: false });
         inheritedOutputs.push(record);
+      }
+      if (discoveryRecoveryBinding) {
+        const recoverySourceRoot = join(
+          workspacePaths(root).projects,
+          discoveryRecoveryBinding.sourceProjectId,
+        );
+        const logicalPath = "outputs/inherited-discovery-evidence.json";
+        const destination = join(targetRoot, logicalPath);
+        await cp(join(recoverySourceRoot, "outputs", "evidence.json"), destination, {
+          errorOnExist: true,
+          force: false,
+        });
+        inheritedOutputs.push(await fileRecord(destination, logicalPath));
+        await cloneProjectEvidenceReceipts(
+          root,
+          discoveryRecoveryBinding.sourceProjectId,
+          targetProjectId,
+        );
+        await cloneEvidenceLedger(root, discoveryRecoveryBinding.sourceProjectId, targetProjectId);
+        await appendEvidenceLedgerEvent(root, targetProjectId, "discovery.recovery.started", {
+          contractSha256: discoveryRecoveryBinding.contractSha256,
+          sourceProjectId: discoveryRecoveryBinding.sourceProjectId,
+          sourceDiscoveryEvidenceSha256: discoveryRecoveryBinding.sourceDiscoveryEvidenceSha256,
+          sourceEvidenceLedgerHead: discoveryRecoveryBinding.sourceEvidenceLedgerHead,
+          sourceEvidenceReceiptsSha256: discoveryRecoveryBinding.sourceEvidenceReceiptsSha256,
+        });
       }
       if (inheritedStages.includes("discover")) {
         await cloneProjectEvidenceReceipts(root, sourceProjectId, targetProjectId);
@@ -760,6 +825,7 @@ export async function forkProject(
         scientificDesignSha256: targetScientificDesign?.designSha256 ?? null,
         scientificDesignProducerSessionSha256:
           targetScientificDesign?.producer.sessionSha256 ?? null,
+        discoveryRecovery: discoveryRecoveryBinding,
       });
       return project;
     } catch (error) {
@@ -1290,6 +1356,7 @@ function validateProjectShape(project: ProjectState, expectedId: string): void {
     !Array.isArray(project.inputs) ||
     !isEvidenceRequirements(project.evidenceRequirements) ||
     !isScientificDesignBinding(project.scientificDesign, expectedId) ||
+    !isDiscoveryRecoveryBinding(project.discoveryRecovery, expectedId) ||
     (Boolean(project.publicationPolicy) && project.scientificDesign === null) ||
     !Array.isArray(project.packages) ||
     !project.usage ||
@@ -1324,6 +1391,204 @@ function validateProjectShape(project: ProjectState, expectedId: string): void {
       exitCode: 2,
     });
   }
+}
+
+async function prepareDiscoveryRecoveryBinding(input: {
+  root: string;
+  authoritativeSource: ProjectState;
+  targetProjectId: string;
+  targetDesign: VerifiedScientificDesign;
+  recovery: VerifiedDiscoveryRecovery;
+}): Promise<DiscoveryRecoveryBinding> {
+  const contract = input.recovery.contract;
+  if (contract.projectId !== input.targetProjectId) {
+    throw discoveryRecoveryError("Discover recovery does not bind the target generation.");
+  }
+  const ancestorIds = new Set<string>();
+  let cursor: ProjectState | null = input.authoritativeSource;
+  while (cursor) {
+    if (ancestorIds.has(cursor.id)) {
+      throw discoveryRecoveryError("Project lineage contains a cycle.");
+    }
+    ancestorIds.add(cursor.id);
+    cursor = cursor.lineage.derivedFrom
+      ? await loadProject(input.root, cursor.lineage.derivedFrom)
+      : null;
+  }
+  if (!ancestorIds.has(contract.sourceProjectId)) {
+    throw discoveryRecoveryError(
+      "Discover recovery source must be the authoritative source generation or one of its ancestors.",
+    );
+  }
+  const recoverySource = await loadProject(input.root, contract.sourceProjectId);
+  if (
+    recoverySource.question !== input.authoritativeSource.question ||
+    canonicalJson(recoverySource.evidenceRequirements) !==
+      canonicalJson(input.authoritativeSource.evidenceRequirements)
+  ) {
+    throw discoveryRecoveryError(
+      "Discover recovery source does not match the authoritative question and evidence requirements.",
+    );
+  }
+  const discover = recoverySource.packages.find((workPackage) => workPackage.stage === "discover");
+  if (discover?.status !== "complete") {
+    throw discoveryRecoveryError(
+      "Discover recovery source does not have a completed Discover stage.",
+    );
+  }
+  const sourceEvidencePath = join(
+    workspacePaths(input.root).projects,
+    recoverySource.id,
+    "outputs",
+    "evidence.json",
+  );
+  const sourceDiscoveryEvidenceSha256 = await sha256File(sourceEvidencePath).catch(() => null);
+  if (!sourceDiscoveryEvidenceSha256) {
+    throw discoveryRecoveryError(
+      "Discover recovery source evidence output is missing or unreadable.",
+    );
+  }
+  const ledger = await verifyEvidenceLedger(input.root, recoverySource.id);
+  const receipts = await loadProjectEvidenceReceipts(input.root, recoverySource.id);
+  const sourceEvidenceReceiptsSha256 = sha256Text(
+    canonicalJson(
+      receipts
+        .map((receipt) => ({
+          attemptId: receipt.attemptId,
+          capabilityId: receipt.capabilityId,
+          sha256: receipt.sha256,
+          contextSha256: receipt.contextSha256,
+          locator: receipt.locator,
+          contextLocator: receipt.contextLocator,
+        }))
+        .sort((left, right) => left.attemptId.localeCompare(right.attemptId)),
+    ),
+  );
+  const candidates = new Set(
+    (await listEvidenceCandidates(input.root, recoverySource.id)).map((candidate) => candidate.id),
+  );
+  const latestDecisions = new Map<string, "admit" | "reject">();
+  for (const event of await readJournal(evidenceLedgerPath(input.root, recoverySource.id))) {
+    if (event.type === "candidate.assessed") {
+      if (event.payload.decision === "admit" || event.payload.decision === "reject") {
+        latestDecisions.set(String(event.payload.candidateId), event.payload.decision);
+      }
+    } else if (event.type === "candidate.admitted") {
+      latestDecisions.set(String(event.payload.candidateId), "admit");
+    } else if (event.type === "candidate.rejected") {
+      latestDecisions.set(String(event.payload.candidateId), "reject");
+    }
+  }
+  const inheritedIds = new Set([
+    ...contract.seedCandidateIds,
+    ...contract.inheritedEligibleCandidateIds,
+  ]);
+  const invalidCandidateIds = [...inheritedIds].filter(
+    (candidateId) => !candidates.has(candidateId) || latestDecisions.get(candidateId) !== "admit",
+  );
+  if (invalidCandidateIds.length) {
+    throw discoveryRecoveryError(
+      `Discover recovery refers to candidates that are not admitted in the source ledger: ${invalidCandidateIds.join(", ")}.`,
+    );
+  }
+  const design = input.targetDesign.contract;
+  const evidenceRole = design.evidenceRoles.find((role) => role.id === contract.evidenceRoleId);
+  if (!evidenceRole || !evidenceRole.required || evidenceRole.role !== "closest-prior-work") {
+    throw discoveryRecoveryError(
+      "Discover recovery evidenceRoleId must name the required closest-prior-work role.",
+    );
+  }
+  const routes = new Map(design.acquisitionPlan.routes.map((route) => [route.id, route]));
+  const invalidActiveRouteIds = contract.activeRouteIds.filter((routeId) => {
+    const route = routes.get(routeId);
+    return (
+      !route ||
+      route.executor !== "agent" ||
+      !["native-discovery", "authorized-browser"].includes(route.routeClass) ||
+      !route.evidenceRoleIds.includes(contract.evidenceRoleId)
+    );
+  });
+  const invalidFormalizationRouteIds = contract.formalizationRouteIds.filter((routeId) => {
+    const route = routes.get(routeId);
+    return (
+      !route ||
+      route.executor !== "agent" ||
+      route.routeClass !== "broker-capability" ||
+      !route.capabilityId ||
+      !route.evidenceRoleIds.includes(contract.evidenceRoleId)
+    );
+  });
+  if (invalidActiveRouteIds.length || invalidFormalizationRouteIds.length) {
+    throw discoveryRecoveryError(
+      "Discover recovery routes do not match the target design's citation-chase and broker-formalization contracts.",
+    );
+  }
+  return {
+    schemaVersion: 1,
+    contractSha256: input.recovery.sha256,
+    objectLocator: `projects/${input.targetProjectId}/discovery-recovery/objects/${input.recovery.sha256}.json`,
+    sourceProjectId: contract.sourceProjectId,
+    sourceDiscoveryEvidenceSha256,
+    sourceEvidenceLedgerHead: ledger.head,
+    sourceEvidenceReceiptsSha256,
+    evidenceRoleId: contract.evidenceRoleId,
+    activeRouteIds: [...contract.activeRouteIds],
+    formalizationRouteIds: [...contract.formalizationRouteIds],
+    seedCandidateIds: [...contract.seedCandidateIds],
+    inheritedEligibleCandidateIds: [...contract.inheritedEligibleCandidateIds],
+    minimumDistinctCandidates: contract.minimumDistinctCandidates,
+    maxNativeCitationChaseActivities: contract.maxNativeCitationChaseActivities,
+    maxBrokerFormalizationCalls: contract.maxBrokerFormalizationCalls,
+    noveltyDefeatingPriorAction: contract.noveltyDefeatingPriorAction,
+  };
+}
+
+function isDiscoveryRecoveryBinding(value: unknown, projectId: string): boolean {
+  if (value === undefined || value === null) return true;
+  if (!isObject(value) || value.schemaVersion !== 1) return false;
+  return (
+    typeof value.contractSha256 === "string" &&
+    /^[a-f0-9]{64}$/.test(value.contractSha256) &&
+    value.objectLocator ===
+      `projects/${projectId}/discovery-recovery/objects/${value.contractSha256}.json` &&
+    typeof value.sourceProjectId === "string" &&
+    PROJECT_ID_PATTERN.test(value.sourceProjectId) &&
+    typeof value.sourceDiscoveryEvidenceSha256 === "string" &&
+    /^[a-f0-9]{64}$/.test(value.sourceDiscoveryEvidenceSha256) &&
+    typeof value.sourceEvidenceLedgerHead === "string" &&
+    /^[a-f0-9]{64}$/.test(value.sourceEvidenceLedgerHead) &&
+    typeof value.sourceEvidenceReceiptsSha256 === "string" &&
+    /^[a-f0-9]{64}$/.test(value.sourceEvidenceReceiptsSha256) &&
+    isIdentifier(value.evidenceRoleId) &&
+    identifierArray(value.activeRouteIds, 1, 20) &&
+    identifierArray(value.formalizationRouteIds, 1, 20) &&
+    identifierArray(value.seedCandidateIds, 1, 100) &&
+    identifierArray(value.inheritedEligibleCandidateIds, 1, 200) &&
+    Number.isInteger(value.minimumDistinctCandidates) &&
+    Number(value.minimumDistinctCandidates) > 1 &&
+    Number.isInteger(value.maxNativeCitationChaseActivities) &&
+    Number(value.maxNativeCitationChaseActivities) > 0 &&
+    Number.isInteger(value.maxBrokerFormalizationCalls) &&
+    Number(value.maxBrokerFormalizationCalls) > 0 &&
+    value.noveltyDefeatingPriorAction === "stop-and-return-to-design-review"
+  );
+}
+
+function identifierArray(value: unknown, minimum: number, maximum: number): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length >= minimum &&
+    value.length <= maximum &&
+    value.every(isIdentifier) &&
+    new Set(value).size === value.length
+  );
+}
+
+function discoveryRecoveryError(message: string): CliError {
+  return new CliError(message, {
+    code: "RESEARCH_DISCOVERY_RECOVERY_INVALID",
+    exitCode: 3,
+  });
 }
 
 function initialLineage(kind: ProjectState["lineage"]["kind"]): ProjectState["lineage"] {

@@ -28,6 +28,7 @@ import {
 } from "./storage.js";
 import type {
   AgentKind,
+  DiscoveryRecoveryBinding,
   ProjectState,
   ScientificReviewRole,
   ScientificGateStatus,
@@ -211,6 +212,7 @@ export interface ScientificReviewPacket {
     bindingSha256: string;
     objectLocator: string;
   };
+  discoveryRecovery: DiscoveryRecoveryBinding | null;
   reviewer: {
     agent: AgentKind;
     sessionSha256: string;
@@ -593,6 +595,7 @@ export async function prepareScientificReview(input: {
         objectLocator: project.scientificDesign.objectLocator,
       },
       policy: packetPolicy,
+      discoveryRecovery: project.discoveryRecovery ?? null,
       reviewer: { agent: input.reviewerAgent, sessionSha256: reviewerSessionSha256 },
       preparedAt: new Date().toISOString(),
       stageInputs,
@@ -624,7 +627,14 @@ export async function prepareScientificReview(input: {
         newGenerationOnMaterialChange: true as const,
         revisionReserveIncluded: true as const,
       },
-      instructions: reviewInstructions(input.role),
+      instructions: [
+        ...reviewInstructions(input.role),
+        ...(project.discoveryRecovery
+          ? [
+              "Judge the frozen Discover recovery as the current execution scope. Its inherited evidence remains the baseline. New candidates must descend from the named citation-chase routes, and broker routes can only formalize identities already recorded by those traces. Reaching the declared closest-work floor ends this generation's search authority.",
+            ]
+          : []),
+      ],
     };
     const packetSha256 = sha256Text(canonicalJson(packetCore));
     const packet: ScientificReviewPacket = { ...packetCore, packetSha256 };

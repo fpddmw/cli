@@ -91,6 +91,11 @@ const evidenceSourceSchema = {
       type: "array",
       items: { type: "string", pattern: IDENTIFIER },
     },
+    evidenceRoleIds: {
+      type: "array",
+      uniqueItems: true,
+      items: { type: "string", pattern: IDENTIFIER },
+    },
   },
 } as const;
 
@@ -164,7 +169,14 @@ const discoveryCloseoutSchema: JsonSchema = {
   $id: "https://schemas.tiangong.ai/research/discovery-closeout-v2.json",
   type: "object",
   additionalProperties: false,
-  required: ["schemaVersion", "limitations", "dimensionJudgments", "gaps"],
+  required: [
+    "schemaVersion",
+    "limitations",
+    "dimensionJudgments",
+    "gaps",
+    "recoveryDisposition",
+    "noveltyDefeatingCandidateIds",
+  ],
   properties: {
     schemaVersion: { type: "integer", const: 2 },
     limitations: { type: "array", items: { type: "string" } },
@@ -181,6 +193,16 @@ const discoveryCloseoutSchema: JsonSchema = {
       },
     },
     gaps: { type: "array", items: { type: "string" } },
+    recoveryDisposition: {
+      type: ["string", "null"],
+      enum: [null, "minimum-satisfied", "novelty-defeating-prior-found"],
+      description:
+        "Null outside bounded Discover recovery; otherwise the explicit recovery outcome.",
+    },
+    noveltyDefeatingCandidateIds: {
+      type: "array",
+      items: { type: "string", pattern: IDENTIFIER },
+    },
   },
 };
 
@@ -232,6 +254,11 @@ const discoveryAssessmentBatchSchema: JsonSchema = {
               applicability: nonEmptyString,
               coverageDimensions: {
                 type: "array",
+                items: { type: "string", pattern: IDENTIFIER },
+              },
+              evidenceRoleIds: {
+                type: "array",
+                uniqueItems: true,
                 items: { type: "string", pattern: IDENTIFIER },
               },
               limitations: { type: "array", items: { type: "string" } },
@@ -509,6 +536,10 @@ export function parseStructuredStageOutput(
   value = sanitizeResearchValue(value);
   if (!isObject(value)) {
     throw new StructuredOutputError(`${stage} output must be a JSON object.`);
+  }
+  if (stage === "discover") {
+    value.recoveryDisposition ??= null;
+    value.noveltyDefeatingCandidateIds ??= [];
   }
   const schema = schemaForStage(stage, reviewPacketSha256);
   const key = canonicalJson(schema);

@@ -42,6 +42,7 @@ export type EvidenceLedgerEventType =
   | "snapshot.frozen"
   | "claim.used"
   | "review.bound"
+  | "discovery.recovery.started"
   | "addendum.created"
   | "project.superseded";
 
@@ -182,6 +183,7 @@ export async function registerBrokerCandidates(input: {
   contextBytes: Uint8Array;
   selectedJsonPointer?: string | null;
   itemOffset?: number;
+  formalizeCandidateId?: string;
 }): Promise<EvidenceCandidate[]> {
   if (input.receipt.projectId !== input.projectId) {
     throw evidenceLedgerError("Broker receipt project does not match the evidence ledger.");
@@ -198,8 +200,44 @@ export async function registerBrokerCandidates(input: {
     return [];
   }
   const items = candidateItems(parsed, selectedJsonPointer, itemOffset);
-  if (!items.length) return [];
+  if (!items.length) {
+    if (input.formalizeCandidateId) {
+      throw evidenceLedgerError(
+        "Broker formalization did not return the bound native candidate identity.",
+      );
+    }
+    return [];
+  }
   const existing = await listEvidenceCandidates(input.root, input.projectId);
+  let formalizationTarget: EvidenceCandidate | null = null;
+  if (input.formalizeCandidateId) {
+    const expected = existing.find((candidate) => candidate.id === input.formalizeCandidateId);
+    if (!expected || !expected.occurrences.some((origin) => origin.kind === "native")) {
+      throw evidenceLedgerError(
+        "Broker formalization target must be an existing native discovery candidate.",
+      );
+    }
+    if (items.length !== 1) {
+      throw evidenceLedgerError("Broker formalization must return exactly one candidate identity.");
+    }
+    const formalized = candidateFromValue(items[0]!.value, {
+      kind: "broker",
+      receiptId: input.receipt.attemptId,
+      inputId: null,
+      capabilityId: input.receipt.capabilityId,
+      locator: input.receipt.locator,
+      jsonPointer: items[0]!.jsonPointer,
+      retrievedAt: input.receipt.retrievedAt,
+    });
+    const sameUrl = Boolean(expected.url && formalized.url && expected.url === formalized.url);
+    const sameDoi = Boolean(expected.doi && formalized.doi && expected.doi === formalized.doi);
+    if (!sameUrl && !sameDoi) {
+      throw evidenceLedgerError(
+        "Broker formalization returned a different canonical URL or DOI from its bound native candidate.",
+      );
+    }
+    formalizationTarget = expected;
+  }
   const byCanonicalKey = new Map(
     existing.map((candidate) => [candidate.canonicalKeySha256, candidate]),
   );
@@ -215,6 +253,19 @@ export async function registerBrokerCandidates(input: {
       retrievedAt: input.receipt.retrievedAt,
     };
     const candidate = candidateFromValue(item.value, occurrence);
+    if (formalizationTarget) {
+      await appendEvidenceLedgerEvent(input.root, input.projectId, "candidate.duplicate", {
+        candidateId: formalizationTarget.id,
+        canonicalKeySha256: formalizationTarget.canonicalKeySha256,
+        occurrence,
+      });
+      registered.push({
+        ...formalizationTarget,
+        origin: occurrence,
+        occurrences: [...formalizationTarget.occurrences, occurrence],
+      });
+      continue;
+    }
     const duplicate = byCanonicalKey.get(candidate.canonicalKeySha256);
     if (duplicate) {
       await appendEvidenceLedgerEvent(input.root, input.projectId, "candidate.duplicate", {

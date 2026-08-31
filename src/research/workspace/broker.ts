@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { resolveAgentAcquisitionRoute } from "./acquisition-routes.js";
+import { activeDiscoveryRecovery, inspectDiscoveryRecoveryFloor } from "./discovery-recovery.js";
 import { loadCapabilityDeclarations, verifyCapabilities } from "./capabilities.js";
 import { loadCapabilityCredentialMap } from "./credentials.js";
 import {
@@ -13,7 +14,11 @@ import {
   persistBrokerEvidence,
   storeBrokerEvidenceCache,
 } from "./evidence.js";
-import { registerBrokerCandidates } from "./evidence-ledger.js";
+import {
+  evidenceLedgerPath,
+  listEvidenceCandidates,
+  registerBrokerCandidates,
+} from "./evidence-ledger.js";
 import { deriveDiscoveryPlan } from "./discovery-planning.js";
 import { appendJournalEvent, readJournal } from "./journal.js";
 import { loadProject } from "./projects.js";
@@ -27,7 +32,7 @@ import {
   sha256Text,
   workspacePaths,
 } from "./storage.js";
-import type { CapabilityDeclaration } from "./types.js";
+import type { CapabilityDeclaration, DiscoveryRecoveryBinding } from "./types.js";
 import { loadWorkspaceConfig } from "./workspace.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -69,8 +74,12 @@ export async function fetchNativeCandidateSource(input: {
     });
   }
   const config = await loadWorkspaceConfig(input.root);
+  const recovery = activeDiscoveryRecovery(project);
   const priorCalls = (await readJournal(workspacePaths(input.root).journal)).filter(
-    (event) => event.scope === input.projectId && event.type === "capability.fetch.requested",
+    (event) =>
+      event.scope === input.projectId &&
+      event.type === "capability.fetch.requested" &&
+      (!recovery || event.payload.recoveryContractSha256 === recovery.contractSha256),
   ).length;
   const discoveryPlan = deriveDiscoveryPlan(
     project.evidenceRequirements,
@@ -89,20 +98,24 @@ export async function fetchNativeCandidateSource(input: {
     workspaceMaxItems: config.budget.maxBrokerItems,
     arguments: input.request,
     onBrokerRequest: () => {
-      if (priorCalls >= discoveryPlan.maxCalls)
-        throw brokerCallLimitError(discoveryPlan.maxCalls, priorCalls);
+      const maxCalls = recovery?.maxBrokerFormalizationCalls ?? discoveryPlan.maxCalls;
+      if (priorCalls >= maxCalls) throw brokerCallLimitError(maxCalls, priorCalls);
     },
   });
   const startedCalls = (await readJournal(workspacePaths(input.root).journal)).filter(
-    (event) => event.scope === input.projectId && event.type === "capability.fetch.requested",
+    (event) =>
+      event.scope === input.projectId &&
+      event.type === "capability.fetch.requested" &&
+      (!recovery || event.payload.recoveryContractSha256 === recovery.contractSha256),
   ).length;
+  const maxCalls = recovery?.maxBrokerFormalizationCalls ?? discoveryPlan.maxCalls;
   return {
     ...receipt,
     brokerBudget: {
-      maxCalls: discoveryPlan.maxCalls,
-      hardCallLimit: discoveryPlan.hardCallLimit,
+      maxCalls,
+      hardCallLimit: recovery?.maxBrokerFormalizationCalls ?? discoveryPlan.hardCallLimit,
       startedCalls,
-      remainingCalls: Math.max(0, discoveryPlan.maxCalls - startedCalls),
+      remainingCalls: Math.max(0, maxCalls - startedCalls),
     },
   };
 }
@@ -134,15 +147,21 @@ export async function startCapabilityBroker(
   const config = await loadWorkspaceConfig(root);
   const projectPath = join(workspacePaths(root).projects, projectId, "project.json");
   const project = (await pathExists(projectPath)) ? await loadProject(root, projectId) : null;
-  const maxCalls = project
-    ? deriveDiscoveryPlan(
-        project.evidenceRequirements,
-        config,
-        networkCapabilities.map((capability) => capability.id),
-      ).maxCalls
-    : config.budget.maxBrokerCalls;
+  const recovery = project ? activeDiscoveryRecovery(project) : null;
+  const maxCalls = recovery
+    ? recovery.maxBrokerFormalizationCalls
+    : project
+      ? deriveDiscoveryPlan(
+          project.evidenceRequirements,
+          config,
+          networkCapabilities.map((capability) => capability.id),
+        ).maxCalls
+      : config.budget.maxBrokerCalls;
   const priorCalls = (await readJournal(workspacePaths(root).journal)).filter(
-    (event) => event.scope === projectId && event.type === "capability.fetch.requested",
+    (event) =>
+      event.scope === projectId &&
+      event.type === "capability.fetch.requested" &&
+      (!recovery || event.payload.recoveryContractSha256 === recovery.contractSha256),
   ).length;
   const callBudget: BrokerCallBudget = {
     maxCalls,
@@ -165,6 +184,7 @@ export async function startCapabilityBroker(
       workspaceMaxItems: config.budget.maxBrokerItems,
       callBudget,
       requireAcquisitionRoute: Boolean(project?.scientificDesign),
+      discoveryRecovery: recovery,
     });
   });
   await new Promise<void>((resolvePromise, reject) => {
@@ -204,6 +224,7 @@ async function handleMcpRequest(input: {
   workspaceMaxItems: number;
   callBudget: BrokerCallBudget;
   requireAcquisitionRoute: boolean;
+  discoveryRecovery: DiscoveryRecoveryBinding | null;
 }): Promise<void> {
   try {
     if (input.request.method !== "POST" || input.request.url !== input.route) {
@@ -238,6 +259,7 @@ async function handleMcpRequest(input: {
               additionalProperties: false,
               required: [
                 ...(input.requireAcquisitionRoute ? ["acquisition_route_id"] : []),
+                ...(input.discoveryRecovery ? ["formalize_candidate_id", "max_items"] : []),
                 "capability_id",
                 "url",
               ],
@@ -248,6 +270,11 @@ async function handleMcpRequest(input: {
                     "Exact broker-capability route ID from the frozen scientific design. Required for scientific projects.",
                 },
                 capability_id: { type: "string" },
+                formalize_candidate_id: {
+                  type: "string",
+                  description:
+                    "Existing citation-chase candidate whose exact identity this bounded recovery call formalizes.",
+                },
                 credential_id: {
                   type: "string",
                   description:
@@ -261,7 +288,9 @@ async function handleMcpRequest(input: {
                 },
                 json_pointer: { type: "string" },
                 item_offset: { type: "integer", minimum: 0 },
-                max_items: { type: "integer", minimum: 1 },
+                max_items: input.discoveryRecovery
+                  ? { type: "integer", const: 1 }
+                  : { type: "integer", minimum: 1 },
                 cache_mode: {
                   enum: ["prefer", "bypass"],
                   description:
@@ -379,6 +408,7 @@ async function fetchCandidateSource(input: {
   const requestedItemOffset = input.arguments.item_offset ?? 0;
   const requestedMaxItems = input.arguments.max_items;
   const requestedCacheMode = input.arguments.cache_mode;
+  const requestedFormalizeCandidateId = input.arguments.formalize_candidate_id;
   if (typeof capabilityId !== "string" || typeof rawUrl !== "string") {
     throw new Error("capability_id and url are required strings");
   }
@@ -390,6 +420,12 @@ async function fetchCandidateSource(input: {
     typeof requestedAcquisitionRouteId !== "string"
   ) {
     throw new Error("acquisition_route_id must be a string when provided");
+  }
+  if (
+    requestedFormalizeCandidateId !== undefined &&
+    typeof requestedFormalizeCandidateId !== "string"
+  ) {
+    throw new Error("formalize_candidate_id must be a string when provided");
   }
   if (
     jsonPointer !== undefined &&
@@ -458,6 +494,31 @@ async function fetchCandidateSource(input: {
       })
     : null;
   const acquisitionRouteId = acquisitionRoute?.id ?? null;
+  const recovery = project ? activeDiscoveryRecovery(project) : null;
+  const formalizeCandidateId =
+    typeof requestedFormalizeCandidateId === "string" ? requestedFormalizeCandidateId : null;
+  if (recovery) {
+    if ((await inspectDiscoveryRecoveryFloor(input.root, project!)).minimumSatisfied) {
+      throw recoveryFormalizationError(
+        "The closest-work recovery floor is already satisfied; no further broker formalization is allowed.",
+      );
+    }
+    if (
+      !acquisitionRouteId ||
+      !recovery.formalizationRouteIds.includes(acquisitionRouteId) ||
+      !formalizeCandidateId ||
+      requestedMaxItems !== 1
+    ) {
+      throw recoveryFormalizationError(
+        "A bounded Discover recovery broker call must bind one formalization route, one existing candidate, and max_items=1.",
+      );
+    }
+    await assertRecoveryFormalizationTarget(input.root, project!, formalizeCandidateId);
+  } else if (formalizeCandidateId) {
+    throw recoveryFormalizationError(
+      "formalize_candidate_id is valid only during an active bounded Discover recovery.",
+    );
+  }
   let target: URL;
   let encodedRequestBody: string | null;
   try {
@@ -554,6 +615,8 @@ async function fetchCandidateSource(input: {
       requestBodySha256: encodedRequestBody ? sha256Text(encodedRequestBody) : null,
       cacheMode,
       cacheKeySha256,
+      recoveryContractSha256: recovery?.contractSha256 ?? null,
+      formalizeCandidateId,
     },
   );
   const projectReuse = await findProjectRequestReuse(
@@ -606,6 +669,7 @@ async function fetchCandidateSource(input: {
       contextBytes: context.bytes,
       selectedJsonPointer: context.selectedJsonPointer,
       itemOffset: context.offset,
+      ...(formalizeCandidateId ? { formalizeCandidateId } : {}),
     });
     await appendJournalEvent(
       workspacePaths(input.root).journal,
@@ -622,6 +686,8 @@ async function fetchCandidateSource(input: {
         contextOffset: context.offset,
         contextItems: context.items,
         candidateCount: candidates.length,
+        recoveryContractSha256: recovery?.contractSha256 ?? null,
+        formalizeCandidateId,
       },
     );
     await appendCompletedReceipt(
@@ -633,6 +699,9 @@ async function fetchCandidateSource(input: {
       false,
       "project",
       acquisitionRouteId,
+      recovery
+        ? { contractSha256: recovery.contractSha256, formalizeCandidateId: formalizeCandidateId! }
+        : null,
     );
     return brokerToolResult(
       receipt,
@@ -658,6 +727,8 @@ async function fetchCandidateSource(input: {
       requestBodySha256: encodedRequestBody ? sha256Text(encodedRequestBody) : null,
       cacheMode,
       cacheKeySha256,
+      recoveryContractSha256: recovery?.contractSha256 ?? null,
+      formalizeCandidateId,
     },
   );
   try {
@@ -707,6 +778,7 @@ async function fetchCandidateSource(input: {
           contextBytes: context.bytes,
           selectedJsonPointer: context.selectedJsonPointer,
           itemOffset: context.offset,
+          ...(formalizeCandidateId ? { formalizeCandidateId } : {}),
         });
         await appendCompletedReceipt(
           input.root,
@@ -717,6 +789,12 @@ async function fetchCandidateSource(input: {
           false,
           "workspace",
           acquisitionRouteId,
+          recovery
+            ? {
+                contractSha256: recovery.contractSha256,
+                formalizeCandidateId: formalizeCandidateId!,
+              }
+            : null,
         );
         return brokerToolResult(
           receipt,
@@ -891,6 +969,7 @@ async function fetchCandidateSource(input: {
       contextBytes: context.bytes,
       selectedJsonPointer: context.selectedJsonPointer,
       itemOffset: context.offset,
+      ...(formalizeCandidateId ? { formalizeCandidateId } : {}),
     });
     await appendCompletedReceipt(
       input.root,
@@ -901,6 +980,9 @@ async function fetchCandidateSource(input: {
       true,
       null,
       acquisitionRouteId,
+      recovery
+        ? { contractSha256: recovery.contractSha256, formalizeCandidateId: formalizeCandidateId! }
+        : null,
     );
     return brokerToolResult(
       receipt,
@@ -924,6 +1006,8 @@ async function fetchCandidateSource(input: {
         attemptId,
         projectId: input.projectId,
         acquisitionRouteId,
+        recoveryContractSha256: recovery?.contractSha256 ?? null,
+        formalizeCandidateId,
         capabilityId,
         credentialId: effectiveCredentialId,
         error: bounded(
@@ -1117,11 +1201,14 @@ async function appendCompletedReceipt(
   networkAttempted: boolean,
   reuseScope: "project" | "workspace" | null,
   acquisitionRouteId: string | null,
+  recovery: { contractSha256: string; formalizeCandidateId: string } | null,
 ): Promise<void> {
   await appendJournalEvent(workspacePaths(root).journal, "capability.fetch.completed", projectId, {
     attemptId: receipt.attemptId,
     projectId: receipt.projectId,
     acquisitionRouteId,
+    recoveryContractSha256: recovery?.contractSha256 ?? null,
+    formalizeCandidateId: recovery?.formalizeCandidateId ?? null,
     capabilityId: receipt.capabilityId,
     credentialId: receipt.credentialId,
     status: receipt.status,
@@ -1147,6 +1234,46 @@ async function appendCompletedReceipt(
     servedAt: receipt.servedAt,
     cacheHit: receipt.cacheHit,
     cacheKeySha256,
+  });
+}
+
+async function assertRecoveryFormalizationTarget(
+  root: string,
+  project: Awaited<ReturnType<typeof loadProject>>,
+  candidateId: string,
+): Promise<void> {
+  const recovery = activeDiscoveryRecovery(project);
+  if (!recovery) throw recoveryFormalizationError("Discover recovery is not active.");
+  const [candidate, activities] = await Promise.all([
+    listEvidenceCandidates(root, project.id).then((candidates) =>
+      candidates.find((item) => item.id === candidateId),
+    ),
+    readJournal(evidenceLedgerPath(root, project.id)),
+  ]);
+  if (!candidate || !candidate.occurrences.some((origin) => origin.kind === "native")) {
+    throw recoveryFormalizationError(
+      "Broker formalization target must be an existing native discovery candidate.",
+    );
+  }
+  const linkedToCitationChase = activities.some(
+    (event) =>
+      event.type === "activity.recorded" &&
+      event.payload.recoveryContractSha256 === recovery.contractSha256 &&
+      event.payload.status === "completed" &&
+      Array.isArray(event.payload.candidateIds) &&
+      event.payload.candidateIds.includes(candidateId),
+  );
+  if (!linkedToCitationChase) {
+    throw recoveryFormalizationError(
+      "Broker formalization target was not produced by a completed legal-seed citation chase.",
+    );
+  }
+}
+
+function recoveryFormalizationError(message: string): CliError {
+  return new CliError(message, {
+    code: "RESEARCH_DISCOVERY_RECOVERY_SCOPE_VIOLATION",
+    exitCode: 3,
   });
 }
 

@@ -3,6 +3,7 @@ import {
   readAndVerifyScientificDesign,
   type ScientificDesignContract,
 } from "./scientific-design.js";
+import { activeDiscoveryRecovery } from "./discovery-recovery.js";
 import { resolveContained, workspacePaths } from "./storage.js";
 import type { ProjectState } from "./types.js";
 
@@ -60,6 +61,24 @@ export async function resolveAgentAcquisitionRoute(input: {
     (input.downloadBackend !== undefined && !route.downloadBackends.includes(input.downloadBackend))
   ) {
     throw invalidRoute();
+  }
+  const recovery = activeDiscoveryRecovery(input.project);
+  if (recovery) {
+    const allowedRouteIds =
+      route.routeClass === "broker-capability"
+        ? recovery.formalizationRouteIds
+        : recovery.activeRouteIds;
+    if (!allowedRouteIds.includes(route.id)) {
+      throw new CliError("The active Discover recovery excludes this acquisition route.", {
+        code: "RESEARCH_DISCOVERY_RECOVERY_SCOPE_VIOLATION",
+        exitCode: 3,
+        details: {
+          routeId: route.id,
+          activeRouteIds: recovery.activeRouteIds,
+          formalizationRouteIds: recovery.formalizationRouteIds,
+        },
+      });
+    }
   }
   return route;
 }

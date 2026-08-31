@@ -35,6 +35,7 @@ import {
   registerEvidenceAtom,
 } from "./workspace/content-evidence.js";
 import { inspectDiscoveryProgress } from "./workspace/discovery-status.js";
+import { readAndVerifyDiscoveryRecovery } from "./workspace/discovery-recovery.js";
 import { inspectEvidenceAccessStatus } from "./workspace/evidence-exhaustion.js";
 import { recordDiscoveryAssessmentBatch } from "./workspace/discovery.js";
 import { bindEvidenceDownload } from "./workspace/downloads.js";
@@ -187,8 +188,8 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project init <project-id> --question <question> [--goal evidence-report|top-journal] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
   tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id> --design <absolute-json>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--trust-status verified-owner-input|unverified-owner-input|reference-only|replication-candidate] [--independently-reproduced] [--workspace <path>] [--json]
-  tiangong-ai research project retry <project-id> [--package <package-id>] [--workspace <path>] [--json]
-  tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|acquire|analyze|synthesize] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--workspace <path>] [--json]
+  tiangong-ai research project retry <project-id> [--package <package-id>] [--reopen-completed-acquisition] [--workspace <path>] [--json]
+  tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|acquire|analyze|synthesize | --discover-recovery <absolute-json>] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--workspace <path>] [--json]
   tiangong-ai research project addendum <closed-project-id> --to <target-project-id> [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--workspace <path>] [--json]
   tiangong-ai research project archive <project-id> --reason <text> [--workspace <path>] [--json]
   tiangong-ai research project abandon <project-id> --reason <text> [--workspace <path>] [--json]
@@ -1720,6 +1721,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         ...WORKSPACE_OPTIONS,
         to: "string",
         "resume-through": "string",
+        "discover-recovery": "string",
         design: "string",
         "design-producer-agent": "string",
         "design-producer-session": "string",
@@ -1740,6 +1742,13 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     const designPath = strictString(args, "design");
     const designProducerAgent = strictString(args, "design-producer-agent");
     const designProducerSession = strictString(args, "design-producer-session");
+    const discoveryRecoveryPath = strictString(args, "discover-recovery");
+    if (discoveryRecoveryPath && strictString(args, "resume-through")) {
+      throw new CliError(
+        "research project fork accepts either --resume-through or --discover-recovery, not both.",
+        { code: "RESEARCH_DISCOVERY_RECOVERY_INVALID", exitCode: 2 },
+      );
+    }
     if (
       source.publicationPolicy &&
       (!designPath || !designProducerAgent || !designProducerSession)
@@ -1769,6 +1778,9 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
               producerSessionId: designProducerSession,
             },
           }
+        : undefined,
+      discoveryRecoveryPath
+        ? await readAndVerifyDiscoveryRecovery(discoveryRecoveryPath, targetProjectId)
         : undefined,
     );
     writeJson(io, project, args);

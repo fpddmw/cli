@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-30
-lastReviewedCommit: 40396601e751ffecff4c51294e4056d4ac968a5e
+lastReviewedAt: 2026-08-31
+lastReviewedCommit: 832e302cca46bc7fbf69b76a41c2e2429e0b74c2
 ---
 
 # Tiangong AI CLI
@@ -1166,6 +1166,44 @@ target-specific scientific design must complete fresh evidence-construct and
 pilot-methods reviews before analysis. `research status --all` marks any legacy
 fork directory without a `project.forked` commit marker as
 `authority.state = "invalid"` rather than authoritative.
+
+A reviewed generation can instead reopen only a bounded closest-work inquiry:
+
+```bash
+tiangong-ai research project fork gpu-resource-impact \
+  --to gpu-resource-impact-v3 \
+  --discover-recovery /absolute/path/to/discover-recovery.json \
+  --design /absolute/path/to/gpu-resource-impact-v3-design.json \
+  --design-producer-agent codex \
+  --design-producer-session OPAQUE_NATIVE_SESSION \
+  --workspace /absolute/path/to/workspace --json
+```
+
+The recovery JSON is a closed, target-generation contract. It binds the new
+generation to a completed ancestor Discover ledger, then states why the
+`closest-prior-work` role remains open. Its legal citation seeds determine where
+the inquiry may begin, while the new scientific design supplies the only native
+and broker routes that remain usable. The inherited eligible candidate IDs form
+the baseline. The new floor and separate activity/call ceilings delimit the
+remaining work. The novelty response is fixed as
+`noveltyDefeatingPriorAction: "stop-and-return-to-design-review"`.
+`--discover-recovery` is mutually exclusive with `--resume-through` and requires
+target-specific Policy/design reapproval.
+
+The fork verifies and clones the ancestor evidence ledger and receipts, stores
+the former Discover output as `outputs/inherited-discovery-evidence.json`, and
+keeps the new Discover package ready for execution. Native activity must start
+from a frozen seed. A broker route can only attach identity provenance to one
+candidate already reached by that activity; matching the same canonical URL or
+DOI is required. The CLI prevents further activity or formalization once the
+floor is met. A novelty-defeating candidate stops closure and returns control
+to design review instead of allowing the producer to broaden the search.
+
+The completed-acquisition reopen is a narrow pre-analysis amendment path. It is
+available only while analysis has never started and the evidence-construct
+review remains pending. The existing acquisition snapshot stays immutable and
+becomes the parent of the next snapshot; the command does not reopen Policy or
+research-design approval.
 
 ## Research Search
 
