@@ -15,7 +15,7 @@ import {
 const ENDPOINT_PATH = "/v1/flood";
 const MAX_WINDOW_DAYS = 366;
 const MAX_VALIDATION_ISSUES = 50;
-const ENSEMBLE_MEMBER_PATTERN = /^river_discharge_member(\d{2})$/;
+const ENSEMBLE_MEMBER_PATTERN = /^river_discharge_member(\d+)$/;
 
 type FloodVariable = (typeof OPEN_METEO_FLOOD_VARIABLES)[number];
 type CellSelection = "land" | "nearest" | "sea";
@@ -457,20 +457,27 @@ function normalizeLocation(
 
   const ensembleMembers: NormalizedEnsembleMember[] = [];
   if (input.includeEnsembleMembers) {
-    const fields = Object.keys(daily)
-      .map((field) => ({ field, match: ENSEMBLE_MEMBER_PATTERN.exec(field) }))
-      .filter(
-        (candidate): candidate is { field: string; match: RegExpExecArray } =>
-          candidate.match !== null,
-      )
-      .sort((left, right) => Number(left.match[1]) - Number(right.match[1]));
+    const fields: Array<{ field: string; member: number }> = [];
+    for (const field of Object.keys(daily)) {
+      const match = ENSEMBLE_MEMBER_PATTERN.exec(field);
+      if (!match) continue;
+      const member = Number(match[1]);
+      if (!Number.isSafeInteger(member)) {
+        collector.add(`${path}.daily.${field}`, "Ensemble member suffix is not a safe integer.");
+        continue;
+      }
+      fields.push({ field, member });
+    }
+    fields.sort(
+      (left, right) => left.member - right.member || codePointOrder(left.field, right.field),
+    );
     if (fields.length === 0) {
       collector.add(
         `${path}.daily.river_discharge_memberNN`,
         "Ensemble members were requested but none were returned.",
       );
     }
-    for (const { field, match } of fields) {
+    for (const { field, member } of fields) {
       const normalized = normalizeSeries(
         daily[field],
         units[field],
@@ -481,7 +488,7 @@ function normalizeLocation(
       );
       if (normalized) {
         ensembleMembers.push({
-          member: Number(match[1]),
+          member,
           sourceField: field,
           ...normalized,
         });
@@ -489,20 +496,32 @@ function normalizeLocation(
     }
   }
 
+  const hasTimezone = typeof item.timezone === "string" && item.timezone.length > 0;
+  const timezone = hasTimezone ? (item.timezone as string) : "GMT";
+  if (!hasTimezone) {
+    collector.add(`${path}.timezone`, "Provider timezone metadata is missing.");
+  } else if (!["GMT", "UTC", "Etc/UTC"].includes(timezone)) {
+    collector.add(`${path}.timezone`, "Provider timezone must remain GMT/UTC for this operation.");
+  }
+  const hasUtcOffset =
+    typeof item.utc_offset_seconds === "number" && Number.isInteger(item.utc_offset_seconds);
+  const utcOffsetSeconds = hasUtcOffset ? (item.utc_offset_seconds as number) : 0;
+  if (!hasUtcOffset) {
+    collector.add(`${path}.utc_offset_seconds`, "Provider UTC offset metadata must be an integer.");
+  } else if (utcOffsetSeconds !== 0) {
+    collector.add(`${path}.utc_offset_seconds`, "Provider UTC offset must be zero in GMT mode.");
+  }
   return {
     requestedLocationIndex: index,
     requestedLocation,
     riverGridLocation: { latitude, longitude },
     elevation: finiteNumber(item.elevation),
-    timezone: typeof item.timezone === "string" && item.timezone ? item.timezone : "GMT",
+    timezone,
     timezoneAbbreviation:
       typeof item.timezone_abbreviation === "string" && item.timezone_abbreviation
         ? item.timezone_abbreviation
         : "GMT",
-    utcOffsetSeconds:
-      typeof item.utc_offset_seconds === "number" && Number.isInteger(item.utc_offset_seconds)
-        ? item.utc_offset_seconds
-        : 0,
+    utcOffsetSeconds,
     dates,
     variables,
     ensembleMembers,

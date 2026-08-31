@@ -154,6 +154,56 @@ describe("Open-Meteo flood connector", () => {
     );
   });
 
+  it("accepts source-compatible variable-width ensemble member suffixes", async () => {
+    const payload = await fixture();
+    const daily = payload.daily as Record<string, unknown>;
+    const units = payload.daily_units as Record<string, unknown>;
+    daily.river_discharge_member1 = daily.river_discharge_member01;
+    units.river_discharge_member1 = units.river_discharge_member01;
+    delete daily.river_discharge_member01;
+    delete units.river_discharge_member01;
+    const result = await executeDataRun(
+      request({ includeEnsembleMembers: true, dailyVariables: ["river_discharge"] }),
+      {
+        registry: createDataRegistry([openMeteoFloodConnector]),
+        environment: {},
+        fetchImpl: (async () => jsonResponse(payload)) as typeof fetch,
+      },
+    );
+
+    assert.equal(result.status, "success");
+    assert.deepEqual(
+      (
+        result.data as {
+          locations: Array<{ ensembleMembers: Array<{ member: number; sourceField: string }> }>;
+        }
+      ).locations[0]?.ensembleMembers.map(({ member, sourceField }) => ({ member, sourceField })),
+      [
+        { member: 1, sourceField: "river_discharge_member1" },
+        { member: 2, sourceField: "river_discharge_member02" },
+      ],
+    );
+  });
+
+  it("reports provider timezone drift instead of silently treating it as GMT", async () => {
+    const payload = await fixture();
+    payload.timezone = "Europe/Berlin";
+    payload.utc_offset_seconds = 3600;
+    const result = await executeDataRun(request(), {
+      registry: createDataRegistry([openMeteoFloodConnector]),
+      environment: {},
+      fetchImpl: (async () => jsonResponse(payload)) as typeof fetch,
+    });
+
+    assert.equal(result.status, "partial");
+    assert.deepEqual(result.summary.missing, [
+      {
+        kind: "field",
+        identifiers: ["$[0].timezone", "$[0].utc_offset_seconds"],
+      },
+    ]);
+  });
+
   it("rejects inverted, oversized, or semantically invalid requests before fetch", async () => {
     for (const input of [
       { startDate: "2026-03-04", endDate: "2026-03-03" },

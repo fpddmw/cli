@@ -225,8 +225,8 @@ export const OPEN_METEO_FLOOD_OUTPUT_SCHEMA = {
               additionalProperties: false,
               required: ["member", "sourceField", "unit", "values"],
               properties: {
-                member: { type: "integer", minimum: 0, maximum: 99 },
-                sourceField: { type: "string", pattern: "^river_discharge_member\\d{2}$" },
+                member: { type: "integer", minimum: 0, maximum: 9007199254740991 },
+                sourceField: { type: "string", pattern: "^river_discharge_member\\d+$" },
                 unit: { type: "string", minLength: 1 },
                 values: SERIES_VALUES,
               },
