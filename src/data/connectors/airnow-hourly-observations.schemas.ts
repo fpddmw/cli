@@ -107,7 +107,10 @@ const AIRNOW_RECORD_SCHEMA = {
     "sourceFile",
   ],
   properties: {
-    aqsid: { type: "string", minLength: 1 },
+    aqsid: {
+      type: "string",
+      description: "AirNow site identifier when supplied by the source row; otherwise empty.",
+    },
     siteName: { type: "string" },
     status: { type: "string" },
     epaRegion: { type: "string" },

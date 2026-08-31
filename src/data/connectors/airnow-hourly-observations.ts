@@ -493,7 +493,6 @@ function normalizeRow(
 ): { records: AirNowRecord[]; issues: string[] } {
   const issues: string[] = [];
   const aqsid = cleanText(row.AQSID);
-  if (!aqsid) return { records: [], issues: [`Row ${line} has no AQSID.`] };
   let latitude: number;
   let longitude: number;
   try {
@@ -514,9 +513,12 @@ function normalizeRow(
   ) {
     return { records: [], issues };
   }
-  const observedAtUtc = parseAirNowDateTime(row.ValidDate, row.ValidTime);
-  if (!observedAtUtc) {
-    return { records: [], issues: [`Row ${line} has an invalid ValidDate or ValidTime.`] };
+  const parsedObservedAtUtc = parseAirNowDateTime(row.ValidDate, row.ValidTime);
+  const observedAtUtc = parsedObservedAtUtc ?? file.hourUtc;
+  if (!parsedObservedAtUtc) {
+    issues.push(
+      `Row ${line} has an invalid ValidDate or ValidTime; used the source-file hour ${file.hourUtc}.`,
+    );
   }
   if (observedAtUtc < file.input.startDateTimeUtc || observedAtUtc > file.input.endDateTimeUtc) {
     return { records: [], issues };
@@ -524,42 +526,45 @@ function normalizeRow(
 
   const records: AirNowRecord[] = [];
   for (const parameter of file.input.parameters) {
-    try {
-      const rawConcentration = optionalNumber(row[parameter], parameter);
-      const aqiColumn = AQI_COLUMNS[parameter];
-      const measuredColumn = MEASURED_COLUMNS[parameter];
-      const aqiValue = aqiColumn ? optionalNumber(row[aqiColumn], aqiColumn) : null;
-      const measured = measuredColumn
-        ? optionalMeasured(row[measuredColumn], measuredColumn)
-        : null;
-      if (rawConcentration === null && aqiValue === null && measured === null) continue;
-      const unit = cleanText(row[`${parameter}_Unit`]) || null;
-      records.push({
-        aqsid,
-        siteName: cleanText(row.SiteName),
-        status: cleanText(row.Status),
-        epaRegion: cleanText(row.EPARegion),
-        latitude,
-        longitude,
-        countryCode: cleanText(row.CountryCode),
-        stateName: cleanText(row.StateName),
-        observedAtUtc,
-        dataSource: cleanText(row.DataSource),
-        reportingAreas: cleanText(row.ReportingArea_PipeDelimited)
-          .split("|")
-          .map((item) => item.trim())
-          .filter(Boolean),
-        parameterName: parameter,
-        aqiValue,
-        aqiKind: AQI_KINDS[parameter] ?? null,
-        rawConcentration,
-        unit,
-        measured,
-        sourceFile: file.sourceFile,
-      });
-    } catch {
-      issues.push(`Row ${line} has an invalid ${parameter} value.`);
-    }
+    const rawConcentration = tolerantOptionalNumber(
+      row[parameter],
+      parameter,
+      line,
+      issues,
+    );
+    const aqiColumn = AQI_COLUMNS[parameter];
+    const measuredColumn = MEASURED_COLUMNS[parameter];
+    const aqiValue = aqiColumn
+      ? tolerantOptionalNumber(row[aqiColumn], aqiColumn, line, issues)
+      : null;
+    const measured = measuredColumn
+      ? tolerantOptionalMeasured(row[measuredColumn], measuredColumn, line, issues)
+      : null;
+    if (rawConcentration === null && aqiValue === null && measured === null) continue;
+    const unit = cleanText(row[`${parameter}_Unit`]) || null;
+    records.push({
+      aqsid,
+      siteName: cleanText(row.SiteName),
+      status: cleanText(row.Status),
+      epaRegion: cleanText(row.EPARegion),
+      latitude,
+      longitude,
+      countryCode: cleanText(row.CountryCode),
+      stateName: cleanText(row.StateName),
+      observedAtUtc,
+      dataSource: cleanText(row.DataSource),
+      reportingAreas: cleanText(row.ReportingArea_PipeDelimited)
+        .split("|")
+        .map((item) => item.trim())
+        .filter(Boolean),
+      parameterName: parameter,
+      aqiValue,
+      aqiKind: AQI_KINDS[parameter] ?? null,
+      rawConcentration,
+      unit,
+      measured,
+      sourceFile: file.sourceFile,
+    });
   }
   return { records, issues };
 }
@@ -614,6 +619,34 @@ function optionalMeasured(value: string | undefined, field: string): boolean | n
   if (text === "0") return false;
   if (text === "1") return true;
   throw new Error(`${field} must be 0 or 1.`);
+}
+
+function tolerantOptionalNumber(
+  value: string | undefined,
+  field: string,
+  line: number,
+  issues: string[],
+): number | null {
+  try {
+    return optionalNumber(value, field);
+  } catch {
+    addIssue(issues, `Row ${line} has an invalid ${field} value; treated it as missing.`);
+    return null;
+  }
+}
+
+function tolerantOptionalMeasured(
+  value: string | undefined,
+  field: string,
+  line: number,
+  issues: string[],
+): boolean | null {
+  try {
+    return optionalMeasured(value, field);
+  } catch {
+    addIssue(issues, `Row ${line} has an invalid ${field} value; treated it as missing.`);
+    return null;
+  }
 }
 
 function cleanText(value: string | undefined): string {
