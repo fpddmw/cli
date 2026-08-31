@@ -65,7 +65,7 @@ This repository owns the Tiangong AI command-line interface.
 - `tiangong-ai research search`
 - `tiangong-ai education search`
 
-The built-in atomic data catalog currently contains 18 independently
+The built-in atomic data catalog currently contains 19 independently
 discoverable capabilities for public environmental, regulatory, news-event,
 social, video, and water-project data, including bounded USBR RISE and project
 record capabilities.
