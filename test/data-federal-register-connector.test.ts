@@ -77,15 +77,26 @@ describe("Federal Register documents connector", () => {
     const first = new URL(requestedUrls[0]!);
     assert.deepEqual(first.searchParams.getAll("fields[]"), [
       "abstract",
+      "action",
       "agencies",
+      "agency_names",
+      "body_html_url",
+      "citation",
+      "comments_close_on",
+      "dates",
+      "docket_id",
       "docket_ids",
       "document_number",
       "effective_on",
+      "full_text_xml_url",
       "html_url",
+      "json_url",
       "pdf_url",
       "public_inspection_pdf_url",
       "publication_date",
+      "raw_text_url",
       "regulation_id_numbers",
+      "regulations_dot_gov_url",
       "significant",
       "title",
       "topics",
@@ -207,15 +218,19 @@ describe("Federal Register documents connector", () => {
     assert.equal(result.summary.truncated, true);
   });
 
-  it("blocks malformed provider pagination metadata", async () => {
+  it("tolerates optional provider summary metadata that is absent or malformed", async () => {
     const result = await executeDataRun(request(), {
       registry: createDataRegistry([federalRegisterDocumentsConnector]),
       environment: {},
       fetchImpl: (async () => responseFor("invalid-metadata.json")) as typeof fetch,
     });
 
-    assert.equal(result.status, "blocked");
-    assert.equal(result.errors[0]?.code, "provider-response-invalid");
+    assert.equal(result.status, "success");
+    assert.deepEqual((result.data as { provider: unknown }).provider, {
+      description: "Invalid provider metadata",
+      count: null,
+      totalPages: 1,
+    });
   });
 
   it("preserves validated earlier pages when a later page fails", async () => {
@@ -242,30 +257,58 @@ describe("Federal Register documents connector", () => {
     );
   });
 
-  it("requires a publication bound and a narrowing filter", async () => {
-    let fetched = false;
+  it("supports a provider-wide newest listing within runtime page and record limits", async () => {
+    let requested: URL | undefined;
     const result = await executeDataRun(
-      request({
-        term: undefined,
-        publicationDate: {},
-        agencies: undefined,
-        documentTypes: undefined,
-        topics: undefined,
-        docketId: undefined,
-        regulationIdNumber: undefined,
-      }),
+      { ...request(), input: {} },
       {
         registry: createDataRegistry([federalRegisterDocumentsConnector]),
         environment: {},
-        fetchImpl: (async () => {
-          fetched = true;
-          throw new Error("must not fetch");
+        fetchImpl: (async (target) => {
+          requested = new URL(String(target));
+          return responseFor("empty.json");
         }) as typeof fetch,
       },
     );
 
-    assert.equal(result.status, "blocked");
-    assert.equal(result.errors[0]?.code, "invalid-request");
-    assert.equal(fetched, false);
+    assert.equal(result.status, "success");
+    assert.equal(result.summary.recordCount, 0);
+    assert.equal(
+      [...(requested?.searchParams.keys() ?? [])].some((key) => key.startsWith("conditions[")),
+      false,
+    );
+    assert.equal(requested?.searchParams.get("order"), "newest");
+  });
+
+  it("preserves sparse records and source-provided governance links", async () => {
+    const payload = {
+      description: "Sparse synthetic result",
+      count: 1,
+      total_pages: 1,
+      next_page_url: null,
+      results: [
+        {
+          citation: "91 FR 1234",
+          comments_close_on: "2026-04-30",
+          raw_text_url: "https://www.federalregister.gov/example.txt",
+          full_text_xml_url: "https://www.federalregister.gov/example.xml",
+          regulations_dot_gov_url: "https://www.regulations.gov/document/TEST-1",
+        },
+      ],
+    };
+    const result = await executeDataRun(request(), {
+      registry: createDataRegistry([federalRegisterDocumentsConnector]),
+      environment: {},
+      fetchImpl: (async () => Response.json(payload)) as typeof fetch,
+    });
+
+    assert.equal(result.status, "success");
+    const record = (result.data as { records: Array<Record<string, unknown>> }).records[0];
+    assert.equal(record?.documentNumber, "federal-register-0");
+    assert.equal(record?.title, "Federal Register document federal-register-0");
+    assert.equal(record?.publicationDate, "");
+    assert.equal(record?.citation, "91 FR 1234");
+    assert.equal(record?.commentsCloseOn, "2026-04-30");
+    assert.equal(record?.rawTextUrl, "https://www.federalregister.gov/example.txt");
   });
 });

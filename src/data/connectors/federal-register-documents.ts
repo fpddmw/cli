@@ -16,15 +16,26 @@ const DOCUMENTS_PATH = "/api/v1/documents.json";
 const DOCUMENTS_NEXT_PATHS = new Set([DOCUMENTS_PATH, "/api/v1/documents"]);
 const DOCUMENT_FIELDS = [
   "abstract",
+  "action",
   "agencies",
+  "agency_names",
+  "body_html_url",
+  "citation",
+  "comments_close_on",
+  "dates",
+  "docket_id",
   "docket_ids",
   "document_number",
   "effective_on",
+  "full_text_xml_url",
   "html_url",
+  "json_url",
   "pdf_url",
   "public_inspection_pdf_url",
   "publication_date",
+  "raw_text_url",
   "regulation_id_numbers",
+  "regulations_dot_gov_url",
   "significant",
   "title",
   "topics",
@@ -33,7 +44,7 @@ const DOCUMENT_FIELDS = [
 
 interface FederalRegisterInput {
   term?: string;
-  publicationDate: { from?: string; to?: string };
+  publicationDate?: { from?: string; to?: string };
   agencies?: string[];
   documentTypes?: string[];
   topics?: string[];
@@ -59,13 +70,22 @@ interface FederalRegisterRecord {
   title: string;
   type: string;
   abstract: string | null;
+  action: string | null;
   documentNumber: string;
   htmlUrl: string | null;
+  jsonUrl: string | null;
   pdfUrl: string | null;
   publicInspectionPdfUrl: string | null;
+  bodyHtmlUrl: string | null;
+  fullTextXmlUrl: string | null;
+  rawTextUrl: string | null;
+  regulationsGovUrl: string | null;
+  citation: string | null;
+  commentsCloseOn: string | null;
   publicationDate: string;
   effectiveOn: string | null;
   agencies: Array<{ id: number | null; name: string; slug: string }>;
+  agencyNames: string[];
   topics: string[];
   docketIds: string[];
   regulationIdNumbers: string[];
@@ -75,8 +95,8 @@ interface FederalRegisterRecord {
 
 interface ParsedProviderPage {
   description: string;
-  count: number;
-  totalPages: number;
+  count: number | null;
+  totalPages: number | null;
   nextPageUrl: string | null;
   rawRecordCount: number;
   records: FederalRegisterRecord[];
@@ -124,7 +144,8 @@ export const federalRegisterDocumentsConnector: DataConnectorDefinition = {
   diagnostics: { static: true, live: false },
   freshness: {
     kind: "provider-current",
-    description: "Search metadata reflects the FederalRegister.gov API at request time.",
+    description:
+      "Search or provider-wide listing metadata reflects the FederalRegister.gov API at request time.",
   },
   limitations: [
     "The connector does not fetch document body, raw text, XML, or linked PDF content.",
@@ -145,11 +166,11 @@ export const federalRegisterDocumentsConnector: DataConnectorDefinition = {
         granularity: "One published Federal Register document metadata record.",
       },
     },
-    summary: "Search bounded Federal Register document metadata by date and regulatory filters.",
+    summary: "Retrieve bounded Federal Register document metadata with optional filters.",
     description:
-      "This capability queries the FederalRegister.gov documents API with an explicit publication-date bound and at least one narrowing filter, then returns validated metadata under page and record limits.",
+      "This capability queries the FederalRegister.gov documents API with optional publication-date and regulatory filters, then returns metadata under explicit page and record limits.",
     provides: [
-      "Document titles, numbers, publication/effective dates, agencies, topics, dockets, and RIN metadata when available.",
+      "Document titles, numbers, publication/effective/comment dates, agencies, topics, dockets, RINs, citations, and provider-supplied content links when available.",
       "Bounded pagination with explicit empty, truncated, and later-page partial states.",
       "Links supplied in provider metadata for subsequent separately governed retrieval.",
     ],
@@ -162,6 +183,7 @@ export const federalRegisterDocumentsConnector: DataConnectorDefinition = {
       "Choose this capability to identify official notices, rules, proposed rules, or presidential documents and their publication metadata.",
       "Choose Regulations.gov for docket comments and attachments rather than Federal Register publication metadata.",
       "Use a separately reviewed content-retrieval workflow when full document text is required.",
+      "Omit filters only for a bounded newest-document listing; use term, agency, type, topic, docket, RIN, or date filters for evidence questions.",
     ],
     typicalUseCases: [
       "Find EPA rules published within a bounded quarter and capture their document numbers and dockets.",
@@ -183,9 +205,9 @@ export const federalRegisterDocumentsConnector: DataConnectorDefinition = {
       operationId: "search",
       operationVersion: "1.0.0",
       summary:
-        "Search bounded FederalRegister.gov document metadata by date and explicit narrowing filters.",
+        "Retrieve bounded FederalRegister.gov document metadata with optional narrowing filters.",
       description:
-        "Builds a stable provider query from publication dates and explicit narrowing filters, follows validated same-origin pagination, and emits metadata only within runtime page and record limits.",
+        "Builds a stable provider query from optional filters, follows validated same-origin pagination metadata, and emits metadata only within runtime page and record limits.",
       inputSchema: FEDERAL_REGISTER_INPUT_SCHEMA,
       outputSchema: FEDERAL_REGISTER_OUTPUT_SCHEMA,
       execute: executeFederalRegisterSearch,
@@ -200,7 +222,11 @@ async function executeFederalRegisterSearch(
   const records: FederalRegisterRecord[] = [];
   const pages: Array<{ pageNumber: number; recordCount: number }> = [];
   const observations: DataSourceObservation[] = [];
-  let provider: { description: string; count: number; totalPages: number } | null = null;
+  let provider: {
+    description: string;
+    count: number | null;
+    totalPages: number | null;
+  } | null = null;
   let stopReason: "completed" | "max-pages" | "max-records" | "no-results" | "partial" =
     "completed";
   let failedPage: number | null = null;
@@ -218,6 +244,7 @@ async function executeFederalRegisterSearch(
         response.json(),
         pageNumber,
         context.limits.maxRecords - records.length,
+        records.length,
       );
       validateProviderConsistency(provider, parsed);
       provider ??= {
@@ -325,35 +352,17 @@ function normalizeQuery(
   const topics = normalizeList(input.topics);
   const docketId = nullableText(input.docketId);
   const regulationIdNumber = nullableText(input.regulationIdNumber);
-  const from = input.publicationDate.from
-    ? parseExactDate(input.publicationDate.from, "publicationDate.from")
+  const publicationDate = input.publicationDate ?? {};
+  const from = publicationDate.from
+    ? parseExactDate(publicationDate.from, "publicationDate.from")
     : undefined;
-  const to = input.publicationDate.to
-    ? parseExactDate(input.publicationDate.to, "publicationDate.to")
+  const to = publicationDate.to
+    ? parseExactDate(publicationDate.to, "publicationDate.to")
     : undefined;
-  if (!from && !to) {
-    throw new DataRuntimeError(
-      "invalid-request",
-      "Federal Register search requires at least one publication-date bound.",
-    );
-  }
   if (from && to && from > to) {
     throw new DataRuntimeError(
       "invalid-request",
       "Federal Register publicationDate.from must not follow publicationDate.to.",
-    );
-  }
-  if (
-    !term &&
-    agencies.length === 0 &&
-    documentTypes.length === 0 &&
-    topics.length === 0 &&
-    !docketId &&
-    !regulationIdNumber
-  ) {
-    throw new DataRuntimeError(
-      "invalid-request",
-      "Federal Register search requires at least one narrowing filter.",
     );
   }
   const order = input.order ?? "newest";
@@ -409,12 +418,13 @@ function parseProviderPage(
   value: unknown,
   pageNumber: number,
   remainingRecords: number,
+  recordOffset: number,
 ): ParsedProviderPage {
   const payload = requireObject(value, "Federal Register response");
-  const description = requireString(payload.description, "description", true);
-  const count = requireNonNegativeInteger(payload.count, "count");
-  const totalPages = requireNonNegativeInteger(payload.total_pages, "total_pages");
-  if ((count === 0) !== (totalPages === 0)) {
+  const description = looseString(payload.description);
+  const count = optionalNonNegativeInteger(payload.count);
+  const totalPages = optionalNonNegativeInteger(payload.total_pages);
+  if (count !== null && totalPages !== null && (count === 0) !== (totalPages === 0)) {
     throw providerInvalid("Federal Register count and total_pages are inconsistent.");
   }
   if (!Array.isArray(payload.results)) {
@@ -422,12 +432,15 @@ function parseProviderPage(
   }
   const nextPageUrl = nullableProviderString(payload.next_page_url, "next_page_url");
   validateNextPageUrl(nextPageUrl, pageNumber, totalPages);
-  if (payload.results.length > count) {
+  if (count !== null && payload.results.length > count) {
     throw providerInvalid("Federal Register page records exceed the provider count.");
   }
   const records = payload.results
+    .filter(isRecord)
     .slice(0, remainingRecords)
-    .map((record, index) => normalizeProviderRecord(record, pageNumber, index));
+    .map((record, index) =>
+      normalizeProviderRecord(record, pageNumber, recordOffset + index),
+    );
   return {
     description,
     count,
@@ -439,85 +452,99 @@ function parseProviderPage(
 }
 
 function normalizeProviderRecord(
-  value: unknown,
+  record: Record<string, unknown>,
   pageNumber: number,
   index: number,
 ): FederalRegisterRecord {
-  const record = requireObject(value, `results[${index}]`);
-  const publicationDate = parseProviderDate(record.publication_date, "publication_date");
-  const effectiveOn =
-    record.effective_on === null || record.effective_on === undefined
-      ? null
-      : parseProviderDate(record.effective_on, "effective_on");
-  const agencies = requireArray(record.agencies, "agencies").map((agency, agencyIndex) => {
-    const item = requireObject(agency, `agencies[${agencyIndex}]`);
-    const name = nonBlankProviderString(item.name) ?? nonBlankProviderString(item.raw_name);
-    if (!name) {
-      throw providerInvalid(`agencies[${agencyIndex}].name must be a non-empty string.`);
-    }
-    return {
-      id:
-        item.id === null || item.id === undefined
-          ? null
-          : requireNonNegativeInteger(item.id, `agencies[${agencyIndex}].id`),
-      name,
-      slug: requireString(item.slug, `agencies[${agencyIndex}].slug`),
-    };
-  });
+  const documentNumber = looseString(record.document_number) || `federal-register-${index}`;
+  const agencies = Array.isArray(record.agencies)
+    ? record.agencies.flatMap((value) => {
+        if (!isRecord(value)) return [];
+        const name = looseString(value.name) || looseString(value.raw_name);
+        if (!name) return [];
+        return [
+          {
+            id: optionalNonNegativeInteger(value.id),
+            name,
+            slug: looseString(value.slug),
+          },
+        ];
+      })
+    : [];
+  const agencyNames = uniqueStrings([
+    ...looseStringArray(record.agency_names),
+    ...agencies.map((agency) => agency.name),
+  ]);
   return {
-    title: requireString(record.title, "title"),
-    type: requireString(record.type, "type"),
-    abstract: nullableProviderString(record.abstract, "abstract"),
-    documentNumber: requireString(record.document_number, "document_number"),
-    htmlUrl: nullableProviderString(record.html_url, "html_url"),
-    pdfUrl: nullableProviderString(record.pdf_url, "pdf_url"),
-    publicInspectionPdfUrl: nullableProviderString(
-      record.public_inspection_pdf_url,
-      "public_inspection_pdf_url",
-    ),
-    publicationDate,
-    effectiveOn,
+    title: looseString(record.title) || `Federal Register document ${documentNumber}`,
+    type: looseString(record.type),
+    abstract: nullableLooseString(record.abstract),
+    action: nullableLooseString(record.action),
+    documentNumber,
+    htmlUrl: nullableLooseString(record.html_url),
+    jsonUrl: nullableLooseString(record.json_url),
+    pdfUrl: nullableLooseString(record.pdf_url),
+    publicInspectionPdfUrl: nullableLooseString(record.public_inspection_pdf_url),
+    bodyHtmlUrl: nullableLooseString(record.body_html_url),
+    fullTextXmlUrl: nullableLooseString(record.full_text_xml_url),
+    rawTextUrl: nullableLooseString(record.raw_text_url),
+    regulationsGovUrl: nullableLooseString(record.regulations_dot_gov_url),
+    citation: nullableLooseString(record.citation),
+    commentsCloseOn: optionalProviderDate(record.comments_close_on),
+    publicationDate: optionalProviderDate(record.publication_date) ?? "",
+    effectiveOn: optionalProviderDate(record.effective_on),
     agencies,
-    topics: requireStringArray(record.topics, "topics"),
-    docketIds: requireStringArray(record.docket_ids, "docket_ids"),
-    regulationIdNumbers: requireStringArray(record.regulation_id_numbers, "regulation_id_numbers"),
-    significant:
-      record.significant === null || record.significant === undefined
-        ? null
-        : requireBoolean(record.significant, "significant"),
+    agencyNames,
+    topics: looseStringArray(record.topics),
+    docketIds: uniqueStrings([
+      ...looseStringArray(record.docket_ids),
+      ...looseStringArray(record.docket_id),
+    ]),
+    regulationIdNumbers: looseStringArray(record.regulation_id_numbers),
+    significant: typeof record.significant === "boolean" ? record.significant : null,
     sourcePageNumber: pageNumber,
   };
 }
 
 function validateProviderConsistency(
-  current: { description: string; count: number; totalPages: number } | null,
+  current: { description: string; count: number | null; totalPages: number | null } | null,
   next: ParsedProviderPage,
 ): void {
   if (!current) return;
   if (
-    current.count !== next.count ||
-    current.totalPages !== next.totalPages ||
-    current.description !== next.description
+    (current.count !== null && next.count !== null && current.count !== next.count) ||
+    (current.totalPages !== null &&
+      next.totalPages !== null &&
+      current.totalPages !== next.totalPages) ||
+    (current.description && next.description && current.description !== next.description)
   ) {
     throw providerInvalid("Federal Register pagination metadata changed between pages.");
   }
 }
 
 function providerHasMore(page: ParsedProviderPage, pageNumber: number): boolean {
-  if (page.totalPages === 0) return false;
-  return pageNumber < page.totalPages;
+  if (page.totalPages !== null) return pageNumber < page.totalPages;
+  return page.rawRecordCount > 0;
 }
 
 function validateNextPageUrl(
   nextPageUrl: string | null,
   pageNumber: number,
-  totalPages: number,
+  totalPages: number | null,
 ): void {
+  if (totalPages === null) {
+    if (nextPageUrl) validateNextPageTarget(nextPageUrl, pageNumber);
+    return;
+  }
   const shouldHaveNext = pageNumber < totalPages;
   if (shouldHaveNext !== Boolean(nextPageUrl)) {
     throw providerInvalid("Federal Register next_page_url does not match total_pages.");
   }
   if (!nextPageUrl) return;
+  validateNextPageTarget(nextPageUrl, pageNumber);
+}
+
+function validateNextPageTarget(nextPageUrl: string, pageNumber: number): void {
   let parsed: URL;
   try {
     parsed = new URL(nextPageUrl);
@@ -540,11 +567,6 @@ function requireObject(value: unknown, field: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function requireArray(value: unknown, field: string): unknown[] {
-  if (!Array.isArray(value)) throw providerInvalid(`${field} must be an array.`);
-  return value;
-}
-
 function requireString(value: unknown, field: string, allowEmpty = false): string {
   if (typeof value !== "string" || (!allowEmpty && !value.trim())) {
     throw providerInvalid(`${field} must be ${allowEmpty ? "a string" : "a non-empty string"}.`);
@@ -557,32 +579,39 @@ function nullableProviderString(value: unknown, field: string): string | null {
   return requireString(value, field, true) || null;
 }
 
-function nonBlankProviderString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim().replace(/\s+/g, " ") : null;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function requireStringArray(value: unknown, field: string): string[] {
-  return requireArray(value, field).map((item, index) => requireString(item, `${field}[${index}]`));
+function looseString(value: unknown): string {
+  return typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
 }
 
-function requireNonNegativeInteger(value: unknown, field: string): number {
-  if (!Number.isInteger(value) || (value as number) < 0) {
-    throw providerInvalid(`${field} must be a non-negative integer.`);
-  }
-  return value as number;
+function nullableLooseString(value: unknown): string | null {
+  return looseString(value) || null;
 }
 
-function requireBoolean(value: unknown, field: string): boolean {
-  if (typeof value !== "boolean") throw providerInvalid(`${field} must be a boolean.`);
-  return value;
+function looseStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(looseString).filter(Boolean);
+  const item = looseString(value);
+  return item ? [item] : [];
 }
 
-function parseProviderDate(value: unknown, field: string): string {
-  if (typeof value !== "string") throw providerInvalid(`${field} must be a date string.`);
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function optionalNonNegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function optionalProviderDate(value: unknown): string | null {
+  const text = looseString(value);
+  if (!text) return null;
   try {
-    return parseExactDate(value, field);
+    return parseExactDate(text, "provider date");
   } catch {
-    throw providerInvalid(`${field} must be a valid YYYY-MM-DD date.`);
+    return null;
   }
 }
 
