@@ -1,6 +1,7 @@
 import type {
   DataConnectorDefinition,
   DataMachineError,
+  DataHttpResponse,
   DataOperationExecution,
   DataOperationExecutionContext,
   DataSourceObservation,
@@ -29,6 +30,7 @@ type SearchSource = {
   domain?: string;
   url?: string;
   tags?: string[];
+  applyServerTimeFilter?: boolean;
 };
 type AuthorSource = {
   mode: "author-feed";
@@ -70,7 +72,7 @@ interface NormalizedQuery {
 interface NormalizedPost {
   uri: string;
   cid: string | null;
-  author: { did: string; handle: string; displayName: string | null };
+  author: { did: string | null; handle: string | null; displayName: string | null };
   createdAt: string | null;
   indexedAt: string | null;
   timestampUtc: string | null;
@@ -88,7 +90,7 @@ interface NormalizedPost {
 
 interface ThreadNode {
   state: "post" | "blocked" | "not-found";
-  uri: string;
+  uri: string | null;
   parentUri: string | null;
   depth: number;
   post: NormalizedPost | null;
@@ -98,6 +100,15 @@ interface SeedPage {
   pageNumber: number;
   inputRecords: number;
   selectedRecords: number;
+  invalidRecords: number;
+}
+
+interface ThreadValidation {
+  maxDepth: number;
+  maxBranchingFactor: number;
+  orphanCount: number;
+  missingNodeCount: number;
+  issues: string[];
 }
 
 export const blueskyPublicPostsConnector: DataConnectorDefinition = {
@@ -111,6 +122,13 @@ export const blueskyPublicPostsConnector: DataConnectorDefinition = {
     {
       endpointId: "bluesky-public-appview",
       baseUrl: "https://public.api.bsky.app",
+      pathPrefixes: [XRPC_PREFIX],
+      allowedMethods: ["GET"],
+      allowedContentTypes: ["application/json"],
+    },
+    {
+      endpointId: "bluesky-public-appview-fallback",
+      baseUrl: "https://api.bsky.app",
       pathPrefixes: [XRPC_PREFIX],
       allowedMethods: ["GET"],
       allowedContentTypes: ["application/json"],
@@ -170,7 +188,7 @@ export const blueskyPublicPostsConnector: DataConnectorDefinition = {
       "This read-only capability selects public post seeds from search, an author feed, a custom feed, or a list feed; applies an optional UTC timestamp window; and optionally flattens getPostThread results under shared request and record budgets.",
     provides: [
       "Public post text, author DID and handle, created/indexed timestamps, language tags, reply linkage, and mutable engagement counters when present.",
-      "Four explicit public seed-source modes with cursor-bounded retrieval and client-side UTC filtering.",
+      "Four explicit public seed-source modes with cursor-bounded retrieval, optional search-side time filters, and authoritative client-side UTC filtering.",
       "Flattened reply cascades with parent URI, depth, blocked/not-found states, per-seed failures, and explicit truncation.",
     ],
     doesNotProvide: [
@@ -182,6 +200,7 @@ export const blueskyPublicPostsConnector: DataConnectorDefinition = {
       "Use search for topic discovery, author-feed for one public actor view, feed for a known generator AT-URI, and list-feed for a known public list AT-URI.",
       "Enable thread expansion only when reply topology matters; seed-only retrieval is cheaper and leaves more request budget for pagination.",
       "Treat counters, ranking, missing nodes, and moderation visibility as snapshot properties and retain the execution receipt.",
+      "For a historical search diagnostic, disable the server time filter while retaining the same client-side UTC window to determine whether the provider only returns out-of-window posts.",
       "Use a repository/firehose-specific workflow when exhaustive AT Protocol records are required.",
     ],
     typicalUseCases: [
@@ -237,6 +256,8 @@ async function executeBlueskyCascades(
   const failures: Array<{ seedUri: string; code: string }> = [];
   const failureValues: unknown[] = [];
   let cursor: string | undefined;
+  let hitsTotal: number | null = null;
+  let fallbackUsed = false;
   let stopReason: "completed" | "no-results" | "max-pages" | "max-records" | "partial" =
     "completed";
   let seedFailure: unknown;
@@ -247,21 +268,29 @@ async function executeBlueskyCascades(
     seedPageNumber += 1;
     requestCount += 1;
     try {
-      const response = await context.http.request({
-        endpointId: "bluesky-public-appview",
-        method: "GET",
+      const requested = await requestPublicAppView(context, {
         path: sourcePath(query.source),
         query: sourceParameters(query, cursor),
       });
+      const response = requested.response;
+      fallbackUsed ||= requested.fallbackUsed;
       const parsed = parseSeedPage(response.json(), query.source.mode);
+      if (parsed.hitsTotal !== null) hitsTotal = parsed.hitsTotal;
       observations.push({
         ...response.observation,
         sourceId: `seed:${query.source.mode}:page:${seedPageNumber}`,
       });
       let selectedRecords = 0;
+      let invalidRecords = parsed.invalidRecords;
       for (const value of parsed.posts) {
         if (seedPosts.length >= context.limits.maxRecords) break;
-        const record = normalizePost(value);
+        let record: NormalizedPost;
+        try {
+          record = normalizePost(value);
+        } catch {
+          invalidRecords += 1;
+          continue;
+        }
         if (!insideWindow(record, query)) continue;
         if (seenSeeds.has(record.uri)) continue;
         seenSeeds.add(record.uri);
@@ -272,6 +301,7 @@ async function executeBlueskyCascades(
         pageNumber: seedPageNumber,
         inputRecords: parsed.posts.length,
         selectedRecords,
+        invalidRecords,
       });
 
       if (seedPosts.length >= context.limits.maxRecords) {
@@ -304,6 +334,7 @@ async function executeBlueskyCascades(
     rootUri: string | null;
     nodes: ThreadNode[];
     truncated: boolean;
+    validation: ThreadValidation;
   }> = [];
   let emittedRecords = seedPosts.length;
   let expansionTruncated = false;
@@ -315,9 +346,7 @@ async function executeBlueskyCascades(
       }
       try {
         requestCount += 1;
-        const response = await context.http.request({
-          endpointId: "bluesky-public-appview",
-          method: "GET",
+        const requested = await requestPublicAppView(context, {
           path: THREAD_PATH,
           query: {
             uri: seed.uri,
@@ -325,6 +354,8 @@ async function executeBlueskyCascades(
             parentHeight: query.threadParentHeight,
           },
         });
+        const response = requested.response;
+        fallbackUsed ||= requested.fallbackUsed;
         observations.push({ ...response.observation, sourceId: `thread:${seed.uri}` });
         const available = context.limits.maxRecords - emittedRecords;
         const parsed = parseThread(response.json(), seed.uri, available);
@@ -379,11 +410,14 @@ async function executeBlueskyCascades(
       source: {
         providerId: "bluesky",
         baseUrl: "https://public.api.bsky.app",
+        fallbackBaseUrl: "https://api.bsky.app",
+        fallbackUsed,
         publicContent: true,
         userGeneratedContent: true,
       },
       query,
       pages,
+      hitsTotal,
       seedPosts,
       cascades,
       failures,
@@ -449,6 +483,7 @@ function normalizeSource(source: BlueskySource): BlueskySource {
         ...optionalText("domain", source.domain),
         ...optionalText("url", source.url),
         ...(tags ? { tags: tags.sort(codePointOrder) } : {}),
+        applyServerTimeFilter: source.applyServerTimeFilter ?? true,
       };
     }
     case "author-feed":
@@ -503,8 +538,12 @@ function sourceParameters(
         ...common,
         q: query.source.query,
         sort: query.source.sort ?? "latest",
-        ...(query.startDateTime ? { since: query.startDateTime } : {}),
-        ...(query.endDateTime ? { until: query.endDateTime } : {}),
+        ...(query.source.applyServerTimeFilter !== false && query.startDateTime
+          ? { since: query.startDateTime }
+          : {}),
+        ...(query.source.applyServerTimeFilter !== false && query.endDateTime
+          ? { until: query.endDateTime }
+          : {}),
         ...(query.source.author ? { author: query.source.author } : {}),
         ...(query.source.mentions ? { mentions: query.source.mentions } : {}),
         ...(query.source.language ? { lang: query.source.language } : {}),
@@ -529,48 +568,67 @@ function sourceParameters(
 function parseSeedPage(
   value: unknown,
   mode: BlueskySource["mode"],
-): { posts: unknown[]; cursor?: string } {
+): {
+  posts: unknown[];
+  cursor?: string;
+  hitsTotal: number | null;
+  invalidRecords: number;
+} {
   const root = object(value, "Bluesky seed response");
   const rawItems = mode === "search" ? root.posts : root.feed;
   if (!Array.isArray(rawItems)) {
     throw providerInvalid("Bluesky seed response does not contain the expected item array.");
   }
-  const posts = rawItems.map((item) => {
-    if (mode === "search") return item;
-    return object(item, "Bluesky feed item").post;
-  });
+  const posts: unknown[] = [];
+  let invalidRecords = 0;
+  for (const item of rawItems) {
+    if (mode === "search") {
+      if (item && typeof item === "object" && !Array.isArray(item)) posts.push(item);
+      else invalidRecords += 1;
+      continue;
+    }
+    const feedItem = objectOrNull(item);
+    const post = feedItem ? objectOrNull(feedItem.post) : null;
+    if (post) posts.push(post);
+    else invalidRecords += 1;
+  }
   const cursor = root.cursor;
   if (cursor !== undefined && (typeof cursor !== "string" || !cursor)) {
     throw providerInvalid("Bluesky pagination cursor is invalid.");
   }
-  return { posts, ...(typeof cursor === "string" ? { cursor } : {}) };
+  return {
+    posts,
+    ...(typeof cursor === "string" ? { cursor } : {}),
+    hitsTotal: nonNegativeInteger(root.hitsTotal),
+    invalidRecords,
+  };
 }
 
 function normalizePost(value: unknown): NormalizedPost {
   const root = object(value, "Bluesky post view");
   const uri = requiredText(root.uri, "Bluesky post URI");
-  const author = object(root.author, "Bluesky post author");
-  const record = object(root.record, "Bluesky post record");
-  const createdAt = optionalDateTime(record.createdAt);
+  const author = objectOrNull(root.author);
+  const record = objectOrNull(root.record);
+  const createdAt = optionalDateTime(record?.createdAt);
   const indexedAt = optionalDateTime(root.indexedAt);
   const timestampUtc = createdAt ?? indexedAt;
-  const reply = objectOrNull(record.reply);
+  const reply = objectOrNull(record?.reply);
   const replyRoot = reply ? objectOrNull(reply.root) : null;
   const replyParent = reply ? objectOrNull(reply.parent) : null;
   return {
     uri,
     cid: optionalString(root.cid),
     author: {
-      did: requiredText(author.did, "Bluesky author DID"),
-      handle: requiredText(author.handle, "Bluesky author handle"),
-      displayName: optionalString(author.displayName),
+      did: optionalString(author?.did),
+      handle: optionalString(author?.handle),
+      displayName: optionalString(author?.displayName),
     },
     createdAt,
     indexedAt,
     timestampUtc,
     timestampSource: createdAt ? "record.createdAt" : indexedAt ? "indexedAt" : null,
-    text: typeof record.text === "string" ? record.text : "",
-    languages: stringArray(record.langs),
+    text: typeof record?.text === "string" ? record.text : "",
+    languages: stringArray(record?.langs),
     reply: reply
       ? {
           rootUri: optionalString(replyRoot?.uri),
@@ -597,10 +655,16 @@ function parseThread(
   value: unknown,
   requestedUri: string,
   maxRecords: number,
-): { rootUri: string | null; nodes: ThreadNode[]; truncated: boolean } {
+): {
+  rootUri: string | null;
+  nodes: ThreadNode[];
+  truncated: boolean;
+  validation: ThreadValidation;
+} {
   const root = object(value, "Bluesky thread response");
   if (!("thread" in root)) throw providerInvalid("Bluesky thread response is missing thread.");
   const nodes: ThreadNode[] = [];
+  const issues: string[] = [];
   const visited = new Set<string>();
   const stack: Array<{ value: unknown; parentUri: string | null; depth: number }> = [
     { value: root.thread, parentUri: null, depth: 0 },
@@ -612,30 +676,64 @@ function parseThread(
       break;
     }
     const current = stack.pop()!;
-    const item = object(current.value, "Bluesky thread node");
+    const item = objectOrNull(current.value);
+    if (!item) {
+      addThreadIssue(issues, `Ignored a non-object thread node at depth ${current.depth}.`);
+      continue;
+    }
     const type = typeof item.$type === "string" ? item.$type : "";
     if (type.endsWith("#threadViewPost") || (!type && item.post)) {
-      const post = normalizePost(item.post);
-      if (visited.has(post.uri)) continue;
-      visited.add(post.uri);
-      nodes.push({
-        state: "post",
-        uri: post.uri,
-        parentUri: current.parentUri,
-        depth: current.depth,
-        post,
-      });
+      let post: NormalizedPost | null = null;
+      try {
+        post = normalizePost(item.post);
+      } catch {
+        addThreadIssue(
+          issues,
+          `Ignored a thread post without a valid URI at depth ${current.depth}.`,
+        );
+      }
+      if (post && visited.has(post.uri)) {
+        addThreadIssue(issues, `Ignored duplicate thread URI ${post.uri}.`);
+        continue;
+      }
+      if (post) {
+        visited.add(post.uri);
+        nodes.push({
+          state: "post",
+          uri: post.uri,
+          parentUri: current.parentUri,
+          depth: current.depth,
+          post,
+        });
+      }
       const replies = item.replies ?? [];
-      if (!Array.isArray(replies)) throw providerInvalid("Bluesky thread replies are invalid.");
+      if (!Array.isArray(replies)) {
+        addThreadIssue(issues, `Ignored invalid replies for ${post?.uri ?? requestedUri}.`);
+        continue;
+      }
       for (let index = replies.length - 1; index >= 0; index -= 1) {
-        stack.push({ value: replies[index], parentUri: post.uri, depth: current.depth + 1 });
+        if (!objectOrNull(replies[index])) {
+          addThreadIssue(
+            issues,
+            `Ignored a non-object reply under ${post?.uri ?? requestedUri}.`,
+          );
+          continue;
+        }
+        stack.push({
+          value: replies[index],
+          parentUri: post?.uri ?? current.parentUri,
+          depth: current.depth + 1,
+        });
       }
       continue;
     }
     if (type.endsWith("#blockedPost") || type.endsWith("#notFoundPost")) {
-      const uri = requiredText(item.uri, "Bluesky missing thread-node URI");
-      if (visited.has(uri)) continue;
-      visited.add(uri);
+      const uri = optionalString(item.uri);
+      if (uri && visited.has(uri)) {
+        addThreadIssue(issues, `Ignored duplicate missing-node URI ${uri}.`);
+        continue;
+      }
+      if (uri) visited.add(uri);
       nodes.push({
         state: type.endsWith("#blockedPost") ? "blocked" : "not-found",
         uri,
@@ -645,9 +743,74 @@ function parseThread(
       });
       continue;
     }
-    throw providerInvalid(`Bluesky returned an unsupported thread node for ${requestedUri}.`);
+    addThreadIssue(
+      issues,
+      `Ignored an unsupported thread node type ${type || "<missing>"} for ${requestedUri}.`,
+    );
   }
-  return { rootUri: nodes[0]?.uri ?? null, nodes, truncated };
+  const uriSet = new Set(nodes.flatMap((node) => (node.uri ? [node.uri] : [])));
+  const branchCounts = new Map<string, number>();
+  let maxDepth = 0;
+  let orphanCount = 0;
+  let missingNodeCount = 0;
+  for (const node of nodes) {
+    maxDepth = Math.max(maxDepth, node.depth);
+    if (node.state !== "post") missingNodeCount += 1;
+    if (node.parentUri) {
+      branchCounts.set(node.parentUri, (branchCounts.get(node.parentUri) ?? 0) + 1);
+      if (!uriSet.has(node.parentUri)) {
+        orphanCount += 1;
+        addThreadIssue(
+          issues,
+          `Thread node ${node.uri ?? "<missing>"} has absent parent ${node.parentUri}.`,
+        );
+      }
+    }
+  }
+  if (!uriSet.has(requestedUri)) {
+    addThreadIssue(issues, `The requested seed URI ${requestedUri} is absent from the thread.`);
+  }
+  return {
+    rootUri: nodes[0]?.uri ?? null,
+    nodes,
+    truncated,
+    validation: {
+      maxDepth,
+      maxBranchingFactor: Math.max(0, ...branchCounts.values()),
+      orphanCount,
+      missingNodeCount,
+      issues,
+    },
+  };
+}
+
+async function requestPublicAppView(
+  context: DataOperationExecutionContext,
+  request: {
+    path: string;
+    query: Record<string, boolean | number | string | string[]>;
+  },
+): Promise<{ response: DataHttpResponse; fallbackUsed: boolean }> {
+  try {
+    return {
+      response: await context.http.request({
+        endpointId: "bluesky-public-appview",
+        method: "GET",
+        ...request,
+      }),
+      fallbackUsed: false,
+    };
+  } catch (error) {
+    if (!(error instanceof DataRuntimeError) || error.options.details?.status !== 403) throw error;
+    return {
+      response: await context.http.request({
+        endpointId: "bluesky-public-appview-fallback",
+        method: "GET",
+        ...request,
+      }),
+      fallbackUsed: true,
+    };
+  }
 }
 
 function exactDateTime(value: string): string {
@@ -692,6 +855,10 @@ function optionalString(value: unknown): string | null {
 function stringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+function addThreadIssue(issues: string[], issue: string): void {
+  if (issues.length < 100) issues.push(issue);
 }
 
 function nonNegativeInteger(value: unknown): number | null {

@@ -155,6 +155,117 @@ describe("Bluesky public-post cascades connector", () => {
     }
   });
 
+  it("retries a route-level 403 through the documented public fallback host", async () => {
+    const targets: URL[] = [];
+    const result = await executeDataRun(request({ expandThreads: false }), {
+      registry: createDataRegistry([blueskyPublicPostsConnector]),
+      environment: {},
+      fetchImpl: (async (target) => {
+        const url = new URL(String(target));
+        targets.push(url);
+        return url.origin === "https://public.api.bsky.app"
+          ? new Response("forbidden", { status: 403 })
+          : Response.json({ posts: [] });
+      }) as typeof fetch,
+    });
+
+    assert.equal(result.status, "success");
+    assert.deepEqual(
+      targets.map((target) => target.origin),
+      ["https://public.api.bsky.app", "https://api.bsky.app"],
+    );
+    assert.equal((result.data as { source: { fallbackUsed: boolean } }).source.fallbackUsed, true);
+  });
+
+  it("supports a historical search diagnostic without weakening client-side time filtering", async () => {
+    let target: URL | undefined;
+    const result = await executeDataRun(
+      request({
+        source: {
+          mode: "search",
+          query: "historical event",
+          applyServerTimeFilter: false,
+        },
+        expandThreads: false,
+      }),
+      {
+        registry: createDataRegistry([blueskyPublicPostsConnector]),
+        environment: {},
+        fetchImpl: (async (value) => {
+          target = new URL(String(value));
+          return Response.json({
+            hitsTotal: 42,
+            posts: [
+              post("at://did:plc:alice/app.bsky.feed.post/1", "inside", "2026-03-10T04:00:00Z"),
+              post("at://did:plc:alice/app.bsky.feed.post/2", "outside", "2026-04-10T04:00:00Z"),
+            ],
+          });
+        }) as typeof fetch,
+      },
+    );
+
+    assert.equal(target?.searchParams.has("since"), false);
+    assert.equal(target?.searchParams.has("until"), false);
+    const data = result.data as { hitsTotal: number | null; seedPosts: Array<{ text: string }> };
+    assert.equal(data.hitsTotal, 42);
+    assert.deepEqual(data.seedPosts.map((item) => item.text), ["inside"]);
+  });
+
+  it("isolates malformed seeds and thread nodes while retaining valid public content", async () => {
+    const rootUri = "at://did:plc:alice/app.bsky.feed.post/1";
+    const result = await executeDataRun(request(), {
+      registry: createDataRegistry([blueskyPublicPostsConnector]),
+      environment: {},
+      fetchImpl: (async (target) => {
+        if (String(target).includes("searchPosts")) {
+          return Response.json({
+            posts: [
+              null,
+              { record: { text: "missing URI" } },
+              { uri: rootUri, indexedAt: "2026-03-10T04:00:00Z" },
+            ],
+          });
+        }
+        return Response.json({
+          thread: {
+            $type: "app.bsky.feed.defs#threadViewPost",
+            post: { uri: rootUri, indexedAt: "2026-03-10T04:00:00Z" },
+            replies: [
+              null,
+              { $type: "app.bsky.feed.defs#unknown" },
+              { $type: "app.bsky.feed.defs#blockedPost" },
+            ],
+          },
+        });
+      }) as typeof fetch,
+    });
+
+    assert.equal(result.status, "success");
+    const data = result.data as {
+      pages: Array<{ invalidRecords: number }>;
+      seedPosts: Array<{ author: { did: string | null; handle: string | null } }>;
+      cascades: Array<{
+        nodes: Array<{ state: string; uri: string | null }>;
+        validation: { missingNodeCount: number; issues: string[] };
+      }>;
+    };
+    assert.equal(data.pages[0]?.invalidRecords, 2);
+    assert.deepEqual(data.seedPosts[0]?.author, {
+      did: null,
+      handle: null,
+      displayName: null,
+    });
+    assert.deepEqual(
+      data.cascades[0]?.nodes.map(({ state, uri }) => ({ state, uri })),
+      [
+        { state: "post", uri: rootUri },
+        { state: "blocked", uri: null },
+      ],
+    );
+    assert.equal(data.cascades[0]?.validation.missingNodeCount, 1);
+    assert.equal(data.cascades[0]?.validation.issues.length, 2);
+  });
+
   it("preserves seeds when one thread expansion fails", async () => {
     const rootUri = "at://did:plc:alice/app.bsky.feed.post/1";
     const result = await executeDataRun(request(), {

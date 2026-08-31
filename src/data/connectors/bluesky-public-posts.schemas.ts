@@ -71,6 +71,12 @@ const SEARCH_SOURCE_SCHEMA = {
       examples: [["climate", "policy"]],
       items: { type: "string", minLength: 1, maxLength: 64 },
     },
+    applyServerTimeFilter: {
+      type: "boolean",
+      description:
+        "Whether searchPosts receives since/until. Set false only for a historical-coverage diagnostic; the client-side UTC window still applies.",
+      examples: [true],
+    },
   },
 } as const;
 
@@ -222,8 +228,8 @@ const AUTHOR_SCHEMA = {
   additionalProperties: false,
   required: ["did", "handle", "displayName"],
   properties: {
-    did: { type: "string", minLength: 1 },
-    handle: { type: "string", minLength: 1 },
+    did: NULLABLE_STRING,
+    handle: NULLABLE_STRING,
     displayName: NULLABLE_STRING,
   },
 } as const;
@@ -287,7 +293,7 @@ const THREAD_NODE_SCHEMA = {
   required: ["state", "uri", "parentUri", "depth", "post"],
   properties: {
     state: { enum: ["post", "blocked", "not-found"] },
-    uri: { type: "string", minLength: 1 },
+    uri: NULLABLE_STRING,
     parentUri: NULLABLE_STRING,
     depth: { type: "integer", minimum: 0 },
     post: { anyOf: [POST_SCHEMA, { type: "null" }] },
@@ -299,15 +305,33 @@ export const BLUESKY_CASCADE_OUTPUT_SCHEMA = {
   $id: "https://schemas.tiangong.ai/data/bluesky/public-post-cascades-output.v1.json",
   type: "object",
   additionalProperties: false,
-  required: ["source", "query", "pages", "seedPosts", "cascades", "failures", "stopReason"],
+  required: [
+    "source",
+    "query",
+    "pages",
+    "hitsTotal",
+    "seedPosts",
+    "cascades",
+    "failures",
+    "stopReason",
+  ],
   properties: {
     source: {
       type: "object",
       additionalProperties: false,
-      required: ["providerId", "baseUrl", "publicContent", "userGeneratedContent"],
+      required: [
+        "providerId",
+        "baseUrl",
+        "fallbackBaseUrl",
+        "fallbackUsed",
+        "publicContent",
+        "userGeneratedContent",
+      ],
       properties: {
         providerId: { const: "bluesky" },
         baseUrl: { const: "https://public.api.bsky.app" },
+        fallbackBaseUrl: { const: "https://api.bsky.app" },
+        fallbackUsed: { type: "boolean" },
         publicContent: { const: true },
         userGeneratedContent: { const: true },
       },
@@ -348,13 +372,19 @@ export const BLUESKY_CASCADE_OUTPUT_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["pageNumber", "inputRecords", "selectedRecords"],
+        required: ["pageNumber", "inputRecords", "selectedRecords", "invalidRecords"],
         properties: {
           pageNumber: { type: "integer", minimum: 1 },
           inputRecords: { type: "integer", minimum: 0 },
           selectedRecords: { type: "integer", minimum: 0 },
+          invalidRecords: { type: "integer", minimum: 0 },
         },
       },
+    },
+    hitsTotal: {
+      type: ["integer", "null"],
+      minimum: 0,
+      description: "Provider-reported search hit estimate when searchPosts supplies hitsTotal.",
     },
     seedPosts: { type: "array", items: POST_SCHEMA },
     cascades: {
@@ -362,12 +392,34 @@ export const BLUESKY_CASCADE_OUTPUT_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["seedUri", "rootUri", "nodes", "truncated"],
+        required: ["seedUri", "rootUri", "nodes", "truncated", "validation"],
         properties: {
           seedUri: { type: "string", minLength: 1 },
           rootUri: NULLABLE_STRING,
           nodes: { type: "array", items: THREAD_NODE_SCHEMA },
           truncated: { type: "boolean" },
+          validation: {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "maxDepth",
+              "maxBranchingFactor",
+              "orphanCount",
+              "missingNodeCount",
+              "issues",
+            ],
+            properties: {
+              maxDepth: { type: "integer", minimum: 0 },
+              maxBranchingFactor: { type: "integer", minimum: 0 },
+              orphanCount: { type: "integer", minimum: 0 },
+              missingNodeCount: { type: "integer", minimum: 0 },
+              issues: {
+                type: "array",
+                maxItems: 100,
+                items: { type: "string", minLength: 1 },
+              },
+            },
+          },
         },
       },
     },
