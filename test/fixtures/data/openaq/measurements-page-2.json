@@ -3,6 +3,7 @@
   "results": [
     {
       "value": 7.5,
+      "flagInfo": { "hasFlags": false },
       "parameter": { "id": 2, "name": "pm25", "units": "µg/m³", "displayName": "PM2.5" },
       "period": {
         "label": "hour",

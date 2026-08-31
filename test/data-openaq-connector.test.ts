@@ -111,7 +111,7 @@ describe("OpenAQ air-quality connector", () => {
 
   it("searches bounded locations, sorts filters, and preserves attribution metadata", async () => {
     const requested: string[] = [];
-    const result = await executeDataRun(locationRequest(), {
+    const result = await executeDataRun(locationRequest({ monitor: true, mobile: false }), {
       registry: createDataRegistry([openAqAirQualityConnector]),
       environment: { OPENAQ_API_KEY: API_KEY },
       fetchImpl: (async (target, init) => {
@@ -126,8 +126,8 @@ describe("OpenAQ air-quality connector", () => {
     assert.equal(result.summary.recordCount, 3);
     assert.equal(result.summary.pageCount, 2);
     assert.deepEqual(requested, [
-      "/v3/locations?iso=NL&limit=2&page=1&providers_id=51%2C52&sort_order=asc",
-      "/v3/locations?iso=NL&limit=2&page=2&providers_id=51%2C52&sort_order=asc",
+      "/v3/locations?iso=NL&limit=2&mobile=false&monitor=true&order_by=id&page=1&providers_id=51%2C52&sort_order=asc",
+      "/v3/locations?iso=NL&limit=2&mobile=false&monitor=true&order_by=id&page=2&providers_id=51%2C52&sort_order=asc",
     ]);
     assert.doesNotMatch(JSON.stringify(result), new RegExp(API_KEY));
     const data = result.data as {
@@ -198,6 +198,7 @@ describe("OpenAQ air-quality connector", () => {
       sensorId: 1001,
       granularity: "hourly",
       value: 12.5,
+      flagInfo: { hasFlags: false },
       parameter: { id: 2, name: "pm25", units: "µg/m³", displayName: "PM2.5" },
       period: {
         label: "hour",
@@ -219,7 +220,9 @@ describe("OpenAQ air-quality connector", () => {
       },
       coverage: {
         expectedCount: 12,
+        expectedInterval: "01:00:00",
         observedCount: 10,
+        observedInterval: "00:50:00",
         percentComplete: 83.33,
         percentCoverage: 83.33,
         datetimeFromUtc: "2026-03-01T00:00:00Z",
@@ -245,7 +248,7 @@ describe("OpenAQ air-quality connector", () => {
       {
         granularity: "daily",
         path: "/v3/sensors/1001/days",
-        expectedBounds: "date_from=2026-03-01&date_to=2026-03-02",
+        expectedBounds: "date_from=2026-03-01T00%3A00%3A00Z&date_to=2026-03-02T00%3A00%3A00Z",
       },
     ] as const;
 
@@ -269,6 +272,54 @@ describe("OpenAQ air-quality connector", () => {
       assert.equal(result.summary.recordCount, 0);
       assert.equal(requested, `${item.path}?${item.expectedBounds}&limit=2&page=1`);
     }
+  });
+
+  it("preserves valid nullable measurement fields, flags, and sparse provider summaries", async () => {
+    const result = await executeDataRun(measurementRequest({ granularity: "raw", pageSize: 1 }), {
+      registry: createDataRegistry([openAqAirQualityConnector]),
+      environment: { OPENAQ_API_KEY: API_KEY },
+      fetchImpl: (async () =>
+        jsonResponse(
+          JSON.stringify({
+            meta: { name: "openaq-api", website: "/", page: 1, limit: 1, found: 1 },
+            results: [
+              {
+                value: null,
+                flagInfo: { hasFlags: true },
+                parameter: {
+                  id: 2,
+                  name: "pm25",
+                  units: "µg/m³",
+                  displayName: null,
+                },
+                period: null,
+                coordinates: { latitude: null, longitude: null },
+                summary: {},
+                coverage: null,
+              },
+            ],
+          }),
+        )) as typeof fetch,
+    });
+
+    assert.equal(result.status, "success");
+    const record = (result.data as { records: Array<Record<string, unknown>> }).records[0];
+    assert.equal(record?.value, null);
+    assert.deepEqual(record?.flagInfo, { hasFlags: true });
+    assert.equal(record?.period, null);
+    assert.deepEqual(record?.coordinates, { latitude: null, longitude: null });
+    assert.deepEqual(record?.summary, {
+      min: null,
+      q02: null,
+      q25: null,
+      median: null,
+      q75: null,
+      q98: null,
+      max: null,
+      average: null,
+      standardDeviation: null,
+    });
+    assert.equal(record?.coverage, null);
   });
 
   it("rejects unbounded, conflicting, and oversized requests before fetching", async () => {
@@ -349,6 +400,7 @@ describe("OpenAQ air-quality connector", () => {
     assert.ok(discovery.doesNotProvide.some((item) => /S3|archive|download/i.test(item)));
     assert.ok(discovery.doesNotProvide.some((item) => /regulatory|health|AQI/i.test(item)));
     assert.ok(discovery.selectionHints.some((item) => /raw|hourly|daily/i.test(item)));
+    assert.ok(discovery.selectionHints.some((item) => /flagInfo|hasFlags/i.test(item)));
   });
 
   it("conforms for both credentialed public operations", async () => {

@@ -133,8 +133,8 @@ interface Parameter extends Entity {
 }
 
 interface Coordinates {
-  latitude: number;
-  longitude: number;
+  latitude: number | null;
+  longitude: number | null;
 }
 
 interface MeasurementRecord {
@@ -142,34 +142,37 @@ interface MeasurementRecord {
   sourcePageNumber: number;
   sensorId: number;
   granularity: "raw" | "hourly" | "daily";
-  value: number;
+  value: number | null;
+  flagInfo: { hasFlags: boolean };
   parameter: Parameter;
   period: {
     label: string;
     interval: string;
-    datetimeFromUtc: string;
-    datetimeToUtc: string;
-  };
+    datetimeFromUtc: string | null;
+    datetimeToUtc: string | null;
+  } | null;
   coordinates: Coordinates | null;
   summary: {
-    min: number;
-    q02: number;
-    q25: number;
-    median: number;
-    q75: number;
-    q98: number;
-    max: number;
-    average: number;
-    standardDeviation: number;
+    min: number | null;
+    q02: number | null;
+    q25: number | null;
+    median: number | null;
+    q75: number | null;
+    q98: number | null;
+    max: number | null;
+    average: number | null;
+    standardDeviation: number | null;
   } | null;
   coverage: {
     expectedCount: number;
+    expectedInterval: string;
     observedCount: number;
+    observedInterval: string;
     percentComplete: number;
     percentCoverage: number;
-    datetimeFromUtc: string;
-    datetimeToUtc: string;
-  };
+    datetimeFromUtc: string | null;
+    datetimeToUtc: string | null;
+  } | null;
 }
 
 type StopReason = "completed" | "no-results" | "max-pages" | "max-records" | "partial";
@@ -228,6 +231,7 @@ export const openAqAirQualityConnector: DataConnectorDefinition = {
     "OpenAQ aggregates heterogeneous provider measurements whose calibration, validation, coverage, and reporting latency differ by source.",
     "The hosted API is rate limited to the provider's published per-minute and per-hour quotas and may change or be discontinued.",
     "Location metadata and sensor availability can change; a discovered sensor ID is not proof of continuous coverage for the requested window.",
+    "OpenAQ daily records are precomputed using the sensor location's local-day boundaries; use returned period and coverage metadata rather than assuming UTC calendar days.",
     "This connector does not calculate an AQI, make health or regulatory determinations, or establish compliance with an air-quality standard.",
   ],
   discovery: {
@@ -253,10 +257,12 @@ export const openAqAirQualityConnector: DataConnectorDefinition = {
     provides: [
       "Filtered location metadata including provider, owner, coordinates, sensor IDs, parameter metadata, time coverage, and per-location licenses.",
       "Raw, hourly, or daily measurements for one sensor and one explicit RFC3339 window, including provider coverage and aggregate summaries when supplied.",
+      "OpenAQ measurement flags and explicit nulls for unavailable values, periods, coordinates, summaries, or coverage.",
       "Bounded pagination with stable normalized queries, explicit truncation, and later-page partial-result reporting.",
     ],
     doesNotProvide: [
       "OpenAQ S3 archive listing, bulk archive download, CSV file transfer, or arbitrary API-path execution.",
+      "Standalone global catalogs of every OpenAQ country, provider, owner, parameter, license, manufacturer, instrument, or sensor; this operation discovers their metadata only through bounded location results.",
       "Regulatory compliance, official monitoring-network status, health advice, AQI calculation, forecasting, or pollutant-source attribution.",
       "Cross-sensor aggregation, spatial interpolation, unit conversion, deduplication, calibration correction, or guaranteed source completeness.",
       "An API key, quota increase, recurring monitoring, or permission to ignore OpenAQ and original-provider attribution terms.",
@@ -264,8 +270,10 @@ export const openAqAirQualityConnector: DataConnectorDefinition = {
     selectionHints: [
       "Use search-locations first when the relevant OpenAQ sensor ID is unknown, and inspect provider, monitor classification, parameter, license, and coverage metadata before selection.",
       "Choose raw for upstream-reported observations and hourly or daily for OpenAQ's preferred precomputed aggregates; do not mix granularities without an explicit analytical method.",
+      "Interpret daily records against the selected location's timezone and the returned period; do not relabel them as UTC calendar-day averages.",
       "Use a separately governed content-download workflow for the delayed public S3 archive or other bulk files.",
       "Verify sensitive environmental, health, or compliance conclusions against the original provider and applicable official authority.",
+      "Preserve null values and flagInfo.hasFlags: OpenAQ can return structurally valid records whose measurement, period, summary, coordinates, or coverage is unavailable.",
     ],
     typicalUseCases: [
       "Find PM2.5 sensors for a known country, provider, or bounded study area.",
@@ -355,6 +363,11 @@ async function executeSensorMeasurements(
       query.granularity === "raw"
         ? "Raw records reflect upstream reporting and must not be treated as quality-controlled OpenAQ aggregates."
         : `${query.granularity === "hourly" ? "Hourly" : "Daily"} records are OpenAQ precomputed aggregates; preserve the returned coverage fields when interpreting them.`,
+      ...(query.granularity === "daily"
+        ? [
+            "OpenAQ daily aggregates use the sensor location's local-day boundaries; preserve returned periods and do not relabel them as UTC calendar days.",
+          ]
+        : []),
       "Measurements are provided as-is and do not constitute an AQI, health assessment, or regulatory determination.",
     ],
   });
@@ -605,9 +618,10 @@ function buildLocationParameters(
     ...(query.countryIds.length > 0 ? { countries_id: query.countryIds.join(",") } : {}),
     ...(query.countryCode ? { iso: query.countryCode } : {}),
     ...(query.licenseIds.length > 0 ? { licenses_id: query.licenseIds.join(",") } : {}),
-    ...(query.mobile !== null ? { isMobile: query.mobile } : {}),
-    ...(query.monitor !== null ? { isMonitor: query.monitor } : {}),
+    ...(query.mobile !== null ? { mobile: query.mobile } : {}),
+    ...(query.monitor !== null ? { monitor: query.monitor } : {}),
     limit: query.pageSize,
+    order_by: "id",
     page: pageNumber,
     ...(query.parameterIds.length > 0 ? { parameters_id: query.parameterIds.join(",") } : {}),
     ...(query.providerIds.length > 0 ? { providers_id: query.providerIds.join(",") } : {}),
@@ -631,10 +645,7 @@ function buildMeasurementParameters(
 ): Record<string, number | string> {
   const bounds =
     query.granularity === "daily"
-      ? {
-          date_from: new Date(query.startDateTime).toISOString().slice(0, 10),
-          date_to: new Date(query.endDateTime).toISOString().slice(0, 10),
-        }
+      ? { date_from: query.startDateTime, date_to: query.endDateTime }
       : { datetime_from: query.startDateTime, datetime_to: query.endDateTime };
   return { ...bounds, limit: query.pageSize, page: pageNumber };
 }
@@ -744,47 +755,63 @@ function normalizeMeasurement(
   recordIndex: number,
 ): MeasurementRecord {
   const record = requireObject(value, `results[${recordIndex}]`);
-  const period = requireObject(record.period, "period");
+  const flagInfo = requireObject(record.flagInfo, "flagInfo");
+  const period = normalizeNullablePeriod(record.period);
   const summaryValue =
     record.summary === null || record.summary === undefined
       ? null
       : requireObject(record.summary, "summary");
-  const coverage = requireObject(record.coverage, "coverage");
+  const coverage = normalizeNullableCoverage(record.coverage);
   return {
     recordIndex,
     sourcePageNumber: pageNumber,
     sensorId: query.sensorId,
     granularity: query.granularity,
-    value: requireFiniteNumber(record.value, "value"),
+    value: nullableFiniteNumber(record.value, "value"),
+    flagInfo: { hasFlags: requireBoolean(flagInfo.hasFlags, "flagInfo.hasFlags") },
     parameter: normalizeParameter(record.parameter, "parameter"),
-    period: {
-      label: requireString(period.label, "period.label"),
-      interval: requireString(period.interval, "period.interval"),
-      datetimeFromUtc: requireDateTimeObject(period.datetimeFrom, "period.datetimeFrom"),
-      datetimeToUtc: requireDateTimeObject(period.datetimeTo, "period.datetimeTo"),
-    },
+    period,
     coordinates: normalizeNullableCoordinates(record.coordinates, "coordinates"),
     summary: summaryValue
       ? {
-          min: requireFiniteNumber(summaryValue.min, "summary.min"),
-          q02: requireFiniteNumber(summaryValue.q02, "summary.q02"),
-          q25: requireFiniteNumber(summaryValue.q25, "summary.q25"),
-          median: requireFiniteNumber(summaryValue.median, "summary.median"),
-          q75: requireFiniteNumber(summaryValue.q75, "summary.q75"),
-          q98: requireFiniteNumber(summaryValue.q98, "summary.q98"),
-          max: requireFiniteNumber(summaryValue.max, "summary.max"),
-          average: requireFiniteNumber(summaryValue.avg, "summary.avg"),
-          standardDeviation: requireFiniteNumber(summaryValue.sd, "summary.sd"),
+          min: nullableFiniteNumber(summaryValue.min, "summary.min"),
+          q02: nullableFiniteNumber(summaryValue.q02, "summary.q02"),
+          q25: nullableFiniteNumber(summaryValue.q25, "summary.q25"),
+          median: nullableFiniteNumber(summaryValue.median, "summary.median"),
+          q75: nullableFiniteNumber(summaryValue.q75, "summary.q75"),
+          q98: nullableFiniteNumber(summaryValue.q98, "summary.q98"),
+          max: nullableFiniteNumber(summaryValue.max, "summary.max"),
+          average: nullableFiniteNumber(summaryValue.avg, "summary.avg"),
+          standardDeviation: nullableFiniteNumber(summaryValue.sd, "summary.sd"),
         }
       : null,
-    coverage: {
-      expectedCount: requireNonNegativeInteger(coverage.expectedCount, "coverage.expectedCount"),
-      observedCount: requireNonNegativeInteger(coverage.observedCount, "coverage.observedCount"),
-      percentComplete: requirePercentage(coverage.percentComplete, "coverage.percentComplete"),
-      percentCoverage: requirePercentage(coverage.percentCoverage, "coverage.percentCoverage"),
-      datetimeFromUtc: requireDateTimeObject(coverage.datetimeFrom, "coverage.datetimeFrom"),
-      datetimeToUtc: requireDateTimeObject(coverage.datetimeTo, "coverage.datetimeTo"),
-    },
+    coverage,
+  };
+}
+
+function normalizeNullablePeriod(value: unknown): MeasurementRecord["period"] {
+  if (value === null || value === undefined) return null;
+  const period = requireObject(value, "period");
+  return {
+    label: requireString(period.label, "period.label"),
+    interval: requireString(period.interval, "period.interval"),
+    datetimeFromUtc: nullableDateTimeObject(period.datetimeFrom, "period.datetimeFrom"),
+    datetimeToUtc: nullableDateTimeObject(period.datetimeTo, "period.datetimeTo"),
+  };
+}
+
+function normalizeNullableCoverage(value: unknown): MeasurementRecord["coverage"] {
+  if (value === null || value === undefined) return null;
+  const coverage = requireObject(value, "coverage");
+  return {
+    expectedCount: requireNonNegativeInteger(coverage.expectedCount, "coverage.expectedCount"),
+    expectedInterval: requireString(coverage.expectedInterval, "coverage.expectedInterval"),
+    observedCount: requireNonNegativeInteger(coverage.observedCount, "coverage.observedCount"),
+    observedInterval: requireString(coverage.observedInterval, "coverage.observedInterval"),
+    percentComplete: requirePercentage(coverage.percentComplete, "coverage.percentComplete"),
+    percentCoverage: requirePercentage(coverage.percentCoverage, "coverage.percentCoverage"),
+    datetimeFromUtc: nullableDateTimeObject(coverage.datetimeFrom, "coverage.datetimeFrom"),
+    datetimeToUtc: nullableDateTimeObject(coverage.datetimeTo, "coverage.datetimeTo"),
   };
 }
 
@@ -809,9 +836,12 @@ function normalizeParameter(value: unknown, field: string): Parameter {
 function normalizeNullableCoordinates(value: unknown, field: string): Coordinates | null {
   if (value === null || value === undefined) return null;
   const coordinates = requireObject(value, field);
-  const latitude = requireFiniteNumber(coordinates.latitude, `${field}.latitude`);
-  const longitude = requireFiniteNumber(coordinates.longitude, `${field}.longitude`);
-  if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+  const latitude = nullableFiniteNumber(coordinates.latitude, `${field}.latitude`);
+  const longitude = nullableFiniteNumber(coordinates.longitude, `${field}.longitude`);
+  if (
+    (latitude !== null && (latitude < -90 || latitude > 90)) ||
+    (longitude !== null && (longitude < -180 || longitude > 180))
+  ) {
     throw providerInvalid(`${field} falls outside WGS84 coordinate bounds.`);
   }
   return { latitude, longitude };
@@ -923,6 +953,11 @@ function requireFiniteNumber(value: unknown, field: string): number {
     throw providerInvalid(`${field} must be a finite number.`);
   }
   return value;
+}
+
+function nullableFiniteNumber(value: unknown, field: string): number | null {
+  if (value === null || value === undefined) return null;
+  return requireFiniteNumber(value, field);
 }
 
 function nullableNonNegativeNumber(value: unknown, field: string): number | null {

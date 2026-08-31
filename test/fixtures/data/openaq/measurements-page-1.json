@@ -3,6 +3,7 @@
   "results": [
     {
       "value": 12.5,
+      "flagInfo": { "hasFlags": false },
       "parameter": { "id": 2, "name": "pm25", "units": "µg/m³", "displayName": "PM2.5" },
       "period": {
         "label": "hour",
@@ -35,6 +36,7 @@
     },
     {
       "value": 9.25,
+      "flagInfo": { "hasFlags": false },
       "parameter": { "id": 2, "name": "pm25", "units": "µg/m³", "displayName": "PM2.5" },
       "period": {
         "label": "hour",

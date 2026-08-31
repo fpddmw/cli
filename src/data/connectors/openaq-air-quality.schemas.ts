@@ -219,8 +219,12 @@ const COORDINATES_SCHEMA = {
   additionalProperties: false,
   required: ["latitude", "longitude"],
   properties: {
-    latitude: { type: "number", minimum: -90, maximum: 90 },
-    longitude: { type: "number", minimum: -180, maximum: 180 },
+    latitude: {
+      anyOf: [{ type: "number", minimum: -90, maximum: 90 }, { type: "null" }],
+    },
+    longitude: {
+      anyOf: [{ type: "number", minimum: -180, maximum: 180 }, { type: "null" }],
+    },
   },
 } as const;
 const PROVIDER_META_SCHEMA = {
@@ -402,15 +406,15 @@ const SUMMARY_SCHEMA = {
   additionalProperties: false,
   required: ["min", "q02", "q25", "median", "q75", "q98", "max", "average", "standardDeviation"],
   properties: {
-    min: { type: "number" },
-    q02: { type: "number" },
-    q25: { type: "number" },
-    median: { type: "number" },
-    q75: { type: "number" },
-    q98: { type: "number" },
-    max: { type: "number" },
-    average: { type: "number" },
-    standardDeviation: { type: "number" },
+    min: NULLABLE_NUMBER,
+    q02: NULLABLE_NUMBER,
+    q25: NULLABLE_NUMBER,
+    median: NULLABLE_NUMBER,
+    q75: NULLABLE_NUMBER,
+    q98: NULLABLE_NUMBER,
+    max: NULLABLE_NUMBER,
+    average: NULLABLE_NUMBER,
+    standardDeviation: NULLABLE_NUMBER,
   },
 } as const;
 const MEASUREMENT_RECORD_SCHEMA = {
@@ -422,6 +426,7 @@ const MEASUREMENT_RECORD_SCHEMA = {
     "sensorId",
     "granularity",
     "value",
+    "flagInfo",
     "parameter",
     "period",
     "coordinates",
@@ -433,40 +438,68 @@ const MEASUREMENT_RECORD_SCHEMA = {
     sourcePageNumber: { type: "integer", minimum: 1 },
     sensorId: { type: "integer", minimum: 1 },
     granularity: { enum: ["raw", "hourly", "daily"] },
-    value: { type: "number" },
-    parameter: PARAMETER_SCHEMA,
-    period: {
+    value: NULLABLE_NUMBER,
+    flagInfo: {
       type: "object",
       additionalProperties: false,
-      required: ["label", "interval", "datetimeFromUtc", "datetimeToUtc"],
-      properties: {
-        label: { type: "string", minLength: 1 },
-        interval: { type: "string", minLength: 1 },
-        datetimeFromUtc: { type: "string", pattern: RFC3339_PATTERN },
-        datetimeToUtc: { type: "string", pattern: RFC3339_PATTERN },
-      },
+      required: ["hasFlags"],
+      properties: { hasFlags: { type: "boolean" } },
+    },
+    parameter: PARAMETER_SCHEMA,
+    period: {
+      anyOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["label", "interval", "datetimeFromUtc", "datetimeToUtc"],
+          properties: {
+            label: { type: "string", minLength: 1 },
+            interval: { type: "string", minLength: 1 },
+            datetimeFromUtc: {
+              anyOf: [{ type: "string", pattern: RFC3339_PATTERN }, { type: "null" }],
+            },
+            datetimeToUtc: {
+              anyOf: [{ type: "string", pattern: RFC3339_PATTERN }, { type: "null" }],
+            },
+          },
+        },
+        { type: "null" },
+      ],
     },
     coordinates: { anyOf: [COORDINATES_SCHEMA, { type: "null" }] },
     summary: { anyOf: [SUMMARY_SCHEMA, { type: "null" }] },
     coverage: {
-      type: "object",
-      additionalProperties: false,
-      required: [
-        "expectedCount",
-        "observedCount",
-        "percentComplete",
-        "percentCoverage",
-        "datetimeFromUtc",
-        "datetimeToUtc",
+      anyOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "expectedCount",
+            "expectedInterval",
+            "observedCount",
+            "observedInterval",
+            "percentComplete",
+            "percentCoverage",
+            "datetimeFromUtc",
+            "datetimeToUtc",
+          ],
+          properties: {
+            expectedCount: { type: "integer", minimum: 0 },
+            expectedInterval: { type: "string", minLength: 1 },
+            observedCount: { type: "integer", minimum: 0 },
+            observedInterval: { type: "string", minLength: 1 },
+            percentComplete: { type: "number", minimum: 0, maximum: 100 },
+            percentCoverage: { type: "number", minimum: 0, maximum: 100 },
+            datetimeFromUtc: {
+              anyOf: [{ type: "string", pattern: RFC3339_PATTERN }, { type: "null" }],
+            },
+            datetimeToUtc: {
+              anyOf: [{ type: "string", pattern: RFC3339_PATTERN }, { type: "null" }],
+            },
+          },
+        },
+        { type: "null" },
       ],
-      properties: {
-        expectedCount: { type: "integer", minimum: 0 },
-        observedCount: { type: "integer", minimum: 0 },
-        percentComplete: { type: "number", minimum: 0, maximum: 100 },
-        percentCoverage: { type: "number", minimum: 0, maximum: 100 },
-        datetimeFromUtc: { type: "string", pattern: RFC3339_PATTERN },
-        datetimeToUtc: { type: "string", pattern: RFC3339_PATTERN },
-      },
     },
   },
 } as const;
