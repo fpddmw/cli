@@ -14,6 +14,7 @@ import { openMeteoFloodConnector } from "./connectors/open-meteo-flood.js";
 import { openMeteoHistoricalWeatherConnector } from "./connectors/open-meteo-historical-weather.js";
 import { openAqAirQualityConnector } from "./connectors/openaq-air-quality.js";
 import { regulationsGovCommentsConnector } from "./connectors/regulations-gov-comments.js";
+import { usbrRiseConnector } from "./connectors/usbr-rise.js";
 import { usgsWaterInstantaneousValuesConnector } from "./connectors/usgs-water-instantaneous-values.js";
 import { youtubePublicContentConnector } from "./connectors/youtube-public-content.js";
 
@@ -31,6 +32,7 @@ export const builtInDataRegistry = createDataRegistry([
   openMeteoHistoricalWeatherConnector,
   openAqAirQualityConnector,
   regulationsGovCommentsConnector,
+  usbrRiseConnector,
   usgsWaterInstantaneousValuesConnector,
   youtubePublicContentConnector,
 ]);

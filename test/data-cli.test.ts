@@ -57,6 +57,7 @@ describe("data CLI", () => {
           "open-meteo.historical-weather",
           "openaq.air-quality",
           "regulations-gov.comments",
+          "usbr.rise",
           "usgs.water-instantaneous-values",
           "youtube.public-content",
         ],

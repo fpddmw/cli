@@ -37,6 +37,7 @@ describe("built-in data connectors", () => {
         "open-meteo.historical-weather",
         "openaq.air-quality",
         "regulations-gov.comments",
+        "usbr.rise",
         "usgs.water-instantaneous-values",
         "youtube.public-content",
       ],
@@ -66,15 +67,19 @@ describe("built-in data connectors", () => {
       "open-meteo.historical-weather",
       "openaq.air-quality",
       "regulations-gov.comments",
+      "usbr.rise",
       "usgs.water-instantaneous-values",
       "youtube.public-content",
     ]) {
       const description = builtInDataRegistry.describe(capabilityId);
       assert.equal(
         description?.operations.length,
-        ["openaq.air-quality", "regulations-gov.comments", "youtube.public-content"].includes(
-          capabilityId,
-        )
+        [
+          "openaq.air-quality",
+          "regulations-gov.comments",
+          "usbr.rise",
+          "youtube.public-content",
+        ].includes(capabilityId)
           ? 2
           : 1,
       );

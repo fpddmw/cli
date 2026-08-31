@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: 36df568230534c0c0d35ae459f266e6010f51c4c
+lastReviewedCommit: 77d6be1a86bfc33aa64c0f1ae91938e00c589948
 ---
 
 # 原子数据运行时实施计划
@@ -178,7 +178,7 @@ runtime primitive。
   smoke 使用隔离 HOME/project，不携带真实凭证。
 - CLI 正式版本发布后更新 exact binding，再合并 Skills PR。
 
-当前公共 `0.0.54` 不暴露 `data` 命令。完整十五项 capability 的本地发布候选统一使用
+当前公共 `0.0.54` 不暴露 `data` 命令。完整十六项 capability 的本地发布候选统一使用
 `0.0.55`，所有 capability manifest 的 `minimumCliVersion` 也设为 `0.0.55`，避免已发布
 但不兼容的旧版本通过 Skills 的最低版本检查。
 
@@ -357,6 +357,30 @@ runtime primitive。
 
 状态：CLI connector、三个对应薄 Skill 和候选 binding 已在本地完成并验证；正式 binding
 等待包含全部 connector 的精确 npm 版本发布。
+
+### 后续迁移 10：USBR RISE
+
+- 新增 `usbr.rise/discover-items` 与 `fetch-results`。前者按 provider 页序扫描有界
+  `catalog-item` 页面，再按 title/location/parameter/source/terms 做 client-side
+  filtering；输出候选 item ID、单位、timestep、transformation、时间覆盖、landing page、
+  坐标和 source page，明确页序不是 relevance ranking 或 evidence weight。
+- `fetch-results` 只接受最多二十个已由官方来源 grounded 的显式 item ID，可加
+  location/parameter、RFC3339 UTC 时间窗、时间排序和 item metadata enrichment；每个
+  item 独立分页，后续 item/page 失败保留已验证行并返回 partial。
+- 两个 operation 共用官方 `https://data.usbr.gov/rise/api` keyless JSON-LD/JSON:API
+  scope，但拥有独立闭合输入/输出 Schema。页数、记录、响应字节、重试和超时由公共
+  runtime 统一限制；不接受任意 endpoint、输出路径或旧 Python 调参。
+- Discovery Metadata 要求按 item 的 unit、timestep、transformation、source code、
+  temporal coverage 和 disclaimer 解释数值；该 capability 不判断 shortage、drought、
+  flood、operating/legal compliance、causality、governance responsibility 或 report
+  readiness，也不提供 USBR 项目全文或跨来源连接。
+- fixture 按 RISE catalog/result envelope 重建；先在 clean container 观察缺失 connector
+  的有效 RED，再由 connector、双 operation conformance、catalog、dist pack 和
+  clean-container GREEN 收口。
+
+状态：CLI connector、对应薄 Skill 和双 operation 候选 binding 已在本地完成；当前正
+在收口全量 clean-container、docpact 和提交门禁，正式 binding 仍须等待包含全部迁移
+connector 的精确 npm 版本发布。
 
 ### 内容、下载与持久化候选的边界审计
 
