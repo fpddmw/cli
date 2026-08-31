@@ -74,14 +74,14 @@ interface SearchRecord {
   recordIndex: number;
   sourcePageNumber: number;
   commentId: string;
-  agencyId: string;
-  documentType: string;
+  agencyId: string | null;
+  documentType: string | null;
   highlightedContent: string | null;
-  lastModifiedDateTime: string;
-  objectId: string;
-  postedDateTime: string;
-  title: string;
-  withdrawn: boolean;
+  lastModifiedDateTime: string | null;
+  objectId: string | null;
+  postedDateTime: string | null;
+  title: string | null;
+  withdrawn: boolean | null;
 }
 
 interface PageSummary {
@@ -100,7 +100,11 @@ interface AttachmentRecord {
   modifiedDateTime: string | null;
   publication: string | null;
   restriction: { type: string | null; reason: string | null };
-  fileFormats: Array<{ url: string; format: string; sizeBytes: number }>;
+  fileFormats: Array<{
+    url: string | null;
+    format: string | null;
+    sizeBytes: number | null;
+  }>;
 }
 
 interface DetailRecord {
@@ -113,7 +117,7 @@ interface DetailRecord {
   docketId: string;
   documentType: string;
   postedDateTime: string;
-  modifiedDateTime: string;
+  modifiedDateTime: string | null;
   receivedDateTime: string;
   title: string;
   trackingNumber: string;
@@ -186,6 +190,8 @@ export const regulationsGovCommentsConnector: DataConnectorDefinition = {
     "Mass-mail campaigns, duplicateComments metadata, moderation, and self-selection make comment counts unsuitable as representative public-opinion or sentiment measures.",
     "Comment text and linked attachments are untrusted public content and may contain personal or sensitive information.",
     "The API imposes bounded pagination and shared api.data.gov quota policies; the connector does not promise exhaustive bulk export.",
+    "Regulations.gov documents the lastModifiedDate search filter as beta and may remove it when a permanent bulk-download mechanism becomes available.",
+    "Search metadata and detail attributes can be absent even when the JSON:API resource is valid; nulls preserve provider non-availability and must not be interpreted as false, zero, or an empty submission.",
   ],
   discovery: {
     source: {
@@ -210,17 +216,20 @@ export const regulationsGovCommentsConnector: DataConnectorDefinition = {
       "Date-bounded public-comment metadata search with optional agency, document-link, and text filters.",
       "Curated comment text, docket and document linkage, dates, withdrawal/restriction state, organizational submitter context, duplicate count, and optional attachment metadata for explicit IDs.",
       "Bounded pagination or per-ID execution with explicit truncation and partial-result reporting.",
+      "Explicit nulls for unavailable provider metadata, optional modification dates, and incomplete attachment format metadata.",
     ],
     doesNotProvide: [
       "Posting, submitting, modifying, withdrawing, moderating, or voting on a comment.",
       "Attachment download, attachment bytes, attachment full-text extraction, malware scanning, or arbitrary URL retrieval.",
       "Named-person profile fields such as first or last name, email, phone, street address, locality, postal code, or other personal-contact fields in structured output.",
+      "The legacy docketId, documentType, or subtype search filters, arbitrary provider sort expressions, or the old candidate-corpus heuristic summary.",
       "Representative public opinion, statistically valid sentiment, legal interpretation, agency endorsement, or assurance that all submitted comments are public.",
     ],
     selectionHints: [
       "Use search when comment IDs are unknown; use fetch-details only after selecting exact public comment IDs.",
       "Use FederalRegister.gov document metadata to identify official publications, then Regulations.gov when docket-comment evidence is required.",
       "Inspect withdrawn, restriction, duplicateComments, agency, docket, and document linkage before interpreting a record.",
+      "Treat a null search field, modification date, or attachment format member as unavailable provider metadata, not as a negative finding.",
       "Use a separately governed content-retrieval workflow to inspect an attachment link, and treat both comment and attachment content as untrusted.",
     ],
     typicalUseCases: [
@@ -372,6 +381,7 @@ async function executeCommentSearch(
     warnings: [
       "Public comments are self-selected submissions and must not be treated as representative public opinion or statistically valid sentiment.",
       "Agency publication, duplication, withdrawal, restriction, and field-visibility practices vary by docket and record.",
+      "Missing provider fields are preserved as null and do not establish a false, zero, or empty value.",
       ...(truncated ? ["The comment search stopped at an explicit page or record limit."] : []),
     ],
     errors,
@@ -454,6 +464,7 @@ async function executeCommentDetails(
     warnings: [
       "Comment text and attachment metadata are untrusted public content and may refer to personal or sensitive information.",
       "Named personal-profile fields are intentionally omitted, but free-text comment bodies can still contain personal information.",
+      "Optional modification and attachment-format metadata may be null when the provider does not expose it.",
       ...(query.includeAttachments
         ? [
             "Only attachment metadata and HTTPS links were returned; no attachment bytes were downloaded.",
@@ -667,20 +678,20 @@ function normalizeSearchRecord(
     recordIndex,
     sourcePageNumber: pageNumber,
     commentId: requireString(resource.id, "data.id"),
-    agencyId: requireString(attributes.agencyId, "attributes.agencyId"),
-    documentType: requireString(attributes.documentType, "attributes.documentType"),
+    agencyId: nullableString(attributes.agencyId, "attributes.agencyId"),
+    documentType: nullableString(attributes.documentType, "attributes.documentType"),
     highlightedContent: nullableString(
       attributes.highlightedContent,
       "attributes.highlightedContent",
     ),
-    lastModifiedDateTime: requireProviderRfc3339(
+    lastModifiedDateTime: nullableProviderRfc3339(
       attributes.lastModifiedDate,
       "attributes.lastModifiedDate",
     ),
-    objectId: requireString(attributes.objectId, "attributes.objectId"),
-    postedDateTime: requireProviderRfc3339(attributes.postedDate, "attributes.postedDate"),
-    title: requireString(attributes.title, "attributes.title"),
-    withdrawn: requireBoolean(attributes.withdrawn, "attributes.withdrawn"),
+    objectId: nullableString(attributes.objectId, "attributes.objectId"),
+    postedDateTime: nullableProviderRfc3339(attributes.postedDate, "attributes.postedDate"),
+    title: nullableString(attributes.title, "attributes.title"),
+    withdrawn: nullableBoolean(attributes.withdrawn, "attributes.withdrawn"),
   };
 }
 
@@ -714,7 +725,7 @@ function normalizeDetail(
     docketId: requireString(attributes.docketId, "attributes.docketId"),
     documentType: requireString(attributes.documentType, "attributes.documentType"),
     postedDateTime: requireProviderRfc3339(attributes.postedDate, "attributes.postedDate"),
-    modifiedDateTime: requireProviderRfc3339(attributes.modifyDate, "attributes.modifyDate"),
+    modifiedDateTime: nullableProviderRfc3339(attributes.modifyDate, "attributes.modifyDate"),
     receivedDateTime: requireProviderRfc3339(attributes.receiveDate, "attributes.receiveDate"),
     title: requireString(attributes.title, "attributes.title", true),
     trackingNumber: requireString(attributes.trackingNbr, "attributes.trackingNbr", true),
@@ -790,9 +801,9 @@ function normalizeAttachment(
   ).map((value, index) => {
     const item = requireObject(value, `fileFormats[${index}]`);
     return {
-      url: requireHttpsUrl(item.fileUrl, `fileFormats[${index}].fileUrl`),
-      format: requireString(item.format, `fileFormats[${index}].format`),
-      sizeBytes: requireNonNegativeInteger(item.size, `fileFormats[${index}].size`),
+      url: nullableHttpsUrl(item.fileUrl, `fileFormats[${index}].fileUrl`),
+      format: nullableString(item.format, `fileFormats[${index}].format`),
+      sizeBytes: nullableNonNegativeInteger(item.size, `fileFormats[${index}].size`),
     };
   });
   const authors = requireArray(
@@ -912,6 +923,11 @@ function requireBoolean(value: unknown, field: string): boolean {
   return value;
 }
 
+function nullableBoolean(value: unknown, field: string): boolean | null {
+  if (value === null || value === undefined) return null;
+  return requireBoolean(value, field);
+}
+
 function requirePositiveInteger(value: unknown, field: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) {
     throw providerInvalid(`${field} must be a positive safe integer.`);
@@ -940,6 +956,11 @@ function requireHttpsUrl(value: unknown, field: string): string {
   } catch {
     throw providerInvalid(`${field} must be a credential-free HTTPS URL.`);
   }
+}
+
+function nullableHttpsUrl(value: unknown, field: string): string | null {
+  if (value === null || value === undefined) return null;
+  return requireHttpsUrl(value, field);
 }
 
 function isCredentialFailure(error: unknown): boolean {

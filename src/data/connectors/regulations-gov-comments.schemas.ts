@@ -127,6 +127,7 @@ export const REGULATIONS_GOV_DETAIL_INPUT_SCHEMA = {
 } as const satisfies JsonSchema;
 
 const NULLABLE_STRING = { anyOf: [{ type: "string" }, { type: "null" }] } as const;
+const NULLABLE_BOOLEAN = { anyOf: [{ type: "boolean" }, { type: "null" }] } as const;
 const NULLABLE_NON_NEGATIVE_INTEGER = {
   anyOf: [{ type: "integer", minimum: 0 }, { type: "null" }],
 } as const;
@@ -201,14 +202,18 @@ const SEARCH_RECORD_SCHEMA = {
     recordIndex: { type: "integer", minimum: 0 },
     sourcePageNumber: { type: "integer", minimum: 1 },
     commentId: { type: "string", pattern: COMMENT_ID_PATTERN },
-    agencyId: { type: "string", minLength: 1 },
-    documentType: { type: "string", minLength: 1 },
+    agencyId: NULLABLE_STRING,
+    documentType: NULLABLE_STRING,
     highlightedContent: NULLABLE_STRING,
-    lastModifiedDateTime: { type: "string", pattern: RFC3339_PATTERN },
-    objectId: { type: "string", minLength: 1 },
-    postedDateTime: { type: "string", pattern: RFC3339_PATTERN },
-    title: { type: "string", minLength: 1 },
-    withdrawn: { type: "boolean" },
+    lastModifiedDateTime: {
+      anyOf: [{ type: "string", pattern: RFC3339_PATTERN }, { type: "null" }],
+    },
+    objectId: NULLABLE_STRING,
+    postedDateTime: {
+      anyOf: [{ type: "string", pattern: RFC3339_PATTERN }, { type: "null" }],
+    },
+    title: NULLABLE_STRING,
+    withdrawn: NULLABLE_BOOLEAN,
   },
 } as const;
 
@@ -293,9 +298,9 @@ const ATTACHMENT_SCHEMA = {
         additionalProperties: false,
         required: ["url", "format", "sizeBytes"],
         properties: {
-          url: { type: "string", minLength: 1 },
-          format: { type: "string", minLength: 1 },
-          sizeBytes: { type: "integer", minimum: 0 },
+          url: NULLABLE_STRING,
+          format: NULLABLE_STRING,
+          sizeBytes: NULLABLE_NON_NEGATIVE_INTEGER,
         },
       },
     },
@@ -335,7 +340,9 @@ const DETAIL_RECORD_SCHEMA = {
     docketId: { type: "string", minLength: 1 },
     documentType: { type: "string", minLength: 1 },
     postedDateTime: { type: "string", pattern: RFC3339_PATTERN },
-    modifiedDateTime: { type: "string", pattern: RFC3339_PATTERN },
+    modifiedDateTime: {
+      anyOf: [{ type: "string", pattern: RFC3339_PATTERN }, { type: "null" }],
+    },
     receivedDateTime: { type: "string", pattern: RFC3339_PATTERN },
     title: { type: "string" },
     trackingNumber: { type: "string" },

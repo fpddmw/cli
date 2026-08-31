@@ -152,6 +152,46 @@ describe("Regulations.gov comments connector", () => {
     });
   });
 
+  it("preserves absent provider search metadata as explicit nulls", async () => {
+    const result = await executeDataRun(searchRequest({ agencyId: undefined }), {
+      registry: createDataRegistry([regulationsGovCommentsConnector]),
+      environment: { REGGOV_API_KEY: API_KEY },
+      fetchImpl: (async () =>
+        jsonResponse(
+          JSON.stringify({
+            data: [{ id: "EPA-HQ-OAR-2026-0001-0099", type: "comments", attributes: {} }],
+            meta: {
+              hasNextPage: false,
+              hasPreviousPage: false,
+              numberOfElements: 1,
+              pageNumber: 1,
+              pageSize: 5,
+              totalElements: 1,
+              totalPages: 1,
+              firstPage: true,
+              lastPage: true,
+            },
+          }),
+        )) as typeof fetch,
+    });
+
+    assert.equal(result.status, "success");
+    const record = (result.data as { records: Array<Record<string, unknown>> }).records[0];
+    assert.deepEqual(record, {
+      recordIndex: 0,
+      sourcePageNumber: 1,
+      commentId: "EPA-HQ-OAR-2026-0001-0099",
+      agencyId: null,
+      documentType: null,
+      highlightedContent: null,
+      lastModifiedDateTime: null,
+      objectId: null,
+      postedDateTime: null,
+      title: null,
+      withdrawn: null,
+    });
+  });
+
   it("converts an RFC3339 last-modified window to the provider's documented Eastern wall time", async () => {
     let requested = "";
     const result = await executeDataRun(
@@ -259,6 +299,60 @@ describe("Regulations.gov comments connector", () => {
     });
   });
 
+  it("preserves an absent detail modification date and sparse attachment formats", async () => {
+    const result = await executeDataRun(detailRequest(), {
+      registry: createDataRegistry([regulationsGovCommentsConnector]),
+      environment: { REGGOV_API_KEY: API_KEY },
+      fetchImpl: (async () =>
+        jsonResponse(
+          JSON.stringify({
+            data: {
+              id: "EPA-HQ-OAR-2026-0001-0002",
+              type: "comments",
+              attributes: {
+                agencyId: "EPA",
+                comment: "Synthetic sparse detail.",
+                commentOnDocumentId: "EPA-HQ-OAR-2026-0001-0001",
+                docketId: "EPA-HQ-OAR-2026-0001",
+                documentType: "Proposed Rule",
+                postedDate: "2026-03-02T12:00:00Z",
+                receiveDate: "2026-03-02T10:00:00Z",
+                title: "Synthetic sparse comment",
+                trackingNbr: "synthetic-sparse-tracking",
+                withdrawn: false,
+              },
+              relationships: {
+                attachments: {
+                  data: [{ id: "SYNTHETIC-SPARSE-ATTACHMENT", type: "attachments" }],
+                },
+              },
+            },
+            included: [
+              {
+                id: "SYNTHETIC-SPARSE-ATTACHMENT",
+                type: "attachments",
+                attributes: { fileFormats: [{}] },
+              },
+            ],
+          }),
+        )) as typeof fetch,
+    });
+
+    assert.equal(result.status, "success");
+    const record = (
+      result.data as {
+        records: Array<{
+          modifiedDateTime: string | null;
+          attachments: Array<{ fileFormats: Array<Record<string, unknown>> }>;
+        }>;
+      }
+    ).records[0];
+    assert.equal(record?.modifiedDateTime, null);
+    assert.deepEqual(record?.attachments[0]?.fileFormats, [
+      { url: null, format: null, sizeBytes: null },
+    ]);
+  });
+
   it("preserves successful details when a later comment request fails", async () => {
     const result = await executeDataRun(
       detailRequest({
@@ -343,6 +437,9 @@ describe("Regulations.gov comments connector", () => {
       discovery.doesNotProvide.some((item) => /attachment.*download|bytes|full text/i.test(item)),
     );
     assert.ok(discovery.doesNotProvide.some((item) => /email|phone|address|personal/i.test(item)));
+    assert.ok(discovery.doesNotProvide.some((item) => /docketId|documentType|subtype/i.test(item)));
+    assert.ok(discovery.limitations.some((item) => /null|absent|unavailable/i.test(item)));
+    assert.ok(discovery.limitations.some((item) => /lastModifiedDate.*beta/i.test(item)));
   });
 
   it("conforms for both credentialed operations", async () => {
