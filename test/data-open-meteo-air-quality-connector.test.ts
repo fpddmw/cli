@@ -68,7 +68,7 @@ describe("Open-Meteo air-quality connector", () => {
     });
 
     assert.equal(result.status, "success");
-    assert.equal(result.summary.recordCount, 3);
+    assert.equal(result.summary.recordCount, 24);
     const url = new URL(requestedUrl);
     assert.equal(url.origin, "https://air-quality-api.open-meteo.com");
     assert.equal(url.pathname, "/v1/air-quality");
@@ -87,22 +87,39 @@ describe("Open-Meteo air-quality connector", () => {
       locations: Array<Record<string, unknown>>;
     };
     assert.equal(data.stopReason, "completed");
-    assert.deepEqual(data.locations, [
-      {
-        requestedLocationIndex: 0,
-        requestedLocation: { latitude: 52.52, longitude: 13.41 },
-        gridLocation: { latitude: 52.52, longitude: 13.419 },
-        elevation: 44.812,
-        timezone: "GMT",
-        timezoneAbbreviation: "GMT",
-        utcOffsetSeconds: 0,
-        timesUtc: ["2026-03-17T00:00:00Z", "2026-03-17T01:00:00Z", "2026-03-17T02:00:00Z"],
-        variables: [
-          { variable: "pm10", unit: "μg/m³", values: [20, 21.5, 22] },
-          { variable: "pm2_5", unit: "μg/m³", values: [10.5, null, 12.25] },
-        ],
-      },
+    const location = data.locations[0] as {
+      requestedLocationIndex: number;
+      requestedLocation: { latitude: number; longitude: number };
+      gridLocation: { latitude: number; longitude: number };
+      timezone: string;
+      utcOffsetSeconds: number;
+      timesUtc: string[];
+      variables: Array<{ variable: string; unit: string; values: Array<number | null> }>;
+    };
+    assert.equal(location.requestedLocationIndex, 0);
+    assert.deepEqual(location.requestedLocation, { latitude: 52.52, longitude: 13.41 });
+    assert.deepEqual(location.gridLocation, { latitude: 52.52, longitude: 13.419 });
+    assert.equal(location.timezone, "GMT");
+    assert.equal(location.utcOffsetSeconds, 0);
+    assert.equal(location.timesUtc.length, 24);
+    assert.deepEqual(location.timesUtc.slice(0, 3), [
+      "2026-03-17T00:00:00Z",
+      "2026-03-17T01:00:00Z",
+      "2026-03-17T02:00:00Z",
     ]);
+    assert.equal(location.timesUtc.at(-1), "2026-03-17T23:00:00Z");
+    assert.deepEqual(
+      location.variables.map((variable) => ({
+        variable: variable.variable,
+        unit: variable.unit,
+        firstValues: variable.values.slice(0, 3),
+        length: variable.values.length,
+      })),
+      [
+        { variable: "pm10", unit: "μg/m³", firstValues: [20, 21.5, 22], length: 24 },
+        { variable: "pm2_5", unit: "μg/m³", firstValues: [10.5, null, 12.25], length: 24 },
+      ],
+    );
   });
 
   it("preserves request order for multiple coordinates while sorting variables", async () => {
@@ -132,7 +149,7 @@ describe("Open-Meteo air-quality connector", () => {
     );
 
     assert.equal(result.status, "success");
-    assert.equal(result.summary.recordCount, 6);
+    assert.equal(result.summary.recordCount, 48);
     const url = new URL(requestedUrl);
     assert.equal(url.searchParams.get("latitude"), "52.52,48.85");
     assert.equal(url.searchParams.get("longitude"), "13.41,2.35");
@@ -177,7 +194,7 @@ describe("Open-Meteo air-quality connector", () => {
     });
 
     assert.equal(result.status, "partial");
-    assert.equal(result.summary.recordCount, 3);
+    assert.equal(result.summary.recordCount, 24);
     assert.equal(result.errors[0]?.code, "partial-result");
     assert.deepEqual(result.summary.missing, [
       { kind: "field", identifiers: ["$[0].hourly.pm10"] },
@@ -190,6 +207,55 @@ describe("Open-Meteo air-quality connector", () => {
       ).locations[0]?.variables.map((variable) => variable.variable),
       ["pm2_5"],
     );
+  });
+
+  it("marks incomplete or nonascending GMT time axes as partial", async () => {
+    const shortened = await fixture();
+    const shortenedHourly = shortened.hourly as Record<string, unknown[]>;
+    for (const field of ["time", "pm2_5", "pm10"]) shortenedHourly[field]?.pop();
+    const shortResult = await executeDataRun(request(), {
+      registry: createDataRegistry([openMeteoAirQualityConnector]),
+      environment: {},
+      fetchImpl: (async () => jsonResponse(shortened)) as typeof fetch,
+    });
+    assert.equal(shortResult.status, "partial");
+    assert.equal(shortResult.summary.recordCount, 23);
+    assert.deepEqual(shortResult.summary.missing, [
+      { kind: "field", identifiers: ["$[0].hourly.time"] },
+    ]);
+
+    const unordered = await fixture();
+    const times = (unordered.hourly as { time: string[] }).time;
+    [times[1], times[2]] = [times[2] as string, times[1] as string];
+    const unorderedResult = await executeDataRun(request(), {
+      registry: createDataRegistry([openMeteoAirQualityConnector]),
+      environment: {},
+      fetchImpl: (async () => jsonResponse(unordered)) as typeof fetch,
+    });
+    assert.equal(unorderedResult.status, "partial");
+    assert.equal(unorderedResult.summary.recordCount, 24);
+    assert.deepEqual(unorderedResult.summary.missing, [
+      { kind: "field", identifiers: ["$[0].hourly.time[2]"] },
+    ]);
+  });
+
+  it("reports provider timezone drift instead of silently treating it as GMT", async () => {
+    const payload = await fixture();
+    payload.timezone = "Europe/Berlin";
+    payload.utc_offset_seconds = 3600;
+    const result = await executeDataRun(request(), {
+      registry: createDataRegistry([openMeteoAirQualityConnector]),
+      environment: {},
+      fetchImpl: (async () => jsonResponse(payload)) as typeof fetch,
+    });
+
+    assert.equal(result.status, "partial");
+    assert.deepEqual(result.summary.missing, [
+      {
+        kind: "field",
+        identifiers: ["$[0].timezone", "$[0].utc_offset_seconds"],
+      },
+    ]);
   });
 
   it("blocks explicit provider error objects", async () => {

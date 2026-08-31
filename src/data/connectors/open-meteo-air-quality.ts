@@ -417,13 +417,21 @@ function normalizeLocation(
   }
 
   const timesUtc: string[] = [];
+  let previousTime: string | null = null;
   for (let timeIndex = 0; timeIndex < hourly.time.length; timeIndex += 1) {
     const normalizedTime = normalizeProviderTime(hourly.time[timeIndex], input);
     if (normalizedTime === null) {
       collector.add(`${path}.hourly.time[${timeIndex}]`, "Invalid or out-of-window GMT timestamp.");
       continue;
     }
+    if (previousTime !== null && normalizedTime <= previousTime) {
+      collector.add(
+        `${path}.hourly.time[${timeIndex}]`,
+        "GMT timestamps must be strictly ascending.",
+      );
+    }
     timesUtc.push(normalizedTime);
+    previousTime = normalizedTime;
   }
   if (timesUtc.length !== hourly.time.length) {
     collector.add(
@@ -431,6 +439,13 @@ function normalizeLocation(
       "One or more invalid timestamps prevent safe alignment for this coordinate.",
     );
     return null;
+  }
+  const expectedHourCount = inclusiveDayCount(input.startDate, input.endDate) * 24;
+  if (timesUtc.length !== expectedHourCount) {
+    collector.add(
+      `${path}.hourly.time`,
+      `Expected ${expectedHourCount} GMT hours for the inclusive date window but received ${timesUtc.length}.`,
+    );
   }
 
   const variables: NormalizedVariable[] = [];
@@ -462,23 +477,44 @@ function normalizeLocation(
     variables.push({ variable, unit, values });
   }
 
+  const hasTimezone = typeof item.timezone === "string" && item.timezone.length > 0;
+  const timezone = hasTimezone ? (item.timezone as string) : "GMT";
+  if (!hasTimezone) {
+    collector.add(`${path}.timezone`, "Provider timezone metadata is missing.");
+  } else if (!["GMT", "UTC", "Etc/UTC"].includes(timezone)) {
+    collector.add(`${path}.timezone`, "Provider timezone must remain GMT/UTC for this operation.");
+  }
+  const hasUtcOffset =
+    typeof item.utc_offset_seconds === "number" && Number.isInteger(item.utc_offset_seconds);
+  const utcOffsetSeconds = hasUtcOffset ? (item.utc_offset_seconds as number) : 0;
+  if (!hasUtcOffset) {
+    collector.add(`${path}.utc_offset_seconds`, "Provider UTC offset metadata must be an integer.");
+  } else if (utcOffsetSeconds !== 0) {
+    collector.add(`${path}.utc_offset_seconds`, "Provider UTC offset must be zero in GMT mode.");
+  }
   return {
     requestedLocationIndex: index,
     requestedLocation,
     gridLocation: { latitude, longitude },
     elevation: finiteNumber(item.elevation),
-    timezone: typeof item.timezone === "string" && item.timezone ? item.timezone : "GMT",
+    timezone,
     timezoneAbbreviation:
       typeof item.timezone_abbreviation === "string" && item.timezone_abbreviation
         ? item.timezone_abbreviation
         : "GMT",
-    utcOffsetSeconds:
-      typeof item.utc_offset_seconds === "number" && Number.isInteger(item.utc_offset_seconds)
-        ? item.utc_offset_seconds
-        : 0,
+    utcOffsetSeconds,
     timesUtc,
     variables,
   };
+}
+
+function inclusiveDayCount(startDate: string, endDate: string): number {
+  return (
+    Math.floor(
+      (new Date(`${endDate}T00:00:00Z`).getTime() - new Date(`${startDate}T00:00:00Z`).getTime()) /
+        86_400_000,
+    ) + 1
+  );
 }
 
 function normalizeProviderTime(value: unknown, input: NormalizedInput): string | null {
