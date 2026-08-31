@@ -1,6 +1,12 @@
 import type { JsonSchema } from "../contracts.js";
 
 const DATETIME_PATTERN = "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$";
+const VIDEO_ID_SCHEMA = {
+  type: "string",
+  minLength: 11,
+  maxLength: 11,
+  pattern: "^[A-Za-z0-9_-]{11}$",
+} as const;
 
 export const YOUTUBE_VIDEO_SEARCH_INPUT_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -32,12 +38,14 @@ export const YOUTUBE_VIDEO_SEARCH_INPUT_SCHEMA = {
     publishedBefore: {
       type: "string",
       pattern: DATETIME_PATTERN,
-      description: "Optional exclusive RFC 3339 UTC upper bound for video publication time.",
+      description:
+        "Optional inclusive RFC 3339 UTC upper bound for video publication time under the current search.list contract.",
       examples: ["2026-03-08T00:00:00Z"],
     },
     order: {
-      enum: ["date", "rating", "relevance", "title", "videoCount", "viewCount"],
-      description: "Provider ordering for search results; relevance is the default.",
+      enum: ["date", "rating", "relevance", "title", "viewCount"],
+      description:
+        "Provider ordering for video search results; relevance is the default. videoCount is excluded because the provider defines it for channel ordering.",
       examples: ["date"],
     },
     regionCode: {
@@ -115,6 +123,14 @@ export const YOUTUBE_VIDEO_SEARCH_INPUT_SCHEMA = {
       description: "Maximum video search results requested per search.list page.",
       examples: [25],
     },
+    maxSearchPages: {
+      type: "integer",
+      minimum: 1,
+      maximum: 10,
+      description:
+        "Maximum search.list pages before mandatory detail enrichment. Defaults to 5 and cannot exceed the reviewed source cap of 10.",
+      examples: [5],
+    },
     requirePublicComments: {
       type: "boolean",
       description:
@@ -144,28 +160,33 @@ export const YOUTUBE_COMMENTS_INPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["videoIds"],
+  dependentRequired: {
+    startDateTime: ["endDateTime"],
+    endDateTime: ["startDateTime"],
+  },
   properties: {
     videoIds: {
       type: "array",
       minItems: 1,
-      maxItems: 25,
+      maxItems: 50,
       uniqueItems: true,
-      description: "Explicit YouTube video IDs whose public comment threads should be read.",
+      description:
+        "One to 50 explicit YouTube video IDs whose public comment threads should be read.",
       examples: [["dQw4w9WgXcQ"]],
-      items: { type: "string", minLength: 1, maxLength: 128 },
+      items: VIDEO_ID_SCHEMA,
     },
     startDateTime: {
       type: "string",
       pattern: DATETIME_PATTERN,
       description:
-        "Optional inclusive UTC lower bound applied client-side to publishedAt or updatedAt.",
+        "Optional inclusive UTC lower bound applied client-side to publishedAt or updatedAt; must be paired with endDateTime.",
       examples: ["2026-03-01T00:00:00Z"],
     },
     endDateTime: {
       type: "string",
       pattern: DATETIME_PATTERN,
       description:
-        "Optional exclusive UTC upper bound applied client-side to publishedAt or updatedAt.",
+        "Optional exclusive UTC upper bound applied client-side to publishedAt or updatedAt; must be paired with startDateTime.",
       examples: ["2026-03-08T00:00:00Z"],
     },
     timeField: {
@@ -227,29 +248,44 @@ const VIDEO_RECORD_SCHEMA = {
   additionalProperties: false,
   required: [
     "videoId",
+    "searchRank",
+    "searchPage",
+    "searchPosition",
     "publishedAt",
     "channelId",
     "channelTitle",
     "title",
     "description",
     "tags",
+    "thumbnailUrls",
     "categoryId",
     "defaultLanguage",
+    "defaultAudioLanguage",
     "liveBroadcastContent",
     "statistics",
     "contentDetails",
     "status",
+    "liveStreamingDetails",
   ],
   properties: {
-    videoId: { type: "string", minLength: 1 },
+    videoId: VIDEO_ID_SCHEMA,
+    searchRank: { type: "integer", minimum: 1 },
+    searchPage: { type: "integer", minimum: 1 },
+    searchPosition: { type: "integer", minimum: 1 },
     publishedAt: NULLABLE_STRING,
     channelId: NULLABLE_STRING,
     channelTitle: NULLABLE_STRING,
     title: { type: "string" },
     description: { type: "string" },
     tags: STRING_ARRAY,
+    thumbnailUrls: {
+      type: "array",
+      uniqueItems: true,
+      items: { type: "string", pattern: "^https://" },
+    },
     categoryId: NULLABLE_STRING,
     defaultLanguage: NULLABLE_STRING,
+    defaultAudioLanguage: NULLABLE_STRING,
     liveBroadcastContent: NULLABLE_STRING,
     statistics: {
       type: "object",
@@ -264,23 +300,43 @@ const VIDEO_RECORD_SCHEMA = {
     contentDetails: {
       type: "object",
       additionalProperties: false,
-      required: ["duration", "caption", "definition", "dimension"],
+      required: ["duration", "caption", "definition", "dimension", "licensedContent", "projection"],
       properties: {
         duration: NULLABLE_STRING,
         caption: NULLABLE_STRING,
         definition: NULLABLE_STRING,
         dimension: NULLABLE_STRING,
+        licensedContent: { type: ["boolean", "null"] },
+        projection: NULLABLE_STRING,
       },
     },
     status: {
       type: "object",
       additionalProperties: false,
-      required: ["privacyStatus", "embeddable", "license", "madeForKids"],
+      required: [
+        "privacyStatus",
+        "embeddable",
+        "license",
+        "madeForKids",
+        "selfDeclaredMadeForKids",
+      ],
       properties: {
         privacyStatus: NULLABLE_STRING,
         embeddable: { type: ["boolean", "null"] },
         license: NULLABLE_STRING,
         madeForKids: { type: ["boolean", "null"] },
+        selfDeclaredMadeForKids: { type: ["boolean", "null"] },
+      },
+    },
+    liveStreamingDetails: {
+      type: "object",
+      additionalProperties: false,
+      required: ["actualStartTime", "actualEndTime", "scheduledStartTime", "scheduledEndTime"],
+      properties: {
+        actualStartTime: NULLABLE_STRING,
+        actualEndTime: NULLABLE_STRING,
+        scheduledStartTime: NULLABLE_STRING,
+        scheduledEndTime: NULLABLE_STRING,
       },
     },
   },
@@ -327,6 +383,7 @@ export const YOUTUBE_VIDEO_SEARCH_OUTPUT_SCHEMA = {
         "videoSyndicated",
         "videoType",
         "pageSize",
+        "maxSearchPages",
         "requirePublicComments",
         "minimumCommentCount",
         "minimumViewCount",
@@ -336,7 +393,7 @@ export const YOUTUBE_VIDEO_SEARCH_OUTPUT_SCHEMA = {
         channelId: NULLABLE_STRING,
         publishedAfter: NULLABLE_STRING,
         publishedBefore: NULLABLE_STRING,
-        order: { enum: ["date", "rating", "relevance", "title", "videoCount", "viewCount"] },
+        order: { enum: ["date", "rating", "relevance", "title", "viewCount"] },
         regionCode: NULLABLE_STRING,
         relevanceLanguage: NULLABLE_STRING,
         safeSearch: { enum: ["moderate", "none", "strict"] },
@@ -351,6 +408,7 @@ export const YOUTUBE_VIDEO_SEARCH_OUTPUT_SCHEMA = {
         videoSyndicated: NULLABLE_STRING,
         videoType: NULLABLE_STRING,
         pageSize: { type: "integer", minimum: 1, maximum: 50 },
+        maxSearchPages: { type: "integer", minimum: 1, maximum: 10 },
         requirePublicComments: { type: "boolean" },
         minimumCommentCount: { type: "integer", minimum: 0 },
         minimumViewCount: { type: "integer", minimum: 0 },
@@ -376,7 +434,7 @@ export const YOUTUBE_VIDEO_SEARCH_OUTPUT_SCHEMA = {
         type: "object",
         additionalProperties: false,
         required: ["videoId", "reason"],
-        properties: { videoId: { type: "string" }, reason: { type: "string" } },
+        properties: { videoId: VIDEO_ID_SCHEMA, reason: { type: "string" } },
       },
     },
     failures: {
@@ -386,7 +444,7 @@ export const YOUTUBE_VIDEO_SEARCH_OUTPUT_SCHEMA = {
         additionalProperties: false,
         required: ["videoIds", "code"],
         properties: {
-          videoIds: { type: "array", items: { type: "string", minLength: 1 } },
+          videoIds: { type: "array", items: VIDEO_ID_SCHEMA },
           code: { type: "string", minLength: 1 },
         },
       },
@@ -404,6 +462,7 @@ const COMMENT_RECORD_SCHEMA = {
     "videoId",
     "parentId",
     "kind",
+    "channelId",
     "authorDisplayName",
     "authorChannelId",
     "authorChannelUrl",
@@ -419,9 +478,10 @@ const COMMENT_RECORD_SCHEMA = {
   properties: {
     commentId: { type: "string", minLength: 1 },
     threadId: { type: "string", minLength: 1 },
-    videoId: { type: "string", minLength: 1 },
+    videoId: VIDEO_ID_SCHEMA,
     parentId: NULLABLE_STRING,
     kind: { enum: ["top-level", "reply"] },
+    channelId: NULLABLE_STRING,
     authorDisplayName: NULLABLE_STRING,
     authorChannelId: NULLABLE_STRING,
     authorChannelUrl: NULLABLE_STRING,
@@ -470,7 +530,7 @@ export const YOUTUBE_COMMENTS_OUTPUT_SCHEMA = {
         "maxReplyPagesPerThread",
       ],
       properties: {
-        videoIds: { type: "array", items: { type: "string", minLength: 1 } },
+        videoIds: { type: "array", items: VIDEO_ID_SCHEMA },
         startDateTime: NULLABLE_STRING,
         endDateTime: NULLABLE_STRING,
         timeField: { enum: ["published", "updated"] },
@@ -489,7 +549,7 @@ export const YOUTUBE_COMMENTS_OUTPUT_SCHEMA = {
         additionalProperties: false,
         required: ["videoId", "threadPages", "replyPages", "threads", "comments", "truncated"],
         properties: {
-          videoId: { type: "string", minLength: 1 },
+          videoId: VIDEO_ID_SCHEMA,
           threadPages: { type: "integer", minimum: 0 },
           replyPages: { type: "integer", minimum: 0 },
           threads: { type: "integer", minimum: 0 },
@@ -506,7 +566,7 @@ export const YOUTUBE_COMMENTS_OUTPUT_SCHEMA = {
         additionalProperties: false,
         required: ["videoId", "code"],
         properties: {
-          videoId: { type: "string", minLength: 1 },
+          videoId: VIDEO_ID_SCHEMA,
           code: { type: "string", minLength: 1 },
         },
       },

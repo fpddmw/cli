@@ -20,13 +20,16 @@ const VIDEOS_PATH = `${API_PREFIX}videos`;
 const COMMENT_THREADS_PATH = `${API_PREFIX}commentThreads`;
 const COMMENTS_PATH = `${API_PREFIX}comments`;
 const VIDEO_DETAIL_BATCH_SIZE = 50;
+const MAX_VIDEO_SEARCH_PAGES = 10;
+const MAX_VIDEO_CANDIDATES = 250;
+const VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{11}$/;
 
 interface VideoSearchInput {
   query: string;
   channelId?: string;
   publishedAfter?: string;
   publishedBefore?: string;
-  order?: "date" | "rating" | "relevance" | "title" | "videoCount" | "viewCount";
+  order?: "date" | "rating" | "relevance" | "title" | "viewCount";
   regionCode?: string;
   relevanceLanguage?: string;
   safeSearch?: "moderate" | "none" | "strict";
@@ -41,6 +44,7 @@ interface VideoSearchInput {
   videoSyndicated?: "any" | "true";
   videoType?: "any" | "episode" | "movie";
   pageSize?: number;
+  maxSearchPages?: number;
   requirePublicComments?: boolean;
   minimumCommentCount?: number;
   minimumViewCount?: number;
@@ -51,7 +55,7 @@ interface NormalizedVideoSearch {
   channelId: string | null;
   publishedAfter: string | null;
   publishedBefore: string | null;
-  order: "date" | "rating" | "relevance" | "title" | "videoCount" | "viewCount";
+  order: "date" | "rating" | "relevance" | "title" | "viewCount";
   regionCode: string | null;
   relevanceLanguage: string | null;
   safeSearch: "moderate" | "none" | "strict";
@@ -66,6 +70,7 @@ interface NormalizedVideoSearch {
   videoSyndicated: VideoSearchInput["videoSyndicated"] | null;
   videoType: VideoSearchInput["videoType"] | null;
   pageSize: number;
+  maxSearchPages: number;
   requirePublicComments: boolean;
   minimumCommentCount: number;
   minimumViewCount: number;
@@ -99,14 +104,19 @@ interface NormalizedCommentsQuery {
 
 interface VideoRecord {
   videoId: string;
+  searchRank: number;
+  searchPage: number;
+  searchPosition: number;
   publishedAt: string | null;
   channelId: string | null;
   channelTitle: string | null;
   title: string;
   description: string;
   tags: string[];
+  thumbnailUrls: string[];
   categoryId: string | null;
   defaultLanguage: string | null;
+  defaultAudioLanguage: string | null;
   liveBroadcastContent: string | null;
   statistics: { viewCount: number | null; likeCount: number | null; commentCount: number | null };
   contentDetails: {
@@ -114,13 +124,31 @@ interface VideoRecord {
     caption: string | null;
     definition: string | null;
     dimension: string | null;
+    licensedContent: boolean | null;
+    projection: string | null;
   };
   status: {
     privacyStatus: string | null;
     embeddable: boolean | null;
     license: string | null;
     madeForKids: boolean | null;
+    selfDeclaredMadeForKids: boolean | null;
   };
+  liveStreamingDetails: {
+    actualStartTime: string | null;
+    actualEndTime: string | null;
+    scheduledStartTime: string | null;
+    scheduledEndTime: string | null;
+  };
+}
+
+type VideoDetailRecord = Omit<VideoRecord, "searchRank" | "searchPage" | "searchPosition">;
+
+interface VideoSearchCandidate {
+  videoId: string;
+  searchRank: number;
+  searchPage: number;
+  searchPosition: number;
 }
 
 interface CommentRecord {
@@ -129,6 +157,7 @@ interface CommentRecord {
   videoId: string;
   parentId: string | null;
   kind: "top-level" | "reply";
+  channelId: string | null;
   authorDisplayName: string | null;
   authorChannelId: string | null;
   authorChannelUrl: string | null;
@@ -195,7 +224,9 @@ export const youtubePublicContentConnector: DataConnectorDefinition = {
   limitations: [
     "Search ranking and result availability are provider-defined; bounded pages and quota do not guarantee exhaustive topic coverage.",
     "Search and detail operations consume project quota under the provider's current quota policy, which can change independently of this connector.",
+    "search.list uses the provider's separate Search Queries quota bucket; the available call allocation is project-specific and must be checked outside this connector.",
     "Public statistics can be hidden, delayed, rounded, disabled, or absent and are not stable measurements of audience or opinion.",
+    "YouTube changed the public viewCount definition on August 24, 2026, so comparisons spanning that date require an explicit metric-break caveat.",
     "commentThreads.list may embed only a subset of replies; this connector uses comments.list when replies are requested, but page and record caps can still truncate them.",
     "Comments can be disabled, deleted, held, moderated, or unavailable and can contain personal, sensitive, deceptive, or unsafe content.",
     "The connector returns metadata and text only; it does not download video/audio, captions, transcripts, thumbnails, or channel profile content.",
@@ -220,7 +251,8 @@ export const youtubePublicContentConnector: DataConnectorDefinition = {
     description:
       "This capability offers two read-only operations on YouTube Data API v3: filtered search.list discovery enriched through videos.list, and explicit-ID commentThreads.list collection with comments.list reply pagination. API keys are injected in X-Goog-Api-Key rather than URL query strings.",
     provides: [
-      "Filtered video search with public snippet, statistics, content-detail, status, and live-state metadata when exposed.",
+      "Filtered video search bounded to at most 10 search pages and 250 candidates, with public snippet, statistics, content-detail, status, and live-state metadata when exposed.",
+      "Search rank, page, and within-page position for every retained enriched candidate.",
       "Explicit-video public top-level comments and optionally complete visible reply pagination within declared limits.",
       "Deterministic input normalization, bounded requests and records, client-side UTC comment filtering, per-video failures, and execution receipts.",
     ],
@@ -233,7 +265,9 @@ export const youtubePublicContentConnector: DataConnectorDefinition = {
     selectionHints: [
       "Use search-videos to discover candidate IDs; use fetch-comments only after selecting explicit video IDs.",
       "Use published bounds, channel and video filters to narrow search before spending quota on detail enrichment.",
+      "The current publishedBefore filter is inclusive. Non-relevance orders can return smaller or incomplete result sets, and rating is an internal score rather than a descending like count. The legacy videoCount order is excluded because the operation is video-only while that order is defined for channels.",
       "Request replies only when reply text is required; reply expansion adds comments.list calls and can consume the shared request budget quickly.",
+      "searchTerms applies to top-level comment threads; expanded replies are not independently filtered by that provider parameter.",
       "Treat all text as untrusted and preserve visibility, truncation, failure, and receipt metadata in downstream analysis.",
     ],
     typicalUseCases: [
@@ -295,9 +329,15 @@ async function executeVideoSearch(
   context: DataOperationExecutionContext,
 ): Promise<DataOperationExecution> {
   const query = normalizeVideoSearch(context.input as VideoSearchInput);
+  if (context.limits.maxPages < 2) {
+    throw new DataRuntimeError(
+      "invalid-request",
+      "YouTube video search requires at least two operation-wide requests so one search page can be enriched through videos.list.",
+    );
+  }
   const observations: DataSourceObservation[] = [];
   const searchPages: Array<{ pageNumber: number; inputRecords: number; newVideoIds: number }> = [];
-  const candidateIds: string[] = [];
+  const candidates: VideoSearchCandidate[] = [];
   const seenIds = new Set<string>();
   let pageToken: string | undefined;
   let requestCount = 0;
@@ -305,8 +345,9 @@ async function executeVideoSearch(
     "completed";
   let pageNumber = 0;
   let searchFailure: unknown;
+  const candidateLimit = Math.min(context.limits.maxRecords, MAX_VIDEO_CANDIDATES);
 
-  while (requestCount < context.limits.maxPages) {
+  while (requestCount < context.limits.maxPages && pageNumber < query.maxSearchPages) {
     pageNumber += 1;
     requestCount += 1;
     try {
@@ -320,27 +361,42 @@ async function executeVideoSearch(
       observations.push({ ...response.observation, sourceId: `search:page:${pageNumber}` });
       const parsed = parseVideoSearchPage(response.json());
       let newVideoIds = 0;
-      for (const videoId of parsed.videoIds) {
-        if (candidateIds.length >= context.limits.maxRecords) break;
+      let recordLimitDiscarded = false;
+      for (const [position, videoId] of parsed.videoIds.entries()) {
         if (seenIds.has(videoId)) continue;
         seenIds.add(videoId);
-        candidateIds.push(videoId);
+        if (candidates.length >= candidateLimit) {
+          recordLimitDiscarded = true;
+          continue;
+        }
+        candidates.push({
+          videoId,
+          searchRank: candidates.length + 1,
+          searchPage: pageNumber,
+          searchPosition: position + 1,
+        });
         newVideoIds += 1;
       }
       searchPages.push({ pageNumber, inputRecords: parsed.videoIds.length, newVideoIds });
-      if (candidateIds.length >= context.limits.maxRecords) {
-        stopReason = parsed.nextPageToken ? "max-records" : "completed";
+      if (candidates.length >= candidateLimit) {
+        stopReason = recordLimitDiscarded || parsed.nextPageToken ? "max-records" : "completed";
         break;
       }
       if (!parsed.nextPageToken) {
-        stopReason = candidateIds.length === 0 ? "no-results" : "completed";
+        stopReason = candidates.length === 0 ? "no-results" : "completed";
         break;
       }
       if (parsed.nextPageToken === pageToken) {
         throw providerInvalid("YouTube search returned a repeated page token.");
       }
       pageToken = parsed.nextPageToken;
-      if (requestCount >= context.limits.maxPages) {
+      if (pageNumber >= query.maxSearchPages) {
+        stopReason = "max-pages";
+        break;
+      }
+      const projectedCandidateCount = Math.min(candidateLimit, candidates.length + query.pageSize);
+      const reservedDetailRequests = Math.ceil(projectedCandidateCount / VIDEO_DETAIL_BATCH_SIZE);
+      if (requestCount + 1 + reservedDetailRequests > context.limits.maxPages) {
         stopReason = "max-pages";
         break;
       }
@@ -356,10 +412,13 @@ async function executeVideoSearch(
   const filteredOut: Array<{ videoId: string; reason: string }> = [];
   const failures: Array<{ videoIds: string[]; code: string }> = [];
   const failureValues: unknown[] = [];
-  const remainingIds = [...candidateIds];
-  while (remainingIds.length > 0 && requestCount < context.limits.maxPages) {
-    const batch = remainingIds.splice(0, VIDEO_DETAIL_BATCH_SIZE);
+  const remainingCandidates = [...candidates];
+  let detailBatchCount = 0;
+  while (remainingCandidates.length > 0 && requestCount < context.limits.maxPages) {
+    const batch = remainingCandidates.splice(0, VIDEO_DETAIL_BATCH_SIZE);
+    const batchIds = batch.map((candidate) => candidate.videoId);
     requestCount += 1;
+    detailBatchCount += 1;
     try {
       const response = await context.http.request({
         endpointId: "youtube-data-api",
@@ -367,34 +426,49 @@ async function executeVideoSearch(
         path: VIDEOS_PATH,
         query: {
           part: "snippet,statistics,contentDetails,status,liveStreamingDetails",
-          id: batch.join(","),
+          id: batchIds.join(","),
+          maxResults: batchIds.length,
         },
         credentialId: "api-key",
       });
       observations.push({
         ...response.observation,
-        sourceId: `videos:${batch[0]}:${batch.length}`,
+        sourceId: `videos:${batchIds[0]}:${batchIds.length}`,
       });
-      const details = parseVideoDetails(response.json());
+      const details = parseVideoDetails(response.json(), batchIds);
       const byId = new Map(details.map((record) => [record.videoId, record]));
-      for (const videoId of batch) {
-        const record = byId.get(videoId);
+      const missingBatchIds: string[] = [];
+      for (const candidate of batch) {
+        const record = byId.get(candidate.videoId);
         if (!record) {
-          filteredOut.push({ videoId, reason: "details-unavailable" });
+          missingBatchIds.push(candidate.videoId);
           continue;
         }
         const reason = videoFilterReason(record, query);
-        if (reason) filteredOut.push({ videoId, reason });
-        else records.push(record);
+        if (reason) filteredOut.push({ videoId: candidate.videoId, reason });
+        else records.push({ ...record, ...candidate });
+      }
+      if (missingBatchIds.length > 0) {
+        const missingError = providerInvalid(
+          "YouTube videos.list omitted one or more requested candidate IDs.",
+        );
+        failures.push({ videoIds: missingBatchIds, code: missingError.code });
+        failureValues.push(missingError);
       }
     } catch (error) {
       const normalized = normalizeProviderFailure(error);
-      failures.push({ videoIds: batch, code: normalized.code });
+      failures.push({ videoIds: batchIds, code: normalized.code });
       failureValues.push(normalized);
     }
   }
-  if (remainingIds.length > 0 && stopReason !== "partial") stopReason = "max-pages";
+  if (remainingCandidates.length > 0) {
+    throw new DataRuntimeError(
+      "invalid-request",
+      "The operation-wide request limit left discovered YouTube candidates without required detail enrichment.",
+    );
+  }
 
+  const truncated = stopReason === "max-pages" || stopReason === "max-records";
   const partial = searchFailure !== undefined || failures.length > 0;
   if (partial) stopReason = "partial";
   if (records.length === 0 && failures.length > 0 && filteredOut.length === 0) {
@@ -420,13 +494,12 @@ async function executeVideoSearch(
         },
       ]
     : [];
-  const truncated = stopReason === "max-pages" || stopReason === "max-records";
-  const missing =
-    missingIds.length > 0
-      ? [{ kind: "range" as const, identifiers: missingIds }]
-      : searchFailure === undefined
-        ? undefined
-        : [{ kind: "page" as const, identifiers: [String(pageNumber)] }];
+  const missing = [
+    ...(missingIds.length > 0 ? [{ kind: "range" as const, identifiers: missingIds }] : []),
+    ...(searchFailure === undefined
+      ? []
+      : [{ kind: "page" as const, identifiers: [String(pageNumber)] }]),
+  ];
   return {
     status: partial ? "partial" : "success",
     data: {
@@ -441,14 +514,21 @@ async function executeVideoSearch(
     summary: {
       recordCount: records.length,
       pageCount: observations.length,
-      chunkCount: Math.ceil(candidateIds.length / VIDEO_DETAIL_BATCH_SIZE),
+      chunkCount: detailBatchCount,
       truncated,
       completeness: partial ? "partial" : "complete",
-      ...(missing ? { missing } : {}),
+      ...(missing.length > 0 ? { missing } : {}),
     },
     warnings: [
       "YouTube search ranking, visibility, metadata, and public statistics are mutable provider snapshots.",
+      "YouTube search.list consumes the provider's separate Search Queries quota bucket; project-specific availability is not inferred from this result.",
+      "YouTube changed the public viewCount definition on August 24, 2026; comparisons spanning that date require a metric-break caveat.",
       "Video and engagement metadata must not be treated as representative public opinion, endorsement, verified identity, or factual verification.",
+      ...(query.order === "relevance"
+        ? []
+        : [
+            "YouTube warns that non-relevance ordering can return a smaller or incomplete result set, especially with publication-date filters.",
+          ]),
       ...(truncated ? ["The result stopped at an explicit request or record limit."] : []),
     ],
     errors,
@@ -474,15 +554,18 @@ async function executeCommentsFetch(
   const failures: Array<{ videoId: string; code: string }> = [];
   const failureValues: unknown[] = [];
   let requestCount = 0;
-  let intentionalTruncation: "max-pages" | "max-records" | null = null;
+  let truncationReason: "max-pages" | "max-records" | null = null;
+  let globalStop = false;
 
   for (const [videoIndex, videoId] of query.videoIds.entries()) {
     if (requestCount >= context.limits.maxPages) {
-      intentionalTruncation = "max-pages";
+      truncationReason ??= "max-pages";
+      globalStop = true;
       break;
     }
     if (records.length >= context.limits.maxRecords) {
-      intentionalTruncation = "max-records";
+      truncationReason = "max-records";
+      globalStop = true;
       break;
     }
     const startCount = records.length;
@@ -499,7 +582,8 @@ async function executeCommentsFetch(
       for (let threadPage = 1; threadPage <= query.maxThreadPagesPerVideo; threadPage += 1) {
         if (requestCount >= context.limits.maxPages) {
           videoSummary.truncated = true;
-          intentionalTruncation = "max-pages";
+          truncationReason ??= "max-pages";
+          globalStop = true;
           break;
         }
         requestCount += 1;
@@ -527,12 +611,19 @@ async function executeCommentsFetch(
         for (const thread of page.threads) {
           if (records.length >= context.limits.maxRecords) {
             videoSummary.truncated = true;
-            intentionalTruncation = "max-records";
+            truncationReason = "max-records";
+            globalStop = true;
             break;
           }
           videoSummary.threads += 1;
           if (insideCommentWindow(thread.topLevel, query)) {
             addComment(records, seenComments, thread.topLevel, context.limits.maxRecords);
+          }
+          if (records.length >= context.limits.maxRecords) {
+            videoSummary.truncated = true;
+            truncationReason = "max-records";
+            globalStop = true;
+            break;
           }
           if (!query.includeReplies || thread.totalReplyCount === 0) continue;
 
@@ -543,8 +634,11 @@ async function executeCommentsFetch(
               records.length >= context.limits.maxRecords
             ) {
               videoSummary.truncated = true;
-              intentionalTruncation =
-                records.length >= context.limits.maxRecords ? "max-records" : "max-pages";
+              truncationReason =
+                records.length >= context.limits.maxRecords
+                  ? "max-records"
+                  : (truncationReason ?? "max-pages");
+              globalStop = true;
               break;
             }
             requestCount += 1;
@@ -566,13 +660,25 @@ async function executeCommentsFetch(
               sourceId: `replies:${thread.topLevel.commentId}:page:${replyPage}`,
             });
             videoSummary.replyPages += 1;
-            const replyResult = parseRepliesPage(replyResponse.json(), videoId, thread.threadId);
+            const replyResult = parseRepliesPage(
+              replyResponse.json(),
+              videoId,
+              thread.threadId,
+              thread.topLevel.commentId,
+            );
             for (const reply of replyResult.records) {
               if (records.length >= context.limits.maxRecords) break;
               if (insideCommentWindow(reply, query)) {
                 addComment(records, seenComments, reply, context.limits.maxRecords);
               }
+              if (records.length >= context.limits.maxRecords) {
+                videoSummary.truncated = true;
+                truncationReason = "max-records";
+                globalStop = true;
+                break;
+              }
             }
+            if (globalStop) break;
             if (!replyResult.nextPageToken) break;
             if (replyResult.nextPageToken === nextReplyPageToken) {
               throw providerInvalid("YouTube replies returned a repeated page token.");
@@ -580,12 +686,12 @@ async function executeCommentsFetch(
             nextReplyPageToken = replyResult.nextPageToken;
             if (replyPage >= query.maxReplyPagesPerThread) {
               videoSummary.truncated = true;
-              intentionalTruncation = "max-pages";
+              truncationReason ??= "max-pages";
             }
           }
-          if (intentionalTruncation) break;
+          if (globalStop) break;
         }
-        if (intentionalTruncation) break;
+        if (globalStop) break;
         if (!page.nextPageToken) break;
         if (page.nextPageToken === nextThreadPageToken) {
           throw providerInvalid("YouTube comment threads returned a repeated page token.");
@@ -593,7 +699,7 @@ async function executeCommentsFetch(
         nextThreadPageToken = page.nextPageToken;
         if (threadPage >= query.maxThreadPagesPerVideo) {
           videoSummary.truncated = true;
-          intentionalTruncation = "max-pages";
+          truncationReason ??= "max-pages";
         }
       }
     } catch (error) {
@@ -603,7 +709,7 @@ async function executeCommentsFetch(
     }
     videoSummary.comments = records.length - startCount;
     videos.push(videoSummary);
-    if (intentionalTruncation && videoIndex < query.videoIds.length - 1) break;
+    if (globalStop && videoIndex < query.videoIds.length - 1) break;
   }
 
   const blockingFailure = failureValues.find((failure) => !isCommentsDisabledFailure(failure));
@@ -611,7 +717,7 @@ async function executeCommentsFetch(
   const partial = failures.length > 0;
   const stopReason = partial
     ? "partial"
-    : (intentionalTruncation ?? (records.length === 0 ? "no-results" : "completed"));
+    : (truncationReason ?? (records.length === 0 ? "no-results" : "completed"));
   const missingVideoIds = failures.map((failure) => failure.videoId);
   const errors: DataMachineError[] = partial
     ? [
@@ -629,7 +735,7 @@ async function executeCommentsFetch(
         },
       ]
     : [];
-  const truncated = stopReason === "max-pages" || stopReason === "max-records";
+  const truncated = truncationReason !== null;
   const completeReplies = query.includeReplies && !truncated && !partial;
   return {
     status: partial ? "partial" : "success",
@@ -664,6 +770,11 @@ async function executeCommentsFetch(
         : [
             "Replies were not requested; top-level comments do not represent the full conversation.",
           ]),
+      ...(query.searchTerms
+        ? [
+            "The provider searchTerms filter applies to top-level comment threads; expanded replies were not independently term-filtered.",
+          ]
+        : []),
       ...(truncated ? ["The comment result stopped at an explicit request or record limit."] : []),
     ],
     errors,
@@ -700,6 +811,7 @@ function normalizeVideoSearch(input: VideoSearchInput): NormalizedVideoSearch {
     videoSyndicated: input.videoSyndicated ?? null,
     videoType: input.videoType ?? null,
     pageSize: input.pageSize ?? 25,
+    maxSearchPages: input.maxSearchPages ?? 5,
     requirePublicComments: input.requirePublicComments ?? true,
     minimumCommentCount: input.minimumCommentCount ?? 0,
     minimumViewCount: input.minimumViewCount ?? 0,
@@ -743,24 +855,29 @@ function parseVideoSearchPage(value: unknown): { videoIds: string[]; nextPageTok
   if (!Array.isArray(root.items)) throw providerInvalid("YouTube search items are missing.");
   const videoIds = root.items.map((item) => {
     const id = object(object(item, "YouTube search item").id, "YouTube search item ID");
-    return requiredText(id.videoId, "YouTube search video ID");
+    return requiredVideoId(id.videoId, "YouTube search video ID");
   });
   return { videoIds, ...optionalPageToken(root.nextPageToken) };
 }
 
-function parseVideoDetails(value: unknown): VideoRecord[] {
+function parseVideoDetails(value: unknown, requestedIds: string[]): VideoDetailRecord[] {
   const root = object(value, "YouTube videos response");
   if (!Array.isArray(root.items)) throw providerInvalid("YouTube video-detail items are missing.");
+  const requested = new Set(requestedIds);
   const seen = new Set<string>();
   return root.items.map((item) => {
     const record = object(item, "YouTube video detail");
-    const videoId = requiredText(record.id, "YouTube video ID");
+    const videoId = requiredVideoId(record.id, "YouTube video ID");
+    if (!requested.has(videoId)) {
+      throw providerInvalid("YouTube videos.list returned an unrequested video ID.");
+    }
     if (seen.has(videoId)) throw providerInvalid("YouTube returned a duplicate video detail.");
     seen.add(videoId);
     const snippet = objectOrEmpty(record.snippet);
     const statistics = objectOrEmpty(record.statistics);
     const contentDetails = objectOrEmpty(record.contentDetails);
     const status = objectOrEmpty(record.status);
+    const liveStreamingDetails = objectOrEmpty(record.liveStreamingDetails);
     return {
       videoId,
       publishedAt: optionalDateTime(snippet.publishedAt),
@@ -769,8 +886,10 @@ function parseVideoDetails(value: unknown): VideoRecord[] {
       title: typeof snippet.title === "string" ? snippet.title : "",
       description: typeof snippet.description === "string" ? snippet.description : "",
       tags: stringArray(snippet.tags),
+      thumbnailUrls: httpsUrlsFromObject(snippet.thumbnails),
       categoryId: optionalString(snippet.categoryId),
       defaultLanguage: optionalString(snippet.defaultLanguage),
+      defaultAudioLanguage: optionalString(snippet.defaultAudioLanguage),
       liveBroadcastContent: optionalString(snippet.liveBroadcastContent),
       statistics: {
         viewCount: numericString(statistics.viewCount),
@@ -782,40 +901,60 @@ function parseVideoDetails(value: unknown): VideoRecord[] {
         caption: optionalString(contentDetails.caption),
         definition: optionalString(contentDetails.definition),
         dimension: optionalString(contentDetails.dimension),
+        licensedContent: optionalBoolean(contentDetails.licensedContent),
+        projection: optionalString(contentDetails.projection),
       },
       status: {
         privacyStatus: optionalString(status.privacyStatus),
         embeddable: optionalBoolean(status.embeddable),
         license: optionalString(status.license),
         madeForKids: optionalBoolean(status.madeForKids),
+        selfDeclaredMadeForKids: optionalBoolean(status.selfDeclaredMadeForKids),
+      },
+      liveStreamingDetails: {
+        actualStartTime: optionalDateTime(liveStreamingDetails.actualStartTime),
+        actualEndTime: optionalDateTime(liveStreamingDetails.actualEndTime),
+        scheduledStartTime: optionalDateTime(liveStreamingDetails.scheduledStartTime),
+        scheduledEndTime: optionalDateTime(liveStreamingDetails.scheduledEndTime),
       },
     };
   });
 }
 
-function videoFilterReason(record: VideoRecord, query: NormalizedVideoSearch): string | null {
+function videoFilterReason(record: VideoDetailRecord, query: NormalizedVideoSearch): string | null {
   const comments = record.statistics.commentCount;
   const views = record.statistics.viewCount;
   if (query.requirePublicComments && (comments === null || comments === 0)) {
     return "public-comments-unavailable";
   }
-  if (comments === null || comments < query.minimumCommentCount) {
+  if (
+    query.minimumCommentCount > 0 &&
+    (comments === null || comments < query.minimumCommentCount)
+  ) {
     return "below-minimum-comment-count";
   }
-  if (views === null || views < query.minimumViewCount) return "below-minimum-view-count";
+  if (query.minimumViewCount > 0 && (views === null || views < query.minimumViewCount)) {
+    return "below-minimum-view-count";
+  }
   return null;
 }
 
 function normalizeCommentsQuery(input: CommentsInput): NormalizedCommentsQuery {
   const startDateTime = input.startDateTime ? exactDateTime(input.startDateTime) : null;
   const endDateTime = input.endDateTime ? exactDateTime(input.endDateTime) : null;
+  if ((startDateTime === null) !== (endDateTime === null)) {
+    throw new DataRuntimeError(
+      "invalid-request",
+      "YouTube comment startDateTime and endDateTime must be provided together.",
+    );
+  }
   if (startDateTime && endDateTime && startDateTime >= endDateTime) {
     throw new DataRuntimeError(
       "invalid-request",
       "YouTube comment startDateTime must precede endDateTime.",
     );
   }
-  const videoIds = input.videoIds.map((value) => nonBlankInput(value, "YouTube video ID"));
+  const videoIds = input.videoIds.map(videoIdInput);
   if (new Set(videoIds).size !== videoIds.length) {
     throw new DataRuntimeError(
       "invalid-request",
@@ -869,11 +1008,14 @@ function parseRepliesPage(
   value: unknown,
   videoId: string,
   threadId: string,
+  parentCommentId: string,
 ): { records: CommentRecord[]; nextPageToken?: string } {
   const root = object(value, "YouTube comments response");
   if (!Array.isArray(root.items)) throw providerInvalid("YouTube reply items are missing.");
   return {
-    records: root.items.map((item) => normalizeComment(item, threadId, videoId, "reply")),
+    records: root.items.map((item) =>
+      normalizeComment(item, threadId, videoId, "reply", parentCommentId),
+    ),
     ...optionalPageToken(root.nextPageToken),
   };
 }
@@ -883,16 +1025,26 @@ function normalizeComment(
   threadId: string,
   videoId: string,
   kind: "top-level" | "reply",
+  expectedParentId: string | null = null,
 ): CommentRecord {
   const root = object(value, "YouTube comment");
   const snippet = object(root.snippet, "YouTube comment snippet");
   const authorChannelId = objectOrEmpty(snippet.authorChannelId);
+  const providerVideoId = optionalString(snippet.videoId);
+  if (providerVideoId && providerVideoId !== videoId) {
+    throw providerInvalid("YouTube comment belongs to an unexpected video.");
+  }
+  const parentId = kind === "reply" ? optionalString(snippet.parentId) : null;
+  if (kind === "reply" && parentId !== expectedParentId) {
+    throw providerInvalid("YouTube reply belongs to an unexpected parent comment.");
+  }
   return {
     commentId: requiredText(root.id, "YouTube comment ID"),
     threadId,
     videoId,
-    parentId: kind === "reply" ? optionalString(snippet.parentId) : null,
+    parentId,
     kind,
+    channelId: optionalString(snippet.channelId),
     authorDisplayName: optionalString(snippet.authorDisplayName),
     authorChannelId: optionalString(authorChannelId.value),
     authorChannelUrl: optionalString(snippet.authorChannelUrl),
@@ -964,6 +1116,17 @@ function nonBlankInput(value: string, label: string): string {
   return normalized;
 }
 
+function videoIdInput(value: string): string {
+  const normalized = nonBlankInput(value, "YouTube video ID");
+  if (!VIDEO_ID_PATTERN.test(normalized)) {
+    throw new DataRuntimeError(
+      "invalid-request",
+      "YouTube video IDs must contain exactly 11 URL-safe identifier characters.",
+    );
+  }
+  return normalized;
+}
+
 function optionalDateTime(value: unknown): string | null {
   if (typeof value !== "string" || !value) return null;
   const parsed = new Date(value);
@@ -994,6 +1157,14 @@ function requiredText(value: unknown, label: string): string {
   return value.trim();
 }
 
+function requiredVideoId(value: unknown, label: string): string {
+  const normalized = requiredText(value, label);
+  if (!VIDEO_ID_PATTERN.test(normalized)) {
+    throw providerInvalid(`${label} must contain exactly 11 URL-safe identifier characters.`);
+  }
+  return normalized;
+}
+
 function optionalString(value: unknown): string | null {
   return typeof value === "string" && value ? value : null;
 }
@@ -1005,6 +1176,24 @@ function optionalBoolean(value: unknown): boolean | null {
 function stringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === "string");
+}
+
+function httpsUrlsFromObject(value: unknown): string[] {
+  const source = objectOrEmpty(value);
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of Object.values(source)) {
+    const url = optionalString(objectOrEmpty(candidate).url);
+    if (!url || seen.has(url)) continue;
+    try {
+      if (new URL(url).protocol !== "https:") continue;
+    } catch {
+      continue;
+    }
+    seen.add(url);
+    urls.push(url);
+  }
+  return urls;
 }
 
 function nonNegativeInteger(value: unknown): number | null {
