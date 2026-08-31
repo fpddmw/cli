@@ -438,9 +438,7 @@ function parseProviderPage(
   const records = payload.results
     .filter(isRecord)
     .slice(0, remainingRecords)
-    .map((record, index) =>
-      normalizeProviderRecord(record, pageNumber, recordOffset + index),
-    );
+    .map((record, index) => normalizeProviderRecord(record, pageNumber, recordOffset + index));
   return {
     description,
     count,

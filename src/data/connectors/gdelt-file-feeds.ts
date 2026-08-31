@@ -595,11 +595,7 @@ function parseSingleEntryZip(bytes: Buffer, expectedMemberName: string): ParsedZ
   };
 }
 
-function parseRows(
-  content: Buffer,
-  fields: readonly string[],
-  fileName: string,
-): ParsedRows {
+function parseRows(content: Buffer, fields: readonly string[], fileName: string): ParsedRows {
   const rows: Array<Record<string, string>> = [];
   const issues: string[] = [];
   let totalRows = 0;
@@ -642,10 +638,7 @@ function parseRows(
 
 function parseAlignedDateTime(value: string, field: string): Date {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value))
-    throw new DataRuntimeError(
-      "invalid-request",
-      `${field} must be a canonical UTC timestamp.`,
-    );
+    throw new DataRuntimeError("invalid-request", `${field} must be a canonical UTC timestamp.`);
   const parsed = new Date(value);
   if (!Number.isFinite(parsed.getTime()) || canonicalDateTime(parsed) !== value) {
     throw new DataRuntimeError(

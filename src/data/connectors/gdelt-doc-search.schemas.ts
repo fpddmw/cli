@@ -57,8 +57,7 @@ export const GDELT_DOC_SEARCH_INPUT_SCHEMA = {
       type: "object",
       additionalProperties: false,
       required: ["from", "to"],
-      description:
-        "Inclusive UTC search window; mutually exclusive with relativeWindow.",
+      description: "Inclusive UTC search window; mutually exclusive with relativeWindow.",
       examples: [{ from: "2026-03-01T00:00:00Z", to: "2026-03-02T00:00:00Z" }],
       properties: {
         from: {

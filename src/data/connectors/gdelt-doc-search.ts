@@ -219,11 +219,9 @@ async function executeGdeltDocSearch(
     }
   }
   if (batches.length === 0) {
-    throw new DataRuntimeError(
-      "provider-response-invalid",
-      "All GDELT DOC query batches failed.",
-      { details: { failedQueries: failures.map((item) => item.query) } },
-    );
+    throw new DataRuntimeError("provider-response-invalid", "All GDELT DOC query batches failed.", {
+      details: { failedQueries: failures.map((item) => item.query) },
+    });
   }
   const partial = failures.length > 0;
   const queryDetails = normalizeQueryDetails(batches[0]!.payload.query_details);
@@ -245,8 +243,7 @@ async function executeGdeltDocSearch(
           code: "partial-result",
           message: "One or more split GDELT DOC query batches failed.",
           retryable: failures.some(
-            ({ error }) =>
-              error instanceof DataRuntimeError && (error.options.retryable ?? false),
+            ({ error }) => error instanceof DataRuntimeError && (error.options.retryable ?? false),
           ),
           userActionRequired: false,
           details: { failedQueries: failures.map((item) => item.query) },
@@ -404,9 +401,7 @@ async function executeGdeltDocSearch(
       completeness: partial ? "partial" : "complete",
       ...(partial
         ? {
-            missing: [
-              { kind: "range" as const, identifiers: failures.map((item) => item.query) },
-            ],
+            missing: [{ kind: "range" as const, identifiers: failures.map((item) => item.query) }],
           }
         : {}),
     },
@@ -728,11 +723,7 @@ function normalizeDomain(value: string, field: string): string {
     .toLowerCase()
     .replace(/^https?:\/\//, "")
     .split("/", 1)[0]!;
-  if (
-    !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(
-      normalized,
-    )
-  ) {
+  if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(normalized)) {
     throw new DataRuntimeError(
       "invalid-request",
       `GDELT DOC ${field} values must be bare DNS domains.`,

@@ -25,8 +25,7 @@ export const GDELT_FILE_FEED_INPUT_SCHEMA = {
     endDateTime: {
       type: "string",
       pattern: RFC3339_PATTERN,
-      description:
-        "Inclusive canonical UTC upper bound; required only for range mode.",
+      description: "Inclusive canonical UTC upper bound; required only for range mode.",
       examples: ["2026-03-01T12:15:00Z"],
     },
     maxFiles: {

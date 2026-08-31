@@ -487,7 +487,10 @@ describe("GDELT connectors", () => {
         fetchImpl: (async (target) => {
           const url = new URL(String(target));
           requested.push(url.pathname);
-          const member = url.pathname.split("/").at(-1)!.replace(/\.zip$/, "");
+          const member = url.pathname
+            .split("/")
+            .at(-1)!
+            .replace(/\.zip$/, "");
           return zipResponse(singleEntryZip(member, `${eventRow().join("\t")}\n`));
         }) as typeof fetch,
       },
@@ -590,15 +593,17 @@ describe("GDELT connectors", () => {
 
     assert.equal(result.status, "success", JSON.stringify(result.errors));
     assert.equal(result.summary.recordCount, 1);
-    const file = (result.data as {
-      files: Array<{
-        rowCount: number;
-        validRowCount: number;
-        invalidRowCount: number;
-        validationIssues: string[];
-        sha256: string;
-      }>;
-    }).files[0];
+    const file = (
+      result.data as {
+        files: Array<{
+          rowCount: number;
+          validRowCount: number;
+          invalidRowCount: number;
+          validationIssues: string[];
+          sha256: string;
+        }>;
+      }
+    ).files[0];
     assert.equal(file?.rowCount, 2);
     assert.equal(file?.validRowCount, 1);
     assert.equal(file?.invalidRowCount, 1);

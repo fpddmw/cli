@@ -713,10 +713,7 @@ function parseThread(
       }
       for (let index = replies.length - 1; index >= 0; index -= 1) {
         if (!objectOrNull(replies[index])) {
-          addThreadIssue(
-            issues,
-            `Ignored a non-object reply under ${post?.uri ?? requestedUri}.`,
-          );
+          addThreadIssue(issues, `Ignored a non-object reply under ${post?.uri ?? requestedUri}.`);
           continue;
         }
         stack.push({

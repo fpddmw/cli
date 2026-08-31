@@ -212,7 +212,10 @@ describe("AirNow hourly observations connector", () => {
       }>;
     };
     assert.equal(data.records.length, 2);
-    assert.equal(data.records.every((record) => record.aqsid === ""), true);
+    assert.equal(
+      data.records.every((record) => record.aqsid === ""),
+      true,
+    );
     assert.equal(
       data.records.every((record) => record.observedAtUtc === "2026-03-22T00:00:00Z"),
       true,

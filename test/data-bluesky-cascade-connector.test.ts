@@ -208,7 +208,10 @@ describe("Bluesky public-post cascades connector", () => {
     assert.equal(target?.searchParams.has("until"), false);
     const data = result.data as { hitsTotal: number | null; seedPosts: Array<{ text: string }> };
     assert.equal(data.hitsTotal, 42);
-    assert.deepEqual(data.seedPosts.map((item) => item.text), ["inside"]);
+    assert.deepEqual(
+      data.seedPosts.map((item) => item.text),
+      ["inside"],
+    );
   });
 
   it("isolates malformed seeds and thread nodes while retaining valid public content", async () => {

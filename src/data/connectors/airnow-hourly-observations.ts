@@ -526,12 +526,7 @@ function normalizeRow(
 
   const records: AirNowRecord[] = [];
   for (const parameter of file.input.parameters) {
-    const rawConcentration = tolerantOptionalNumber(
-      row[parameter],
-      parameter,
-      line,
-      issues,
-    );
+    const rawConcentration = tolerantOptionalNumber(row[parameter], parameter, line, issues);
     const aqiColumn = AQI_COLUMNS[parameter];
     const measuredColumn = MEASURED_COLUMNS[parameter];
     const aqiValue = aqiColumn
