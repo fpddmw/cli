@@ -192,7 +192,7 @@ function createFeedConnector(definition: FeedDefinition): DataConnectorDefinitio
       },
       summary: definition.summary,
       description:
-        "Selects either the provider's latest feed entry or an explicit aligned UTC range, verifies bounded single-member ZIP bytes, and emits closed named columns.",
+        "Selects either the provider's latest feed entry or the first published 15-minute snapshots inside an explicit inclusive UTC range, verifies bounded single-member ZIP bytes, and emits closed named columns.",
       provides: [
         `Normalized ${definition.kind} rows with exact named fields from the published codebook layout.`,
         "Latest-file MD5 and compressed-size verification when the provider advertises them.",
@@ -206,7 +206,7 @@ function createFeedConnector(definition: FeedDefinition): DataConnectorDefinitio
       selectionHints: [
         `Choose this capability when the ${definition.kind} table is the intended GDELT schema.`,
         "Choose GDELT DOC search for recent article discovery or aggregate timelines instead of raw feed rows.",
-        "Use latest for the current provider file; use range only for exact 15-minute UTC boundaries.",
+        "Use latest for the current provider file; range bounds may be unaligned, and selection starts at the first 15-minute snapshot at or after the lower bound.",
       ],
       typicalUseCases: [definition.useCase],
       sourceDocumentation: [

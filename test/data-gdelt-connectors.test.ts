@@ -170,6 +170,14 @@ describe("GDELT connectors", () => {
         assert.ok(Array.isArray((field as Record<string, unknown>).examples), name);
       }
     }
+    for (const connector of [gdeltEventsConnector, gdeltGkgConnector, gdeltMentionsConnector]) {
+      assert.match(connector.discovery.description, /first published 15-minute snapshots/);
+      assert.ok(
+        connector.discovery.selectionHints.some((hint) =>
+          hint.includes("range bounds may be unaligned"),
+        ),
+      );
+    }
     for (const window of ["relativeWindow", "absoluteWindow"] as const) {
       for (const [name, field] of Object.entries(
         GDELT_DOC_SEARCH_INPUT_SCHEMA.properties[window].properties,
