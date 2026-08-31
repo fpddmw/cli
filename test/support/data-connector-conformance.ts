@@ -11,6 +11,7 @@ export async function assertDataConnectorConformance(input: {
   environment?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
   expectedStatus?: "success" | "partial";
+  artifactOutputDirectory?: string;
 }): Promise<void> {
   const registry = createDataRegistry([input.connector]);
   const catalog = registry.catalog();
@@ -27,6 +28,9 @@ export async function assertDataConnectorConformance(input: {
     registry,
     environment: input.environment ?? {},
     ...(input.fetchImpl === undefined ? {} : { fetchImpl: input.fetchImpl }),
+    ...(input.artifactOutputDirectory === undefined
+      ? {}
+      : { artifactOutputDirectory: input.artifactOutputDirectory }),
     clock: () => new Date("2026-08-30T00:00:00.000Z"),
   });
   assert.equal(result.status, input.expectedStatus ?? "success");

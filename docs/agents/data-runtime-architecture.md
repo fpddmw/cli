@@ -37,14 +37,14 @@ HTTP、认证、分页、重试、缓存或回执实现。Auto Research 复用�
 
 ## 公共命令契约
 
-以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册十八个
+以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册十九个
 独立可发现 capability：
 
 ```text
 tiangong-ai data catalog
 tiangong-ai data describe <capability-id>
 tiangong-ai data doctor <capability-id> [--live]
-tiangong-ai data run <capability-id> <operation-id> --input <path|->
+tiangong-ai data run <capability-id> <operation-id> --input <path|-> [--artifact-dir <absolute-existing-directory>]
 ```
 
 - `catalog` 离线、无副作用，返回内置能力、稳定版本/Schema 摘要，以及供 Agent
@@ -54,6 +54,10 @@ tiangong-ai data run <capability-id> <operation-id> --input <path|->
 - `doctor` 默认只做静态配置诊断；只有显式 `--live` 才允许有界的 provider 探测。
 - `run` 每次只执行一个 capability 的一个 operation。一个来源内部的分页、分块文件或
   重试仍属于该原子操作；跨来源 fan-out 或结果组合不属于它。
+- 只有 Execution Manifest 明确声明 `artifactOutput` 的 operation 才能接收
+  `--artifact-dir`。目录必须是显式、绝对、已存在且非符号链接的目录；runtime 使用隐藏
+  临时文件暂存，在业务输出和公共 envelope 校验后以 no-overwrite 语义提交，blocked 时
+  回滚。绝对路径不进入 request、result 或 receipt。
 - 机器输入优先来自文件或 stdin。凭证、令牌和敏感 header 不得进入 argv、输入 JSON、
   stdout、错误详情或回执。
 - JSON 模式返回稳定 envelope；pretty/人类输出只是投影，不改变退出码和机器语义。
@@ -75,6 +79,7 @@ src/data/
 ├── catalog.ts                  # 内置、静态、可排序的 connector registry
 ├── runtime/
 │   ├── execute.ts              # 单次原子调用编排
+│   ├── artifacts.ts            # 显式目录、事务暂存、no-overwrite commit 与回滚
 │   ├── bounded-http.ts         # endpoint、重定向、大小、超时和重试策略
 │   ├── credentials.ts          # 逻辑凭证解析与最小注入
 │   ├── canonical-json.ts       # 稳定序列化和语义摘要
@@ -115,6 +120,7 @@ CLI 拥有与 connector 实现直接相关的客观来源语义、覆盖范围�
   `minimumCliVersion`；
 - 稳定的 `providerId`、官方 endpoint scope、认证类型和逻辑 credential ID；
 - operation ID/version、输入/输出 Schema ID/digest 和执行 limits；
+- operation 可选的受控本地 `artifactOutput` 声明；未声明的 operation 不能接收输出目录；
 - capability 级超时、请求/响应字节、分页/分块、重试、速率、记录数和诊断上限；
 - 仅覆盖上述执行字段的 `manifestDigest`。
 
@@ -282,10 +288,18 @@ Eastern wall-clock last-modified filter 依据官方
 [v4 OpenAPI](https://open.gsa.gov/api/regulationsgov/v4/openapi.yaml)，共享限流依据
 [api.data.gov rate limits](https://api.data.gov/docs/rate-limits/)。
 
-十五个 connector 的默认 static doctor 均完全离线。四个 GDELT capability 共享受限的
-文件流机制，但不互相调用 capability 业务入口；其余 connector 也互不导入业务函数。十一个
-connector 无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY`、OpenAQ 从 `OPENAQ_API_KEY`、
-Regulations.gov 从 `REGGOV_API_KEY`、YouTube 从 `YOUTUBE_API_KEY` 解析逻辑凭证，
+`regulations-gov.attachments/download` 只接受最多 20 个显式 comment ID 和可选的 exact
+attachment ID allowlist，通过官方 `GET /v4/comments/{id}?include=attachments` 获取关系与
+metadata，再只从精确 `https://downloads.regulations.gov` origin 下载 bounded files。
+operation 要求独立 artifact directory，按 file/total-byte/runtime limits 执行，输出相对
+文件名、SHA-256、实际与 provider 声明字节数对比及 hash-bound manifest；拒绝 overwrite、
+任意 URL、redirect 和旧脚本假设的独立 attachment endpoint。文件按不可信 public-submission
+bytes 处理，不做 malware scan、打开、OCR、text extraction、stance、法律或证据判断。
+
+十九个 capability 的默认 static doctor 均完全离线。四个 GDELT capability 共享受限的
+文件流机制，但不互相调用 capability 业务入口；其余 connector 也互不导入业务函数。十四个
+capability 无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY`、OpenAQ 从 `OPENAQ_API_KEY`、
+两个 Regulations.gov capability 从 `REGGOV_API_KEY`、YouTube 从 `YOUTUBE_API_KEY` 解析逻辑凭证，
 缺失时离线报告 blocked。测试 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制
 的 live provider 响应或真实凭证。
 
@@ -315,6 +329,11 @@ Regulations.gov 从 `REGGOV_API_KEY`、YouTube 从 `YOUTUBE_API_KEY` 解析逻�
 
 `partial` 必须说明缺失了哪些页、文件、范围或字段，不能把不完整结果伪装为成功。
 `blocked` 不携带可误用为完整证据的业务结果。
+
+声明 `artifactOutput` 的 operation 仍以 `DataRunResult` 返回机器结果，但二进制内容只写入
+调用方显式选择的目录。业务输出只能引用安全单段相对文件名、SHA-256 和字节数；manifest
+本身同样作为 hash-bound artifact 返回。说明文字或本地绝对路径不参与 provider 请求，
+也不进入核心回执。
 
 ### 错误
 

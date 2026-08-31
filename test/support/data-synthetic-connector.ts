@@ -31,6 +31,7 @@ export const SYNTHETIC_OUTPUT_SCHEMA = {
 export interface SyntheticConnectorOptions {
   credential?: boolean;
   liveDoctor?: boolean;
+  artifactOutput?: boolean;
   execute?: (
     context: DataOperationExecutionContext,
   ) => DataOperationExecution | Promise<DataOperationExecution>;
@@ -129,6 +130,9 @@ export function syntheticConnector(
           "Validates one non-empty string and returns it unchanged in a closed envelope.",
         inputSchema: SYNTHETIC_INPUT_SCHEMA,
         outputSchema: SYNTHETIC_OUTPUT_SCHEMA,
+        ...(options.artifactOutput
+          ? { artifactOutput: { kind: "directory" as const, required: true as const } }
+          : {}),
         execute:
           options.execute ??
           ((context) => ({

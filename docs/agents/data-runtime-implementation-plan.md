@@ -429,6 +429,30 @@ cold gate 等全部缺失项落地后在最终树执行，正式 binding 等待�
 状态：CLI connector 已在本地实现，目标测试和 TypeScript 7 typecheck 已通过；薄 Skill、
 clean-container GREEN、统一安装 smoke、cold gate 与正式 binding 尚待完成。
 
+### 后续迁移 13：Regulations.gov Attachments
+
+- 新增 `regulations-gov.attachments/download`，只接受最多 20 个 exact public comment ID、
+  可选 attachment-ID allowlist 以及显式 file/total-byte caps；metadata 严格通过官方
+  `GET /v4/comments/{id}?include=attachments` 获取，不保留旧脚本中当前 OpenAPI 未定义的
+  独立 attachment endpoint 假设。
+- 新增 operation 级 `artifactOutput` execution contract 与 `--artifact-dir` out-of-band 参数。
+  runtime 要求绝对、已存在、非 symlink 目录，隐藏暂存文件在 normalized output 和公共
+  envelope 校验通过后才以 no-overwrite 语义 commit；blocked 则 rollback，绝对路径不进入
+  request/result/receipt。
+- 下载只允许精确 `https://downloads.regulations.gov` origin，不接受 arbitrary URL 或
+  redirect，也不向下载端注入 `REGGOV_API_KEY`。输出保留 comment/attachment/file-format
+  lineage、content type、provider/actual size comparison、SHA-256、relative filename 和
+  hash-bound manifest。
+- file failure 或不安全 provider URL 保留已验证文件并返回 explicit partial；manifest
+  记录缺失项。connector 不扫描、打开、解析或解释 public-submission bytes，下游必须继续
+  经过独立安全和 evidence extraction workflow。
+- fixture 为合成 JSON:API metadata 与本地字节；clean container 已先观察缺失 connector、
+  artifact runtime 参数和 conformance 参数的有效 RED。
+
+状态：CLI connector 与 artifact transaction runtime 已在本地实现，定向测试和
+TypeScript 7 typecheck 已通过；薄 Skill、binding、clean-container GREEN、统一安装 smoke
+和 cold gate 尚待完成。
+
 ### 内容、下载与持久化候选的边界审计
 
 - 四个 RSS/fulltext Skill 继续保持独立：RSS 核心包含任意 feed/OPML intake、SQLite subscription

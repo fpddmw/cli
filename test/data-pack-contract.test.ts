@@ -56,6 +56,8 @@ describe("data package contract", () => {
       "data/connectors/open-meteo-historical-weather.schemas.js",
       "data/connectors/openaq-air-quality.js",
       "data/connectors/openaq-air-quality.schemas.js",
+      "data/connectors/regulations-gov-attachments.js",
+      "data/connectors/regulations-gov-attachments.schemas.js",
       "data/connectors/regulations-gov-comments.js",
       "data/connectors/regulations-gov-comments.schemas.js",
       "data/connectors/usbr-project-records.js",
@@ -67,6 +69,7 @@ describe("data package contract", () => {
       "data/connectors/youtube-public-content.js",
       "data/connectors/youtube-public-content.schemas.js",
       "data/runtime/csv.js",
+      "data/runtime/artifacts.js",
     ];
     for (const modulePath of modules) {
       await access(join(repositoryRoot, "dist", ...modulePath.split("/")));
@@ -94,6 +97,7 @@ describe("data package contract", () => {
         "open-meteo.flood",
         "open-meteo.historical-weather",
         "openaq.air-quality",
+        "regulations-gov.attachments",
         "regulations-gov.comments",
         "usbr.project-records",
         "usbr.rise",

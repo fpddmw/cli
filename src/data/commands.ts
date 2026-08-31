@@ -85,7 +85,7 @@ Usage:
   tiangong-ai data catalog [--json]
   tiangong-ai data describe <capability-id> [--json]
   tiangong-ai data doctor <capability-id> [--live] [--json]
-  tiangong-ai data run <capability-id> <operation-id> --input <path|-> [--json]
+  tiangong-ai data run <capability-id> <operation-id> --input <path|-> [--artifact-dir <absolute-existing-directory>] [--json]
 
 Data commands use closed, versioned machine contracts. catalog, describe, and
 static doctor are offline. Only an explicit doctor --live or data run may use
@@ -261,7 +261,7 @@ async function runOperation(
 ): Promise<number> {
   const args = parseStrictArgs(
     argv,
-    { help: "boolean", input: "string", json: "boolean" },
+    { "artifact-dir": "string", help: "boolean", input: "string", json: "boolean" },
     "data run",
   );
   if (strictBoolean(args, "help")) {
@@ -277,11 +277,13 @@ async function runOperation(
   }
   const rawRequest = await readDataInput(inputSource, io);
   assertCommandBinding(rawRequest, args.positionals[0]!, args.positionals[1]!);
+  const artifactOutputDirectory = strictString(args, "artifact-dir");
   const result = await executeDataRun(rawRequest, {
     registry,
     environment: io.env,
     ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
     ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(artifactOutputDirectory === undefined ? {} : { artifactOutputDirectory }),
   });
   if (strictBoolean(args, "json")) {
     write(io.stdout, stringifyJson(result, true));

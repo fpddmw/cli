@@ -124,6 +124,11 @@ The built-in capabilities are:
   Regulations.gov public-comment metadata and retrieves curated details for
   explicit comment IDs. It omits named personal-profile fields, never submits
   comments, and returns attachment metadata without downloading file bytes.
+- `regulations-gov.attachments` / `download`: retrieves attachment metadata for
+  exact public comment IDs and writes bounded files only from the official
+  Regulations.gov download origin. It requires `--artifact-dir`, refuses to
+  overwrite files, and commits SHA-256-bound relative files plus a manifest;
+  it does not scan, open, extract, or interpret the untrusted bytes.
 - `usbr.project-records` / `fetch`: inventories caller-supplied official
   `www.usbr.gov` project or program pages plus bounded same-origin links. It
   preserves page response provenance but does not follow, download, parse, or
@@ -152,6 +157,13 @@ source notes, coverage, selection guidance and license restrictions are
 available in the discovery metadata returned by `data describe`; static
 `data doctor` remains offline and reports a missing required credential without
 making a network request.
+
+Operations that declare local artifact output must be invoked with
+`data run ... --artifact-dir <absolute-existing-directory>`. The path is an
+out-of-band execution parameter and is excluded from the request, result, and
+receipt. Files are staged under hidden temporary names, validated before an
+atomic no-overwrite commit, and rolled back when execution or output validation
+is blocked.
 
 ## KB Ingest
 

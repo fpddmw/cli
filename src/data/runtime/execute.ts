@@ -11,6 +11,7 @@ import type {
 import { DATA_RUN_REQUEST_SCHEMA_VERSION, DATA_RUN_RESULT_SCHEMA_VERSION } from "../contracts.js";
 import type { DataRegistry, RegisteredDataConnector } from "../catalog.js";
 import { createBoundedHttpClient } from "./bounded-http.js";
+import { createDataArtifactSession, type DataArtifactSession } from "./artifacts.js";
 import { canonicalJson } from "./canonical-json.js";
 import { requiredCredentialsPresent, resolveDataCredentials } from "./credentials.js";
 import {
@@ -33,6 +34,7 @@ export interface ExecuteDataRunOptions {
   fetchImpl?: typeof fetch | undefined;
   clock?: (() => Date) | undefined;
   cliVersion?: string | undefined;
+  artifactOutputDirectory?: string | undefined;
 }
 
 export async function executeDataRun(
@@ -121,6 +123,35 @@ export async function executeDataRun(
     });
   }
 
+  const artifactOutput = operation.definition.artifactOutput;
+  if (artifactOutput?.required && options.artifactOutputDirectory === undefined) {
+    return blockedResult({
+      cliVersion,
+      request,
+      manifest: connector.manifest,
+      operation: operation.manifest,
+      error: new DataRuntimeError(
+        "invalid-request",
+        "This data operation requires an explicit artifact output directory.",
+        { userActionRequired: true },
+      ),
+      generatedAt: clock().toISOString(),
+    });
+  }
+  if (artifactOutput === undefined && options.artifactOutputDirectory !== undefined) {
+    return blockedResult({
+      cliVersion,
+      request,
+      manifest: connector.manifest,
+      operation: operation.manifest,
+      error: new DataRuntimeError(
+        "invalid-request",
+        "This data operation does not declare artifact output.",
+      ),
+      generatedAt: clock().toISOString(),
+    });
+  }
+
   let effectiveLimits: DataExecutionLimits;
   try {
     effectiveLimits = applyLimitOverrides(operation.manifest.limits, request.limits);
@@ -159,6 +190,22 @@ export async function executeDataRun(
     });
   }
 
+  let artifactSession: DataArtifactSession | null = null;
+  if (artifactOutput !== undefined) {
+    try {
+      artifactSession = await createDataArtifactSession(options.artifactOutputDirectory!);
+    } catch (error) {
+      return blockedResult({
+        cliVersion,
+        request,
+        manifest: connector.manifest,
+        operation: operation.manifest,
+        error,
+        generatedAt: clock().toISOString(),
+      });
+    }
+  }
+
   const http = createBoundedHttpClient({
     capabilityId: connector.manifest.capabilityId,
     endpoints: connector.definition.endpoints,
@@ -173,6 +220,7 @@ export async function executeDataRun(
       request,
       limits: effectiveLimits,
       http,
+      artifacts: artifactSession,
     });
     assertExecutionInvariants(execution, effectiveLimits);
     if (!operation.validateOutput(execution.data)) {
@@ -218,8 +266,10 @@ export async function executeDataRun(
       }),
     };
     validateDataPublicContract("runResult", result);
+    await artifactSession?.commit();
     return result;
   } catch (error) {
+    await artifactSession?.rollback();
     return blockedResult({
       cliVersion,
       request,

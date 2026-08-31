@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -57,6 +57,7 @@ describe("data CLI", () => {
           "open-meteo.flood",
           "open-meteo.historical-weather",
           "openaq.air-quality",
+          "regulations-gov.attachments",
           "regulations-gov.comments",
           "usbr.project-records",
           "usbr.rise",
@@ -158,6 +159,68 @@ describe("data CLI", () => {
     assert.equal(exitCode, 0);
     assert.equal(payload.status, "success");
     assert.deepEqual(payload.data, { echoed: "stdin" });
+  });
+
+  it("passes an explicit artifact directory to declared artifact operations", async () => {
+    const artifactOutputDirectory = await mkdtemp(join(tmpdir(), "tiangong-data-cli-artifacts-"));
+    try {
+      const capture = captureIo();
+      const request = {
+        schemaVersion: "tiangong.data.run-request.v1",
+        capabilityId: "test.synthetic",
+        capabilityVersion: "1.0.0",
+        operationId: "echo",
+        operationVersion: "1.0.0",
+        input: { value: "artifact-cli" },
+      };
+      const exitCode = await runDataCommand(
+        [
+          "run",
+          "test.synthetic",
+          "echo",
+          "--input",
+          "-",
+          "--artifact-dir",
+          artifactOutputDirectory,
+          "--json",
+        ],
+        { ...capture.io, stdin: Readable.from([JSON.stringify(request)]) },
+        {
+          registry: createDataRegistry([
+            syntheticConnector({
+              artifactOutput: true,
+              execute: async (context) => {
+                assert.ok(context.artifacts);
+                await context.artifacts.stage("cli.txt", Buffer.from("artifact-cli", "utf8"));
+                return {
+                  status: "success",
+                  data: { echoed: "artifact-cli" },
+                  summary: {
+                    recordCount: 1,
+                    pageCount: 0,
+                    chunkCount: 1,
+                    truncated: false,
+                    completeness: "complete",
+                  },
+                  warnings: [],
+                  errors: [],
+                  observations: [],
+                };
+              },
+            }),
+          ]),
+        },
+      );
+
+      assert.equal(exitCode, 0);
+      assert.equal(
+        await readFile(join(artifactOutputDirectory, "cli.txt"), "utf8"),
+        "artifact-cli",
+      );
+      assert.doesNotMatch(capture.output().stdout, new RegExp(artifactOutputDirectory));
+    } finally {
+      await rm(artifactOutputDirectory, { force: true, recursive: true });
+    }
   });
 
   it("uses non-zero exits for partial and blocked machine results", async () => {

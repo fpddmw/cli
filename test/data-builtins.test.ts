@@ -37,6 +37,7 @@ describe("built-in data connectors", () => {
         "open-meteo.flood",
         "open-meteo.historical-weather",
         "openaq.air-quality",
+        "regulations-gov.attachments",
         "regulations-gov.comments",
         "usbr.project-records",
         "usbr.rise",
@@ -69,6 +70,7 @@ describe("built-in data connectors", () => {
       "open-meteo.flood",
       "open-meteo.historical-weather",
       "openaq.air-quality",
+      "regulations-gov.attachments",
       "regulations-gov.comments",
       "usbr.project-records",
       "usbr.rise",
@@ -117,6 +119,7 @@ describe("built-in data connectors", () => {
       const requiresCredential = [
         "nasa-firms.active-fire",
         "openaq.air-quality",
+        "regulations-gov.attachments",
         "regulations-gov.comments",
         "youtube.public-content",
       ].includes(capabilityId);
@@ -144,6 +147,13 @@ describe("built-in data connectors", () => {
         );
       }
       if (capabilityId === "regulations-gov.comments") {
+        assert.ok(
+          doctor.checks.some(
+            (check) => check.checkId === "credential:api-key" && check.status === "fail",
+          ),
+        );
+      }
+      if (capabilityId === "regulations-gov.attachments") {
         assert.ok(
           doctor.checks.some(
             (check) => check.checkId === "credential:api-key" && check.status === "fail",
