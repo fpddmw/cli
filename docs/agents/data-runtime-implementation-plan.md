@@ -19,7 +19,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: 34874c904badd06bba0a54250473ec8be11a52eb
+lastReviewedCommit: 5dc7dc20eb94bc29616528bc3b20c428b5d10c31
 ---
 
 # 原子数据运行时实施计划
@@ -407,6 +407,27 @@ connector 的精确 npm 版本发布。
 状态：CLI connector 已在本地实现并通过 499 项 clean-container；薄 Skill、候选 binding、
 `quick_validate.py` 与 thin-skill contract 已通过。统一 copy/symlink 安装 smoke 和两仓
 cold gate 等全部缺失项落地后在最终树执行，正式 binding 等待精确 CLI 发布版本。
+
+### 后续迁移 12：USBR Project Records
+
+- 新增 `usbr.project-records/fetch`，只接受调用者已确认的精确
+  `https://www.usbr.gov` 项目或计划页面 URL；拒绝其他 USBR subdomain、HTTP、凭证、
+  custom port 和 fragment，不提供任意 endpoint、站内搜索或递归 crawling。
+- 对每个调用者排序的页面保留 title、meta description、响应 digest/bytes，以及安全的
+  `content-type`、`last-modified` 和 `etag`；只抽取同 origin 链接，移除 fragment、按 URL
+  去重并保持 document order，以扩展名区分常见 PDF/HTML/Office/text 文档和普通 linked page。
+- 链接只作为 availability cue 返回，不跟随、不下载、不散列链接内容。公共 runtime 继续
+  负责 endpoint、redirect、响应字节、超时和 retry；operation 显式报告 page、global record、
+  per-page link cap，并在后续页面失败时保留先前记录返回 partial。
+- Discovery Metadata 将它与 `usbr.rise` 分开：前者适合已知 USBR 页面上的报告/通知候选
+  清点，后者适合 catalog item 与 operational time series；两者都不输出法律、政策、运行、
+  环境影响或治理责任结论。
+- fixture 为合成 HTML；先在 clean container 观察缺失 connector/schema 的有效 RED，随后
+  由 exact-origin、link normalization、limit/partial、conformance、catalog 和 dist pack
+  测试收口。
+
+状态：CLI connector 已在本地实现，目标测试和 TypeScript 7 typecheck 已通过；薄 Skill、
+clean-container GREEN、统一安装 smoke、cold gate 与正式 binding 尚待完成。
 
 ### 内容、下载与持久化候选的边界审计
 

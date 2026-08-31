@@ -18,7 +18,7 @@ checkPaths:
   - docs/agents/**
   - src/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: 34874c904badd06bba0a54250473ec8be11a52eb
+lastReviewedCommit: 5dc7dc20eb94bc29616528bc3b20c428b5d10c31
 ---
 
 # Tiangong AI CLI Contract
@@ -65,9 +65,10 @@ This repository owns the Tiangong AI command-line interface.
 - `tiangong-ai research search`
 - `tiangong-ai education search`
 
-The built-in atomic data catalog currently contains 15 independently
+The built-in atomic data catalog currently contains 18 independently
 discoverable capabilities for public environmental, regulatory, news-event,
-social, and video data, including the bounded Bluesky and YouTube capabilities.
+social, video, and water-project data, including bounded USBR RISE and project
+record capabilities.
 Connector execution, normalization, schemas, provider limits, and
 source/license restrictions belong under `src/data/**`. The execution manifest
 digest is deliberately separate from the Agent-facing discovery metadata

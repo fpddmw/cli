@@ -33,7 +33,9 @@ describe("bounded data HTTP", () => {
         authorization = new Headers(init?.headers).get("authorization") ?? "";
         return new Response('{"items":[]}', {
           status: 200,
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json; charset=UTF-8; boundary=super-secret-token",
+          },
         });
       }) as typeof fetch,
     });
@@ -49,6 +51,8 @@ describe("bounded data HTTP", () => {
     assert.equal(authorization, "Bearer super-secret-token");
     assert.deepEqual(response.json(), { items: [] });
     assert.equal(response.observation.attempts, 1);
+    assert.equal(response.safeHeaders["content-type"], "application/json; charset=utf-8");
+    assert.doesNotMatch(JSON.stringify(response.safeHeaders), /super-secret-token/);
   });
 
   it("injects a path-segment credential without exposing it to the request digest", async () => {

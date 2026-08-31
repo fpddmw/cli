@@ -17,7 +17,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-08-31
-lastReviewedCommit: 34874c904badd06bba0a54250473ec8be11a52eb
+lastReviewedCommit: 5dc7dc20eb94bc29616528bc3b20c428b5d10c31
 ---
 
 # 原子数据运行时目标架构
@@ -37,8 +37,8 @@ HTTP、认证、分页、重试、缓存或回执实现。Auto Research 复用�
 
 ## 公共命令契约
 
-以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册两个试点
-connector 和五个后续迁移 connector：
+以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册十八个
+独立可发现 capability：
 
 ```text
 tiangong-ai data catalog

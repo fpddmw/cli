@@ -124,6 +124,10 @@ The built-in capabilities are:
   Regulations.gov public-comment metadata and retrieves curated details for
   explicit comment IDs. It omits named personal-profile fields, never submits
   comments, and returns attachment metadata without downloading file bytes.
+- `usbr.project-records` / `fetch`: inventories caller-supplied official
+  `www.usbr.gov` project or program pages plus bounded same-origin links. It
+  preserves page response provenance but does not follow, download, parse, or
+  assess linked records and is not USBR-wide search.
 - `usbr.rise` / `discover-items` and `fetch-results`: scans bounded Bureau of
   Reclamation RISE catalog pages for client-filtered candidate item IDs, then
   retrieves bounded result rows for explicitly selected items. Provider scan
@@ -137,7 +141,7 @@ The built-in capabilities are:
   comment/reply text for explicit video IDs. It does not download media or
   transcripts and does not treat ranking or comments as representative opinion.
 
-Thirteen capabilities are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
+Fourteen capabilities are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
 CLI injects as a protected provider path segment; OpenAQ requires
 `OPENAQ_API_KEY`, Regulations.gov requires `REGGOV_API_KEY`, and YouTube requires
 `YOUTUBE_API_KEY`; the CLI injects all three as protected provider headers, with

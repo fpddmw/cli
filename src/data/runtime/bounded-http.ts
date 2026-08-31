@@ -464,11 +464,20 @@ function createHttpResponse(
 
 function safeResponseHeaders(headers: Headers): Record<string, string> {
   const result: Record<string, string> = {};
+  const contentType = safeContentTypeMetadata(headers.get("content-type"));
+  if (contentType) result["content-type"] = contentType;
   for (const name of [...SAFE_RESPONSE_HEADERS].sort(codePointOrder)) {
     const value = headers.get(name);
     if (value) result[name] = value.slice(0, 256);
   }
   return result;
+}
+
+function safeContentTypeMetadata(value: string | null): string | null {
+  if (!value) return null;
+  const mediaType = normalizedContentType(value);
+  const charset = /(?:^|;)\s*charset\s*=\s*["']?([A-Za-z0-9._-]{1,64})/i.exec(value)?.[1];
+  return charset ? `${mediaType}; charset=${charset.toLowerCase()}` : mediaType;
 }
 
 function normalizedContentType(value: string | null): string {
