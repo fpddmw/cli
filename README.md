@@ -1066,26 +1066,43 @@ records and JSONL progress preserve sanitized accounting mode, event/item
 counts, provider turns, tool calls, reasoning tokens, and bounded provider
 errors.
 
-Every evidence source must resolve to an admitted input or a completed broker
-receipt. Successful broker bodies are immutable content-addressed objects under
+Every evidence source must resolve to an admitted input, a completed broker
+receipt, or a completed structured data-runtime receipt. Successful broker and
+data results are immutable content-addressed objects under
 `.tiangong-research/evidence/objects`; receipts are project-scoped and verified
 for existence, size, and SHA-256 before every capsule stages them. Independent
 review binds the requirements, receipts, permanent evidence objects, inputs,
 and artifact hashes. Its exact packet and merged bounded evidence context are
 also content-addressed under the project `review/packets/` and
 `review/contexts/` directories. Mechanical closure re-verifies the packet,
-context, broker objects, and registered local input hashes before recording
+context, evidence objects, and registered local input hashes before recording
 their safe locators. Capsule deletion therefore does not delete the durable
 review chain.
 
 Native discovery preparation embeds the exact staged capability manifest and
-each external Skill's top-level `SKILL.md`. The current host may fetch admitted
-evidence only with `research project evidence fetch`, whose bounded request file
+each external Skill's top-level `SKILL.md`. It also projects every built-in data
+operation dynamically, with no per-provider Research adapter. The current host
+may fetch generic broker evidence with `research project evidence fetch`, whose bounded request file
 contains logical IDs but no credential values. The manifest includes the locked,
 non-secret HTTPS endpoint rather than only its host, and each response returns
 the exact bounded context plus a hash-bound receipt while retaining the raw
 object in the permanent evidence store. Host web/search/database tools cannot
 substitute for a required broker receipt.
+
+For structured sources, inspect the packet catalog and the selected operation
+with `tiangong-ai data describe`, then run the exact request through:
+
+```bash
+tiangong-ai research project evidence data run <project-id> \
+  --request /absolute/path/to/data-run-request.json \
+  --workspace /absolute/path/to/workspace --json
+```
+
+This Research command calls the same TypeScript data service in-process; it does
+not spawn `tiangong-ai data run`. It preserves the core data and receipt digest,
+then adds the project budget, namespaced owner-only credential mapping,
+content-addressed evidence/optional artifacts, candidate, ledger, journal, and
+review bindings. A blocked data result is not promoted to evidence.
 Analyze and synthesize packets contain bounded, hash-verified prior-stage
 artifacts and require no external evidence calls. Review is tool-free and uses the
 reviewer's route-specific structured-output turn cap:

@@ -198,6 +198,12 @@ runtime primitive。
 完成门槛：现有 Research clean-container 门禁先观察针对新 adapter 的 RED，再在新容器
 转 GREEN；不得让 data runtime 依赖项目目录或 stage 状态。
 
+状态：已实现。adapter 动态投影内置 registry，在 native discover packet 中发布选择摘要与
+精确运行命令，进程内复用 data runtime，并把核心 receipt digest、connector/operation
+版本、永久结果对象、可选下载 artifacts、candidate、预算和 journal 绑定到 Research。
+parity、credential 脱敏、动态投影和 packet 合同均有独立回归；隔离容器 RED/GREEN 证据
+按本工作包门禁保留。
+
 ## 工作包 6：后续分批迁移
 
 建议批次，不等于全部自动批准：

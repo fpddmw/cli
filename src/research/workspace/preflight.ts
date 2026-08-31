@@ -1,4 +1,5 @@
 import { loadCapabilityDeclarations, verifyCapabilities } from "./capabilities.js";
+import { projectResearchDataCapabilities } from "./data-evidence-adapter.js";
 import { hasPublicInternetCapability } from "./external-skills.js";
 import { deriveDiscoveryPlan } from "./discovery-planning.js";
 import {
@@ -75,11 +76,33 @@ export async function evaluateProjectPreflight(
       requiredForDiscovery: capability.requiredForDiscovery,
       coverage: capability.coverage,
     }));
+  const dataCapabilities = projectResearchDataCapabilities().capabilities.map((capability) => ({
+    id: capability.id,
+    allowedHosts: [] as string[],
+    endpoint: null,
+    accept: "application/json",
+    maxResponseBytes: null,
+    maxItems: null,
+    requiredForDiscovery: false,
+    coverage: null,
+    kind: "data-runtime" as const,
+    capabilityId: capability.capabilityId,
+    operationId: capability.operationId,
+    summary: capability.summary,
+    manifestDigest: capability.manifestDigest,
+  }));
+  const researchCapabilities = [...networkCapabilities, ...dataCapabilities];
+  const selectedDataCapabilityIds = new Set(
+    (requirements?.requiredCapabilityIds ?? []).filter((capabilityId) =>
+      dataCapabilities.some((capability) => capability.id === capabilityId),
+    ),
+  );
+  const hasSelectedDataCapability = selectedDataCapabilityIds.size > 0;
   const discoveryPlan = requirements
     ? deriveDiscoveryPlan(
         requirements,
         config,
-        networkCapabilities.map((capability) => capability.id),
+        researchCapabilities.map((capability) => capability.id),
       )
     : null;
   const packageTokens = config.budget.packageMaxTokens;
@@ -191,7 +214,7 @@ export async function evaluateProjectPreflight(
       options.scientificDesign.contract,
       options.publicationPolicy,
       requirements,
-      new Set(networkCapabilities.map((capability) => capability.id)),
+      new Set(researchCapabilities.map((capability) => capability.id)),
     );
   }
   if (config.mode === "production-research" && !requirements) {
@@ -219,8 +242,14 @@ export async function evaluateProjectPreflight(
   if (config.producer.agent === config.reviewer.agent) {
     gaps.push("independent-review-route-missing");
   }
-  if (!networkCapabilities.length && !inputPlan) gaps.push("no-evidence-acquisition-plan");
-  if (config.mode === "production-research" && !hasPublicInternetCapability(capabilities)) {
+  if (!networkCapabilities.length && !hasSelectedDataCapability && !inputPlan) {
+    gaps.push("no-evidence-acquisition-plan");
+  }
+  if (
+    config.mode === "production-research" &&
+    !hasPublicInternetCapability(capabilities) &&
+    !hasSelectedDataCapability
+  ) {
     gaps.push("production-public-internet-capability-missing");
   }
   if (capabilityVerification.status !== "verified") {
@@ -335,7 +364,7 @@ export async function evaluateProjectPreflight(
             schemaForStage(
               stage,
               null,
-              stage === "discover" && networkCapabilities.length === 0
+              stage === "discover" && networkCapabilities.length === 0 && !hasSelectedDataCapability
                 ? { inputOnlyProvenanceIds: inputPlan?.inputs.map((input) => input.id) ?? [] }
                 : {},
             ),
@@ -345,7 +374,7 @@ export async function evaluateProjectPreflight(
       ),
     ]),
   ) as Record<AgentPackageStage, number>;
-  const capabilityDocumentationReservation = networkCapabilities.length
+  const capabilityDocumentationReservation = researchCapabilities.length
     ? config.budget.maxInputContextTokens
     : 0;
   const preCallTokenReservations = {
@@ -395,7 +424,10 @@ export async function evaluateProjectPreflight(
     }
   }
   if (requirements) {
-    appendEvidencePlanGaps(gaps, coverageGaps, requirements, inputPlan, networkCapabilities);
+    appendEvidencePlanGaps(gaps, coverageGaps, requirements, inputPlan, [
+      ...networkCapabilities,
+      ...dataCapabilities.filter((capability) => selectedDataCapabilityIds.has(capability.id)),
+    ]);
   }
   const result = {
     schemaVersion: 1 as const,
@@ -410,7 +442,7 @@ export async function evaluateProjectPreflight(
             projectId: options.scientificDesign.contract.projectId,
             evaluation: designEvaluation,
           },
-    capabilities: networkCapabilities,
+    capabilities: researchCapabilities,
     inputPlan:
       inputPlan === null
         ? null

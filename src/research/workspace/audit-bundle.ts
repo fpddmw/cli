@@ -154,14 +154,13 @@ export async function exportProjectAuditBundle(input: {
 
       const receipts = await loadProjectEvidenceReceipts(input.root, project.id);
       for (const receipt of receipts) {
-        await stageFile(
-          resolveContained(paths.control, receipt.locator),
-          `workspace-objects/${receipt.locator}`,
-        );
-        await stageFile(
-          resolveContained(paths.control, receipt.contextLocator),
-          `workspace-objects/${receipt.contextLocator}`,
-        );
+        for (const locator of [
+          receipt.locator,
+          receipt.contextLocator,
+          ...(receipt.data?.artifacts.map((artifact) => artifact.locator) ?? []),
+        ]) {
+          await stageFile(resolveContained(paths.control, locator), `workspace-objects/${locator}`);
+        }
       }
       const artifacts = await loadEvidenceArtifactRecords(input.root, project.id);
       for (const artifact of artifacts) {

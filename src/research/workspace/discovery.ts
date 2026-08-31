@@ -91,20 +91,25 @@ export async function materializeDiscoveryEvidence(
     }
     const candidate = candidates.get(admission.candidateId)!;
     const admissibleOrigin = candidate.occurrences.find(
-      (origin) => origin.kind === "input" || origin.kind === "broker",
+      (origin) => origin.kind === "input" || origin.kind === "broker" || origin.kind === "data",
     );
     if (!admissibleOrigin) {
       throw new StructuredOutputError(
-        "Native Web or Browser discovery must first be formalized through an immutable broker receipt for the same canonical URL or DOI.",
+        "Native Web or Browser discovery must first be formalized through an immutable broker receipt for the same canonical URL or DOI; structured data results require their own immutable data receipt.",
         {
-          validation: ["native candidates require immutable broker provenance"],
+          validation: ["candidates require immutable input, broker, or data provenance"],
           candidateId: candidate.id,
         },
       );
     }
     const provenance =
-      admissibleOrigin.kind === "broker"
-        ? brokerProvenance(admissibleOrigin.receiptId, admissibleOrigin.locator, receipts)
+      admissibleOrigin.kind === "broker" || admissibleOrigin.kind === "data"
+        ? receiptProvenance(
+            admissibleOrigin.kind,
+            admissibleOrigin.receiptId,
+            admissibleOrigin.locator,
+            receipts,
+          )
         : inputProvenance(admissibleOrigin.inputId, admissibleOrigin.locator, inputs);
     const input = provenance.kind === "input" ? inputs.get(provenance.id) : undefined;
     return {
@@ -240,10 +245,12 @@ export async function recordDiscoveryAssessmentBatch(input: {
         );
       }
       if (
-        !candidate.occurrences.some((origin) => origin.kind === "input" || origin.kind === "broker")
+        !candidate.occurrences.some(
+          (origin) => origin.kind === "input" || origin.kind === "broker" || origin.kind === "data",
+        )
       ) {
         throw discoveryError(
-          `Native candidate ${candidate.id} must be formalized by a broker receipt before admission.`,
+          `Native candidate ${candidate.id} must be formalized by an immutable evidence receipt before admission.`,
         );
       }
     }
@@ -297,16 +304,18 @@ export async function recordDiscoveryAssessmentBatch(input: {
   };
 }
 
-function brokerProvenance(
+function receiptProvenance(
+  kind: "broker" | "data",
   receiptId: string | null,
   locator: string | null,
   receipts: Map<string, Awaited<ReturnType<typeof loadProjectEvidenceReceipts>>[number]>,
-): { kind: "broker"; id: string; locator: string } {
+): { kind: "broker" | "data"; id: string; locator: string } {
   const receipt = receiptId ? receipts.get(receiptId) : undefined;
-  if (!receipt || !locator || receipt.locator !== locator) {
-    throw discoveryError("Broker candidate provenance does not match an immutable receipt.");
+  const receiptKind = receipt?.evidenceKind === "data" ? "data" : "broker";
+  if (!receipt || receiptKind !== kind || !locator || receipt.locator !== locator) {
+    throw discoveryError("Candidate provenance does not match an immutable evidence receipt.");
   }
-  return { kind: "broker", id: receipt.attemptId, locator: receipt.locator };
+  return { kind, id: receipt.attemptId, locator: receipt.locator };
 }
 
 function inputProvenance(

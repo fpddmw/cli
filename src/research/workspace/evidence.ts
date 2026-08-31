@@ -15,6 +15,8 @@ import {
 
 export interface BrokerEvidenceReceipt {
   schemaVersion: 1;
+  /** Absent on legacy broker receipts; an explicit value identifies data-runtime evidence. */
+  evidenceKind?: "data";
   attemptId: string;
   projectId: string;
   capabilityId: string;
@@ -38,6 +40,35 @@ export interface BrokerEvidenceReceipt {
   retrievedAt: string;
   servedAt: string;
   cacheHit: boolean;
+  data?: DataEvidenceBinding;
+}
+
+export interface DataEvidenceArtifactBinding {
+  relativePath: string;
+  sha256: string;
+  bytes: number;
+  locator: string;
+}
+
+export interface DataEvidenceBinding {
+  coreReceiptDigest: string;
+  capabilityId: string;
+  capabilityVersion: string;
+  operationId: string;
+  operationVersion: string;
+  requestDigest: string;
+  manifestDigest: string;
+  inputSchemaDigest: string;
+  outputSchemaDigest: string;
+  resultStatus: "success" | "partial";
+  artifacts: DataEvidenceArtifactBinding[];
+}
+
+export interface DataEvidenceArtifactInput {
+  relativePath: string;
+  sha256: string;
+  byteSize: number;
+  bytes: Uint8Array;
 }
 
 export async function persistBrokerEvidence(
@@ -103,6 +134,61 @@ export async function persistBrokerEvidence(
   return value;
 }
 
+export async function persistDataEvidence(
+  root: string,
+  receipt: Omit<
+    BrokerEvidenceReceipt,
+    | "schemaVersion"
+    | "evidenceKind"
+    | "bytes"
+    | "sha256"
+    | "locator"
+    | "contextLocator"
+    | "contextSha256"
+    | "contextBytes"
+    | "contextEstimatedTokens"
+    | "servedAt"
+    | "data"
+  > & { data: Omit<DataEvidenceBinding, "artifacts"> },
+  bytes: Uint8Array,
+  contextBytes: Uint8Array,
+  artifacts: DataEvidenceArtifactInput[] = [],
+): Promise<BrokerEvidenceReceipt> {
+  const artifactBindings: DataEvidenceArtifactBinding[] = [];
+  for (const artifact of [...artifacts].sort((left, right) =>
+    left.relativePath.localeCompare(right.relativePath),
+  )) {
+    const digest = sha256Bytes(artifact.bytes);
+    if (
+      digest !== artifact.sha256 ||
+      artifact.bytes.byteLength !== artifact.byteSize ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,239}$/.test(artifact.relativePath)
+    ) {
+      throw evidenceStoreError("Data evidence artifact binding is invalid.");
+    }
+    const locator = `evidence/objects/${digest.slice(0, 2)}/${digest}`;
+    const objectPath = resolveContained(workspacePaths(root).control, locator);
+    await ensureDirectory(dirname(objectPath));
+    await writeImmutableObject(objectPath, artifact.bytes, digest);
+    artifactBindings.push({
+      relativePath: artifact.relativePath,
+      sha256: digest,
+      bytes: artifact.bytes.byteLength,
+      locator,
+    });
+  }
+  return persistBrokerEvidence(
+    root,
+    {
+      ...receipt,
+      evidenceKind: "data",
+      data: { ...receipt.data, artifacts: artifactBindings },
+    },
+    bytes,
+    contextBytes,
+  );
+}
+
 export async function loadProjectEvidenceReceipts(
   root: string,
   projectId: string,
@@ -155,6 +241,19 @@ export async function verifyEvidenceReceipt(
   ) {
     throw evidenceStoreError(`Broker evidence context object is invalid: ${receipt.attemptId}`);
   }
+  for (const artifact of receipt.data?.artifacts ?? []) {
+    const artifactPath = resolveContained(workspacePaths(root).control, artifact.locator);
+    const artifactInfo = await lstat(artifactPath).catch(() => undefined);
+    if (
+      artifact.locator !== `evidence/objects/${artifact.sha256.slice(0, 2)}/${artifact.sha256}` ||
+      !artifactInfo?.isFile() ||
+      artifactInfo.isSymbolicLink() ||
+      artifactInfo.size !== artifact.bytes ||
+      (await sha256File(artifactPath)) !== artifact.sha256
+    ) {
+      throw evidenceStoreError(`Data evidence artifact is invalid: ${receipt.attemptId}`);
+    }
+  }
   return objectPath;
 }
 
@@ -170,6 +269,8 @@ export async function stageProjectEvidence(
     for (const [digest, locator] of [
       [receipt.sha256, receipt.locator],
       [receipt.contextSha256, receipt.contextLocator],
+      ...(receipt.data?.artifacts.map((artifact) => [artifact.sha256, artifact.locator] as const) ??
+        []),
     ] as const) {
       if (copied.has(digest)) continue;
       const source = resolveContained(workspacePaths(root).control, locator);
@@ -286,7 +387,49 @@ function parseReceipt(value: unknown): BrokerEvidenceReceipt {
   if (receipt.credentialId !== null && typeof receipt.credentialId !== "string") {
     throw evidenceStoreError("Broker evidence credential identity is invalid.");
   }
+  if (receipt.evidenceKind !== undefined && receipt.evidenceKind !== "data") {
+    throw evidenceStoreError("Research evidence kind is invalid.");
+  }
+  if (receipt.evidenceKind === "data") parseDataEvidenceBinding(receipt.data);
+  else if (receipt.data !== undefined) {
+    throw evidenceStoreError("Broker evidence receipt cannot contain a data binding.");
+  }
   return receipt;
+}
+
+function parseDataEvidenceBinding(value: unknown): DataEvidenceBinding {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !/^[0-9a-f]{64}$/.test(String((value as DataEvidenceBinding).coreReceiptDigest)) ||
+    typeof (value as DataEvidenceBinding).capabilityId !== "string" ||
+    typeof (value as DataEvidenceBinding).capabilityVersion !== "string" ||
+    typeof (value as DataEvidenceBinding).operationId !== "string" ||
+    typeof (value as DataEvidenceBinding).operationVersion !== "string" ||
+    !/^[0-9a-f]{64}$/.test(String((value as DataEvidenceBinding).requestDigest)) ||
+    !/^[0-9a-f]{64}$/.test(String((value as DataEvidenceBinding).manifestDigest)) ||
+    !/^[0-9a-f]{64}$/.test(String((value as DataEvidenceBinding).inputSchemaDigest)) ||
+    !/^[0-9a-f]{64}$/.test(String((value as DataEvidenceBinding).outputSchemaDigest)) ||
+    !["success", "partial"].includes(String((value as DataEvidenceBinding).resultStatus)) ||
+    !Array.isArray((value as DataEvidenceBinding).artifacts)
+  ) {
+    throw evidenceStoreError("Data evidence receipt has an unsupported shape.");
+  }
+  for (const artifact of (value as DataEvidenceBinding).artifacts) {
+    if (
+      !artifact ||
+      typeof artifact !== "object" ||
+      typeof artifact.relativePath !== "string" ||
+      !/^[0-9a-f]{64}$/.test(String(artifact.sha256)) ||
+      !Number.isInteger(artifact.bytes) ||
+      artifact.bytes < 0 ||
+      typeof artifact.locator !== "string"
+    ) {
+      throw evidenceStoreError("Data evidence artifact receipt has an unsupported shape.");
+    }
+  }
+  return value as DataEvidenceBinding;
 }
 
 function brokerCachePath(root: string, cacheKeySha256: string): string {

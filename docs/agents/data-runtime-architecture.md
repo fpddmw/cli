@@ -399,6 +399,15 @@ lock、预算、候选/来源准入、永久证据、journal 和 review 规则�
 独立调用与 Research 调用中必须得到相同核心数据和核心回执；Research 只增加上层证据
 链，不改变 connector 语义。
 
+当前实现从内置 registry 动态投影每个 operation 为
+`data:<capability-id>:<operation-id>` Research capability；十九个 connector 当前产生
+二十三个 operation 投影。native discover packet 携带这份摘要 catalog、独立
+`data describe` 命令和 `research project evidence data run` 命令。后者在同一进程调用
+`executeDataRun`，施加 Research 证据调用/响应/记录/context 上限，从 owner-only credential
+map 把命名空间化逻辑凭证映射到 manifest 环境变量，并把成功或 partial 结果、核心 receipt
+digest 与可选 artifact bytes 内容寻址地写入既有 receipt/ledger/audit 链。blocked 结果只记
+失败 journal，不晋升为证据。新增 registry operation 无需修改 Research provider 代码。
+
 ## 明确不做
 
 - 不迁移旧仓库的 OpenClaw harness、议会/多 agent 编排或跨 case/round 数据库。
