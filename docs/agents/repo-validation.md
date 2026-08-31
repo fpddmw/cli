@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-20
-lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
+lastReviewedAt: 2026-08-24
+lastReviewedCommit: 2438d7677764450094a829ab036a8b9f2d4a73ee
 ---
 
 # Repo Validation
@@ -200,7 +200,8 @@ disclosure, TTY Wizard automation and color suppression, pinned Brave
 source-layout paths across every evidence profile, deterministic Git checkout
 configuration, safe hash-mismatch diagnostics and pre-installer fail-closed
 behavior, workspace-lock resolver/stale-version rejection, Catalog CLI-drift
-warnings, optional setting/credential omission without false readiness
+warnings, prior runtime-lock archival and exact-version rotation before
+replacement Doctor, optional setting/credential omission without false readiness
 warnings, reusable runtime-bound live
 attestations, explicit orchestrator/default-baseline selection,
 replacement-time managed capability and credential pruning with custom/Skill
@@ -227,6 +228,8 @@ is required by the project.
 `test/research-workspace.test.ts` also fixes the whole-tree traversal order to
 NFC-normalized UTF-8 byte ordering so default ICU locale changes cannot alter a
 capability or setup pin.
+Its Linux capsule regression also requires an absolute `/etc/resolv.conf` symlink target outside
+the standard read-only roots to be mounted explicitly, as on WSL.
 `test/research-runtime-production.test.ts` adds zero-cost
 production evals for permanent evidence and review packets, exact HTTP policy,
 byte/item/offset/estimated-token extraction bounds and raw-object cache reuse,

@@ -19,7 +19,11 @@ import {
   parseMaterializedAcquisitionAudit,
 } from "./acquisition.js";
 import { stageEvidenceArtifacts } from "./artifacts.js";
-import { commitDiscoveryDecisions, materializeDiscoveryEvidence } from "./discovery.js";
+import {
+  commitCurrentDiscoveryAssessments,
+  commitDiscoveryDecisions,
+  materializeDiscoveryEvidence,
+} from "./discovery.js";
 import { inspectDiscoveryProgress, type DiscoveryProgress } from "./discovery-status.js";
 import { downloadBindingRecordSchema } from "./downloads.js";
 import {
@@ -506,10 +510,17 @@ async function releaseNativeStageSession(
 ): Promise<NativeCapsuleDisposition> {
   const disposition = nativeCapsuleDisposition(session);
   await rm(nativeStageSessionPath(root, projectId), { force: true });
+  await releaseNativeStageCapsule(session, disposition);
+  return disposition;
+}
+
+async function releaseNativeStageCapsule(
+  session: NativeStageSession,
+  disposition = nativeCapsuleDisposition(session),
+): Promise<void> {
   if (disposition === "deleted") {
     await rm(session.capsuleRoot, { recursive: true, force: true });
   }
-  return disposition;
 }
 
 export interface NativeStageStatus {
@@ -560,7 +571,9 @@ export async function inspectNativeResearchStage(
       preparedAt: session.packet.preparedAt,
       reasonCode,
       recommendedAction: reasonCode
-        ? `tiangong-ai research project stage abort ${project.id} --session ${session.packet.sessionId} --workspace ${root}`
+        ? reasonCode === "binding-drift" && session.packet.stage === "acquire"
+          ? `tiangong-ai research project stage refresh ${project.id} --session ${session.packet.sessionId} --workspace ${root}`
+          : `tiangong-ai research project stage abort ${project.id} --session ${session.packet.sessionId} --workspace ${root}`
         : `Resume the current native ${session.packet.stage} stage and submit with the packet command.`,
     };
   } catch (error) {
@@ -685,6 +698,11 @@ export async function prepareNativeResearchStage(input: {
       const hasBrokeredEvidence = declarations.capabilities.some((capability) =>
         capability.permissions.includes("brokered-network"),
       );
+      const evidenceCandidates = await listEvidenceCandidates(input.root, project.id);
+      const acquisitionCandidateBindings =
+        input.stage === "acquire"
+          ? await admittedSourceCandidateBindings(input.root, project.id)
+          : [];
       const basePrompt = packagePrompt(
         project,
         workPackage,
@@ -696,7 +714,8 @@ export async function prepareNativeResearchStage(input: {
         capsule.contextBundleContent,
         stageContextContent,
         discovery,
-        await listEvidenceCandidates(input.root, project.id),
+        evidenceCandidates,
+        acquisitionCandidateBindings,
       );
       const prompt = [
         "Perform this producer stage in the current interactive host session. Do not launch codex exec, claude -p, or any other nested reasoning agent.",
@@ -1037,6 +1056,234 @@ export async function prepareNativeResearchStage(input: {
       throw error;
     }
   });
+}
+
+export async function refreshNativeResearchStage(input: {
+  root: string;
+  projectId: string;
+  sessionId: string;
+}): Promise<NativeStagePacket> {
+  return withWorkspaceLock(input.root, "research.native-stage.refresh", async () => {
+    await verifyJournal(workspacePaths(input.root).journal);
+    const session = await readNativeStageSession(input.root, input.projectId);
+    if (session.packet.sessionId !== input.sessionId) {
+      throw new CliError("Native stage session ID does not match the active session.", {
+        code: "RESEARCH_NATIVE_STAGE_SESSION_MISMATCH",
+        exitCode: 3,
+      });
+    }
+    if (session.packet.stage !== "acquire") {
+      throw new CliError("Only an active acquisition stage can refresh appended evidence inputs.", {
+        code: "RESEARCH_NATIVE_STAGE_REFRESH_NOT_ALLOWED",
+        exitCode: 3,
+        details: { stage: session.packet.stage },
+      });
+    }
+
+    const config = await loadWorkspaceConfig(input.root);
+    assertExecutionConfiguration(config);
+    const project = await loadProject(input.root, input.projectId);
+    await assertProjectPublicationPolicy(input.root, project);
+    const capabilityVerification = await verifyCapabilities(input.root);
+    if (capabilityVerification.status !== "verified") {
+      throw new CliError("Native research requires verified capability locks.", {
+        code: "RESEARCH_CAPABILITY_DRIFT",
+        exitCode: 3,
+        details: capabilityVerification,
+      });
+    }
+    const workPackage = packageById(project, session.packet.packageId);
+    if (
+      workPackage.status !== "running" ||
+      workPackage.executor !== "producer" ||
+      workPackage.stage !== "acquire"
+    ) {
+      throw new CliError("The bound acquisition package is no longer running.", {
+        code: "RESEARCH_NATIVE_STAGE_SESSION_MISMATCH",
+        exitCode: 3,
+      });
+    }
+
+    const originalInputs = await readNativeCapsuleInputBindings(session);
+    assertAppendOnlyNativeInputRefresh(project, originalInputs);
+    const originalStateBinding = await nativeStageBinding(
+      input.root,
+      project,
+      workPackage,
+      originalInputs,
+    );
+    if (originalStateBinding !== session.packet.bindingSha256) {
+      const actualBinding = await nativeStageBinding(input.root, project, workPackage);
+      throw new CliError(
+        "Native stage refresh permits append-only inputs, but configuration, package state, or admitted outputs also drifted.",
+        {
+          code: "RESEARCH_NATIVE_STAGE_BINDING_DRIFT",
+          exitCode: 3,
+          details: {
+            expectedSha256: session.packet.bindingSha256,
+            actualSha256: actualBinding,
+          },
+        },
+      );
+    }
+
+    await commitCurrentDiscoveryAssessments(input.root, project.id);
+    await assertNewNativeInputsAdmitted(input.root, project, originalInputs);
+    const canonicalEvidencePath = resolveContained(
+      projectRoot(input.root, project.id),
+      "outputs/evidence.json",
+    );
+    const priorEvidenceContent = await readFile(canonicalEvidencePath, "utf8");
+    const priorEvidence = parseEvidenceRecord(priorEvidenceContent);
+    const priorCoverage = priorEvidence.coverage;
+    if (
+      !isObject(priorCoverage) ||
+      !Array.isArray(priorCoverage.dimensions) ||
+      !Array.isArray(priorCoverage.gaps) ||
+      !Array.isArray(priorEvidence.limitations)
+    ) {
+      throw new CliError("The admitted discovery evidence cannot be refreshed safely.", {
+        code: "RESEARCH_NATIVE_STAGE_SESSION_INVALID",
+        exitCode: 3,
+      });
+    }
+    const refreshedEvidenceContent = `${JSON.stringify(
+      normalizeEvidenceCoverage(
+        project,
+        await materializeDiscoveryEvidence(input.root, project, {
+          schemaVersion: 2,
+          limitations: priorEvidence.limitations,
+          dimensionJudgments: priorCoverage.dimensions.map((dimension) => {
+            if (
+              !isObject(dimension) ||
+              typeof dimension.id !== "string" ||
+              !["covered", "partial", "missing"].includes(String(dimension.status))
+            ) {
+              throw new CliError("The admitted discovery dimensions cannot be refreshed safely.", {
+                code: "RESEARCH_NATIVE_STAGE_SESSION_INVALID",
+                exitCode: 3,
+              });
+            }
+            return { id: dimension.id, status: dimension.status };
+          }),
+          gaps: priorCoverage.gaps.filter(
+            (gap): gap is string =>
+              typeof gap === "string" && !isMechanicalDiscoveryCoverageGap(gap),
+          ),
+        }),
+      ),
+      null,
+      2,
+    )}\n`;
+    const capsule = await createCapsule(input.root, project, workPackage, randomUUID(), config);
+    let refreshedPersisted = false;
+    let evidenceReplaced = false;
+    try {
+      await writeTextAtomic(canonicalEvidencePath, refreshedEvidenceContent);
+      evidenceReplaced = true;
+      await writeTextAtomic(
+        resolveContained(capsule.projectRoot, "outputs/evidence.json"),
+        refreshedEvidenceContent,
+      );
+      const stageContextContent = await stageContextForPackage(
+        capsule.projectRoot,
+        project,
+        workPackage,
+        config,
+      );
+      const evidenceCandidates = await listEvidenceCandidates(input.root, project.id);
+      const acquisitionCandidateBindings = await admittedSourceCandidateBindings(
+        input.root,
+        project.id,
+      );
+      const basePrompt = packagePrompt(
+        project,
+        workPackage,
+        capsule.inputManifest,
+        capsule.stagedSkills,
+        capsule.capabilityDocumentation,
+        null,
+        capsule.contextBundle,
+        capsule.contextBundleContent,
+        stageContextContent,
+        null,
+        evidenceCandidates,
+        acquisitionCandidateBindings,
+      );
+      const prompt = [
+        "Perform this producer stage in the current interactive host session. Do not launch codex exec, claude -p, or any other nested reasoning agent.",
+        capsule.publicationPolicyDocumentation,
+        "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. Capture the exact browser/adapter Download object, save it to the planned unique staging path, and call bindDownload before registerArtifact. Record browser/download/file-inspection activity with recordActivity. Failed or cancelled downloads cannot create bindings or artifacts. Never scan a download directory or infer success from file existence.",
+        basePrompt,
+        "Save only the final schema-conforming JSON object to a new regular file, then submit it with the packet's submit command. The CLI remains the sole authority for validation and atomic promotion.",
+      ].join("\n\n");
+      const bindingSha256 = await nativeStageBinding(input.root, project, workPackage);
+      const { packetSha256: _oldPacketSha256, ...oldPacketCore } = session.packet;
+      const packetCore = {
+        ...oldPacketCore,
+        bindingSha256,
+        prompt,
+        outputSchema: schemaForStage("acquire", null),
+        publicationPolicy: capsule.publicationPolicy,
+      };
+      const packet: NativeStagePacket = {
+        ...packetCore,
+        packetSha256: sha256Text(canonicalJson(packetCore)),
+      };
+      const sessionCore = {
+        schemaVersion: 1 as const,
+        kind: "tiangong-native-research-stage-session" as const,
+        packet,
+        capsuleRoot: capsule.capsuleRoot,
+        capsuleProject: capsule.projectRoot,
+      };
+      const refreshedSession: NativeStageSession = {
+        ...sessionCore,
+        sessionSha256: sha256Text(canonicalJson(sessionCore)),
+      };
+      await writeJsonAtomic(nativeStageSessionPath(input.root, project.id), refreshedSession);
+      refreshedPersisted = true;
+      await appendJournalEvent(
+        workspacePaths(input.root).journal,
+        "native.stage.binding-refreshed",
+        project.id,
+        {
+          sessionId: packet.sessionId,
+          priorPacketSha256: session.packet.packetSha256,
+          packetSha256: packet.packetSha256,
+          priorBindingSha256: session.packet.bindingSha256,
+          bindingSha256,
+          projectId: project.id,
+          packageId: workPackage.id,
+          stage: workPackage.stage,
+          attempts: workPackage.attempts,
+          priorInputCount: originalInputs.length,
+          inputCount: project.inputs.length,
+          capsuleDisposition: nativeCapsuleDisposition(session),
+          retainedCapsuleId:
+            nativeCapsuleDisposition(session) === "retained-outer-sandbox"
+              ? basename(session.capsuleRoot)
+              : null,
+        },
+      );
+      await releaseNativeStageCapsule(session);
+      return packet;
+    } catch (error) {
+      if (!refreshedPersisted) {
+        if (evidenceReplaced) await writeTextAtomic(canonicalEvidencePath, priorEvidenceContent);
+        await rm(capsule.capsuleRoot, { recursive: true, force: true });
+      }
+      throw error;
+    }
+  });
+}
+
+function isMechanicalDiscoveryCoverageGap(value: string): boolean {
+  return (
+    /^requires \d+ (?:source|full-text source|dated source)s?\b.*\bfound \d+$/i.test(value) ||
+    /^missing required source type:/i.test(value) ||
+    /^missing evidence dimension:/i.test(value)
+  );
 }
 
 export function nativeEvidenceRequestSchema(
@@ -1757,6 +2004,11 @@ async function executeWorkPackage(
           : undefined;
       const primaryBrokerUrl = broker?.url ?? null;
       const inputOnlyProvenance = workPackage.stage === "discover" && primaryBrokerUrl === null;
+      const evidenceCandidates = await listEvidenceCandidates(root, project.id);
+      const acquisitionCandidateBindings =
+        workPackage.stage === "acquire"
+          ? await admittedSourceCandidateBindings(root, project.id)
+          : [];
       const primaryRequest = agentRequest({
         root,
         project,
@@ -1779,7 +2031,8 @@ async function executeWorkPackage(
             capsule.contextBundleContent,
             stageContextContent,
             discovery,
-            await listEvidenceCandidates(root, project.id),
+            evidenceCandidates,
+            acquisitionCandidateBindings,
           ) +
           (capsule.publicationPolicyDocumentation
             ? `\n\n${capsule.publicationPolicyDocumentation}`
@@ -4087,7 +4340,7 @@ async function stageContextForPackage(
           : workPackage.stage === "analyze"
             ? config.budget.maxInputContextTokens
             : workPackage.stage === "acquire"
-              ? config.budget.maxOutputTokens
+              ? config.budget.maxInputContextTokens
               : 0;
   if (estimatedTokens > maxStageContextTokens) {
     throw new CliError(
@@ -4118,6 +4371,7 @@ function packagePrompt(
   stageContextContent: string,
   discovery: DiscoveryProgress | null,
   evidenceCandidates: Awaited<ReturnType<typeof listEvidenceCandidates>>,
+  acquisitionCandidateBindings: Array<{ sourceId: string; candidateId: string }>,
 ): string {
   const stageInstructions: Record<WorkPackage["stage"], string> = {
     discover:
@@ -4171,6 +4425,26 @@ function packagePrompt(
       contextBundleContent,
     );
   }
+  if (workPackage.stage === "acquire") {
+    const candidatesById = new Map(
+      evidenceCandidates.map((candidate) => [candidate.id, candidate]),
+    );
+    prompt.push(
+      `Exact admitted source-to-candidate bindings: ${JSON.stringify(
+        acquisitionCandidateBindings.map((binding) => {
+          const candidate = candidatesById.get(binding.candidateId);
+          return {
+            ...binding,
+            title: candidate?.title ?? null,
+            url: candidate?.url ?? null,
+            doi: candidate?.doi ?? null,
+            publicationDate: candidate?.publicationDate ?? null,
+            originKind: candidate?.origin.kind ?? null,
+          };
+        }),
+      )}`,
+    );
+  }
   if (stageContextContent) {
     prompt.push(
       "The complete admitted stage context is embedded below. Use it directly and do not re-read output files.",
@@ -4178,6 +4452,25 @@ function packagePrompt(
     );
   }
   return prompt.join("\n\n");
+}
+
+async function admittedSourceCandidateBindings(
+  root: string,
+  projectId: string,
+): Promise<Array<{ sourceId: string; candidateId: string }>> {
+  const bindings = new Map<string, string>();
+  for (const event of await readJournal(evidenceLedgerPath(root, projectId))) {
+    if (
+      event.type === "candidate.admitted" &&
+      typeof event.payload.sourceId === "string" &&
+      typeof event.payload.candidateId === "string"
+    ) {
+      bindings.set(event.payload.sourceId, event.payload.candidateId);
+    }
+  }
+  return [...bindings.entries()]
+    .map(([sourceId, candidateId]) => ({ sourceId, candidateId }))
+    .sort((left, right) => left.sourceId.localeCompare(right.sourceId));
 }
 
 function repairPrompt(workPackage: WorkPackage, raw: string, error: StructuredOutputError): string {
@@ -4894,10 +5187,143 @@ async function readNativeStageSession(
   return value as unknown as NativeStageSession;
 }
 
+type NativeStageBindingInput = Pick<
+  ProjectState["inputs"][number],
+  "id" | "role" | "sha256" | "bytes" | "contextSha256" | "contextBytes"
+>;
+
+function nativeStageInputBinding(input: NativeStageBindingInput): Record<string, unknown> {
+  return {
+    id: input.id,
+    role: input.role,
+    sha256: input.sha256,
+    bytes: input.bytes,
+    contextSha256: input.contextSha256 ?? null,
+    contextBytes: input.contextBytes ?? null,
+  };
+}
+
+async function readNativeCapsuleInputBindings(
+  session: NativeStageSession,
+): Promise<NativeStageBindingInput[]> {
+  const value = await readJsonFile<unknown>(
+    resolveContained(session.capsuleProject, "project.json"),
+    "Native stage capsule project",
+  );
+  if (!isObject(value) || value.id !== session.packet.projectId || !Array.isArray(value.inputs)) {
+    throw new CliError("Native stage capsule project has an unsupported input shape.", {
+      code: "RESEARCH_NATIVE_STAGE_SESSION_INVALID",
+      exitCode: 3,
+    });
+  }
+  const inputs: NativeStageBindingInput[] = [];
+  const ids = new Set<string>();
+  for (const record of value.inputs) {
+    if (
+      !isObject(record) ||
+      typeof record.id !== "string" ||
+      !["primary", "reference", "replication"].includes(String(record.role)) ||
+      typeof record.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(record.sha256) ||
+      !Number.isSafeInteger(record.bytes) ||
+      Number(record.bytes) < 0 ||
+      (record.contextSha256 !== undefined &&
+        record.contextSha256 !== null &&
+        (typeof record.contextSha256 !== "string" ||
+          !/^[a-f0-9]{64}$/.test(record.contextSha256))) ||
+      (record.contextBytes !== undefined &&
+        record.contextBytes !== null &&
+        (!Number.isSafeInteger(record.contextBytes) || Number(record.contextBytes) < 0)) ||
+      ids.has(record.id)
+    ) {
+      throw new CliError("Native stage capsule project has an unsupported input shape.", {
+        code: "RESEARCH_NATIVE_STAGE_SESSION_INVALID",
+        exitCode: 3,
+      });
+    }
+    ids.add(record.id);
+    inputs.push({
+      id: record.id,
+      role: record.role as ProjectState["inputs"][number]["role"],
+      sha256: record.sha256,
+      bytes: Number(record.bytes),
+      ...(typeof record.contextSha256 === "string" ? { contextSha256: record.contextSha256 } : {}),
+      ...(typeof record.contextBytes === "number" ? { contextBytes: record.contextBytes } : {}),
+    });
+  }
+  return inputs.sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function assertAppendOnlyNativeInputRefresh(
+  project: ProjectState,
+  originalInputs: NativeStageBindingInput[],
+): void {
+  const currentById = new Map(project.inputs.map((input) => [input.id, input]));
+  const changedOrMissing = originalInputs
+    .filter((input) => {
+      const current = currentById.get(input.id);
+      return (
+        !current ||
+        canonicalJson(nativeStageInputBinding(current)) !==
+          canonicalJson(nativeStageInputBinding(input))
+      );
+    })
+    .map((input) => input.id);
+  if (changedOrMissing.length > 0) {
+    throw new CliError(
+      "Native stage refresh requires every previously bound input to remain byte-for-byte unchanged.",
+      {
+        code: "RESEARCH_NATIVE_STAGE_REFRESH_NOT_APPEND_ONLY",
+        exitCode: 3,
+        details: { changedOrMissingInputIds: changedOrMissing },
+      },
+    );
+  }
+}
+
+async function assertNewNativeInputsAdmitted(
+  root: string,
+  project: ProjectState,
+  originalInputs: NativeStageBindingInput[],
+): Promise<void> {
+  const originalIds = new Set(originalInputs.map((input) => input.id));
+  const added = project.inputs.filter((input) => !originalIds.has(input.id));
+  if (added.length === 0) return;
+  const candidates = await listEvidenceCandidates(root, project.id);
+  const candidateByInputId = new Map<string, string>();
+  for (const candidate of candidates) {
+    for (const occurrence of candidate.occurrences) {
+      if (occurrence.kind === "input" && occurrence.inputId) {
+        candidateByInputId.set(occurrence.inputId, candidate.id);
+      }
+    }
+  }
+  const admittedCandidateIds = new Set(
+    (await admittedSourceCandidateBindings(root, project.id)).map((binding) => binding.candidateId),
+  );
+  const notAdmittedInputIds = added
+    .filter((input) => {
+      const candidateId = candidateByInputId.get(input.id);
+      return !candidateId || !admittedCandidateIds.has(candidateId);
+    })
+    .map((input) => input.id);
+  if (notAdmittedInputIds.length > 0) {
+    throw new CliError(
+      "New acquisition inputs must complete formal candidate admission before the native packet is refreshed.",
+      {
+        code: "RESEARCH_NATIVE_STAGE_REFRESH_INPUT_NOT_ADMITTED",
+        exitCode: 3,
+        details: { inputIds: notAdmittedInputIds },
+      },
+    );
+  }
+}
+
 async function nativeStageBinding(
   root: string,
   project: ProjectState,
   workPackage: WorkPackage,
+  inputBindings: NativeStageBindingInput[] = project.inputs,
 ): Promise<string> {
   const paths = workspacePaths(root);
   const outputRoot = join(projectRoot(root, project.id), "outputs");
@@ -4915,14 +5341,7 @@ async function nativeStageBinding(
       projectId: project.id,
       questionSha256: sha256Text(project.question),
       evidenceRequirements: project.evidenceRequirements,
-      inputs: project.inputs.map((record) => ({
-        id: record.id,
-        role: record.role,
-        sha256: record.sha256,
-        bytes: record.bytes,
-        contextSha256: record.contextSha256 ?? null,
-        contextBytes: record.contextBytes ?? null,
-      })),
+      inputs: inputBindings.map(nativeStageInputBinding),
       package: {
         id: workPackage.id,
         stage: workPackage.stage,

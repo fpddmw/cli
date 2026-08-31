@@ -1228,7 +1228,17 @@ function isProjectStateShape(value: unknown): value is ProjectState {
     typeof value.id === "string" &&
     typeof value.question === "string" &&
     (value.budgetConfirmedAt === null || typeof value.budgetConfirmedAt === "string") &&
-    ["ready", "running", "blocked", "complete"].includes(String(value.status)) &&
+    [
+      "ready",
+      "running",
+      "blocked",
+      "complete",
+      "stale",
+      "waiting-user",
+      "waiting-external",
+      "archived",
+      "abandoned",
+    ].includes(String(value.status)) &&
     Array.isArray(value.inputs) &&
     isObject(value.evidenceRequirements) &&
     Array.isArray(value.packages) &&

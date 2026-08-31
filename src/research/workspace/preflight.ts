@@ -286,7 +286,7 @@ export async function evaluateProjectPreflight(
     }
   }
   const stageContextTokenReservations = {
-    acquire: discoverOutputTokens,
+    acquire: config.budget.maxInputContextTokens,
     analyze: config.budget.maxInputContextTokens,
     synthesize: config.budget.maxInputContextTokens,
     review: config.budget.maxInputContextTokens + config.budget.maxOutputTokens * 4,

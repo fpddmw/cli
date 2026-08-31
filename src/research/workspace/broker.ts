@@ -49,12 +49,20 @@ export async function fetchNativeCandidateSource(input: {
   request: Record<string, unknown>;
 }): Promise<Record<string, unknown>> {
   const project = await loadProject(input.root, input.projectId);
-  const discover = project.packages.find((workPackage) => workPackage.stage === "discover");
-  if (discover?.status !== "running" || discover.executor !== "producer") {
-    throw new CliError("Native evidence fetch is allowed only during an active discover stage.", {
-      code: "RESEARCH_NATIVE_STAGE_REQUIRED",
-      exitCode: 3,
-    });
+  const nativeEvidenceStage = project.packages.find(
+    (workPackage) =>
+      (workPackage.stage === "discover" || workPackage.stage === "acquire") &&
+      workPackage.status === "running" &&
+      workPackage.executor === "producer",
+  );
+  if (!nativeEvidenceStage) {
+    throw new CliError(
+      "Native evidence fetch is allowed only during an active discover or acquisition stage.",
+      {
+        code: "RESEARCH_NATIVE_STAGE_REQUIRED",
+        exitCode: 3,
+      },
+    );
   }
   const declarations = await loadCapabilityDeclarations(input.root);
   const capabilities = declarations.capabilities.filter((capability) =>

@@ -90,6 +90,7 @@ import {
   abortNativeResearchStage,
   inspectNativeResearchStage,
   prepareNativeResearchStage,
+  refreshNativeResearchStage,
   requestResearchHandoff,
   resolveResearchHandoff,
   runResearchWorkspace,
@@ -187,7 +188,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project init <project-id> --question <question> [--goal evidence-report|top-journal] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
   tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id> --design <absolute-json>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--trust-status verified-owner-input|unverified-owner-input|reference-only|replication-candidate] [--independently-reproduced] [--workspace <path>] [--json]
-  tiangong-ai research project retry <project-id> [--package <package-id>] [--workspace <path>] [--json]
+  tiangong-ai research project retry <project-id> [--package <package-id>] [--reopen-completed-acquisition] [--workspace <path>] [--json]
   tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|acquire|analyze|synthesize] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--workspace <path>] [--json]
   tiangong-ai research project addendum <closed-project-id> --to <target-project-id> [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--workspace <path>] [--json]
   tiangong-ai research project archive <project-id> --reason <text> [--workspace <path>] [--json]
@@ -201,6 +202,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project audit export <project-id> --output <absolute-new-directory> [--workspace <path>] [--json]
   tiangong-ai research project audit verify --bundle <absolute-directory> [--json]
   tiangong-ai research project stage prepare <project-id> --stage discover|acquire|analyze|synthesize --host-agent codex|claude|workbuddy|codebuddy [--workspace <path>] [--json]
+  tiangong-ai research project stage refresh <project-id> --session <id> [--workspace <path>] [--json]
   tiangong-ai research project stage submit <project-id> --session <id> --output <absolute-json> [--confirm-model <id>] [--workspace <path>] [--json]
   tiangong-ai research project stage abort <project-id> --session <id> [--workspace <path>] [--json]
   tiangong-ai research project evidence fetch <project-id> --request <absolute-json> [--workspace <path>] [--json]
@@ -1191,6 +1193,26 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       writeJson(io, result, args);
       return 0;
     }
+    if (stageAction === "refresh") {
+      const args = parseStrictArgs(
+        stageRest,
+        { ...WORKSPACE_OPTIONS, session: "string" },
+        "research project stage refresh",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project stage refresh");
+      const sessionId = strictString(args, "session");
+      if (!sessionId) {
+        throw new CliError("stage refresh requires --session.", {
+          code: "RESEARCH_NATIVE_STAGE_SESSION_REQUIRED",
+          exitCode: 2,
+        });
+      }
+      const root = await workspaceFromArgs(args);
+      const result = await refreshNativeResearchStage({ root, projectId, sessionId });
+      writeJson(io, result, args);
+      return 0;
+    }
     if (stageAction === "abort") {
       const args = parseStrictArgs(
         stageRest,
@@ -1703,13 +1725,19 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   if (action === "retry") {
     const args = parseStrictArgs(
       rest,
-      { ...WORKSPACE_OPTIONS, package: "string" },
+      {
+        ...WORKSPACE_OPTIONS,
+        package: "string",
+        "reopen-completed-acquisition": "boolean",
+      },
       "research project retry",
     );
     if (strictBoolean(args, "help")) return writeHelp(io);
     const projectId = onePositional(args.positionals, "research project retry");
     const root = await workspaceFromArgs(args);
-    const project = await retryProjectPackage(root, projectId, strictString(args, "package"));
+    const project = await retryProjectPackage(root, projectId, strictString(args, "package"), {
+      reopenCompletedAcquisition: strictBoolean(args, "reopen-completed-acquisition"),
+    });
     writeJson(io, project, args);
     return 0;
   }

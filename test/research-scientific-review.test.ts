@@ -281,6 +281,47 @@ describe("top-journal early scientific reviews", () => {
     }
   });
 
+  it("accepts role-bound publication dates frozen by the typed content snapshot", async () => {
+    const fixture = await projectFixture("scientific-content-date-binding");
+    try {
+      await passResearchDesign(fixture);
+      await completePackage(fixture, "discover", "evidence.json");
+      const sources = evidenceSnapshotSources(fixture.design).map((source) => ({
+        ...source,
+        publicationDate: null,
+      }));
+      await acquiredEvidenceFixture(fixture, sources);
+      await passingContentSnapshotWithDatesFixture(fixture, sources);
+      const canary = await canaryArtifactFixture(fixture, "typed-date-binding");
+      const assessmentPath = join(fixture.root, "typed-date-binding-assessment.json");
+      await writeJsonAtomic(
+        assessmentPath,
+        evidenceAssessment(fixture.designSha256, fixture.design, true, canary.sha256),
+      );
+      const packet = await prepareScientificReview({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        role: "evidence-construct",
+        assessmentPath,
+        reviewerAgent: "claude",
+        reviewerSessionId: "typed-date-binding-reviewer",
+        canaryArtifactPaths: [canary.path],
+      });
+      assert.ok(!packet.mechanicalAssessment.issueCodes.includes("EVIDENCE_SOURCE_DATE_INVALID"));
+      assert.ok(
+        !packet.mechanicalAssessment.issueCodes.includes("EVIDENCE_ROLE_DATED_INSUFFICIENT"),
+      );
+      assert.ok(
+        !packet.mechanicalAssessment.issueCodes.includes(
+          "EVIDENCE_UNIQUE_DATED_COVERAGE_INSUFFICIENT",
+        ),
+      );
+      assert.equal(packet.mechanicalAssessment.canPass, true);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("revalidates promoted construct-canary bytes before downstream inference", async () => {
     const fixture = await projectFixture("scientific-canary-tamper");
     try {
@@ -1509,7 +1550,7 @@ async function completePackage(
 
 async function acquiredEvidenceFixture(
   fixture: Awaited<ReturnType<typeof projectFixture>>,
-  sources = evidenceSnapshotSources(fixture.design),
+  sources: Array<Record<string, unknown>> = evidenceSnapshotSources(fixture.design),
 ) {
   await completePackage(fixture, "acquire", "acquisition.json");
   const snapshot = evidenceSnapshotFixture(fixture.projectId, sources);
@@ -1640,6 +1681,78 @@ async function stoppedContentSnapshotFixture(
       requiredDecompositionArtifactIds: [],
       missingDecompositionArtifactIds: [],
       acceptedFullTextSourceIds: [],
+      sourcesWithoutAtoms: [],
+    },
+  };
+  const snapshot = { ...core, snapshotSha256: sha256Text(canonicalJson(core)) };
+  const projectRoot = join(workspacePaths(fixture.root).projects, fixture.projectId);
+  const outputPath = join(projectRoot, "outputs", "content-snapshot.json");
+  const immutablePath = join(
+    projectRoot,
+    "evidence",
+    "content-snapshots",
+    `${snapshot.snapshotSha256}.json`,
+  );
+  await ensureDirectory(dirname(immutablePath));
+  await writeJsonAtomic(outputPath, snapshot);
+  await writeJsonAtomic(immutablePath, snapshot);
+}
+
+async function passingContentSnapshotWithDatesFixture(
+  fixture: Awaited<ReturnType<typeof projectFixture>>,
+  sources: Array<Record<string, unknown>>,
+): Promise<void> {
+  const acquisition = evidenceSnapshotFixture(fixture.projectId, sources);
+  const roleCoverage = fixture.design.evidenceRoles
+    .filter((role) => role.required)
+    .map((role, roleIndex) => {
+      const sourceIds = Array.from(
+        { length: role.minimumIndependentSources },
+        (_, index) => `source-${roleIndex}-${index}`,
+      );
+      return {
+        roleId: role.id,
+        sourceIds,
+        fullTextSourceIds: sourceIds.slice(0, role.minimumFullText),
+        datedSourceIds: sourceIds.slice(0, role.minimumDatedSources),
+        coverageDimensionIds: [...role.coverageDimensionIds],
+        sourceTypes: [...role.sourceTypeRequirements],
+        decision: "pass",
+        gaps: [],
+      };
+    });
+  const roleIdsBySource = new Map<string, string[]>();
+  for (const coverage of roleCoverage) {
+    for (const sourceId of coverage.sourceIds) {
+      roleIdsBySource.set(sourceId, [...(roleIdsBySource.get(sourceId) ?? []), coverage.roleId]);
+    }
+  }
+  const core = {
+    schemaVersion: 1,
+    kind: "tiangong-evidence-content-snapshot",
+    snapshotId: "content-snapshot-dated-source-test",
+    projectId: fixture.projectId,
+    acquisitionSnapshotId: acquisition.snapshotId,
+    acquisitionSnapshotSha256: acquisition.snapshotSha256,
+    createdAt: "2026-08-18T00:01:00.000Z",
+    ledgerHead: "6".repeat(64),
+    decompositions: [],
+    atoms: [],
+    sourceCoverage: sources.map((source) => ({
+      sourceId: String(source.id),
+      publicationDate: "2025-01-01",
+      atomIds: [`atom-${String(source.id)}`],
+      evidenceRoleIds: roleIdsBySource.get(String(source.id)) ?? [],
+      coverageDimensionIds: [],
+      evidenceFunctions: ["context"],
+    })),
+    roleCoverage,
+    gate: {
+      decision: "pass",
+      reasons: [],
+      requiredDecompositionArtifactIds: [],
+      missingDecompositionArtifactIds: [],
+      acceptedFullTextSourceIds: sources.map((source) => String(source.id)),
       sourcesWithoutAtoms: [],
     },
   };

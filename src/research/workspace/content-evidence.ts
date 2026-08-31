@@ -1,5 +1,8 @@
+import { createReadStream } from "node:fs";
 import { chmod, lstat, readFile, readdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { createInterface } from "node:readline";
+import { createGunzip } from "node:zlib";
 
 import { CliError } from "../../errors.js";
 import { loadCurrentEvidenceSnapshot } from "./acquisition.js";
@@ -76,6 +79,7 @@ export interface EvidenceAtomRecord {
   candidateId: string;
   artifactId: string;
   artifactSha256: string;
+  sourcePublicationDate?: string;
   locator:
     | { kind: "line-range"; startLine: number; endLine: number }
     | { kind: "json-pointer"; pointer: string };
@@ -104,6 +108,7 @@ export interface EvidenceContentSnapshot {
   atoms: EvidenceAtomRecord[];
   sourceCoverage: Array<{
     sourceId: string;
+    publicationDate: string | null;
     atomIds: string[];
     evidenceRoleIds: string[];
     coverageDimensionIds: string[];
@@ -229,41 +234,39 @@ export async function registerEvidenceAtom(input: {
   const value = parseAtomInput(input.value);
   const acquisition = await loadCurrentEvidenceSnapshot(input.root, input.projectId);
   const source = acquisition.sources.find((candidate) => candidate.id === value.sourceId);
-  if (
-    !source ||
-    !Array.isArray(source.artifactIds) ||
-    !source.artifactIds.includes(value.artifactId)
-  ) {
+  if (!source) {
     throw contentError(
       "Evidence atom source and artifact must belong to the same frozen acquisition source.",
       "RESEARCH_EVIDENCE_ATOM_SOURCE_INVALID",
     );
   }
-  const artifact = (await loadEvidenceArtifactRecords(input.root, input.projectId)).find(
+  const registeredArtifact = (await loadEvidenceArtifactRecords(input.root, input.projectId)).find(
     (candidate) => candidate.artifactId === value.artifactId,
   );
+  const atomOrigin = registeredArtifact
+    ? await resolveRegisteredArtifactAtomOrigin(input.root, source, value, registeredArtifact)
+    : await resolveProjectInputAtomOrigin(input.root, input.projectId, source, value);
+  await validateAtomTaxonomy(input.root, input.projectId, source, value);
+  const excerpt = await atomOrigin.extract(value.locator);
+  assertSafeContent(excerpt, "Evidence atom excerpt contains sensitive material.");
   if (
-    !artifact ||
-    artifact.candidateId !== value.candidateId ||
-    !PRODUCER_VISIBLE_MEDIA_TYPES.has(artifact.mediaType)
+    value.sourcePublicationDate &&
+    !new RegExp(`\\b${value.sourcePublicationDate.slice(0, 4)}\\b`, "u").test(excerpt)
   ) {
     throw contentError(
-      "Evidence atoms may reference only producer-readable artifacts bound to the declared candidate.",
-      "RESEARCH_EVIDENCE_ATOM_ARTIFACT_INVALID",
+      "Evidence atom sourcePublicationDate must be supported by the exact excerpt year.",
+      "RESEARCH_EVIDENCE_ATOM_DATE_UNSUPPORTED",
     );
   }
-  await validateAtomTaxonomy(input.root, input.projectId, source, value);
-  const artifactPath = resolveContained(workspacePaths(input.root).control, artifact.locator);
-  const excerpt = await extractAtomExcerpt(artifactPath, artifact.mediaType, value.locator);
-  assertSafeContent(excerpt, "Evidence atom excerpt contains sensitive material.");
   const stable = {
     schemaVersion: 1 as const,
     projectId: input.projectId,
     atomId: value.atomId,
     sourceId: value.sourceId,
     candidateId: value.candidateId,
-    artifactId: artifact.artifactId,
-    artifactSha256: artifact.sha256,
+    artifactId: atomOrigin.id,
+    artifactSha256: atomOrigin.sha256,
+    ...(value.sourcePublicationDate ? { sourcePublicationDate: value.sourcePublicationDate } : {}),
     locator: value.locator,
     excerpt,
     excerptSha256: sha256Text(excerpt),
@@ -300,12 +303,93 @@ export async function registerEvidenceAtom(input: {
     candidateId: record.candidateId,
     artifactId: record.artifactId,
     artifactSha256: record.artifactSha256,
+    sourcePublicationDate: record.sourcePublicationDate ?? null,
     excerptSha256: record.excerptSha256,
     evidenceRoleIds: record.evidenceRoleIds,
     coverageDimensionIds: record.coverageDimensionIds,
     evidenceFunction: record.evidenceFunction,
   });
   return record;
+}
+
+async function resolveRegisteredArtifactAtomOrigin(
+  root: string,
+  source: Record<string, unknown>,
+  value: ReturnType<typeof parseAtomInput>,
+  artifact: EvidenceArtifactRecord,
+): Promise<{
+  id: string;
+  sha256: string;
+  extract: (locator: EvidenceAtomRecord["locator"]) => Promise<string>;
+}> {
+  if (
+    !Array.isArray(source.artifactIds) ||
+    !source.artifactIds.includes(value.artifactId) ||
+    artifact.candidateId !== value.candidateId ||
+    !PRODUCER_VISIBLE_MEDIA_TYPES.has(artifact.mediaType)
+  ) {
+    throw contentError(
+      "Evidence atoms may reference only producer-readable artifacts bound to the declared candidate.",
+      "RESEARCH_EVIDENCE_ATOM_ARTIFACT_INVALID",
+    );
+  }
+  const path = resolveContained(workspacePaths(root).control, artifact.locator);
+  return {
+    id: artifact.artifactId,
+    sha256: artifact.sha256,
+    extract: (locator) => extractAtomExcerpt(path, artifact.mediaType, locator),
+  };
+}
+
+async function resolveProjectInputAtomOrigin(
+  root: string,
+  projectId: string,
+  source: Record<string, unknown>,
+  value: ReturnType<typeof parseAtomInput>,
+): Promise<{
+  id: string;
+  sha256: string;
+  extract: (locator: EvidenceAtomRecord["locator"]) => Promise<string>;
+}> {
+  const provenance = isObject(source.provenance) ? source.provenance : null;
+  if (provenance?.kind !== "input" || typeof provenance.id !== "string") {
+    throw contentError(
+      "Evidence atom source and artifact must belong to the same frozen acquisition source.",
+      "RESEARCH_EVIDENCE_ATOM_SOURCE_INVALID",
+    );
+  }
+  const project = await loadProject(root, projectId);
+  const projectInput = project.inputs.find((candidate) => candidate.id === provenance.id);
+  const expectedCandidateId = projectInput
+    ? `candidate-${sha256Text(`input:${projectInput.sha256}`).slice(0, 24)}`
+    : null;
+  if (
+    !projectInput ||
+    value.artifactId !== projectInput.id ||
+    value.candidateId !== expectedCandidateId
+  ) {
+    throw contentError(
+      "Evidence atom input must match the exact admitted input and candidate binding.",
+      "RESEARCH_EVIDENCE_ATOM_SOURCE_INVALID",
+    );
+  }
+  const info = await lstat(projectInput.path).catch(() => null);
+  if (
+    !info?.isFile() ||
+    info.isSymbolicLink() ||
+    info.size !== projectInput.bytes ||
+    (await sha256File(projectInput.path)) !== projectInput.sha256
+  ) {
+    throw contentError(
+      "Evidence atom project input is missing, unsafe, or hash-drifted.",
+      "RESEARCH_EVIDENCE_ATOM_ARTIFACT_INVALID",
+    );
+  }
+  return {
+    id: projectInput.id,
+    sha256: projectInput.sha256,
+    extract: (locator) => extractProjectInputExcerpt(projectInput.path, locator),
+  };
 }
 
 export async function freezeEvidenceContentSnapshot(
@@ -359,6 +443,27 @@ export async function freezeEvidenceContentSnapshot(
     values.push(atom);
     atomsBySource.set(atom.sourceId, values);
   }
+  const publicationDates = new Map<string, string | null>();
+  const publicationDateConflicts: string[] = [];
+  for (const source of acquisition.sources) {
+    const sourceId = String(source.id);
+    const declared = typeof source.publicationDate === "string" ? source.publicationDate : null;
+    const atomDates = sortedUnique(
+      (atomsBySource.get(sourceId) ?? []).flatMap((atom) =>
+        atom.sourcePublicationDate ? [atom.sourcePublicationDate] : [],
+      ),
+    );
+    const resolved = resolveCompatiblePublicationDates(
+      declared ? [declared, ...atomDates] : atomDates,
+    );
+    if (resolved.conflict) {
+      publicationDateConflicts.push(
+        `source ${sourceId} has conflicting publication-date evidence: ${resolved.values.join(", ")}`,
+      );
+    }
+    publicationDates.set(sourceId, resolved.value);
+  }
+  reasons.push(...publicationDateConflicts);
   const acceptedFullTextSourceIds = acquisition.sources
     .filter(
       (source) => source.acquisitionStatus === "accepted" && source.fullTextAvailable === true,
@@ -379,6 +484,7 @@ export async function freezeEvidenceContentSnapshot(
     );
     return {
       sourceId: String(source.id),
+      publicationDate: publicationDates.get(String(source.id)) ?? null,
       atomIds: sourceAtoms.map((atom) => atom.atomId),
       evidenceRoleIds: sortedUnique(sourceAtoms.flatMap((atom) => atom.evidenceRoleIds)),
       coverageDimensionIds: sortedUnique(sourceAtoms.flatMap((atom) => atom.coverageDimensionIds)),
@@ -390,6 +496,7 @@ export async function freezeEvidenceContentSnapshot(
         (await loadBoundAcquisitionDesign(root, project)).evidenceRoles,
         acquisition.sources,
         atoms,
+        publicationDates,
       )
     : [];
   reasons.push(...roleCoverage.flatMap((coverage) => coverage.gaps));
@@ -653,6 +760,7 @@ function parseAtomInput(value: Record<string, unknown>): {
   sourceId: string;
   candidateId: string;
   artifactId: string;
+  sourcePublicationDate?: string;
   locator: EvidenceAtomRecord["locator"];
   statement: string;
   evidenceRoleIds: string[];
@@ -667,6 +775,7 @@ function parseAtomInput(value: Record<string, unknown>): {
     "sourceId",
     "candidateId",
     "artifactId",
+    "sourcePublicationDate",
     "locator",
     "statement",
     "evidenceRoleIds",
@@ -682,6 +791,8 @@ function parseAtomInput(value: Record<string, unknown>): {
     !identifierValue(value.sourceId) ||
     !identifierValue(value.candidateId) ||
     !identifierValue(value.artifactId) ||
+    (value.sourcePublicationDate !== undefined &&
+      !validPublicationDate(value.sourcePublicationDate)) ||
     !validAtomLocator(value.locator) ||
     !boundedString(value.statement, 8, 2_000) ||
     !safeIdentifierArray(value.evidenceRoleIds, 100) ||
@@ -737,6 +848,82 @@ async function validateAtomTaxonomy(
       "RESEARCH_EVIDENCE_ATOM_TAXONOMY_INVALID",
     );
   }
+}
+
+async function extractProjectInputExcerpt(
+  path: string,
+  locator: EvidenceAtomRecord["locator"],
+): Promise<string> {
+  const lowerPath = path.toLowerCase();
+  if (lowerPath.endsWith(".gz")) {
+    if (
+      locator.kind !== "line-range" ||
+      ![".csv.gz", ".txt.gz", ".md.gz", ".markdown.gz"].some((suffix) => lowerPath.endsWith(suffix))
+    ) {
+      throw contentError(
+        "Compressed project inputs support line-range atoms only for gzip text, CSV, or Markdown.",
+        "RESEARCH_EVIDENCE_ATOM_LOCATOR_INVALID",
+      );
+    }
+    return extractGzipLineRange(path, locator);
+  }
+  const mediaType = lowerPath.endsWith(".json")
+    ? "application/json"
+    : lowerPath.endsWith(".csv")
+      ? "text/csv"
+      : lowerPath.endsWith(".md") || lowerPath.endsWith(".markdown")
+        ? "text/markdown"
+        : lowerPath.endsWith(".txt")
+          ? "text/plain"
+          : null;
+  if (!mediaType) {
+    throw contentError(
+      "Evidence atoms may reference only producer-readable project inputs.",
+      "RESEARCH_EVIDENCE_ATOM_ARTIFACT_INVALID",
+    );
+  }
+  return extractAtomExcerpt(path, mediaType, locator);
+}
+
+async function extractGzipLineRange(
+  path: string,
+  locator: Extract<EvidenceAtomRecord["locator"], { kind: "line-range" }>,
+): Promise<string> {
+  const source = createReadStream(path);
+  const gunzip = createGunzip();
+  const lines = createInterface({ input: source.pipe(gunzip), crlfDelay: Infinity });
+  const selected: string[] = [];
+  let lineNumber = 0;
+  try {
+    for await (const line of lines) {
+      lineNumber += 1;
+      if (lineNumber >= locator.startLine) selected.push(line);
+      if (lineNumber >= locator.endLine) break;
+    }
+  } catch {
+    throw contentError(
+      "Compressed project input could not be decoded as gzip text.",
+      "RESEARCH_EVIDENCE_ATOM_ARTIFACT_INVALID",
+    );
+  } finally {
+    lines.close();
+    source.destroy();
+    gunzip.destroy();
+  }
+  if (lineNumber < locator.endLine) {
+    throw contentError(
+      "Evidence atom line range exceeds the project input.",
+      "RESEARCH_EVIDENCE_ATOM_LOCATOR_INVALID",
+    );
+  }
+  const excerpt = selected.join("\n");
+  if (!excerpt.trim() || Buffer.byteLength(excerpt, "utf8") > MAX_EXCERPT_BYTES) {
+    throw contentError(
+      "Evidence atom excerpt must be non-empty and within the byte bound.",
+      "RESEARCH_EVIDENCE_ATOM_EXCERPT_INVALID",
+    );
+  }
+  return excerpt;
 }
 
 async function extractAtomExcerpt(
@@ -807,6 +994,7 @@ function computeRoleCoverage(
   }>,
   sources: Array<Record<string, unknown>>,
   atoms: EvidenceAtomRecord[],
+  publicationDates: Map<string, string | null>,
 ): EvidenceContentSnapshot["roleCoverage"] {
   const sourcesById = new Map(sources.map((source) => [String(source.id), source]));
   return roles
@@ -820,7 +1008,7 @@ function computeRoleCoverage(
         (sourceId) => sourcesById.get(sourceId)?.fullTextAvailable === true,
       );
       const datedSourceIds = sourceIds.filter(
-        (sourceId) => typeof sourcesById.get(sourceId)?.publicationDate === "string",
+        (sourceId) => publicationDates.get(sourceId) !== null,
       );
       const coverageDimensionIds = sortedUnique(
         roleAtoms.flatMap((atom) => atom.coverageDimensionIds),
@@ -868,6 +1056,64 @@ function computeRoleCoverage(
         gaps,
       };
     });
+}
+
+function resolveCompatiblePublicationDates(values: string[]): {
+  value: string | null;
+  values: string[];
+  conflict: boolean;
+} {
+  const unique = sortedUnique(values);
+  if (!unique.length) return { value: null, values: [], conflict: false };
+  const intervals = unique.map((value) => publicationDateInterval(value));
+  if (intervals.some((interval) => interval === null)) {
+    return { value: null, values: unique, conflict: true };
+  }
+  const earliest = intervals
+    .map((interval) => interval!.earliest)
+    .sort()
+    .at(-1)!;
+  const latest = intervals
+    .map((interval) => interval!.latest)
+    .sort()
+    .at(0)!;
+  if (earliest > latest) return { value: null, values: unique, conflict: true };
+  return {
+    value: [...unique].sort(
+      (left, right) => right.length - left.length || left.localeCompare(right),
+    )[0]!,
+    values: unique,
+    conflict: false,
+  };
+}
+
+function validPublicationDate(value: unknown): value is string {
+  return publicationDateInterval(value) !== null;
+}
+
+function publicationDateInterval(value: unknown): { earliest: string; latest: string } | null {
+  if (typeof value !== "string") return null;
+  const match = /^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$/u.exec(value);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = match[2] ? Number(match[2]) : null;
+  const day = match[3] ? Number(match[3]) : null;
+  if (year < 1 || year > 9999 || (month !== null && (month < 1 || month > 12))) return null;
+  if (day !== null) {
+    const exact = `${match[1]}-${match[2]}-${match[3]}`;
+    const timestamp = Date.parse(`${exact}T00:00:00.000Z`);
+    if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== exact) {
+      return null;
+    }
+    return { earliest: exact, latest: exact };
+  }
+  if (month !== null) {
+    const monthText = String(month).padStart(2, "0");
+    const earliest = `${match[1]}-${monthText}-01`;
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return { earliest, latest: `${match[1]}-${monthText}-${String(lastDay).padStart(2, "0")}` };
+  }
+  return { earliest: `${match[1]}-01-01`, latest: `${match[1]}-12-31` };
 }
 
 function artifactDescendsFrom(
@@ -945,6 +1191,8 @@ function parseAtomRecord(value: unknown): EvidenceAtomRecord {
     !identifierValue(value.artifactId) ||
     typeof value.artifactSha256 !== "string" ||
     !SHA256.test(value.artifactSha256) ||
+    (value.sourcePublicationDate !== undefined &&
+      !validPublicationDate(value.sourcePublicationDate)) ||
     !validAtomLocator(value.locator) ||
     typeof value.excerpt !== "string" ||
     typeof value.excerptSha256 !== "string" ||

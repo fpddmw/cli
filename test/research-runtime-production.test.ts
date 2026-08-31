@@ -17,7 +17,10 @@ import { describe, it } from "node:test";
 import { CliError } from "../src/errors.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import { registerEvidenceArtifact } from "../src/research/workspace/artifacts.js";
-import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
+import {
+  commitDiscoveryDecisions,
+  recordDiscoveryAssessmentBatch,
+} from "../src/research/workspace/discovery.js";
 import {
   fetchNativeCandidateSource,
   startCapabilityBroker,
@@ -64,6 +67,145 @@ import {
 import { scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("production research evidence and broker", () => {
+  it("admits acquisition evidence context above the output ceiling but below the input ceiling", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      await initializeProject(
+        root,
+        "acquire-input-context",
+        "Keep acquisition context governed by the input ceiling.",
+      );
+      const project = await loadProject(root, "acquire-input-context");
+      const discover = project.packages.find((workPackage) => workPackage.stage === "discover");
+      assert.ok(discover);
+      discover.status = "complete";
+      discover.completedAt = new Date().toISOString();
+      await saveProject(root, project);
+
+      const config = JSON.parse(await readFile(workspacePaths(root).config, "utf8")) as {
+        budget: { maxOutputTokens: number; maxInputContextTokens: number };
+      };
+      const evidence = JSON.stringify({
+        schemaVersion: 2,
+        payload: "x".repeat((config.budget.maxOutputTokens + 1_000) * 3),
+      });
+      const estimatedTokens = Math.ceil(
+        Buffer.byteLength(`### outputs/evidence.json\n${evidence}`, "utf8") / 3,
+      );
+      assert.ok(estimatedTokens > config.budget.maxOutputTokens);
+      assert.ok(estimatedTokens < config.budget.maxInputContextTokens);
+      await writeFile(
+        join(workspacePaths(root).projects, "acquire-input-context", "outputs", "evidence.json"),
+        evidence,
+      );
+
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "acquire-input-context",
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      assert.equal(packet.stage, "acquire");
+      await abortNativeResearchStage({
+        root,
+        projectId: "acquire-input-context",
+        sessionId: packet.sessionId,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("embeds exact source-to-candidate bindings in native acquisition packets", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      await initializeProject(
+        root,
+        "acquire-candidate-bindings",
+        "Bind admitted source IDs to immutable candidate IDs during acquisition.",
+      );
+      const inputPath = join(root, "candidate-binding-input.txt");
+      await writeFile(inputPath, "candidate-bound evidence\n");
+      await addProjectInput(root, "acquire-candidate-bindings", inputPath, "primary");
+      const [candidate] = await listEvidenceCandidates(root, "acquire-candidate-bindings");
+      assert.ok(candidate);
+      const discoverPacket = await prepareNativeResearchStage({
+        root,
+        projectId: "acquire-candidate-bindings",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      await recordDiscoveryAssessmentBatch({
+        root,
+        projectId: "acquire-candidate-bindings",
+        value: {
+          schemaVersion: 1,
+          assessments: [admissionAssessment(candidate.id, "bound-source")],
+        },
+      });
+      await commitDiscoveryDecisions(root, "acquire-candidate-bindings", {
+        schemaVersion: 2,
+        limitations: [],
+        dimensionJudgments: [{ id: "research-question", status: "covered" }],
+        gaps: [],
+      });
+      await abortNativeResearchStage({
+        root,
+        projectId: "acquire-candidate-bindings",
+        sessionId: discoverPacket.sessionId,
+      });
+
+      const project = await loadProject(root, "acquire-candidate-bindings");
+      const discover = project.packages.find((workPackage) => workPackage.stage === "discover");
+      assert.ok(discover);
+      discover.status = "complete";
+      discover.completedAt = new Date().toISOString();
+      await saveProject(root, project);
+      await writeFile(
+        join(
+          workspacePaths(root).projects,
+          "acquire-candidate-bindings",
+          "outputs",
+          "evidence.json",
+        ),
+        JSON.stringify({
+          schemaVersion: 1,
+          sources: [{ id: "bound-source", title: "Bound source" }],
+          limitations: [],
+          gaps: [],
+        }),
+      );
+
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "acquire-candidate-bindings",
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      assert.match(packet.prompt, /Exact admitted source-to-candidate bindings:/);
+      assert.match(
+        packet.prompt,
+        new RegExp(
+          `"sourceId":"bound-source","candidateId":"${candidate.id}"`.replace(
+            /[.*+?^${}()|[\]\\]/g,
+            "\\$&",
+          ),
+        ),
+      );
+      await abortNativeResearchStage({
+        root,
+        projectId: "acquire-candidate-bindings",
+        sessionId: packet.sessionId,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("publishes the acquisition route required by scientific broker requests", () => {
     const ordinary = nativeEvidenceRequestSchema(false) as {
       required: string[];
@@ -2432,6 +2574,51 @@ describe("production research control plane", () => {
         normal,
       );
       assert.equal(forkResult.status, "complete", JSON.stringify(forkResult));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reopens a completed acquisition only before content review and analysis", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(
+        root,
+        "reopen-acquisition",
+        "Acquire an additional lawful full text before evidence construction.",
+      );
+      const input = join(root, "reopen-source.txt");
+      await writeFile(input, "source\n");
+      await addProjectInput(root, "reopen-acquisition", input, "primary");
+
+      await runResearchWorkspace(
+        root,
+        { maxParallel: 1, maxCycles: 2, dryRun: false, environment: {} },
+        deterministicExecutor(),
+      );
+      const before = await loadProject(root, "reopen-acquisition");
+      assert.equal(before.packages[1]?.status, "complete");
+      assert.equal(before.packages[2]?.attempts, 0);
+      const snapshotBefore = before.evidenceState.currentSnapshotSha256;
+
+      await assert.rejects(
+        retryProjectPackage(root, "reopen-acquisition", "acquire"),
+        (error: unknown) => (error as { code?: string }).code === "RESEARCH_RETRY_NOT_AVAILABLE",
+      );
+
+      const reopened = await retryProjectPackage(root, "reopen-acquisition", "acquire", {
+        reopenCompletedAcquisition: true,
+      });
+      assert.equal(reopened.packages[1]?.status, "ready");
+      assert.equal(reopened.packages[1]?.attempts, before.packages[1]?.attempts);
+      assert.equal(
+        reopened.packages[1]?.maxAttempts,
+        Math.max(before.packages[1]?.maxAttempts ?? 0, (before.packages[1]?.attempts ?? 0) + 1),
+      );
+      assert.equal(reopened.packages[2]?.status, "pending");
+      assert.equal(reopened.packages[2]?.attempts, 0);
+      assert.equal(reopened.evidenceState.currentSnapshotSha256, snapshotBefore);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

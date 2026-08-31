@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-20
-lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
+lastReviewedAt: 2026-08-24
+lastReviewedCommit: 2438d7677764450094a829ab036a8b9f2d4a73ee
 ---
 
 # Tiangong AI CLI
@@ -374,7 +374,11 @@ hash mismatch remains fail-closed before `npx skills add`; its structured error
 reports only the Skill/source IDs, hash algorithm, and expected/observed hashes.
 It never treats file existence as installation success or silently rewrites an
 immutable plan. Plans created by an earlier CLI release are rejected at the
-execution boundary; create and review a new plan with the active release. The
+execution boundary; create and review a new plan with the active release. A
+replacement generation archives the prior runtime lock, then apply atomically
+rotates the workspace to the plan's exact CLI version before Doctor runs; an
+invalid or workspace-mismatched lock still fails closed and is never repaired
+by hand. The
 orchestrator additionally declares a `workspace-lock` runtime contract: every
 workspace command goes through its bundled resolver, which accepts only the
 regular non-symlink `runtime-lock.json` exact stable CLI version. Setup and
@@ -492,6 +496,13 @@ the acquired evidence. Evidence-construct coverage may cite only frozen
 snapshot source IDs and exact content atoms. Its JSON canary artifacts are promoted and
 content-addressed through `--canary-artifacts`; reviewer prose cannot override
 an invented ID, unbound digest, or other mechanical failure.
+
+Before analysis and the evidence-construct review, an explicitly reopened
+acquisition may close evidence gaps through the same controlled intake used by
+discovery: new native leads can be registered, broker-formalized, and assessed
+while the acquisition package is active. This does not admit a native lead by
+itself or bypass immutable provenance, download binding, artifact validation,
+decomposition, atoms, or the next frozen acquisition generation.
 
 ```bash
 tiangong-ai research schema show scientific-assessment-research-design --json
@@ -734,6 +745,20 @@ tiangong-ai research project stage submit gpu-resource-impact \
 tiangong-ai research status --workspace /absolute/path/to/workspace --json
 ```
 
+If lawful evidence is appended and formally admitted while an acquisition
+session is already active, refresh that exact session before submission:
+
+```bash
+tiangong-ai research project stage refresh gpu-resource-impact \
+  --session SESSION_ID --workspace /absolute/path/to/workspace --json
+```
+
+Refresh is acquisition-only. It verifies that every earlier input is unchanged
+and that configuration, locks, package identity, and prior outputs have not
+drifted; it then rebuilds the admitted evidence record and native packet without
+changing the session start time or consuming another package attempt. Any
+non-append-only drift still fails closed and requires explicit recovery.
+
 For WorkBuddy/CodeBuddy, keep Default Permission and start the sidecar from a
 separate native terminal with a private non-symlink state directory outside the
 workspace:
@@ -826,8 +851,15 @@ or abandon the unsupported scope before a new reviewed generation can resume.
 Acquisition freezes an immutable evidence snapshot even when lawful retrieval
 ends with explicit gaps. Before inference, decompose every acquired PDF,
 spreadsheet, archive, or structured file into exact lineage-bound producer-
-readable artifacts; register line-range or JSON-Pointer evidence atoms; then
-freeze `content-snapshot.json`. `research status --json` exposes acquisition,
+readable artifacts; register line-range or JSON-Pointer evidence atoms from
+those artifacts or from the exact hash-bound registered project input. Gzip
+text/CSV/Markdown inputs use streaming line ranges while retaining the original
+compressed-file hash. When an append-only local input lost otherwise verifiable
+publication-date metadata at discovery, an atom may additionally declare
+`sourcePublicationDate`; the exact excerpt must contain the asserted year, and
+conflicting date evidence stops content freeze. The resolved date is bound into
+content review and the later inference snapshot. Then freeze
+`content-snapshot.json`. `research status --json` exposes acquisition,
 content, inference, and graph state under `evidencePipeline` and does not direct
 the operator to analysis while content preparation is missing or stopped.
 Only passing acquisition/content gates and required scientific reviews can
@@ -1080,10 +1112,19 @@ Explicit recovery uses append-only management events:
 ```bash
 tiangong-ai research project retry gpu-resource-impact --package analyze \
   --workspace /absolute/path/to/workspace
+tiangong-ai research project retry gpu-resource-impact --package acquire \
+  --reopen-completed-acquisition \
+  --workspace /absolute/path/to/workspace
 tiangong-ai research project fork gpu-resource-impact \
   --to gpu-resource-impact-v2 --resume-through analyze \
   --workspace /absolute/path/to/workspace
 ```
+
+The completed-acquisition reopen is a narrow pre-analysis amendment path. It is
+available only while analysis has never started and the evidence-construct
+review remains pending. The existing acquisition snapshot stays immutable and
+becomes the parent of the next snapshot; the command does not reopen Policy or
+research-design approval.
 
 ## Research Search
 

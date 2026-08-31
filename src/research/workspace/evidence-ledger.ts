@@ -306,9 +306,15 @@ export async function registerNativeDiscoveryCandidate(input: {
   const discover = packages.find(
     (workPackage) => isObject(workPackage) && workPackage.stage === "discover",
   );
-  if (!isObject(discover) || discover.status !== "running") {
+  const acquire = packages.find(
+    (workPackage) => isObject(workPackage) && workPackage.stage === "acquire",
+  );
+  const evidenceIntakeOpen =
+    (isObject(discover) && discover.status === "running") ||
+    (isObject(acquire) && acquire.status === "running");
+  if (!evidenceIntakeOpen) {
     throw evidenceLedgerError(
-      "Native discovery candidates may be registered only during the active discover stage.",
+      "Native discovery candidates may be registered only during an active discover or acquisition stage.",
     );
   }
   if (typeof input.value.title !== "string" || !input.value.title.trim()) {

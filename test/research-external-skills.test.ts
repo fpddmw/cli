@@ -635,6 +635,47 @@ describe("external database capability admission and doctor", () => {
     }
   });
 
+  it("retries one transient transport failure before blocking capability readiness", async () => {
+    const root = await temporaryDirectory();
+    const skillParent = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const definitionPath = await writeDatabaseCapability(root, skillParent);
+      await importExternalCapability({ workspace: root, definitionPath });
+      await writeFile(
+        workspacePaths(root).env,
+        'TIANGONG_RESEARCH_CAPABILITY_CREDENTIALS_JSON={"database.acme.api-key":"fixture-owner-secret-value"}\n',
+        { mode: 0o600 },
+      );
+      await chmod(workspacePaths(root).env, 0o600);
+
+      let attempts = 0;
+      const retrySleeps: number[] = [];
+      const doctor = await doctorExternalCapabilities(root, {
+        live: true,
+        sleeper: async (milliseconds) => void retrySleeps.push(milliseconds),
+        fetcher: async () => {
+          attempts += 1;
+          if (attempts === 1) throw new TypeError("simulated connect timeout");
+          return new Response('{"status":"ok"}', {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      });
+
+      assert.equal(doctor.status, "ready", JSON.stringify(doctor));
+      assert.equal(doctor.capabilities[0]?.health.code, "connected");
+      assert.equal(attempts, 2);
+      assert.deepEqual(retrySleeps, [250]);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(skillParent, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("retains bounded sanitized provider diagnostics for an unsupported subscription option", async () => {
     const root = await temporaryDirectory();
     const skillParent = await temporaryDirectory();

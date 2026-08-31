@@ -611,6 +611,19 @@ async function sandboxInvocation(
       sandboxArgs.push("--ro-bind", path, path);
     }
     const createdDirectories = new Set(systemRoots);
+    const resolverBindTarget = await resolveLinuxResolverBindTargetForTesting(
+      "/etc/resolv.conf",
+      systemRoots,
+    );
+    if (resolverBindTarget) {
+      await appendBubblewrapFileParentDirectories(
+        sandboxArgs,
+        resolverBindTarget,
+        systemRoots,
+        createdDirectories,
+      );
+      sandboxArgs.push("--ro-bind", resolverBindTarget, resolverBindTarget);
+    }
     const runtimeRoots = [
       executableReadRoot(binary),
       executableReadRoot(targetBinary),
@@ -1381,6 +1394,41 @@ async function existingLinuxSystemRoots(): Promise<string[]> {
     if (await lstat(candidate).catch(() => undefined)) roots.push(candidate);
   }
   return roots;
+}
+
+export async function resolveLinuxResolverBindTargetForTesting(
+  resolverPath: string,
+  systemRoots: string[],
+): Promise<string | null> {
+  const canonicalResolver = await realpath(resolverPath).catch(() => null);
+  if (!canonicalResolver || canonicalResolver === resolve(resolverPath)) return null;
+  if (
+    systemRoots.some(
+      (root) => canonicalResolver === root || canonicalResolver.startsWith(`${root}/`),
+    )
+  ) {
+    return null;
+  }
+  const target = await lstat(canonicalResolver).catch(() => null);
+  if (!target?.isFile() || !(await pathIsReadable(canonicalResolver))) return null;
+  return canonicalResolver;
+}
+
+async function appendBubblewrapFileParentDirectories(
+  args: string[],
+  target: string,
+  boundRoots: string[],
+  created: Set<string>,
+): Promise<void> {
+  const parts = resolve(target).split("/").filter(Boolean);
+  let current = "";
+  for (const part of parts.slice(0, -1)) {
+    current += `/${part}`;
+    if (boundRoots.some((root) => current === root || current.startsWith(`${root}/`))) continue;
+    if (created.has(current) || !(await lstat(current).catch(() => undefined))) continue;
+    args.push("--dir", current);
+    created.add(current);
+  }
 }
 
 async function appendBubblewrapParentDirectories(

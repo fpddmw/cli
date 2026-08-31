@@ -3,6 +3,7 @@ import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { gzipSync } from "node:zlib";
 
 import { PDFDocument } from "pdf-lib";
 
@@ -52,6 +53,303 @@ import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("research acquisition and evidence snapshots", () => {
+  it("allows supplemental discovery intake while acquisition is active", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-acquire-gap-fill-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-acquire-gap-fill-files-"));
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      await initializeProject(root, "acquire-gap-fill", "Fill evidence gaps before analysis.");
+      const source = join(staging, "source.txt");
+      await writeFile(source, "exact owner source\n");
+      await addProjectInput(root, "acquire-gap-fill", source, "primary");
+
+      const discover = await prepareNativeResearchStage({
+        root,
+        projectId: "acquire-gap-fill",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const [candidate] = await listEvidenceCandidates(root, "acquire-gap-fill");
+      assert.ok(candidate);
+      await recordAdmission(root, "acquire-gap-fill", candidate.id, "owner-source");
+      const discoverOutput = join(staging, "discover.json");
+      await writeFile(discoverOutput, JSON.stringify(discoveryValue(candidate.id, "owner-source")));
+      await submitNativeResearchStage({
+        root,
+        projectId: "acquire-gap-fill",
+        sessionId: discover.sessionId,
+        outputPath: discoverOutput,
+        confirmedModel: discover.expectedModel,
+      });
+      await prepareNativeResearchStage({
+        root,
+        projectId: "acquire-gap-fill",
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+
+      const supplemental = await registerNativeDiscoveryCandidate({
+        root,
+        projectId: "acquire-gap-fill",
+        value: {
+          title: "Dated supplemental source found during acquisition",
+          url: "https://example.test/supplemental-source",
+          publicationDate: "2026-08-24",
+          excerpt: "A bounded acquisition-stage gap-fill lead.",
+        },
+      });
+      assert.equal(supplemental.admissionStatus, "supplemental-not-admitted");
+      await recordAdmission(root, "acquire-gap-fill", candidate.id, "owner-source");
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("refreshes an active acquisition packet after append-only admitted inputs without consuming an attempt", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-acquire-refresh-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-acquire-refresh-files-"));
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      await initializeProject(root, "acquire-refresh", "Refresh lawful acquisition evidence.");
+
+      const originalPath = join(staging, "original.txt");
+      await writeFile(originalPath, "original exact source\n");
+      await addProjectInput(root, "acquire-refresh", originalPath, "primary");
+      const discover = await prepareNativeResearchStage({
+        root,
+        projectId: "acquire-refresh",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const [originalCandidate] = await listEvidenceCandidates(root, "acquire-refresh");
+      assert.ok(originalCandidate);
+      await recordAdmission(root, "acquire-refresh", originalCandidate.id, "source-original");
+      const discoverOutput = join(staging, "discover.json");
+      await writeFile(
+        discoverOutput,
+        JSON.stringify(discoveryValue(originalCandidate.id, "source-original")),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId: "acquire-refresh",
+        sessionId: discover.sessionId,
+        outputPath: discoverOutput,
+        confirmedModel: discover.expectedModel,
+      });
+
+      const acquire = await prepareNativeResearchStage({
+        root,
+        projectId: "acquire-refresh",
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      const before = await loadProject(root, "acquire-refresh");
+      const attemptsBefore = before.packages.find((item) => item.id === "acquire")?.attempts;
+
+      const supplementalPath = join(staging, "supplemental.txt");
+      await writeFile(supplementalPath, "supplemental exact source\n");
+      const supplementalInput = await addProjectInput(
+        root,
+        "acquire-refresh",
+        supplementalPath,
+        "primary",
+      );
+      const supplementalCandidate = (await listEvidenceCandidates(root, "acquire-refresh")).find(
+        (candidate) => candidate.origin.inputId === supplementalInput.id,
+      );
+      assert.ok(supplementalCandidate);
+      await recordAdmission(
+        root,
+        "acquire-refresh",
+        supplementalCandidate.id,
+        "source-supplemental",
+      );
+
+      const refreshedResult = await invokeCli([
+        "research",
+        "project",
+        "stage",
+        "refresh",
+        "acquire-refresh",
+        "--session",
+        acquire.sessionId,
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(refreshedResult.exitCode, 0, refreshedResult.stderr);
+      const refreshed = JSON.parse(refreshedResult.stdout) as typeof acquire;
+      assert.equal(refreshed.sessionId, acquire.sessionId);
+      assert.notEqual(refreshed.bindingSha256, acquire.bindingSha256);
+      assert.notEqual(refreshed.packetSha256, acquire.packetSha256);
+      assert.equal(refreshed.preparedAt, acquire.preparedAt);
+      assert.match(refreshed.prompt, /source-supplemental/);
+      assert.match(refreshed.prompt, new RegExp(supplementalInput.id));
+
+      const afterRefresh = await loadProject(root, "acquire-refresh");
+      assert.equal(
+        afterRefresh.packages.find((item) => item.id === "acquire")?.attempts,
+        attemptsBefore,
+      );
+
+      const acquireOutput = join(staging, "acquire.json");
+      await writeFile(
+        acquireOutput,
+        JSON.stringify({
+          schemaVersion: 1,
+          decisions: [
+            {
+              sourceId: "source-original",
+              candidateId: originalCandidate.id,
+              artifactIds: [],
+              status: "accepted",
+              rationale: "Original immutable input is available in full.",
+              limitations: [],
+            },
+            {
+              sourceId: "source-supplemental",
+              candidateId: supplementalCandidate.id,
+              artifactIds: [],
+              status: "accepted",
+              rationale: "Supplemental immutable input is available in full.",
+              limitations: [],
+            },
+          ],
+          limitations: [],
+          gaps: [],
+        }),
+      );
+      const completed = await submitNativeResearchStage({
+        root,
+        projectId: "acquire-refresh",
+        sessionId: refreshed.sessionId,
+        outputPath: acquireOutput,
+        confirmedModel: refreshed.expectedModel,
+      });
+      assert.equal(completed.status, "complete");
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("registers exact atoms from accepted hash-bound project inputs, including gzip text", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-input-atom-test-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-input-atom-files-"));
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      await initializeProject(root, "input-atom-project", "Evaluate an exact local input atom.");
+      const source = join(staging, "source.csv.gz");
+      await writeFile(
+        source,
+        gzipSync("plant_id,publication_year,value\n1001,2022,7\n1002,2023,9\n"),
+      );
+      const input = await addProjectInput(root, "input-atom-project", source, "primary");
+
+      const discover = await prepareNativeResearchStage({
+        root,
+        projectId: "input-atom-project",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const [candidate] = await listEvidenceCandidates(root, "input-atom-project");
+      assert.ok(candidate);
+      await recordAdmission(root, "input-atom-project", candidate.id, "exact-local-input");
+      const discoverOutput = join(staging, "discover.json");
+      await writeFile(
+        discoverOutput,
+        JSON.stringify(discoveryValue(candidate.id, "exact-local-input")),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId: "input-atom-project",
+        sessionId: discover.sessionId,
+        outputPath: discoverOutput,
+        confirmedModel: discover.expectedModel,
+      });
+
+      const acquire = await prepareNativeResearchStage({
+        root,
+        projectId: "input-atom-project",
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      const acquireOutput = join(staging, "acquire.json");
+      await writeFile(
+        acquireOutput,
+        JSON.stringify(acquisitionValue(candidate.id, "exact-local-input")),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId: "input-atom-project",
+        sessionId: acquire.sessionId,
+        outputPath: acquireOutput,
+        confirmedModel: acquire.expectedModel,
+      });
+
+      const atom = await registerEvidenceAtom({
+        root,
+        projectId: "input-atom-project",
+        value: {
+          schemaVersion: 1,
+          atomId: "exact-local-input.row-1001",
+          sourceId: "exact-local-input",
+          candidateId: candidate.id,
+          artifactId: input.id,
+          locator: { kind: "line-range", startLine: 2, endLine: 2 },
+          sourcePublicationDate: "2022",
+          statement: "The hash-bound local input contains the exact selected data row.",
+          evidenceRoleIds: [],
+          coverageDimensionIds: ["research-question"],
+          evidenceFunction: "support",
+          scope: "This atom proves exact local-input content binding.",
+          limitations: [],
+        },
+      });
+      assert.equal(atom.artifactId, input.id);
+      assert.equal(atom.artifactSha256, input.sha256);
+      assert.equal(atom.excerpt, "1001,2022,7");
+      assert.equal(atom.sourcePublicationDate, "2022");
+      await assert.rejects(
+        registerEvidenceAtom({
+          root,
+          projectId: "input-atom-project",
+          value: {
+            schemaVersion: 1,
+            atomId: "exact-local-input.unsupported-date",
+            sourceId: "exact-local-input",
+            candidateId: candidate.id,
+            artifactId: input.id,
+            locator: { kind: "line-range", startLine: 2, endLine: 2 },
+            sourcePublicationDate: "2023",
+            statement: "This deliberately mismatched date must not be accepted.",
+            evidenceRoleIds: [],
+            coverageDimensionIds: ["research-question"],
+            evidenceFunction: "limitation",
+            scope: "This atom exercises exact publication-date support.",
+            limitations: [],
+          },
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_EVIDENCE_ATOM_DATE_UNSUPPORTED",
+      );
+      const content = await freezeEvidenceContentSnapshot(root, "input-atom-project");
+      assert.equal(content.gate.decision, "pass");
+      assert.equal(content.sourceCoverage[0]?.publicationDate, "2022");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(staging, { recursive: true, force: true });
+    }
+  });
+
   it("registers one exact artifact, ignores concurrent files, and freezes a verified snapshot", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-acquisition-test-"));
     const staging = await mkdtemp(join(tmpdir(), "tiangong-acquisition-files-"));

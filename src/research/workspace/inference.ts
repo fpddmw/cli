@@ -159,6 +159,12 @@ export async function freezeInferenceSnapshot(
         .filter((value): value is string => typeof value === "string"),
     );
   }
+  const contentPublicationDates = new Map(
+    (content?.sourceCoverage ?? []).map((coverage) => [
+      coverage.sourceId,
+      coverage.publicationDate,
+    ]),
+  );
   const core = {
     schemaVersion: 1 as const,
     kind: "tiangong-inference-snapshot" as const,
@@ -178,7 +184,9 @@ export async function freezeInferenceSnapshot(
       id: String(source.id),
       title: typeof source.title === "string" ? source.title : String(source.id),
       sourceType: typeof source.sourceType === "string" ? source.sourceType : null,
-      publicationDate: typeof source.publicationDate === "string" ? source.publicationDate : null,
+      publicationDate:
+        contentPublicationDates.get(String(source.id)) ??
+        (typeof source.publicationDate === "string" ? source.publicationDate : null),
       acquisitionStatus:
         typeof source.acquisitionStatus === "string" ? source.acquisitionStatus : null,
     })),

@@ -703,11 +703,21 @@ describe("research setup catalog and immutable plans", () => {
     }
   });
 
-  it("archives an old immutable generation before explicit replacement", async () => {
+  it("archives an old immutable generation and rotates its runtime lock before replacement doctor", async () => {
     const root = await temporaryDirectory();
     try {
       const first = await createEmptyPlan(root);
       const firstBytes = await readFile(workspacePaths(root).setupPlan, "utf8");
+      await applyResearchSetupPlan(workspacePaths(root).setupPlan, { skipDoctor: true });
+      const runtimeLockPath = workspacePaths(root).runtimeLock;
+      await chmod(runtimeLockPath, 0o600);
+      const priorRuntimeLock = JSON.parse(await readFile(runtimeLockPath, "utf8")) as Record<
+        string,
+        unknown
+      >;
+      priorRuntimeLock.packageVersion = "0.0.50";
+      const priorRuntimeLockBytes = `${JSON.stringify(priorRuntimeLock, null, 2)}\n`;
+      await writeFile(runtimeLockPath, priorRuntimeLockBytes);
       const second = await createResearchSetupPlan({
         workspace: root,
         name: "replacement",
@@ -726,10 +736,28 @@ describe("research setup catalog and immutable plans", () => {
         ),
         firstBytes,
       );
+      assert.equal(
+        await readFile(
+          join(
+            workspacePaths(root).control,
+            "setup-history",
+            first.planSha256,
+            "runtime-lock.json",
+          ),
+          "utf8",
+        ),
+        priorRuntimeLockBytes,
+      );
       const applied = await applyResearchSetupPlan(workspacePaths(root).setupPlan, {
         skipDoctor: true,
       });
       assert.equal(applied.state.status, "partially-ready");
+      assert.equal(applied.state.completedSteps.includes("runtime-lock"), true);
+      const activeRuntimeLock = JSON.parse(await readFile(runtimeLockPath, "utf8")) as Record<
+        string,
+        unknown
+      >;
+      assert.equal(activeRuntimeLock.packageVersion, packageVersion());
       assert.equal((await inspectResearchContext(root)).role, "workspace");
     } finally {
       await rm(root, { recursive: true, force: true });

@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-20
-lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
+lastReviewedAt: 2026-08-24
+lastReviewedCommit: 2438d7677764450094a829ab036a8b9f2d4a73ee
 ---
 
 # Repo Architecture
@@ -90,7 +90,9 @@ storage writes, queueing, and document status transitions.
   release, safe legacy-file-lock migration, and path-free append-only recovery
   events, a separately sourced external Skill ecosystem catalog, immutable setup
   plans/state/history, reproducible detached source checkout with fixed Git
-  line-ending behavior, locale-independent whole-tree hashing, and exact-copy
+  line-ending behavior, archived prior-generation runtime locks, atomic
+  plan-version runtime-lock rotation before replacement Doctor,
+  locale-independent whole-tree hashing, and exact-copy
   installation, custom external capability admission,
   hidden-TTY, bounded-stdin, and owner-environment-to-logical-credential
   configuration with pre-download owner-only persistence, static/live provider
@@ -100,7 +102,7 @@ storage writes, queueing, and document status transitions.
   receipt gates with distinct never-attempted/attempted-without-evidence
   diagnostics, bounded local-input plans, a scoped HTTPS GET/JSON-POST MCP
   broker with inline bounded result contexts,
-  one bounded short-delay 429 retry with sanitized journal provenance,
+  one bounded short-delay 429 or transport retry with sanitized journal provenance,
   a coverage-derived working broker-view budget under a reviewed workspace
   ceiling, content-addressed permanent evidence, paged broker views/cache,
   a hash-chained candidate/admission/artifact/claim/review ledger,
@@ -111,14 +113,25 @@ storage writes, queueing, and document status transitions.
   retained only by hash, exact download-event binding, and explicit exact-file
   artifact registration with PDF/ZIP/OpenXML validation,
   acquisition audits that freeze both success and honest gaps, immutable
-  parent/delta evidence snapshots, exact-lineage artifact decomposition,
+  parent/delta evidence snapshots, an explicit completed-acquisition reopen
+  that is limited to the pre-analysis and pre-evidence-construct-review window
+  and preserves the prior snapshot as the next generation's parent; while that
+  acquisition package is active, supplemental native leads may be registered,
+  broker-formalized, and assessed through the same immutable-provenance path as
+  discovery without weakening later download, artifact, decomposition, atom,
+  or snapshot gates,
+  exact-lineage artifact decomposition,
   line-range/JSON-Pointer evidence atoms, typed-content coverage snapshots,
   separate inference-stop gates, immutable inference snapshots, schema-v2
   reproducible analysis runs, and mechanically generated Claim-Evidence Graphs,
   addendum
   supersession, one authoritative project lineage with explicit
   archive/abandon dispositions, and default historical-project filtering,
-  hash-bound native-host producer stage prepare/submit/abort, one-shot native
+  hash-bound native-host producer stage prepare/refresh/submit/abort, including
+  an acquisition-only refresh that rebuilds formally admitted append-only input
+  context and discovery evidence without resetting the session clock or
+  consuming a package attempt while rejecting input mutation or any unrelated
+  configuration/output drift, one-shot native
   broker fetches, schema-driven reviewer output and isolated repair, dedicated
   reviewer capsule homes,
   pre-review deterministic Markdown newline-artifact normalization with
@@ -316,11 +329,17 @@ requires derived text to name its parent artifact, and lets that derivative
 inherit only the parent's canonical source URL instead of fabricating a second
 download binding; a conflicting URL is rejected. Acquisition then produces a
 complete source audit and verified immutable snapshot even when its separate
-inference gate stops on honest gaps. Every acquired binary/data artifact is
-then dispositioned through an exact decomposition record; producer-readable
-derivatives support line-range or JSON-Pointer atoms whose source, artifact,
-role, dimension, scope, and limitations are hash-bound in a typed-content
-snapshot. The top-journal evidence-construct canary runs against those frozen
+inference gate stops on honest gaps. The native acquisition packet embeds the
+exact admitted source-to-candidate bindings required by artifact registration
+and the final acquisition audit; the producer never has to infer or re-read
+those ledger identities. Every acquired binary/data artifact is then
+dispositioned through an exact decomposition record; producer-readable
+derivatives and exact hash-bound project inputs support line-range or
+JSON-Pointer atoms whose source, candidate, origin hash, role, dimension,
+scope, and limitations are bound in a typed-content snapshot. Registered
+gzip text, CSV, and Markdown inputs are streamed by decompressed line range
+without replacing the original compressed-file hash. The top-journal
+evidence-construct canary runs against those frozen
 objects, binds its exact external JSON artifact bytes without retaining host
 paths, and rejects invented source IDs, unbound atoms, or asserted
 full-text/date states before the methods pilot. Only passing acquisition,

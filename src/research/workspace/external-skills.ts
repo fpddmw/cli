@@ -1364,6 +1364,7 @@ async function probeCapability(
   try {
     let redirectCount = 0;
     let rateLimitRetries = 0;
+    let transportRetries = 0;
     while (redirectCount <= 5) {
       if (
         current.protocol !== "https:" ||
@@ -1376,13 +1377,23 @@ async function probeCapability(
       if (credentialHosts && !credentialHosts.includes(current.host.toLowerCase())) {
         throw new Error("health check redirect escaped the credential host policy");
       }
-      const response = await fetcher(current, {
-        method: healthCheck.method,
-        headers,
-        ...(body === null ? {} : { body }),
-        redirect: "manual",
-        signal: AbortSignal.timeout(30_000),
-      });
+      let response: Response;
+      try {
+        response = await fetcher(current, {
+          method: healthCheck.method,
+          headers,
+          ...(body === null ? {} : { body }),
+          redirect: "manual",
+          signal: AbortSignal.timeout(30_000),
+        });
+      } catch (error) {
+        if (transportRetries === 0) {
+          transportRetries += 1;
+          await sleeper(250);
+          continue;
+        }
+        throw error;
+      }
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         if (healthCheck.method === "POST") {
           await response.body?.cancel();

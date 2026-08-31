@@ -311,6 +311,7 @@ export async function retryProjectPackage(
   root: string,
   projectId: string,
   packageId?: string,
+  options: { reopenCompletedAcquisition?: boolean } = {},
 ): Promise<ProjectState> {
   validateProjectId(projectId);
   return withWorkspaceLock(root, "project.retry", async () => {
@@ -336,11 +337,53 @@ export async function retryProjectPackage(
     const selected = packageId
       ? packageById(project, packageId)
       : project.packages.find((item) => item.status === "failed" || item.status === "retry");
-    if (!selected || (selected.status !== "failed" && selected.status !== "retry")) {
+    const reopeningCompletedAcquisition = Boolean(
+      options.reopenCompletedAcquisition &&
+      selected?.stage === "acquire" &&
+      selected.status === "complete",
+    );
+    if (
+      options.reopenCompletedAcquisition &&
+      (!selected || selected.stage !== "acquire" || selected.status !== "complete")
+    ) {
+      throw new CliError(
+        "Completed-acquisition reopening requires --package acquire on a completed acquisition.",
+        {
+          code: "RESEARCH_ACQUISITION_REOPEN_INVALID",
+          exitCode: 2,
+        },
+      );
+    }
+    if (
+      !selected ||
+      (!reopeningCompletedAcquisition &&
+        selected.status !== "failed" &&
+        selected.status !== "retry")
+    ) {
       throw new CliError("Project retry requires a failed or retryable package.", {
         code: "RESEARCH_RETRY_NOT_AVAILABLE",
         exitCode: 2,
       });
+    }
+    if (reopeningCompletedAcquisition) {
+      const analyze = project.packages.find((item) => item.stage === "analyze");
+      const evidenceConstructGate = project.scientificDesign?.gates["evidence-construct"];
+      if (
+        !project.evidenceState.currentSnapshotId ||
+        !project.evidenceState.currentSnapshotSha256 ||
+        !analyze ||
+        analyze.attempts !== 0 ||
+        !["pending", "ready"].includes(analyze.status) ||
+        (evidenceConstructGate && evidenceConstructGate.status !== "pending")
+      ) {
+        throw new CliError(
+          "Completed acquisition can be reopened only before evidence-construct review and before analysis starts.",
+          {
+            code: "RESEARCH_ACQUISITION_REOPEN_UNAVAILABLE",
+            exitCode: 3,
+          },
+        );
+      }
     }
     const selectedIndex = project.packages.indexOf(selected);
     const previous = {
@@ -361,12 +404,25 @@ export async function retryProjectPackage(
     project.status = "ready";
     project.updatedAt = new Date().toISOString();
     await saveProject(root, project);
-    await appendJournalEvent(workspacePaths(root).journal, "project.retry.requested", projectId, {
+    await appendJournalEvent(
+      workspacePaths(root).journal,
+      reopeningCompletedAcquisition
+        ? "project.acquisition.reopen.requested"
+        : "project.retry.requested",
       projectId,
-      packageId: selected.id,
-      previous,
-      preservedOutputs: true,
-    });
+      {
+        projectId,
+        packageId: selected.id,
+        previous,
+        preservedOutputs: true,
+        ...(reopeningCompletedAcquisition
+          ? {
+              parentSnapshotId: project.evidenceState.currentSnapshotId,
+              parentSnapshotSha256: project.evidenceState.currentSnapshotSha256,
+            }
+          : {}),
+      },
+    );
     return project;
   });
 }

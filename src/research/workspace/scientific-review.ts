@@ -165,6 +165,7 @@ interface EvidenceConstructContext {
   canaryArtifactSha256s: Set<string>;
   contentGate: { decision: "pass" | "stop"; reasons: string[] } | null;
   contentRoleSourceIds: Map<string, Set<string>>;
+  contentRoleDatedSourceIds: Map<string, Set<string>>;
 }
 
 interface ScientificFutureGateObligation {
@@ -972,6 +973,7 @@ function evaluateAssessment(
         (sourceId) => !evidenceContext?.sources.has(sourceId),
       );
       const atomBoundRoleSources = evidenceContext?.contentRoleSourceIds.get(required.id);
+      const atomBoundRoleDatedSources = evidenceContext?.contentRoleDatedSourceIds.get(required.id);
       if (
         atomBoundRoleSources &&
         [...independentIds].some((sourceId) => !atomBoundRoleSources.has(sourceId))
@@ -995,9 +997,11 @@ function evaluateAssessment(
       const validFullText = [...fullTextIds].filter(
         (sourceId) => evidenceContext?.sources.get(sourceId)?.fullTextAvailable === true,
       );
-      const validDated = [...datedIds].filter((sourceId) =>
-        Boolean(evidenceContext?.sources.get(sourceId)?.publicationDate),
-      );
+      const validDated = [...datedIds].filter((sourceId) => {
+        if (!evidenceContext?.sources.has(sourceId)) return false;
+        if (atomBoundRoleDatedSources) return atomBoundRoleDatedSources.has(sourceId);
+        return Boolean(evidenceContext.sources.get(sourceId)?.publicationDate);
+      });
       const validPeerReviewed = [...peerReviewedIds].filter((sourceId) => {
         const source = evidenceContext?.sources.get(sourceId);
         return source?.fullTextAvailable === true;
@@ -1015,7 +1019,7 @@ function evaluateAssessment(
       if ([...datedIds].some((sourceId) => !validDated.includes(sourceId))) {
         add(
           "EVIDENCE_SOURCE_DATE_INVALID",
-          "A claimed dated source has no publication date in the frozen evidence snapshot.",
+          "A claimed dated source has no publication date bound to this evidence role in the frozen typed-content snapshot or, when no content snapshot exists, in the acquisition snapshot.",
           [required.id],
         );
       }
@@ -1612,6 +1616,7 @@ async function assessmentEvidenceContext(
   );
   let contentGate: EvidenceConstructContext["contentGate"] = null;
   const contentRoleSourceIds = new Map<string, Set<string>>();
+  const contentRoleDatedSourceIds = new Map<string, Set<string>>();
   if (contentRecord) {
     const contentSnapshot = await readExactJson(
       resolveContained(workspacePaths(root).control, contentRecord.path),
@@ -1660,11 +1665,14 @@ async function assessmentEvidenceContext(
         !isObject(coverage) ||
         typeof coverage.roleId !== "string" ||
         !Array.isArray(coverage.sourceIds) ||
-        coverage.sourceIds.some((sourceId) => typeof sourceId !== "string")
+        coverage.sourceIds.some((sourceId) => typeof sourceId !== "string") ||
+        !Array.isArray(coverage.datedSourceIds) ||
+        coverage.datedSourceIds.some((sourceId) => typeof sourceId !== "string")
       ) {
         throw scientificGateError("Evidence content role coverage is malformed for review.", role);
       }
       contentRoleSourceIds.set(coverage.roleId, new Set(coverage.sourceIds as string[]));
+      contentRoleDatedSourceIds.set(coverage.roleId, new Set(coverage.datedSourceIds as string[]));
     }
   }
   return {
@@ -1676,6 +1684,7 @@ async function assessmentEvidenceContext(
     ),
     contentGate,
     contentRoleSourceIds,
+    contentRoleDatedSourceIds,
   };
 }
 

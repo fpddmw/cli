@@ -77,7 +77,12 @@ import {
   writeJsonAtomic,
   writeTextAtomic,
 } from "./storage.js";
-import { packageRoot, packageVersion, RESEARCH_PACKAGE_NAME } from "./constants.js";
+import {
+  packageRoot,
+  packageVersion,
+  RESEARCH_PACKAGE_NAME,
+  RESEARCH_PROTOCOL_VERSION,
+} from "./constants.js";
 import { inspectReviewerBridgeStatus } from "./review-executor.js";
 import {
   exactResearchCliCommand,
@@ -91,11 +96,13 @@ import type {
   AgentRoute,
   ResearchMode,
   ReviewExecutionConfig,
+  RuntimeLock,
 } from "./types.js";
 import {
   doctorResearchWorkspace,
   initializeResearchWorkspace,
   loadWorkspaceConfig,
+  loadWorkspaceMarker,
   type DoctorOptions,
 } from "./workspace.js";
 
@@ -670,6 +677,9 @@ export async function applyResearchSetupPlan(
   });
   try {
     await ensureSetupWorkspace(plan);
+    state = await startSetupStep(root, state, "runtime-lock");
+    await reconcileSetupRuntimeLock(plan);
+    state = await completeSetupStep(root, state, "runtime-lock");
     await configureAgentRoutes(plan);
     state = await completeSetupStep(root, state, "workspace");
 
@@ -2918,6 +2928,46 @@ async function ensureSetupWorkspace(plan: ResearchSetupPlan): Promise<void> {
   await initializeResearchWorkspace(plan.workspace.path, plan.workspace.name, plan.workspace.mode);
 }
 
+async function reconcileSetupRuntimeLock(plan: ResearchSetupPlan): Promise<void> {
+  const root = plan.workspace.path;
+  const paths = workspacePaths(root);
+  const marker = await loadWorkspaceMarker(root);
+  const current = await readJsonFile<unknown>(paths.runtimeLock, "Research runtime lock");
+  if (
+    !isObject(current) ||
+    current.schemaVersion !== 1 ||
+    current.protocolVersion !== RESEARCH_PROTOCOL_VERSION ||
+    current.packageName !== RESEARCH_PACKAGE_NAME ||
+    typeof current.packageVersion !== "string" ||
+    current.workspaceId !== marker.workspaceId
+  ) {
+    throw setupError({
+      code: "RESEARCH_SETUP_RUNTIME_LOCK_INVALID",
+      step: "runtime-lock",
+      reason: "The existing research runtime lock does not match the current workspace.",
+      minimumAction:
+        "Restore the prior CLI-created runtime lock or inspect the archived setup generation; do not edit the lock by hand.",
+      retryCommand: `tiangong-ai research setup status --workspace ${root} --json`,
+      exitCode: 3,
+    });
+  }
+  if (current.packageVersion === plan.cli.version) return;
+
+  const next: RuntimeLock = {
+    schemaVersion: 1,
+    protocolVersion: RESEARCH_PROTOCOL_VERSION,
+    packageName: RESEARCH_PACKAGE_NAME,
+    packageVersion: plan.cli.version,
+    workspaceId: marker.workspaceId,
+  };
+  await writeJsonAtomic(paths.runtimeLock, next);
+  await appendJournalEvent(paths.journal, "research.setup.runtime-lock.updated", "workspace", {
+    planSha256: plan.planSha256,
+    priorPackageVersion: current.packageVersion,
+    packageVersion: next.packageVersion,
+  });
+}
+
 async function configureAgentRoutes(plan: ResearchSetupPlan): Promise<void> {
   const paths = workspacePaths(plan.workspace.path);
   const config = await loadWorkspaceConfig(plan.workspace.path);
@@ -4361,6 +4411,7 @@ async function archiveSetupGeneration(root: string): Promise<string> {
     [paths.setupState, "setup-state.json"],
     [paths.setupReport, "setup-report.json"],
     [paths.setupDeclarationBinding, "setup-declaration.json"],
+    [paths.runtimeLock, "runtime-lock.json"],
   ] as const;
   for (const [source, name] of files) {
     if (!(await pathExists(source))) continue;
@@ -4675,6 +4726,12 @@ function setupMutations(
       step: "workspace",
       target: workspacePaths(root).control,
       reason: "Initialize or verify the auditable research workspace control plane.",
+    },
+    {
+      step: "runtime-lock",
+      target: workspacePaths(root).runtimeLock,
+      reason:
+        "Atomically bind the workspace to the exact CLI version declared by this immutable setup generation.",
     },
   ];
   if (selected.some((skill) => skill.id === "tiangong.auto-research")) {

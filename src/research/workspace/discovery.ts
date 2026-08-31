@@ -155,6 +155,13 @@ export async function commitDiscoveryDecisions(
   value: Record<string, unknown>,
 ): Promise<void> {
   parseCloseoutValue(value);
+  await commitCurrentDiscoveryAssessments(root, projectId);
+}
+
+export async function commitCurrentDiscoveryAssessments(
+  root: string,
+  projectId: string,
+): Promise<void> {
   const assessments = await latestDiscoveryAssessments(root, projectId);
   const events = await readJournal(evidenceLedgerPath(root, projectId));
   const committed = new Set(
@@ -208,9 +215,15 @@ export async function recordDiscoveryAssessmentBatch(input: {
   const discover = packages.find(
     (workPackage) => isObject(workPackage) && workPackage.stage === "discover",
   );
-  if (!isObject(discover) || discover.status !== "running") {
+  const acquire = packages.find(
+    (workPackage) => isObject(workPackage) && workPackage.stage === "acquire",
+  );
+  const evidenceIntakeOpen =
+    (isObject(discover) && discover.status === "running") ||
+    (isObject(acquire) && acquire.status === "running");
+  if (!evidenceIntakeOpen) {
     throw discoveryError(
-      "Discovery assessments may be recorded only during the active discover stage.",
+      "Discovery assessments may be recorded only during an active discover or acquisition stage.",
     );
   }
   const requiredDimensions = new Set(

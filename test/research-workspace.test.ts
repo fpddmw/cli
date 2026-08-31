@@ -12,7 +12,11 @@ import { startCapabilityBroker } from "../src/research/workspace/broker.js";
 import { inspectResearchContext } from "../src/research/workspace/context.js";
 import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
 import { listEvidenceCandidates } from "../src/research/workspace/evidence-ledger.js";
-import { executeAgent, fingerprintAgentRoute } from "../src/research/workspace/executor.js";
+import {
+  executeAgent,
+  fingerprintAgentRoute,
+  resolveLinuxResolverBindTargetForTesting,
+} from "../src/research/workspace/executor.js";
 import { researchPlatformCapabilities } from "../src/research/workspace/platform-capabilities.js";
 import {
   readAndVerifyProjectInputPlan,
@@ -51,6 +55,25 @@ import {
 } from "../src/research/workspace/workspace.js";
 
 describe("research workspace lifecycle", () => {
+  it("binds a resolver target that escapes /etc through an absolute symlink", async () => {
+    const root = await temporaryDirectory();
+    try {
+      const etc = join(root, "etc");
+      const wsl = join(root, "mnt", "wsl");
+      await mkdir(etc, { recursive: true });
+      await mkdir(wsl, { recursive: true });
+      const target = join(wsl, "resolv.conf");
+      const resolver = join(etc, "resolv.conf");
+      await writeFile(target, "nameserver 10.0.0.1\n");
+      await symlink(target, resolver);
+
+      assert.equal(await resolveLinuxResolverBindTargetForTesting(resolver, [etc]), target);
+      assert.equal(await resolveLinuxResolverBindTargetForTesting(target, [etc]), null);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("orders regular tree paths by normalized UTF-8 bytes instead of process collation", async () => {
     const root = await temporaryDirectory();
     try {
@@ -2144,6 +2167,11 @@ describe("research workspace CLI", () => {
       assert.equal(finalStatus.hiddenArchivedProjects, 1);
       assert.equal(finalStatus.hiddenAbandonedProjects, 1);
       assert.deepEqual(finalStatus.projects, []);
+
+      const doctor = await doctorResearchWorkspace(root);
+      assert.equal(doctor.status, "ready", JSON.stringify(doctor));
+      assert.equal(doctor.checks.find((check) => check.id === "project-state")?.status, "pass");
+      assert.equal(doctor.checks.find((check) => check.id === "evidence-store")?.status, "pass");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2935,7 +2963,7 @@ describe("research workspace CLI", () => {
           preflightValue.budget.maxInputContextTokens,
       );
       assert.deepEqual(preflightValue.budget.stageContextTokenReservations, {
-        acquire: 1_024,
+        acquire: 128_000,
         analyze: 128_000,
         synthesize: 128_000,
         review: 256_000,
