@@ -1,7 +1,9 @@
 import type {
   DataConnectorDefinition,
+  DataMachineError,
   DataOperationExecution,
   DataOperationExecutionContext,
+  DataSourceObservation,
 } from "../contracts.js";
 import { DATA_MANIFEST_SCHEMA_VERSION } from "../contracts.js";
 import { DataRuntimeError } from "../runtime/errors.js";
@@ -37,6 +39,7 @@ const RELATIVE_SUFFIXES = {
 
 type DocMode =
   | "artlist"
+  | "tonechart"
   | "timelinevol"
   | "timelinevolraw"
   | "timelinetone"
@@ -53,6 +56,9 @@ interface GdeltDocInput {
   maxRecords?: number;
   sort?: ArticleSort;
   timelineSmooth?: number;
+  domains?: string[];
+  exactDomains?: string[];
+  continueOnQueryError?: boolean;
 }
 
 interface NormalizedDocQuery {
@@ -63,6 +69,8 @@ interface NormalizedDocQuery {
   maxRecords: number | null;
   sort: ArticleSort | null;
   timelineSmooth: number | null;
+  domainFilters: string[];
+  continueOnQueryError: boolean;
 }
 
 export const gdeltDocSearchConnector: DataConnectorDefinition = {
@@ -95,7 +103,7 @@ export const gdeltDocSearchConnector: DataConnectorDefinition = {
     timeoutMs: 45_000,
     maxRequestBytes: 4_096,
     maxResponseBytes: 20_000_000,
-    maxPages: 1,
+    maxPages: 20,
     maxRecords: 5_000,
     maxRetries: 4,
     maxRetryDelayMs: 120_000,
@@ -107,7 +115,7 @@ export const gdeltDocSearchConnector: DataConnectorDefinition = {
     description: "DOC results reflect the provider's rolling index at request time.",
   },
   limitations: [
-    "This connector bounds each DOC operation to 366 days; article-list mode only considers the final three months of a longer selected window under provider behavior.",
+    "Non-timeline DOC modes only consider the final three months of a longer selected window under provider behavior.",
     "Language translation, entity extraction, tone, and topical coding are automated and can be wrong.",
     "Monitored-source coverage and reporting volume vary across countries, languages, and time.",
   ],
@@ -120,17 +128,19 @@ export const gdeltDocSearchConnector: DataConnectorDefinition = {
       coverage: {
         geographic: "Global monitored news sources, with uneven source and language coverage.",
         temporal:
-          "Provider-searchable DOC holdings; this connector accepts at most a 366-day window per operation.",
+          "Provider-searchable DOC holdings; non-timeline modes only consider the final three months of a longer selected window.",
         granularity:
           "One indexed article metadata item or one timestamped aggregate timeline point.",
       },
     },
     summary: "Search recent GDELT news metadata or bounded aggregate news timelines.",
     description:
-      "Use a closed DOC 2.0 JSON surface with one explicit rolling or absolute window of at most 366 days; output is normalized and capped by the common runtime.",
+      "Use a closed DOC 2.0 JSON surface with an optional rolling or absolute window; repeated domain filters are split into bounded requests and output is normalized under the common runtime.",
     provides: [
       "Article-link metadata for bounded recent-news queries.",
       "Volume, raw-volume, tone, language, or source-country timeline series.",
+      "Tone-distribution histogram bins for tonechart mode.",
+      "Local rejection of unsupported site:/inurl: syntax and unparenthesized boolean OR groups.",
       "Explicit query parameters and machine-verifiable source observations.",
     ],
     doesNotProvide: [
@@ -142,6 +152,7 @@ export const gdeltDocSearchConnector: DataConnectorDefinition = {
       "Choose DOC search for recent article discovery or aggregate attention/tone trends.",
       "Choose the Events, Mentions, or GKG file capability for structured 15-minute feed records.",
       "Treat returned links as candidates for separately governed source retrieval and verification.",
+      "Use exactDomains for domainis: filters and domains for suffix-matching domain: filters; each value becomes a separate bounded query batch.",
     ],
     typicalUseCases: [
       "Find recent article metadata matching a topic and country filter.",
@@ -173,84 +184,235 @@ async function executeGdeltDocSearch(
   context: DataOperationExecutionContext,
 ): Promise<DataOperationExecution> {
   const query = normalizeQuery(context.input as GdeltDocInput);
-  const response = await context.http.request({
-    endpointId: "gdelt-doc-api",
-    method: "GET",
-    path: DOC_PATH,
-    query: buildProviderQuery(query),
-  });
-  const payload = requireObject(response.json(), "GDELT DOC response");
-  const queryDetails = normalizeQueryDetails(payload.query_details);
+  const effectiveQueries =
+    query.domainFilters.length === 0
+      ? [query.query]
+      : query.domainFilters.map((filter) => composeDomainQuery(query.query, filter));
+  if (effectiveQueries.length > context.limits.maxPages) {
+    throw new DataRuntimeError(
+      "invalid-request",
+      "GDELT DOC split-domain queries exceed the effective request limit.",
+      { details: { queryCount: effectiveQueries.length, maxQueries: context.limits.maxPages } },
+    );
+  }
+  const batches: Array<{
+    query: string;
+    payload: Record<string, unknown>;
+    observation: DataSourceObservation;
+  }> = [];
+  const failures: Array<{ query: string; code: string; error: unknown }> = [];
+  for (const effectiveQuery of effectiveQueries) {
+    try {
+      const response = await context.http.request({
+        endpointId: "gdelt-doc-api",
+        method: "GET",
+        path: DOC_PATH,
+        query: buildProviderQuery(query, effectiveQuery),
+      });
+      const payload = requireObject(response.json(), "GDELT DOC response");
+      validateModePayload(payload, query.mode);
+      batches.push({ query: effectiveQuery, payload, observation: response.observation });
+    } catch (error) {
+      if (!query.continueOnQueryError) throw normalizeProviderFailure(error);
+      const normalized = normalizeProviderFailure(error);
+      failures.push({ query: effectiveQuery, code: normalized.code, error: normalized });
+    }
+  }
+  if (batches.length === 0) {
+    throw new DataRuntimeError(
+      "provider-response-invalid",
+      "All GDELT DOC query batches failed.",
+      { details: { failedQueries: failures.map((item) => item.query) } },
+    );
+  }
+  const partial = failures.length > 0;
+  const queryDetails = normalizeQueryDetails(batches[0]!.payload.query_details);
+  const batchQueries = batches.map((batch) => ({
+    query: batch.query,
+    queryDetails: normalizeQueryDetails(batch.payload.query_details),
+  }));
+  const queryErrors = failures.map(({ query: failedQuery, code }) => ({
+    query: failedQuery,
+    code,
+  }));
+  const observations = batches.map((batch, index) => ({
+    ...batch.observation,
+    sourceId: `doc:batch:${index + 1}`,
+  }));
+  const errors: DataMachineError[] = partial
+    ? [
+        {
+          code: "partial-result",
+          message: "One or more split GDELT DOC query batches failed.",
+          retryable: failures.some(
+            ({ error }) =>
+              error instanceof DataRuntimeError && (error.options.retryable ?? false),
+          ),
+          userActionRequired: false,
+          details: { failedQueries: failures.map((item) => item.query) },
+        },
+      ]
+    : [];
   if (query.mode === "artlist") {
-    const rawArticles = requireArray(payload.articles, "articles");
     const cap = Math.min(context.limits.maxRecords, query.maxRecords ?? 75);
-    const articles = rawArticles.slice(0, cap).map(normalizeArticle);
-    const truncated = rawArticles.length > articles.length;
+    const articles: Array<Record<string, unknown>> = [];
+    const seen = new Set<string>();
+    let availableArticleCount = 0;
+    for (const batch of batches) {
+      for (const value of requireArray(batch.payload.articles, "articles")) {
+        const article = normalizeArticle(value, availableArticleCount, batch.query);
+        if (!article) continue;
+        const identity = articleIdentity(article);
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        availableArticleCount += 1;
+        if (articles.length < cap) articles.push(article);
+      }
+    }
+    const truncated = availableArticleCount > articles.length;
     return {
-      status: "success",
+      status: partial ? "partial" : "success",
       data: {
         source: { providerId: "gdelt", endpoint: DOC_PATH, metadataOnly: true },
         query,
         kind: "articles",
         queryDetails,
+        batchQueries,
+        queryErrors,
         articles,
         timelines: [],
-        stopReason: articles.length === 0 ? "no-results" : truncated ? "max-records" : "completed",
+        toneBins: [],
+        stopReason: partial
+          ? "partial"
+          : articles.length === 0
+            ? "no-results"
+            : truncated
+              ? "max-records"
+              : "completed",
       },
       summary: {
         recordCount: articles.length,
-        pageCount: 1,
+        pageCount: batches.length,
         chunkCount: 0,
         truncated,
-        completeness: "complete",
+        completeness: partial ? "partial" : "complete",
+        ...(partial
+          ? {
+              missing: [
+                { kind: "range" as const, identifiers: failures.map((item) => item.query) },
+              ],
+            }
+          : {}),
       },
       warnings: discoveryWarnings(truncated),
-      errors: [],
-      observations: [{ ...response.observation, sourceId: "doc:article-list" }],
+      errors,
+      observations,
     };
   }
 
-  const rawTimelines = requireArray(payload.timeline, "timeline");
+  if (query.mode === "tonechart") {
+    const toneBins = batches.flatMap((batch) => normalizeToneBins(batch.payload, batch.query));
+    const capped = toneBins.slice(0, context.limits.maxRecords);
+    const truncated = toneBins.length > capped.length;
+    return {
+      status: partial ? "partial" : "success",
+      data: {
+        source: { providerId: "gdelt", endpoint: DOC_PATH, metadataOnly: true },
+        query,
+        kind: "tone-chart",
+        queryDetails,
+        batchQueries,
+        queryErrors,
+        articles: [],
+        timelines: [],
+        toneBins: capped,
+        stopReason: partial
+          ? "partial"
+          : capped.length === 0
+            ? "no-results"
+            : truncated
+              ? "max-records"
+              : "completed",
+      },
+      summary: {
+        recordCount: capped.length,
+        pageCount: batches.length,
+        chunkCount: batches.length,
+        truncated,
+        completeness: partial ? "partial" : "complete",
+        ...(partial
+          ? {
+              missing: [
+                { kind: "range" as const, identifiers: failures.map((item) => item.query) },
+              ],
+            }
+          : {}),
+      },
+      warnings: discoveryWarnings(truncated),
+      errors,
+      observations,
+    };
+  }
+
   let remaining = context.limits.maxRecords;
   let rawPointCount = 0;
-  const timelines = rawTimelines.map((value, seriesIndex) => {
-    const series = requireObject(value, `timeline[${seriesIndex}]`);
-    const rawData = requireArray(series.data, `timeline[${seriesIndex}].data`);
-    rawPointCount += rawData.length;
-    const data = rawData
-      .slice(0, remaining)
-      .map((point, pointIndex) =>
-        normalizeTimelinePoint(point, `timeline[${seriesIndex}].data[${pointIndex}]`),
-      );
-    remaining -= data.length;
-    return {
-      series: requireNonBlankString(series.series, `timeline[${seriesIndex}].series`),
-      data,
-    };
-  });
+  const timelines = batches.flatMap((batch) =>
+    requireArray(batch.payload.timeline, "timeline").map((value, seriesIndex) => {
+      const series = requireObject(value, `timeline[${seriesIndex}]`);
+      const rawData = requireArray(series.data, `timeline[${seriesIndex}].data`);
+      rawPointCount += rawData.length;
+      const data = rawData
+        .slice(0, remaining)
+        .map((point, pointIndex) =>
+          normalizeTimelinePoint(point, `timeline[${seriesIndex}].data[${pointIndex}]`),
+        );
+      remaining -= data.length;
+      return {
+        query: batch.query,
+        series: requireNonBlankString(series.series, `timeline[${seriesIndex}].series`),
+        data,
+      };
+    }),
+  );
   const recordCount = context.limits.maxRecords - remaining;
   const truncated = rawPointCount > recordCount;
   return {
-    status: "success",
+    status: partial ? "partial" : "success",
     data: {
       source: { providerId: "gdelt", endpoint: DOC_PATH, metadataOnly: true },
       query,
       kind: "timeline",
       queryDetails,
+      batchQueries,
+      queryErrors,
       articles: [],
       timelines,
-      stopReason: recordCount === 0 ? "no-results" : truncated ? "max-records" : "completed",
+      toneBins: [],
+      stopReason: partial
+        ? "partial"
+        : recordCount === 0
+          ? "no-results"
+          : truncated
+            ? "max-records"
+            : "completed",
     },
     summary: {
       recordCount,
-      pageCount: 1,
+      pageCount: batches.length,
       chunkCount: timelines.length,
       truncated,
-      completeness: "complete",
+      completeness: partial ? "partial" : "complete",
+      ...(partial
+        ? {
+            missing: [
+              { kind: "range" as const, identifiers: failures.map((item) => item.query) },
+            ],
+          }
+        : {}),
     },
     warnings: discoveryWarnings(truncated),
-    errors: [],
-    observations: [{ ...response.observation, sourceId: `doc:${query.mode}` }],
+    errors,
+    observations,
   };
 }
 
@@ -264,23 +426,19 @@ function normalizeQuery(input: GdeltDocInput): NormalizedDocQuery {
   }
   const hasRelative = input.relativeWindow !== undefined;
   const hasAbsolute = input.absoluteWindow !== undefined;
-  if (hasRelative === hasAbsolute) {
+  if (hasRelative && hasAbsolute) {
     throw new DataRuntimeError(
       "invalid-request",
-      "GDELT DOC search requires exactly one relativeWindow or absoluteWindow.",
+      "GDELT DOC search accepts relativeWindow or absoluteWindow, not both.",
     );
   }
   let relativeWindow: NormalizedDocQuery["relativeWindow"] = null;
   let absoluteWindow: NormalizedDocQuery["absoluteWindow"] = null;
   if (input.relativeWindow) {
-    const maximum = RELATIVE_MAXIMUMS[input.relativeWindow.unit];
-    if (
-      input.relativeWindow.value > maximum ||
-      (input.relativeWindow.unit === "minutes" && input.relativeWindow.value < 15)
-    ) {
+    if (input.relativeWindow.unit === "minutes" && input.relativeWindow.value < 15) {
       throw new DataRuntimeError(
         "invalid-request",
-        "GDELT DOC relativeWindow must span from 15 minutes through one year.",
+        "GDELT DOC relativeWindow must span at least 15 minutes.",
       );
     }
     relativeWindow = { ...input.relativeWindow };
@@ -292,12 +450,6 @@ function normalizeQuery(input: GdeltDocInput): NormalizedDocQuery {
       throw new DataRuntimeError(
         "invalid-request",
         "GDELT DOC absoluteWindow.from must not follow absoluteWindow.to.",
-      );
-    }
-    if (to.getTime() - from.getTime() > 366 * 86_400_000) {
-      throw new DataRuntimeError(
-        "invalid-request",
-        "GDELT DOC absoluteWindow cannot exceed 366 days.",
       );
     }
     absoluteWindow = {
@@ -312,12 +464,23 @@ function normalizeQuery(input: GdeltDocInput): NormalizedDocQuery {
       "timelineSmooth is accepted only for timeline modes.",
     );
   }
-  if (timeline && (input.maxRecords !== undefined || input.sort !== undefined)) {
+  if (input.mode !== "artlist" && (input.maxRecords !== undefined || input.sort !== undefined)) {
     throw new DataRuntimeError(
       "invalid-request",
       "maxRecords and sort are accepted only for artlist mode.",
     );
   }
+  const domainFilters = [
+    ...(input.domains ?? []).map((value) => `domain:${normalizeDomain(value, "domains")}`),
+    ...(input.exactDomains ?? []).map(
+      (value) => `domainis:${normalizeDomain(value, "exactDomains")}`,
+    ),
+  ];
+  const effectiveQueries =
+    domainFilters.length === 0
+      ? [query]
+      : domainFilters.map((filter) => composeDomainQuery(query, filter));
+  for (const effectiveQuery of effectiveQueries) lintQuery(effectiveQuery);
   return {
     query,
     mode: input.mode,
@@ -326,14 +489,19 @@ function normalizeQuery(input: GdeltDocInput): NormalizedDocQuery {
     maxRecords: input.mode === "artlist" ? (input.maxRecords ?? 75) : null,
     sort: input.mode === "artlist" ? (input.sort ?? "hybridrel") : null,
     timelineSmooth: timeline ? (input.timelineSmooth ?? 0) : null,
+    domainFilters,
+    continueOnQueryError: input.continueOnQueryError ?? false,
   };
 }
 
-function buildProviderQuery(query: NormalizedDocQuery): Record<string, string | number> {
+function buildProviderQuery(
+  query: NormalizedDocQuery,
+  effectiveQuery: string,
+): Record<string, string | number> {
   return {
     format: "json",
     mode: query.mode,
-    query: query.query,
+    query: effectiveQuery,
     ...(query.relativeWindow
       ? { TIMESPAN: `${query.relativeWindow.value}${RELATIVE_SUFFIXES[query.relativeWindow.unit]}` }
       : {}),
@@ -349,19 +517,81 @@ function buildProviderQuery(query: NormalizedDocQuery): Record<string, string | 
   };
 }
 
-function normalizeArticle(value: unknown, index: number): Record<string, unknown> {
-  const article = requireObject(value, `articles[${index}]`);
+function normalizeArticle(
+  value: unknown,
+  index: number,
+  sourceQuery: string,
+): Record<string, unknown> | null {
+  const article = objectOrNull(value);
+  if (!article) return null;
   return {
     recordIndex: index,
-    url: requireNonBlankString(article.url, "article.url"),
-    mobileUrl: nullableString(article.url_mobile, "article.url_mobile"),
-    title: requireNonBlankString(article.title, "article.title"),
-    seenDateTime: parseProviderDateTime(article.seendate, "article.seendate"),
-    socialImageUrl: nullableString(article.socialimage, "article.socialimage"),
-    domain: requireNonBlankString(article.domain, "article.domain"),
-    language: requireNonBlankString(article.language, "article.language"),
-    sourceCountry: requireNonBlankString(article.sourcecountry, "article.sourcecountry"),
+    sourceQuery,
+    url: looseNullableString(article.url),
+    mobileUrl: looseNullableString(article.url_mobile),
+    title: looseString(article.title),
+    seenDateTime: optionalProviderDateTime(article.seendate),
+    socialImageUrl: looseNullableString(article.socialimage),
+    domain: looseString(article.domain),
+    language: looseString(article.language),
+    sourceCountry: looseString(article.sourcecountry),
   };
+}
+
+function articleIdentity(article: Record<string, unknown>): string {
+  return String(article.url || article.title || JSON.stringify(article));
+}
+
+function normalizeToneBins(
+  payload: Record<string, unknown>,
+  sourceQuery: string,
+): Array<Record<string, unknown>> {
+  const rawToneChart = payload.tonechart;
+  const bins = Array.isArray(rawToneChart)
+    ? rawToneChart
+    : objectOrNull(rawToneChart) && Array.isArray(objectOrNull(rawToneChart)?.bins)
+      ? (objectOrNull(rawToneChart)?.bins as unknown[])
+      : [];
+  return bins.flatMap((value, index) => {
+    const bin = objectOrNull(value);
+    if (!bin) return [];
+    const toneBin = looseString(bin.bin ?? bin.tone ?? bin.label);
+    const articleCount = finiteNumber(bin.count ?? bin.value);
+    if (!toneBin || articleCount === null || articleCount < 0) return [];
+    const representativeArticles = Array.isArray(bin.articles)
+      ? bin.articles.flatMap((article, articleIndex) => {
+          const normalized = normalizeArticle(article, articleIndex, sourceQuery);
+          return normalized ? [normalized] : [];
+        })
+      : [];
+    return [
+      {
+        recordIndex: index,
+        sourceQuery,
+        toneBin,
+        articleCount,
+        representativeArticles,
+      },
+    ];
+  });
+}
+
+function validateModePayload(payload: Record<string, unknown>, mode: DocMode): void {
+  if (mode === "artlist") {
+    requireArray(payload.articles, "articles");
+    return;
+  }
+  if (mode === "tonechart") {
+    const chart = payload.tonechart;
+    if (
+      !Array.isArray(chart) &&
+      !(objectOrNull(chart) && Array.isArray(objectOrNull(chart)?.bins))
+    ) {
+      throw providerInvalid("GDELT DOC tonechart response must contain tonechart bins.");
+    }
+    return;
+  }
+  requireArray(payload.timeline, "timeline");
 }
 
 function normalizeTimelinePoint(value: unknown, field: string): Record<string, unknown> {
@@ -433,6 +663,12 @@ function requireObject(value: unknown, field: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function objectOrNull(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 function requireArray(value: unknown, field: string): unknown[] {
   if (!Array.isArray(value)) throw providerInvalid(`${field} must be an array.`);
   return value;
@@ -444,9 +680,30 @@ function requireNonBlankString(value: unknown, field: string): string {
   return value.trim();
 }
 
-function nullableString(value: unknown, field: string): string | null {
+function looseString(value: unknown): string {
+  return typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+}
+
+function looseNullableString(value: unknown): string | null {
+  return looseString(value) || null;
+}
+
+function finiteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function optionalProviderDateTime(value: unknown): string | null {
   if (value === undefined || value === null || value === "") return null;
-  return requireNonBlankString(value, field);
+  try {
+    return parseProviderDateTime(value, "article.seendate");
+  } catch {
+    return null;
+  }
 }
 
 function requireFiniteNumber(value: unknown, field: string): number {
@@ -457,6 +714,84 @@ function requireFiniteNumber(value: unknown, field: string): number {
 
 function providerInvalid(message: string): DataRuntimeError {
   return new DataRuntimeError("provider-response-invalid", message);
+}
+
+function normalizeProviderFailure(error: unknown): DataRuntimeError {
+  return error instanceof DataRuntimeError
+    ? error
+    : providerInvalid("The GDELT DOC response could not be retrieved or normalized.");
+}
+
+function normalizeDomain(value: string, field: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .split("/", 1)[0]!;
+  if (
+    !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(
+      normalized,
+    )
+  ) {
+    throw new DataRuntimeError(
+      "invalid-request",
+      `GDELT DOC ${field} values must be bare DNS domains.`,
+    );
+  }
+  return normalized;
+}
+
+function composeDomainQuery(query: string, domainFilter: string): string {
+  const base = hasTopLevelOr(query) ? `(${query})` : query;
+  return `${domainFilter} ${base}`;
+}
+
+function lintQuery(query: string): void {
+  const unsupported = /(?:^|\s)(site|inurl):/i.exec(query);
+  if (unsupported) {
+    throw new DataRuntimeError(
+      "invalid-request",
+      `GDELT DOC does not support ${unsupported[1]!.toLowerCase()}:; use domainis: or domain: instead.`,
+    );
+  }
+  if (hasTopLevelOr(query)) {
+    throw new DataRuntimeError(
+      "invalid-request",
+      "GDELT DOC boolean OR groups must be enclosed in parentheses.",
+    );
+  }
+}
+
+function hasTopLevelOr(query: string): boolean {
+  let depth = 0;
+  let quote: '"' | "'" | null = null;
+  for (let index = 0; index < query.length; index += 1) {
+    const character = query[index]!;
+    if (quote) {
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === "(") {
+      depth += 1;
+      continue;
+    }
+    if (character === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (
+      depth === 0 &&
+      query.slice(index).match(/^OR\b/i) &&
+      (index === 0 || /\s/.test(query[index - 1]!))
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function discoveryWarnings(truncated: boolean): string[] {

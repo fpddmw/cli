@@ -20,13 +20,15 @@ export const GDELT_DOC_SEARCH_INPUT_SCHEMA = {
     mode: {
       enum: [
         "artlist",
+        "tonechart",
         "timelinevol",
         "timelinevolraw",
         "timelinetone",
         "timelinelang",
         "timelinesourcecountry",
       ],
-      description: "Closed DOC output mode: article metadata or one of the supported timelines.",
+      description:
+        "Closed DOC JSON output mode: article metadata, tone-distribution bins, or a supported timeline.",
       examples: ["artlist"],
     },
     relativeWindow: {
@@ -40,9 +42,8 @@ export const GDELT_DOC_SEARCH_INPUT_SCHEMA = {
         value: {
           type: "integer",
           minimum: 1,
-          maximum: 527_040,
           description:
-            "Positive integer lookback amount; semantic validation enforces 15 minutes through one year.",
+            "Positive integer lookback amount; minute windows must span at least 15 minutes.",
           examples: [24],
         },
         unit: {
@@ -57,7 +58,7 @@ export const GDELT_DOC_SEARCH_INPUT_SCHEMA = {
       additionalProperties: false,
       required: ["from", "to"],
       description:
-        "Inclusive UTC search window; mutually exclusive with relativeWindow and limited by this connector to 366 days.",
+        "Inclusive UTC search window; mutually exclusive with relativeWindow.",
       examples: [{ from: "2026-03-01T00:00:00Z", to: "2026-03-02T00:00:00Z" }],
       properties: {
         from: {
@@ -93,6 +94,32 @@ export const GDELT_DOC_SEARCH_INPUT_SCHEMA = {
       description: "Timeline smoothing window accepted only for timeline modes.",
       examples: [5],
     },
+    domains: {
+      type: "array",
+      minItems: 1,
+      maxItems: 20,
+      uniqueItems: true,
+      description:
+        "Bare domains converted to separate domain: query batches and merged with URL/title de-duplication.",
+      examples: [["example.org"]],
+      items: { type: "string", minLength: 1, maxLength: 253 },
+    },
+    exactDomains: {
+      type: "array",
+      minItems: 1,
+      maxItems: 20,
+      uniqueItems: true,
+      description:
+        "Bare domains converted to separate exact domainis: query batches and merged with URL/title de-duplication.",
+      examples: [["epa.gov", "airnow.gov"]],
+      items: { type: "string", minLength: 1, maxLength: 253 },
+    },
+    continueOnQueryError: {
+      type: "boolean",
+      description:
+        "Whether successful split-domain batches remain usable as a partial result when another batch fails.",
+      examples: [true],
+    },
   },
 } as const satisfies JsonSchema;
 
@@ -103,6 +130,7 @@ const ARTICLE_SCHEMA = {
   additionalProperties: false,
   required: [
     "recordIndex",
+    "sourceQuery",
     "url",
     "mobileUrl",
     "title",
@@ -114,14 +142,17 @@ const ARTICLE_SCHEMA = {
   ],
   properties: {
     recordIndex: { type: "integer", minimum: 0 },
-    url: { type: "string", minLength: 1 },
+    sourceQuery: { type: "string", minLength: 1 },
+    url: NULLABLE_STRING,
     mobileUrl: NULLABLE_STRING,
-    title: { type: "string", minLength: 1 },
-    seenDateTime: { type: "string", pattern: RFC3339_PATTERN },
+    title: { type: "string" },
+    seenDateTime: {
+      anyOf: [{ type: "string", pattern: RFC3339_PATTERN }, { type: "null" }],
+    },
     socialImageUrl: NULLABLE_STRING,
-    domain: { type: "string", minLength: 1 },
-    language: { type: "string", minLength: 1 },
-    sourceCountry: { type: "string", minLength: 1 },
+    domain: { type: "string" },
+    language: { type: "string" },
+    sourceCountry: { type: "string" },
   },
 } as const;
 
@@ -141,7 +172,18 @@ export const GDELT_DOC_SEARCH_OUTPUT_SCHEMA = {
   $id: "https://schemas.tiangong.ai/data/gdelt/doc-search-output.v1.json",
   type: "object",
   additionalProperties: false,
-  required: ["source", "query", "kind", "queryDetails", "articles", "timelines", "stopReason"],
+  required: [
+    "source",
+    "query",
+    "kind",
+    "queryDetails",
+    "batchQueries",
+    "queryErrors",
+    "articles",
+    "timelines",
+    "toneBins",
+    "stopReason",
+  ],
   properties: {
     source: {
       type: "object",
@@ -164,12 +206,15 @@ export const GDELT_DOC_SEARCH_OUTPUT_SCHEMA = {
         "maxRecords",
         "sort",
         "timelineSmooth",
+        "domainFilters",
+        "continueOnQueryError",
       ],
       properties: {
         query: { type: "string", minLength: 1 },
         mode: {
           enum: [
             "artlist",
+            "tonechart",
             "timelinevol",
             "timelinevolraw",
             "timelinetone",
@@ -213,13 +258,50 @@ export const GDELT_DOC_SEARCH_OUTPUT_SCHEMA = {
           ],
         },
         timelineSmooth: { type: ["integer", "null"], minimum: 0, maximum: 30 },
+        domainFilters: { type: "array", items: { type: "string", minLength: 1 } },
+        continueOnQueryError: { type: "boolean" },
       },
     },
-    kind: { enum: ["articles", "timeline"] },
+    kind: { enum: ["articles", "timeline", "tone-chart"] },
     queryDetails: {
       type: ["object", "null"],
       additionalProperties: {
         anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }, { type: "null" }],
+      },
+    },
+    batchQueries: {
+      type: "array",
+      minItems: 1,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["query", "queryDetails"],
+        properties: {
+          query: { type: "string", minLength: 1 },
+          queryDetails: {
+            type: ["object", "null"],
+            additionalProperties: {
+              anyOf: [
+                { type: "string" },
+                { type: "number" },
+                { type: "boolean" },
+                { type: "null" },
+              ],
+            },
+          },
+        },
+      },
+    },
+    queryErrors: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["query", "code"],
+        properties: {
+          query: { type: "string", minLength: 1 },
+          code: { type: "string", minLength: 1 },
+        },
       },
     },
     articles: { type: "array", items: ARTICLE_SCHEMA },
@@ -228,13 +310,35 @@ export const GDELT_DOC_SEARCH_OUTPUT_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["series", "data"],
+        required: ["query", "series", "data"],
         properties: {
+          query: { type: "string", minLength: 1 },
           series: { type: "string", minLength: 1 },
           data: { type: "array", items: TIMELINE_POINT_SCHEMA },
         },
       },
     },
-    stopReason: { enum: ["completed", "no-results", "max-records"] },
+    toneBins: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "recordIndex",
+          "sourceQuery",
+          "toneBin",
+          "articleCount",
+          "representativeArticles",
+        ],
+        properties: {
+          recordIndex: { type: "integer", minimum: 0 },
+          sourceQuery: { type: "string", minLength: 1 },
+          toneBin: { type: "string", minLength: 1 },
+          articleCount: { type: "number", minimum: 0 },
+          representativeArticles: { type: "array", items: ARTICLE_SCHEMA },
+        },
+      },
+    },
+    stopReason: { enum: ["completed", "no-results", "max-records", "partial"] },
   },
 } as const satisfies JsonSchema;

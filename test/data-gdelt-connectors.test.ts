@@ -218,6 +218,7 @@ describe("GDELT connectors", () => {
     assert.equal(data.kind, "articles");
     assert.deepEqual(data.articles[0], {
       recordIndex: 0,
+      sourceQuery: '"climate change" sourcecountry:us',
       url: "https://news.example.invalid/synthetic-article",
       mobileUrl: null,
       title: "Synthetic climate article",
@@ -261,15 +262,15 @@ describe("GDELT connectors", () => {
     assert.equal(data.timelines[0]?.data.length, 1);
   });
 
-  it("rejects ambiguous, mode-incompatible, oversized, and unsafe DOC requests before fetch", async () => {
+  it("rejects ambiguous, mode-incompatible, syntactically unsafe, and unbounded split DOC requests before fetch", async () => {
     const requests = [
       docRequest({ relativeWindow: { value: 1, unit: "days" } }),
       docRequest({ mode: "artlist", timelineSmooth: 2 }),
       docRequest({ mode: "timelinevol", maxRecords: 5, sort: undefined }),
-      docRequest({
-        absoluteWindow: { from: "2025-01-01T00:00:00Z", to: "2026-03-02T00:00:00Z" },
-      }),
       docRequest({ query: "https://evil.invalid/\nunsafe" }),
+      docRequest({ query: "smoke OR advisory" }),
+      docRequest({ query: "smoke site:epa.gov" }),
+      { ...docRequest({ exactDomains: ["epa.gov", "airnow.gov"] }), limits: { maxPages: 1 } },
     ];
     for (const request of requests) {
       let fetched = false;
@@ -285,6 +286,100 @@ describe("GDELT connectors", () => {
       assert.equal(result.errors[0]?.code, "invalid-request");
       assert.equal(fetched, false);
     }
+  });
+
+  it("uses the provider default window and accepts a long absolute timeline window", async () => {
+    const requests = [
+      docRequest({ absoluteWindow: undefined }),
+      docRequest({
+        mode: "timelinevol",
+        absoluteWindow: { from: "2024-01-01T00:00:00Z", to: "2026-03-02T00:00:00Z" },
+        maxRecords: undefined,
+        sort: undefined,
+      }),
+    ];
+    for (const request of requests) {
+      let target: URL | undefined;
+      const result = await executeDataRun(request, {
+        registry: createDataRegistry([gdeltDocSearchConnector]),
+        environment: {},
+        fetchImpl: (async (value) => {
+          target = new URL(String(value));
+          return jsonResponse(
+            (request.input as { mode: string }).mode === "artlist"
+              ? DOC_ARTICLE_RESPONSE
+              : DOC_TIMELINE_RESPONSE,
+          );
+        }) as typeof fetch,
+      });
+      assert.equal(result.status, "success", JSON.stringify(result.errors));
+      if ((request.input as { mode: string }).mode === "artlist") {
+        assert.equal(target?.searchParams.has("TIMESPAN"), false);
+        assert.equal(target?.searchParams.has("STARTDATETIME"), false);
+      }
+    }
+  });
+
+  it("splits exact-domain queries, de-duplicates articles, and preserves partial batches", async () => {
+    const requestedQueries: string[] = [];
+    const result = await executeDataRun(
+      docRequest({
+        query: "smoke OR advisory",
+        exactDomains: ["epa.gov", "airnow.gov"],
+        continueOnQueryError: true,
+      }),
+      {
+        registry: createDataRegistry([gdeltDocSearchConnector]),
+        environment: {},
+        fetchImpl: (async (target) => {
+          const query = new URL(String(target)).searchParams.get("query") ?? "";
+          requestedQueries.push(query);
+          return query.startsWith("domainis:epa.gov")
+            ? jsonResponse(DOC_ARTICLE_RESPONSE)
+            : textResponse("missing", 404);
+        }) as typeof fetch,
+      },
+    );
+
+    assert.equal(result.status, "partial");
+    assert.deepEqual(requestedQueries, [
+      "domainis:epa.gov (smoke OR advisory)",
+      "domainis:airnow.gov (smoke OR advisory)",
+    ]);
+    assert.equal(result.summary.recordCount, 1);
+    assert.equal((result.data as { queryErrors: unknown[] }).queryErrors.length, 1);
+  });
+
+  it("normalizes DOC tonechart bins and representative article links", async () => {
+    const result = await executeDataRun(
+      docRequest({ mode: "tonechart", maxRecords: undefined, sort: undefined }),
+      {
+        registry: createDataRegistry([gdeltDocSearchConnector]),
+        environment: {},
+        fetchImpl: (async () =>
+          jsonResponse({
+            tonechart: {
+              bins: [
+                {
+                  bin: "-2",
+                  count: 3,
+                  articles: DOC_ARTICLE_RESPONSE.articles,
+                },
+              ],
+            },
+          })) as typeof fetch,
+      },
+    );
+
+    assert.equal(result.status, "success", JSON.stringify(result.errors));
+    const data = result.data as {
+      kind: string;
+      toneBins: Array<{ toneBin: string; articleCount: number; representativeArticles: unknown[] }>;
+    };
+    assert.equal(data.kind, "tone-chart");
+    assert.equal(data.toneBins[0]?.toneBin, "-2");
+    assert.equal(data.toneBins[0]?.articleCount, 3);
+    assert.equal(data.toneBins[0]?.representativeArticles.length, 1);
   });
 
   it("fetches each latest file feed through HTTPS and emits closed named columns", async () => {
