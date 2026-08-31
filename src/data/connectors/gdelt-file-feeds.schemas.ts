@@ -12,27 +12,29 @@ export const GDELT_FILE_FEED_INPUT_SCHEMA = {
     mode: {
       enum: ["latest", "range"],
       description:
-        "Fetch the latest published file or a deterministic inclusive 15-minute UTC range.",
+        "Fetch the latest published file or select the first bounded files whose 15-minute timestamps fall in an inclusive UTC range.",
       examples: ["latest"],
     },
     startDateTime: {
       type: "string",
       pattern: RFC3339_PATTERN,
-      description: "Range start on an exact 15-minute UTC boundary; required only for range mode.",
+      description:
+        "Inclusive canonical UTC lower bound; the first selected file is the first 15-minute snapshot at or after this instant.",
       examples: ["2026-03-01T12:00:00Z"],
     },
     endDateTime: {
       type: "string",
       pattern: RFC3339_PATTERN,
       description:
-        "Inclusive range end on an exact 15-minute UTC boundary; required only for range mode.",
+        "Inclusive canonical UTC upper bound; required only for range mode.",
       examples: ["2026-03-01T12:15:00Z"],
     },
     maxFiles: {
       type: "integer",
       minimum: 1,
       maximum: 20,
-      description: "Hard ceiling for selected 15-minute source files.",
+      description:
+        "Hard ceiling for files selected from the latest index or a potentially larger range.",
       examples: [4],
     },
   },
@@ -202,8 +204,12 @@ function fileFeedOutputSchema(
             "timestamp",
             "fileName",
             "compressedBytes",
+            "sha256",
             "uncompressedBytes",
             "rowCount",
+            "validRowCount",
+            "invalidRowCount",
+            "validationIssues",
             "verifiedMd5",
             "crc32Verified",
           ],
@@ -211,8 +217,16 @@ function fileFeedOutputSchema(
             timestamp: { type: "string", pattern: "^\\d{14}$" },
             fileName: { type: "string", minLength: 1 },
             compressedBytes: { type: "integer", minimum: 1 },
+            sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
             uncompressedBytes: { type: "integer", minimum: 0 },
             rowCount: { type: "integer", minimum: 0 },
+            validRowCount: { type: "integer", minimum: 0 },
+            invalidRowCount: { type: "integer", minimum: 0 },
+            validationIssues: {
+              type: "array",
+              maxItems: 20,
+              items: { type: "string", minLength: 1 },
+            },
             verifiedMd5: { type: ["boolean", "null"] },
             crc32Verified: { const: true },
           },

@@ -63,9 +63,16 @@ interface FeedCandidate {
 }
 
 interface ParsedZip {
-  text: string;
+  content: Buffer;
   uncompressedBytes: number;
   crc32Verified: true;
+}
+
+interface ParsedRows {
+  rows: Array<Record<string, string>>;
+  totalRows: number;
+  invalidRowCount: number;
+  issues: string[];
 }
 
 const FEED_DEFINITIONS: Record<FeedKind, FeedDefinition> = {
@@ -231,12 +238,16 @@ async function executeFeed(
 ): Promise<DataOperationExecution> {
   const query = normalizeFeedQuery(context.input as FeedInput);
   const observations: DataSourceObservation[] = [];
-  const allCandidates =
+  const effectiveFileLimit = Math.min(query.maxFiles, context.limits.maxPages);
+  const plan =
     query.mode === "latest"
-      ? [await resolveLatestCandidate(context, definition, observations)]
-      : rangeCandidates(query, definition);
-  const candidates = allCandidates.slice(0, context.limits.maxPages);
-  const stoppedAtFileCap = candidates.length < allCandidates.length;
+      ? {
+          candidates: [await resolveLatestCandidate(context, definition, observations)],
+          truncated: false,
+        }
+      : rangeCandidates(query, definition, effectiveFileLimit);
+  const candidates = plan.candidates;
+  const stoppedAtFileCap = plan.truncated;
   const files: Array<Record<string, unknown>> = [];
   const records: Array<Record<string, unknown>> = [];
   const failures: Array<{ fileName: string; code: string; retryable: boolean }> = [];
@@ -259,9 +270,9 @@ async function executeFeed(
       verifyAdvertisedFile(bytes, candidate);
       const memberName = candidate.fileName.slice(0, -4);
       const parsed = parseSingleEntryZip(bytes, memberName);
-      const rows = parseRows(parsed.text, definition.fields, candidate.fileName);
+      const parsedRows = parseRows(parsed.content, definition.fields, candidate.fileName);
       const remaining = context.limits.maxRecords - records.length;
-      const emittedRows = rows.slice(0, remaining);
+      const emittedRows = parsedRows.rows.slice(0, remaining);
       for (const fields of emittedRows) {
         records.push({
           recordIndex: records.length,
@@ -274,12 +285,16 @@ async function executeFeed(
         timestamp: candidate.timestamp,
         fileName: candidate.fileName,
         compressedBytes: bytes.byteLength,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
         uncompressedBytes: parsed.uncompressedBytes,
-        rowCount: rows.length,
+        rowCount: parsedRows.totalRows,
+        validRowCount: parsedRows.rows.length,
+        invalidRowCount: parsedRows.invalidRowCount,
+        validationIssues: parsedRows.issues,
         verifiedMd5: candidate.expectedMd5 === null ? null : true,
         crc32Verified: parsed.crc32Verified,
       });
-      if (emittedRows.length < rows.length) {
+      if (emittedRows.length < parsedRows.rows.length) {
         stoppedAtRecordCap = true;
         break;
       }
@@ -359,6 +374,9 @@ async function executeFeed(
               : "The operation stopped at the runtime file/page limit.",
           ]
         : []),
+      ...(files.some((file) => Number(file.invalidRowCount) > 0)
+        ? ["One or more source rows failed UTF-8 or column-count validation and were omitted."]
+        : []),
     ],
     errors,
     observations,
@@ -388,16 +406,6 @@ function normalizeFeedQuery(input: FeedInput): NormalizedFeedQuery {
     throw new DataRuntimeError(
       "invalid-request",
       "GDELT startDateTime must not follow endDateTime.",
-    );
-  }
-  const fileCount = Math.floor((end.getTime() - start.getTime()) / FIFTEEN_MINUTES_MS) + 1;
-  if (fileCount > maxFiles || fileCount > MAX_FILES) {
-    throw new DataRuntimeError(
-      "invalid-request",
-      "GDELT range contains more files than the explicit maxFiles limit.",
-      {
-        details: { fileCount, maxFiles },
-      },
     );
   }
   return {
@@ -445,11 +453,24 @@ async function resolveLatestCandidate(
   );
 }
 
-function rangeCandidates(query: NormalizedFeedQuery, definition: FeedDefinition): FeedCandidate[] {
+function rangeCandidates(
+  query: NormalizedFeedQuery,
+  definition: FeedDefinition,
+  limit: number,
+): { candidates: FeedCandidate[]; truncated: boolean } {
   const start = new Date(query.startDateTime as string);
   const end = new Date(query.endDateTime as string);
+  const firstTimestamp = Math.ceil(start.getTime() / FIFTEEN_MINUTES_MS) * FIFTEEN_MINUTES_MS;
+  const availableCount =
+    firstTimestamp > end.getTime()
+      ? 0
+      : Math.floor((end.getTime() - firstTimestamp) / FIFTEEN_MINUTES_MS) + 1;
   const candidates: FeedCandidate[] = [];
-  for (let time = start.getTime(); time <= end.getTime(); time += FIFTEEN_MINUTES_MS) {
+  for (
+    let time = firstTimestamp;
+    time <= end.getTime() && candidates.length < limit;
+    time += FIFTEEN_MINUTES_MS
+  ) {
     const timestamp = gdeltTimestamp(new Date(time));
     candidates.push({
       timestamp,
@@ -458,7 +479,7 @@ function rangeCandidates(query: NormalizedFeedQuery, definition: FeedDefinition)
       expectedMd5: null,
     });
   }
-  return candidates;
+  return { candidates, truncated: availableCount > candidates.length };
 }
 
 function verifyAdvertisedFile(bytes: Buffer, candidate: FeedCandidate): void {
@@ -568,50 +589,75 @@ function parseSingleEntryZip(bytes: Buffer, expectedMemberName: string): ParsedZ
   if (content.byteLength !== uncompressedSize || crc32(content) !== expectedCrc)
     throw providerInvalid("GDELT ZIP member size or CRC32 validation failed.");
   return {
-    text: decodeUtf8(content, "GDELT table"),
+    content,
     uncompressedBytes: content.byteLength,
     crc32Verified: true,
   };
 }
 
 function parseRows(
-  text: string,
+  content: Buffer,
   fields: readonly string[],
   fileName: string,
-): Array<Record<string, string>> {
-  if (text.includes("\0")) throw providerInvalid(`GDELT file ${fileName} contains a NUL byte.`);
-  const lines = text.split(/\r?\n/);
-  while (lines.at(-1) === "") lines.pop();
-  return lines.map((line, rowIndex) => {
-    if (!line) throw providerInvalid(`GDELT file ${fileName} contains an empty row.`);
+): ParsedRows {
+  const rows: Array<Record<string, string>> = [];
+  const issues: string[] = [];
+  let totalRows = 0;
+  let invalidRowCount = 0;
+  let lineStart = 0;
+  for (let offset = 0; offset <= content.length; offset += 1) {
+    if (offset < content.length && content[offset] !== 0x0a) continue;
+    let lineEnd = offset;
+    if (lineEnd > lineStart && content[lineEnd - 1] === 0x0d) lineEnd -= 1;
+    if (lineStart === content.length || (lineEnd === lineStart && offset === content.length)) break;
+    totalRows += 1;
+    const lineBytes = content.subarray(lineStart, lineEnd);
+    lineStart = offset + 1;
+    let line: string;
+    try {
+      line = new TextDecoder("utf-8", { fatal: true }).decode(lineBytes);
+    } catch {
+      invalidRowCount += 1;
+      addRowIssue(issues, `Row ${totalRows} is not valid UTF-8.`);
+      continue;
+    }
+    if (!line || line.includes("\0")) {
+      invalidRowCount += 1;
+      addRowIssue(issues, `Row ${totalRows} is empty or contains a NUL byte.`);
+      continue;
+    }
     const values = line.split("\t");
     if (values.length !== fields.length) {
-      throw providerInvalid(
-        `GDELT file ${fileName} row ${rowIndex + 1} has ${values.length} columns; expected ${fields.length}.`,
+      invalidRowCount += 1;
+      addRowIssue(
+        issues,
+        `Row ${totalRows} has ${values.length} columns; expected ${fields.length}.`,
       );
+      continue;
     }
-    return Object.fromEntries(fields.map((field, index) => [field, values[index] as string]));
-  });
+    rows.push(Object.fromEntries(fields.map((field, index) => [field, values[index] as string])));
+  }
+  return { rows, totalRows, invalidRowCount, issues };
 }
 
 function parseAlignedDateTime(value: string, field: string): Date {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00Z$/.test(value))
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value))
     throw new DataRuntimeError(
       "invalid-request",
-      `${field} must be a canonical UTC timestamp on a 15-minute boundary.`,
+      `${field} must be a canonical UTC timestamp.`,
     );
   const parsed = new Date(value);
-  if (
-    !Number.isFinite(parsed.getTime()) ||
-    canonicalDateTime(parsed) !== value ||
-    parsed.getUTCMinutes() % 15 !== 0
-  ) {
+  if (!Number.isFinite(parsed.getTime()) || canonicalDateTime(parsed) !== value) {
     throw new DataRuntimeError(
       "invalid-request",
-      `${field} must be a valid UTC timestamp on a 15-minute boundary.`,
+      `${field} must be a valid canonical UTC timestamp.`,
     );
   }
   return parsed;
+}
+
+function addRowIssue(issues: string[], issue: string): void {
+  if (issues.length < 20) issues.push(issue);
 }
 
 function canonicalDateTime(value: Date): string {

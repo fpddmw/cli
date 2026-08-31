@@ -464,6 +464,36 @@ describe("GDELT connectors", () => {
     assert.equal(requested.includes("/gdeltv2/masterfilelist.txt"), false);
   });
 
+  it("selects the first capped snapshots from a larger unaligned UTC range", async () => {
+    const requested: string[] = [];
+    const result = await executeDataRun(
+      feedRequest("gdelt.events", {
+        mode: "range",
+        startDateTime: "2026-03-01T12:01:30Z",
+        endDateTime: "2026-03-01T13:00:00Z",
+        maxFiles: 2,
+      }),
+      {
+        registry: createDataRegistry([gdeltEventsConnector]),
+        environment: {},
+        fetchImpl: (async (target) => {
+          const url = new URL(String(target));
+          requested.push(url.pathname);
+          const member = url.pathname.split("/").at(-1)!.replace(/\.zip$/, "");
+          return zipResponse(singleEntryZip(member, `${eventRow().join("\t")}\n`));
+        }) as typeof fetch,
+      },
+    );
+
+    assert.equal(result.status, "success");
+    assert.equal(result.summary.truncated, true);
+    assert.equal((result.data as { stopReason: string }).stopReason, "max-files");
+    assert.deepEqual(requested, [
+      "/gdeltv2/20260301121500.export.CSV.zip",
+      "/gdeltv2/20260301123000.export.CSV.zip",
+    ]);
+  });
+
   it("preserves earlier feed records when a later range file is unavailable", async () => {
     const result = await executeDataRun(
       feedRequest("gdelt.events", {
@@ -488,19 +518,13 @@ describe("GDELT connectors", () => {
     ]);
   });
 
-  it("rejects misaligned, over-broad, and path-unsafe feed requests before network access", async () => {
+  it("rejects reversed and mode-incompatible feed requests before network access", async () => {
     const requests = [
       feedRequest("gdelt.events", {
         mode: "range",
-        startDateTime: "2026-03-01T12:01:00Z",
-        endDateTime: "2026-03-01T12:15:00Z",
+        startDateTime: "2026-03-01T12:15:00Z",
+        endDateTime: "2026-03-01T12:00:00Z",
         maxFiles: 2,
-      }),
-      feedRequest("gdelt.events", {
-        mode: "range",
-        startDateTime: "2026-03-01T00:00:00Z",
-        endDateTime: "2026-03-02T00:00:00Z",
-        maxFiles: 20,
       }),
       feedRequest("gdelt.events", { mode: "latest", startDateTime: "../unsafe" }),
     ];
@@ -520,14 +544,10 @@ describe("GDELT connectors", () => {
     }
   });
 
-  it("blocks malformed ZIP structure, unsafe members, wrong columns, and checksum drift", async () => {
+  it("blocks malformed ZIP structure, unsafe members, and checksum drift", async () => {
     const cases = [
       {
         bytes: singleEntryZip("../unsafe.export.CSV", `${eventRow().join("\t")}\n`),
-        advertisedBytes: null,
-      },
-      {
-        bytes: singleEntryZip("20260301120000.export.CSV", "too\tfew\tcolumns\n"),
         advertisedBytes: null,
       },
       { bytes: corruptLastByte(ZIPS.events), advertisedBytes: ZIPS.events },
@@ -544,6 +564,38 @@ describe("GDELT connectors", () => {
       assert.equal(result.status, "blocked");
       assert.equal(result.errors[0]?.code, "provider-response-invalid");
     }
+  });
+
+  it("isolates malformed table rows while preserving valid rows from the same ZIP", async () => {
+    const bytes = singleEntryZip(
+      "20260301120000.export.CSV",
+      `too\tfew\tcolumns\n${eventRow().join("\t")}\n`,
+    );
+    const result = await executeDataRun(feedRequest("gdelt.events"), {
+      registry: createDataRegistry([gdeltEventsConnector]),
+      environment: {},
+      fetchImpl: (async (target) =>
+        String(target).endsWith("lastupdate.txt")
+          ? textResponse(eventLastUpdateText(bytes))
+          : zipResponse(bytes)) as typeof fetch,
+    });
+
+    assert.equal(result.status, "success", JSON.stringify(result.errors));
+    assert.equal(result.summary.recordCount, 1);
+    const file = (result.data as {
+      files: Array<{
+        rowCount: number;
+        validRowCount: number;
+        invalidRowCount: number;
+        validationIssues: string[];
+        sha256: string;
+      }>;
+    }).files[0];
+    assert.equal(file?.rowCount, 2);
+    assert.equal(file?.validRowCount, 1);
+    assert.equal(file?.invalidRowCount, 1);
+    assert.equal(file?.validationIssues.length, 1);
+    assert.match(file?.sha256 ?? "", /^[0-9a-f]{64}$/);
   });
 
   it("stops a file feed at the record cap before another download", async () => {
