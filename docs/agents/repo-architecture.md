@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-24
-lastReviewedCommit: 2438d7677764450094a829ab036a8b9f2d4a73ee
+lastReviewedAt: 2026-08-31
+lastReviewedCommit: 1bfbf589cec3959d37b1c65368b9f325c0c70412
 ---
 
 # Repo Architecture
@@ -323,7 +323,16 @@ commands whose request files contain logical IDs only. It records candidate
 judgments in bounded append-only batches instead of returning a source-sized
 JSON document. Native Web/Browser discovery remains visible as hashed activity
 and supplemental candidates; the same URL or DOI must be formalized through
-the broker before admission. Acquisition binds a completed network download to
+the broker before admission. A bounded Discover recovery is a distinct
+authoritative fork whose immutable contract names one completed ancestor
+ledger, one unresolved evidence role, and the frozen citation seeds from
+which work may continue. The fork verifies and clones its ledger and receipts,
+preserves the ancestor closeout separately, and leaves the current Discover
+output absent until recovery closes. Native activity must trace from a seed;
+broker formalization must match the reached candidate's canonical URL or DOI.
+The contract's floor and ceilings stop later tracing, formalization, and
+admission atomically. Novelty-defeating prior work returns control to design
+review. Acquisition binds a completed network download to
 the exact selected file and download event before artifact registration,
 requires derived text to name its parent artifact, and lets that derivative
 inherit only the parent's canonical source URL instead of fabricating a second

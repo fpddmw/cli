@@ -1,7 +1,14 @@
 import { randomUUID } from "node:crypto";
 
+import { CliError } from "../../errors.js";
 import { resolveAgentAcquisitionRoute } from "./acquisition-routes.js";
-import { appendEvidenceLedgerEvent, listEvidenceCandidates } from "./evidence-ledger.js";
+import { activeDiscoveryRecovery, inspectDiscoveryRecoveryFloor } from "./discovery-recovery.js";
+import {
+  appendEvidenceLedgerEvent,
+  evidenceLedgerPath,
+  listEvidenceCandidates,
+} from "./evidence-ledger.js";
+import { readJournal } from "./journal.js";
 import { loadProject } from "./projects.js";
 import { sanitizeResearchValue } from "./sanitization.js";
 import { canonicalJson, isObject, sha256Text } from "./storage.js";
@@ -49,6 +56,15 @@ export const nativeActivityRecordSchema = {
       maxItems: 100,
       items: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
     },
+    seedCandidateIds: {
+      type: "array",
+      uniqueItems: true,
+      minItems: 1,
+      maxItems: 100,
+      items: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+      description:
+        "Required only during a bounded Discover recovery; every value must be a frozen legal seed candidate.",
+    },
     resultCount: { type: "integer", minimum: 0 },
     status: { type: "string", enum: ["completed", "blocked", "failed"] },
     challenge: {
@@ -77,6 +93,8 @@ export interface NativeActivityReceipt {
   status: string;
   challenge: string;
   candidateIds: string[];
+  seedCandidateIds: string[];
+  recoveryContractSha256: string | null;
   resultCount: number;
   inputSha256: string;
   recordedAt: string;
@@ -96,6 +114,7 @@ export async function recordNativeResearchActivity(input: {
     "channel",
     "input",
     "candidateIds",
+    "seedCandidateIds",
     "resultCount",
     "status",
     "challenge",
@@ -125,6 +144,14 @@ export async function recordNativeResearchActivity(input: {
       (candidateId) => typeof candidateId !== "string" || !IDENTIFIER.test(candidateId),
     ) ||
     new Set(value.candidateIds).size !== value.candidateIds.length ||
+    (value.seedCandidateIds !== undefined &&
+      (!Array.isArray(value.seedCandidateIds) ||
+        value.seedCandidateIds.length < 1 ||
+        value.seedCandidateIds.length > 100 ||
+        value.seedCandidateIds.some(
+          (candidateId) => typeof candidateId !== "string" || !IDENTIFIER.test(candidateId),
+        ) ||
+        new Set(value.seedCandidateIds).size !== value.seedCandidateIds.length)) ||
     !Number.isInteger(value.resultCount) ||
     Number(value.resultCount) < 0 ||
     !["completed", "blocked", "failed"].includes(String(value.status)) ||
@@ -180,10 +207,45 @@ export async function recordNativeResearchActivity(input: {
       : {}),
   });
   const candidateIds = value.candidateIds as string[];
+  const recovery = activeDiscoveryRecovery(project);
+  const seedCandidateIds = (value.seedCandidateIds ?? []) as string[];
+  if (recovery) {
+    if ((await inspectDiscoveryRecoveryFloor(input.root, project)).minimumSatisfied) {
+      throw recoveryActivityError(
+        "The closest-work recovery floor is already satisfied; no further citation chase is allowed.",
+      );
+    }
+    if (!recovery.activeRouteIds.includes(route!.id)) {
+      throw recoveryActivityError("Native activity is outside the frozen citation-chase routes.");
+    }
+    if (
+      seedCandidateIds.length < 1 ||
+      seedCandidateIds.some((candidateId) => !recovery.seedCandidateIds.includes(candidateId))
+    ) {
+      throw recoveryActivityError(
+        "Bounded citation-chase activity must identify one or more frozen legal seed candidates.",
+      );
+    }
+    const priorRecoveryActivities = (
+      await readJournal(evidenceLedgerPath(input.root, project.id))
+    ).filter(
+      (event) =>
+        event.type === "activity.recorded" &&
+        event.payload.recoveryContractSha256 === recovery.contractSha256,
+    ).length;
+    if (priorRecoveryActivities >= recovery.maxNativeCitationChaseActivities) {
+      throw recoveryActivityError("The bounded citation-chase activity allowance is exhausted.");
+    }
+  } else if (seedCandidateIds.length) {
+    throw recoveryActivityError(
+      "seedCandidateIds are valid only during an active bounded Discover recovery.",
+    );
+  }
   const known = new Set(
     (await listEvidenceCandidates(input.root, input.projectId)).map((candidate) => candidate.id),
   );
   const missing = candidateIds.filter((candidateId) => !known.has(candidateId));
+  missing.push(...seedCandidateIds.filter((candidateId) => !known.has(candidateId)));
   if (missing.length) {
     throw activityError(`Native activity refers to unknown candidates: ${missing.join(", ")}.`);
   }
@@ -198,6 +260,8 @@ export async function recordNativeResearchActivity(input: {
     status: String(value.status),
     challenge: String(value.challenge),
     candidateIds,
+    seedCandidateIds,
+    recoveryContractSha256: recovery?.contractSha256 ?? null,
     resultCount: Number(value.resultCount),
     inputSha256: sha256Text(value.input),
     recordedAt,
@@ -211,4 +275,11 @@ export async function recordNativeResearchActivity(input: {
 
 function activityError(message: string): StructuredOutputError {
   return new StructuredOutputError(message, { validation: [message] });
+}
+
+function recoveryActivityError(message: string): CliError {
+  return new CliError(message, {
+    code: "RESEARCH_DISCOVERY_RECOVERY_SCOPE_VIOLATION",
+    exitCode: 3,
+  });
 }

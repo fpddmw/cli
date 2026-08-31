@@ -334,6 +334,35 @@ export interface ScientificDesignBinding {
   >;
 }
 
+interface DiscoveryRecoveryBindingBase {
+  contractSha256: string;
+  objectLocator: string;
+  sourceProjectId: string;
+  sourceDiscoveryEvidenceSha256: string;
+  sourceEvidenceLedgerHead: string;
+  sourceEvidenceReceiptsSha256: string;
+  evidenceRoleId: string;
+  activeRouteIds: string[];
+  formalizationRouteIds: string[];
+  seedCandidateIds: string[];
+  inheritedEligibleCandidateIds: string[];
+  minimumDistinctCandidates: number;
+  maxNativeCitationChaseActivities: number;
+  maxBrokerFormalizationCalls: number;
+  noveltyDefeatingPriorAction: "stop-and-return-to-design-review";
+}
+
+export interface LegacyDiscoveryRecoveryBinding extends DiscoveryRecoveryBindingBase {
+  schemaVersion: 1;
+}
+
+export interface DiscoveryRecoveryBindingV2 extends DiscoveryRecoveryBindingBase {
+  schemaVersion: 2;
+  floorClosureAction: "reject-further-citation-chase-formalization-and-admission";
+}
+
+export type DiscoveryRecoveryBinding = LegacyDiscoveryRecoveryBinding | DiscoveryRecoveryBindingV2;
+
 export interface ProjectUsage {
   tokens: number;
   inputTokens: number;
@@ -390,6 +419,7 @@ export interface ProjectState {
   evidenceRequirements: ProjectEvidenceRequirements;
   publicationPolicy?: ResearchPolicyBinding | null;
   scientificDesign: ScientificDesignBinding | null;
+  discoveryRecovery?: DiscoveryRecoveryBinding | null;
   packages: WorkPackage[];
   usage: ProjectUsage;
   lineage: {

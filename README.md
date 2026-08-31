@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-24
-lastReviewedCommit: 2438d7677764450094a829ab036a8b9f2d4a73ee
+lastReviewedAt: 2026-08-31
+lastReviewedCommit: 1bfbf589cec3959d37b1c65368b9f325c0c70412
 ---
 
 # Tiangong AI CLI
@@ -1119,6 +1119,28 @@ tiangong-ai research project fork gpu-resource-impact \
   --to gpu-resource-impact-v2 --resume-through analyze \
   --workspace /absolute/path/to/workspace
 ```
+
+A reviewed generation may instead reopen only one bounded closest-work inquiry:
+
+```bash
+tiangong-ai research project fork gpu-resource-impact \
+  --to gpu-resource-impact-v3 \
+  --discover-recovery /absolute/path/to/discover-recovery.json \
+  --design /absolute/path/to/gpu-resource-impact-v3-design.json \
+  --design-producer-agent codex \
+  --design-producer-session OPAQUE_NATIVE_SESSION \
+  --workspace /absolute/path/to/workspace --json
+```
+
+The recovery contract binds a new, target-specifically approved generation to
+one completed ancestor Discover ledger and one still-open evidence role. It
+allows citation tracing only from frozen legal seeds, then permits broker
+formalization only for a candidate reached by that trace. The returned URL or
+DOI must match the candidate. The contract sets a distinct-candidate floor and
+separate activity and call ceilings; reaching the floor closes further tracing,
+formalization, and admission. Finding novelty-defeating prior work returns the
+project to design review. `--discover-recovery` is mutually exclusive with
+`--resume-through`.
 
 The completed-acquisition reopen is a narrow pre-analysis amendment path. It is
 available only while analysis has never started and the evidence-construct

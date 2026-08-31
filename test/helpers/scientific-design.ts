@@ -31,6 +31,7 @@ export async function scientificDesignInput(
     pendingModels?: boolean;
     optionalLicensedRoute?: boolean;
     brokerCapabilityId?: string;
+    additionalBrokerRoute?: { id: string; capabilityId: string };
     modelObjectMode?: "registered-json" | "external-raw" | "legacy-control-json";
     downloadBackend?:
       | "native-browser"
@@ -170,6 +171,20 @@ export async function scientificDesignInput(
     route.capabilityId = options.brokerCapabilityId;
     route.activityKind = null;
     route.activityChannel = null;
+  }
+  if (options.additionalBrokerRoute) {
+    const template = value.acquisitionPlan.routes.find(
+      (candidate) => candidate.id === "route-native-public-search",
+    );
+    if (!template) throw new Error("Missing fixture agent acquisition route.");
+    value.acquisitionPlan.routes.push({
+      ...template,
+      id: options.additionalBrokerRoute.id,
+      routeClass: "broker-capability",
+      capabilityId: options.additionalBrokerRoute.capabilityId,
+      activityKind: null,
+      activityChannel: null,
+    });
   }
   if (options.downloadBackend) {
     const route = value.acquisitionPlan.routes.find(
@@ -370,7 +385,10 @@ async function stageFixtureGapSources(
   }
 }
 
-export async function passResearchDesignGate(root: string, projectId: string): Promise<void> {
+export async function passResearchDesignGate(
+  root: string,
+  projectId: string,
+): Promise<ScientificReviewPacket> {
   const { scientificDesign } = await loadProject(root, projectId);
   if (!scientificDesign) throw new Error("Test project has no scientific design binding.");
   const sessionId = `independent-${projectId}-research-design-review`;
@@ -401,6 +419,7 @@ export async function passResearchDesignGate(root: string, projectId: string): P
     reviewerSessionId: sessionId,
   });
   await submitPassingReview(root, projectId, packet);
+  return packet;
 }
 
 export async function passEvidenceConstructGate(root: string, projectId: string): Promise<void> {

@@ -23,7 +23,7 @@ import {
   importExternalCapability,
   inspectExternalSkillCatalog,
 } from "./workspace/external-skills.js";
-import { appendJournalEvent } from "./workspace/journal.js";
+import { appendJournalEvent, readJournal } from "./workspace/journal.js";
 import { fetchNativeCandidateSource } from "./workspace/broker.js";
 import { registerEvidenceArtifact } from "./workspace/artifacts.js";
 import { exportProjectAuditBundle, verifyProjectAuditBundle } from "./workspace/audit-bundle.js";
@@ -35,6 +35,7 @@ import {
   registerEvidenceAtom,
 } from "./workspace/content-evidence.js";
 import { inspectDiscoveryProgress } from "./workspace/discovery-status.js";
+import { readAndVerifyDiscoveryRecovery } from "./workspace/discovery-recovery.js";
 import { inspectEvidenceAccessStatus } from "./workspace/evidence-exhaustion.js";
 import { recordDiscoveryAssessmentBatch } from "./workspace/discovery.js";
 import { bindEvidenceDownload } from "./workspace/downloads.js";
@@ -189,7 +190,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id> --design <absolute-json>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--trust-status verified-owner-input|unverified-owner-input|reference-only|replication-candidate] [--independently-reproduced] [--workspace <path>] [--json]
   tiangong-ai research project retry <project-id> [--package <package-id>] [--reopen-completed-acquisition] [--workspace <path>] [--json]
-  tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|acquire|analyze|synthesize] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--workspace <path>] [--json]
+  tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|acquire|analyze|synthesize | --discover-recovery <absolute-json>] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--workspace <path>] [--json]
   tiangong-ai research project addendum <closed-project-id> --to <target-project-id> [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--workspace <path>] [--json]
   tiangong-ai research project archive <project-id> --reason <text> [--workspace <path>] [--json]
   tiangong-ai research project abandon <project-id> --reason <text> [--workspace <path>] [--json]
@@ -1748,6 +1749,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         ...WORKSPACE_OPTIONS,
         to: "string",
         "resume-through": "string",
+        "discover-recovery": "string",
         design: "string",
         "design-producer-agent": "string",
         "design-producer-session": "string",
@@ -1768,6 +1770,13 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     const designPath = strictString(args, "design");
     const designProducerAgent = strictString(args, "design-producer-agent");
     const designProducerSession = strictString(args, "design-producer-session");
+    const discoveryRecoveryPath = strictString(args, "discover-recovery");
+    if (discoveryRecoveryPath && strictString(args, "resume-through")) {
+      throw new CliError(
+        "research project fork accepts either --resume-through or --discover-recovery, not both.",
+        { code: "RESEARCH_DISCOVERY_RECOVERY_INVALID", exitCode: 2 },
+      );
+    }
     if (
       source.publicationPolicy &&
       (!designPath || !designProducerAgent || !designProducerSession)
@@ -1797,6 +1806,9 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
               producerSessionId: designProducerSession,
             },
           }
+        : undefined,
+      discoveryRecoveryPath
+        ? await readAndVerifyDiscoveryRecovery(discoveryRecoveryPath, targetProjectId)
         : undefined,
     );
     writeJson(io, project, args);
@@ -1901,6 +1913,16 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
   const config = await loadWorkspaceConfig(root);
   const selectedProject = strictString(args, "project");
   const workspaceProjects = await listProjects(root);
+  const committedForkTargets = new Set(
+    (await readJournal(workspacePaths(root).journal))
+      .filter(
+        (event) =>
+          event.type === "project.forked" &&
+          isObject(event.payload) &&
+          typeof event.payload.targetProjectId === "string",
+      )
+      .map((event) => String(event.payload.targetProjectId)),
+  );
   const allProjects = selectedProject
     ? [
         workspaceProjects.find((project) => project.id === selectedProject) ??
@@ -1947,6 +1969,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
     projects: await Promise.all(
       projects.map(async (project) => {
         const current = refreshProject(project);
+        const authority = projectAuthority(current, workspaceProjects, committedForkTargets);
         const nativeStage = await inspectNativeResearchStage(root, current);
         const evidencePipeline = await inspectEvidencePipelineForStatus(root, current);
         const snapshot = evidencePipeline.acquisition;
@@ -1962,7 +1985,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
           id: current.id,
           question: current.question,
           status: current.status,
-          authority: projectAuthority(current, workspaceProjects),
+          authority,
           lineage: current.lineage,
           handoff: current.handoff,
           evidenceState: current.evidenceState,
@@ -1973,15 +1996,18 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
           evidenceAccess,
           publication,
           readyPackage,
-          recommendedAction: projectRecommendedAction(
-            root,
-            current,
-            readyPackage,
-            nativeStage,
-            scientificReview,
-            evidencePipeline,
-            publication,
-          ),
+          recommendedAction:
+            authority.state === "invalid"
+              ? "This recovery target has no project.forked commit marker. Do not execute it; inspect and remove or repair the incomplete fork while retaining source authority."
+              : projectRecommendedAction(
+                  root,
+                  current,
+                  readyPackage,
+                  nativeStage,
+                  scientificReview,
+                  evidencePipeline,
+                  publication,
+                ),
           usage: current.usage,
           inputs: current.inputs,
           packages: current.packages,
@@ -2113,7 +2139,14 @@ async function inspectEvidenceAccessForStatus(
 function projectAuthority(
   project: Awaited<ReturnType<typeof loadProject>>,
   projects: Awaited<ReturnType<typeof listProjects>>,
-): { state: "authoritative" | "superseded" | "archived" | "abandoned"; projectId: string } {
+  committedForkTargets: Set<string>,
+): {
+  state: "authoritative" | "superseded" | "archived" | "abandoned" | "invalid";
+  projectId: string;
+} {
+  if (project.lineage.kind === "fork" && !committedForkTargets.has(project.id)) {
+    return { state: "invalid", projectId: project.id };
+  }
   const byId = new Map(projects.map((candidate) => [candidate.id, candidate]));
   const visited = new Set([project.id]);
   let current = project;
@@ -2122,6 +2155,7 @@ function projectAuthority(
     visited.add(current.lineage.supersededBy);
     const next = byId.get(current.lineage.supersededBy);
     if (!next) return { state: "superseded", projectId: current.lineage.supersededBy };
+    if (next.lineage.kind === "fork" && !committedForkTargets.has(next.id)) break;
     current = next;
   }
   if (project.status === "archived") return { state: "archived", projectId: current.id };

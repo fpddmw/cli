@@ -1,5 +1,7 @@
 import { basename, join } from "node:path";
 
+import { CliError } from "../../errors.js";
+import { activeDiscoveryRecovery } from "./discovery-recovery.js";
 import {
   appendEvidenceLedgerEvent,
   evidenceLedgerPath,
@@ -7,6 +9,7 @@ import {
 } from "./evidence-ledger.js";
 import { loadProjectEvidenceReceipts } from "./evidence.js";
 import { readJournal } from "./journal.js";
+import { loadProject } from "./projects.js";
 import { parseDiscoveryAssessmentBatch, StructuredOutputError } from "./schemas.js";
 import { canonicalJson, isObject, readJsonFile, sha256Text, workspacePaths } from "./storage.js";
 import type { ProjectState } from "./types.js";
@@ -20,6 +23,7 @@ interface DiscoveryAdmission {
   quality: { level: "primary" | "secondary" | "tertiary" | "unknown"; rationale: string };
   applicability: string;
   coverageDimensions: string[];
+  evidenceRoleIds?: string[];
   limitations: string[];
 }
 
@@ -40,6 +44,8 @@ export interface DiscoveryCloseoutValue {
   limitations: string[];
   dimensionJudgments: DimensionJudgment[];
   gaps: string[];
+  recoveryDisposition?: "minimum-satisfied" | "novelty-defeating-prior-found" | null;
+  noveltyDefeatingCandidateIds?: string[];
 }
 
 export async function materializeDiscoveryEvidence(
@@ -54,6 +60,7 @@ export async function materializeDiscoveryEvidence(
   const candidates = new Map(
     (await listEvidenceCandidates(root, project.id)).map((candidate) => [candidate.id, candidate]),
   );
+  await assertDiscoveryRecoveryCloseout(root, project, closeout, assessments, candidates);
   const receipts = new Map(
     (await loadProjectEvidenceReceipts(root, project.id)).map((receipt) => [
       receipt.attemptId,
@@ -124,6 +131,7 @@ export async function materializeDiscoveryEvidence(
       quality: admission.quality,
       applicability: admission.applicability,
       coverageDimensions: admission.coverageDimensions,
+      evidenceRoleIds: admission.evidenceRoleIds ?? [],
     };
   });
   const sourceLimitations = admissions.flatMap((admission) =>
@@ -179,6 +187,7 @@ export async function commitCurrentDiscoveryAssessments(
       sourceType: admission.sourceType,
       judgmentSha256,
       coverageDimensions: admission.coverageDimensions,
+      evidenceRoleIds: admission.evidenceRoleIds ?? [],
     });
   }
   for (const rejection of assessments.filter(isRejection)) {
@@ -207,32 +216,18 @@ export async function recordDiscoveryAssessmentBatch(input: {
 }> {
   const parsed = parseDiscoveryAssessmentBatch(input.value);
   const assessments = parsed.assessments as Array<DiscoveryAdmission | DiscoveryRejection>;
-  const project = await readJsonFile<Record<string, unknown>>(
-    join(workspacePaths(input.root).projects, input.projectId, "project.json"),
-    `Research project ${input.projectId}`,
-  );
-  const packages = Array.isArray(project.packages) ? project.packages : [];
-  const discover = packages.find(
-    (workPackage) => isObject(workPackage) && workPackage.stage === "discover",
-  );
-  const acquire = packages.find(
-    (workPackage) => isObject(workPackage) && workPackage.stage === "acquire",
-  );
-  const evidenceIntakeOpen =
-    (isObject(discover) && discover.status === "running") ||
-    (isObject(acquire) && acquire.status === "running");
+  const project = await loadProject(input.root, input.projectId);
+  const packages = project.packages;
+  const discover = packages.find((workPackage) => workPackage.stage === "discover");
+  const acquire = packages.find((workPackage) => workPackage.stage === "acquire");
+  const evidenceIntakeOpen = discover?.status === "running" || acquire?.status === "running";
   if (!evidenceIntakeOpen) {
     throw discoveryError(
-      "Discovery assessments may be recorded only during an active discover or acquisition stage.",
+      "Discovery assessments may be recorded only during an active discover or acquire stage.",
     );
   }
-  const requiredDimensions = new Set(
-    isObject(project.evidenceRequirements) && Array.isArray(project.evidenceRequirements.dimensions)
-      ? project.evidenceRequirements.dimensions.filter(
-          (dimension): dimension is string => typeof dimension === "string",
-        )
-      : [],
-  );
+  const requiredDimensions = new Set(project.evidenceRequirements.dimensions);
+  const recovery = activeDiscoveryRecovery(project);
   const candidates = new Map(
     (await listEvidenceCandidates(input.root, input.projectId)).map((candidate) => [
       candidate.id,
@@ -259,10 +254,47 @@ export async function recordDiscoveryAssessmentBatch(input: {
           `Native candidate ${candidate.id} must be formalized by a broker receipt before admission.`,
         );
       }
+      if (recovery) {
+        if (
+          assessment.evidenceRoleIds?.length !== 1 ||
+          assessment.evidenceRoleIds[0] !== recovery.evidenceRoleId
+        ) {
+          throw recoveryError(
+            `Recovery admission ${assessment.sourceId} must bind only ${recovery.evidenceRoleId}.`,
+          );
+        }
+        if (
+          !recovery.inheritedEligibleCandidateIds.includes(candidate.id) &&
+          !(await isQualifyingRecoveryCandidate(input.root, project, candidate.id))
+        ) {
+          throw recoveryError(
+            `Recovery candidate ${candidate.id} lacks a completed legal-seed citation chase and matching broker formalization.`,
+          );
+        }
+      } else if (assessment.evidenceRoleIds?.length) {
+        throw recoveryError(
+          "evidenceRoleIds on a discovery admission are reserved for an active bounded recovery.",
+        );
+      }
     }
   }
 
   const existing = await latestDiscoveryAssessments(input.root, input.projectId);
+  if (recovery) {
+    const projected = new Map(existing.map((assessment) => [assessment.candidateId, assessment]));
+    for (const assessment of assessments) projected.set(assessment.candidateId, assessment);
+    const projectedEligible = [...projected.values()].filter(
+      (assessment) =>
+        isAdmission(assessment) &&
+        (recovery.inheritedEligibleCandidateIds.includes(assessment.candidateId) ||
+          assessment.evidenceRoleIds?.includes(recovery.evidenceRoleId)),
+    );
+    if (projectedEligible.length > recovery.minimumDistinctCandidates) {
+      throw recoveryError(
+        "Recovery admission would exceed the frozen closest-work floor; no candidate after the floor may be admitted.",
+      );
+    }
+  }
   const replacementIds = new Set(assessments.map((assessment) => assessment.candidateId));
   const sourceOwners = new Map(
     existing
@@ -360,7 +392,17 @@ function parseCloseoutValue(value: Record<string, unknown>): DiscoveryCloseoutVa
     !Array.isArray(value.limitations) ||
     !Array.isArray(value.dimensionJudgments) ||
     !Array.isArray(value.gaps) ||
-    value.dimensionJudgments.some((item) => !isDimensionJudgment(item))
+    value.dimensionJudgments.some((item) => !isDimensionJudgment(item)) ||
+    (value.recoveryDisposition !== undefined &&
+      value.recoveryDisposition !== null &&
+      !["minimum-satisfied", "novelty-defeating-prior-found"].includes(
+        String(value.recoveryDisposition),
+      )) ||
+    (value.noveltyDefeatingCandidateIds !== undefined &&
+      (!Array.isArray(value.noveltyDefeatingCandidateIds) ||
+        value.noveltyDefeatingCandidateIds.some((item) => typeof item !== "string") ||
+        new Set(value.noveltyDefeatingCandidateIds).size !==
+          value.noveltyDefeatingCandidateIds.length))
   ) {
     throw discoveryError("Discovery closeout value is malformed.");
   }
@@ -381,6 +423,10 @@ function isAdmission(value: unknown): value is DiscoveryAdmission {
     typeof value.applicability === "string" &&
     Array.isArray(value.coverageDimensions) &&
     value.coverageDimensions.every((item) => typeof item === "string") &&
+    (value.evidenceRoleIds === undefined ||
+      (Array.isArray(value.evidenceRoleIds) &&
+        value.evidenceRoleIds.every((item) => typeof item === "string") &&
+        new Set(value.evidenceRoleIds).size === value.evidenceRoleIds.length)) &&
     Array.isArray(value.limitations) &&
     value.limitations.every((item) => typeof item === "string")
   );
@@ -406,4 +452,128 @@ function isDimensionJudgment(value: unknown): value is DimensionJudgment {
 
 function discoveryError(message: string): StructuredOutputError {
   return new StructuredOutputError(message, { validation: [message] });
+}
+
+async function assertDiscoveryRecoveryCloseout(
+  root: string,
+  project: ProjectState,
+  closeout: DiscoveryCloseoutValue,
+  assessments: Array<DiscoveryAdmission | DiscoveryRejection>,
+  candidates: Map<string, Awaited<ReturnType<typeof listEvidenceCandidates>>[number]>,
+): Promise<void> {
+  const recovery = activeDiscoveryRecovery(project);
+  if (!recovery) {
+    if (closeout.recoveryDisposition || closeout.noveltyDefeatingCandidateIds?.length) {
+      throw recoveryError("Recovery closeout fields require an active bounded recovery.");
+    }
+    return;
+  }
+  const noveltyIds = closeout.noveltyDefeatingCandidateIds ?? [];
+  if (noveltyIds.some((candidateId) => !candidates.has(candidateId))) {
+    throw recoveryError("Recovery closeout names an unknown novelty-defeating candidate.");
+  }
+  if (closeout.recoveryDisposition === "novelty-defeating-prior-found") {
+    if (!noveltyIds.length) {
+      throw recoveryError(
+        "A novelty-defeating disposition must identify the responsible candidate.",
+      );
+    }
+    throw new CliError(
+      "The bounded citation chase found prior work that may defeat the frozen novelty claim.",
+      {
+        code: "RESEARCH_DISCOVERY_RECOVERY_NOVELTY_DEFEAT",
+        exitCode: 3,
+        details: {
+          candidateIds: noveltyIds,
+          requiredAction: recovery.noveltyDefeatingPriorAction,
+        },
+      },
+    );
+  }
+  if (closeout.recoveryDisposition !== "minimum-satisfied" || noveltyIds.length) {
+    throw recoveryError(
+      "Recovery closeout must explicitly report minimum-satisfied with no novelty-defeating candidates.",
+    );
+  }
+  const events = await readJournal(evidenceLedgerPath(root, project.id));
+  const completedActivities = events.filter(
+    (event) =>
+      event.type === "activity.recorded" &&
+      event.payload.recoveryContractSha256 === recovery.contractSha256 &&
+      event.payload.status === "completed",
+  );
+  if (!completedActivities.length) {
+    throw recoveryError("Recovery closeout requires a completed legal-seed citation chase.");
+  }
+  const admitted = new Set(
+    assessments
+      .filter(isAdmission)
+      .filter(
+        (assessment) =>
+          recovery.inheritedEligibleCandidateIds.includes(assessment.candidateId) ||
+          assessment.evidenceRoleIds?.includes(recovery.evidenceRoleId),
+      )
+      .map((assessment) => assessment.candidateId),
+  );
+  if (admitted.size < recovery.minimumDistinctCandidates) {
+    throw new CliError(
+      "The bounded Discover recovery has not reached its frozen closest-work floor.",
+      {
+        code: "RESEARCH_DISCOVERY_RECOVERY_INCOMPLETE",
+        exitCode: 3,
+        details: {
+          evidenceRoleId: recovery.evidenceRoleId,
+          eligibleCandidates: admitted.size,
+          minimumDistinctCandidates: recovery.minimumDistinctCandidates,
+        },
+      },
+    );
+  }
+}
+
+async function isQualifyingRecoveryCandidate(
+  root: string,
+  project: ProjectState,
+  candidateId: string,
+): Promise<boolean> {
+  const recovery = activeDiscoveryRecovery(project);
+  if (!recovery) return false;
+  const [ledgerEvents, mainEvents, candidates] = await Promise.all([
+    readJournal(evidenceLedgerPath(root, project.id)),
+    readJournal(workspacePaths(root).journal),
+    listEvidenceCandidates(root, project.id),
+  ]);
+  const chased = ledgerEvents.some(
+    (event) =>
+      event.type === "activity.recorded" &&
+      event.payload.recoveryContractSha256 === recovery.contractSha256 &&
+      event.payload.status === "completed" &&
+      Array.isArray(event.payload.candidateIds) &&
+      event.payload.candidateIds.includes(candidateId),
+  );
+  if (!chased) return false;
+  const formalizationAttemptIds = new Set(
+    mainEvents
+      .filter(
+        (event) =>
+          event.scope === project.id &&
+          event.type === "capability.fetch.completed" &&
+          event.payload.recoveryContractSha256 === recovery.contractSha256 &&
+          event.payload.formalizeCandidateId === candidateId,
+      )
+      .map((event) => String(event.payload.attemptId)),
+  );
+  const candidate = candidates.find((item) => item.id === candidateId);
+  return Boolean(
+    candidate?.occurrences.some(
+      (origin) => origin.kind === "broker" && formalizationAttemptIds.has(origin.receiptId ?? ""),
+    ),
+  );
+}
+
+function recoveryError(message: string): CliError {
+  return new CliError(message, {
+    code: "RESEARCH_DISCOVERY_RECOVERY_SCOPE_VIOLATION",
+    exitCode: 3,
+  });
 }

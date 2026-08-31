@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-24
-lastReviewedCommit: 2438d7677764450094a829ab036a8b9f2d4a73ee
+lastReviewedAt: 2026-08-31
+lastReviewedCommit: 1bfbf589cec3959d37b1c65368b9f325c0c70412
 ---
 
 # Repo Validation

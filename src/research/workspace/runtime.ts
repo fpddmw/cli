@@ -98,6 +98,7 @@ import type {
   AgentExecutionTelemetry,
   AgentPackageStage,
   AgentRoute,
+  DiscoveryRecoveryBinding,
   ExecutionResult,
   FailureKind,
   OutputRecord,
@@ -720,11 +721,13 @@ export async function prepareNativeResearchStage(input: {
       const prompt = [
         "Perform this producer stage in the current interactive host session. Do not launch codex exec, claude -p, or any other nested reasoning agent.",
         capsule.publicationPolicyDocumentation,
-        input.stage === "discover" && hasBrokeredEvidence
-          ? "Use native Web/Browser broadly for discovery when useful, but record every native search/navigation with recordActivity and register its candidates. Before admitting any native lead, formalize the same URL or DOI through fetchEvidence so it receives an immutable broker receipt. Assess candidates in bounded batches with recordAssessment as they arrive; the final output is only a small coverage closeout. Native results without broker/input provenance are discovery leads, never evidence."
-          : input.stage === "acquire"
-            ? "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. Capture the exact browser/adapter Download object, save it to the planned unique staging path, and call bindDownload before registerArtifact. Record browser/download/file-inspection activity with recordActivity. Failed or cancelled downloads cannot create bindings or artifacts. Never scan a download directory or infer success from file existence."
-            : "Do not acquire additional evidence in this stage.",
+        input.stage === "discover" && discovery?.recovery
+          ? "The frozen recovery reopens only the closest-work question. Begin every citation trace from a legal seedCandidateId and register a candidate only when that trace reaches it. fetchEvidence may then formalize that candidate's identity with formalize_candidate_id and max_items=1. General coverage search and every route outside the recovery allowlists remain closed."
+          : input.stage === "discover" && hasBrokeredEvidence
+            ? "Use native Web/Browser broadly for discovery when useful, but record every native search/navigation with recordActivity and register its candidates. Before admitting any native lead, formalize the same URL or DOI through fetchEvidence so it receives an immutable broker receipt. Assess candidates in bounded batches with recordAssessment as they arrive; the final output is only a small coverage closeout. Native results without broker/input provenance are discovery leads, never evidence."
+            : input.stage === "acquire"
+              ? "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. Capture the exact browser/adapter Download object, save it to the planned unique staging path, and call bindDownload before registerArtifact. Record browser/download/file-inspection activity with recordActivity. Failed or cancelled downloads cannot create bindings or artifacts. Never scan a download directory or infer success from file existence."
+              : "Do not acquire additional evidence in this stage.",
         basePrompt,
         "Save only the final schema-conforming JSON object to a new regular file, then submit it with the packet's submit command. The CLI remains the sole authority for validation and atomic promotion.",
       ].join("\n\n");
@@ -832,7 +835,10 @@ export async function prepareNativeResearchStage(input: {
                     input.root,
                     "--json",
                   ],
-                  requestSchema: nativeEvidenceRequestSchema(Boolean(project.scientificDesign)),
+                  requestSchema: nativeEvidenceRequestSchema(
+                    Boolean(project.scientificDesign),
+                    project.discoveryRecovery ?? null,
+                  ),
                 }
               : null,
           registerArtifact:
@@ -1288,12 +1294,14 @@ function isMechanicalDiscoveryCoverageGap(value: string): boolean {
 
 export function nativeEvidenceRequestSchema(
   requireAcquisitionRoute: boolean,
+  recovery: DiscoveryRecoveryBinding | null = null,
 ): Record<string, unknown> {
   return {
     type: "object",
     additionalProperties: false,
     required: [
       ...(requireAcquisitionRoute ? ["acquisition_route_id"] : []),
+      ...(recovery ? ["formalize_candidate_id", "max_items"] : []),
       "capability_id",
       "url",
     ],
@@ -1303,12 +1311,17 @@ export function nativeEvidenceRequestSchema(
         description: "Exact broker-capability route ID from the frozen scientific design.",
       },
       capability_id: { type: "string" },
+      formalize_candidate_id: {
+        type: "string",
+        description:
+          "During bounded recovery, the existing native candidate whose exact URL or DOI this request is allowed to formalize.",
+      },
       credential_id: { type: "string" },
       url: { type: "string", format: "uri" },
       request_body: { type: "object" },
       json_pointer: { type: "string" },
       item_offset: { type: "integer", minimum: 0 },
-      max_items: { type: "integer", minimum: 1 },
+      max_items: recovery ? { type: "integer", const: 1 } : { type: "integer", minimum: 1 },
       cache_mode: { enum: ["prefer", "bypass"] },
     },
   };
@@ -4374,8 +4387,11 @@ function packagePrompt(
   acquisitionCandidateBindings: Array<{ sourceId: string; candidateId: string }>,
 ): string {
   const stageInstructions: Record<WorkPackage["stage"], string> = {
-    discover:
-      "Assess candidates incrementally through the packet's recordAssessment command; do not accumulate a source-sized final response. The control plane has already assigned every immutable input and broker result a candidateId and retains its title, URL, DOI, dates, receipt, locator, JSON Pointer, hashes, and retrieval metadata. Reference candidateId; never repeat or invent those deterministic fields. Give each admitted candidate a concise sourceId plus source type, relevance, quality, applicability, coverage dimensions, and limitations. Record meaningful explicit rejections; omitted candidates remain unassessed for later gap filling. Native Web or Browser discoveries are supplemental candidates only and cannot be admitted until an immutable broker receipt is attached to the same canonical URL or DOI. After broad search, strict assessment, and focused gap filling, return only the small closeout object with one judgment for every reviewed dimension plus limitations and remaining gaps. The CLI mechanically joins the latest recorded assessments to provenance, derives counts/date range/coverage, and rejects unknown or unformalized candidates.",
+    discover: discovery?.recovery
+      ? `The inherited ledger remains the reviewed baseline, so this stage judges only candidates reached from the recovery's legal seeds. A new admission belongs solely to the closest-work inquiry and must set evidenceRoleIds to [${JSON.stringify(
+          discovery.recovery.evidenceRoleId,
+        )}]. The broker attaches immutable identity provenance to a candidate already recorded by a completed recovery activity and cannot originate a search. Discovery ends when ${discovery.recovery.minimumDistinctCandidates} distinct eligible candidates have been admitted. A prior work that defeats the novelty claim requires recoveryDisposition=novelty-defeating-prior-found and its candidateId, which returns the project to design review. When the floor is met without such a finding, use recoveryDisposition=minimum-satisfied and an empty noveltyDefeatingCandidateIds array in the ordinary closeout object.`
+      : "Assess candidates incrementally through the packet's recordAssessment command; do not accumulate a source-sized final response. The control plane has already assigned every immutable input and broker result a candidateId and retains its title, URL, DOI, dates, receipt, locator, JSON Pointer, hashes, and retrieval metadata. Reference candidateId; never repeat or invent those deterministic fields. Give each admitted candidate a concise sourceId plus source type, relevance, quality, applicability, coverage dimensions, and limitations. Record meaningful explicit rejections; omitted candidates remain unassessed for later gap filling. Native Web or Browser discoveries are supplemental candidates only and cannot be admitted until an immutable broker receipt is attached to the same canonical URL or DOI. After broad search, strict assessment, and focused gap filling, return only the small closeout object with one judgment for every reviewed dimension plus limitations and remaining gaps. The CLI mechanically joins the latest recorded assessments to provenance, derives counts/date range/coverage, and rejects unknown or unformalized candidates.",
     acquire:
       "Audit every provisionally admitted source exactly once. For each source, bind its ledger candidateId, list only artifactIds returned by the exact artifact registration command, and choose accepted, limited, or rejected with a concise rationale and explicit limitations. A broker receipt is an immutable discovery record but is not full text. Use an empty artifactIds array only when intentionally retaining a source as metadata/abstract evidence or when the source is an already registered local input. Put unresolved blocking acquisition or coverage deficiencies in gaps; put honest non-blocking scope constraints in limitations. Do not invent file paths, hashes, URLs, artifact IDs, or successful downloads.",
     analyze:
@@ -4399,9 +4415,11 @@ function packagePrompt(
       : workPackage.stage === "acquire"
         ? "Use the installed external acquisition/document Skills in the current native host, but treat the CLI artifact registry and acquisition schema as the only authority for durable evidence."
         : "Capability files are provenance-bound but are not available as execution tools in this stage.",
-    workPackage.stage === "discover"
-      ? `Follow the reviewed discovery plan: ${JSON.stringify(discovery)}. The plan's max broker-view count is a hard working ceiling, not a target to exhaust. Execute required first-pass channels before supplemental channels, prefer broad high-yield queries, assess registered candidates between batches, and use the next gap-fill batch only for explicit uncovered dimensions, source types, date ranges, full text, limitations, or counterevidence. Stop fetching as soon as the declared coverage minimums are supportable. Native Web/Browser may broaden lead discovery, but every such action must be recorded through recordActivity, every useful result must be registered as a candidate, and the same URL/DOI must then be formalized through the broker before admission. The broker or an immutable registered input is the sole admissible evidence path. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. Invoke fetch_candidate_source with the manifest capability ID and obey its exact declared HTTP method. GET capabilities use only declared query parameters; POST capabilities require request_body containing only the documented non-secret request JSON. Never place API keys, tokens, authorization data, cookies, or other credential-like fields in request_body. The broker injects the sole declared logical credential, disables caching for credentialed requests, and never persists the POST body (only its hash). The tool result includes exact bounded context, registered candidate IDs, its receipt, whether a network call was avoided, and remaining view budget. Exercise every manifest capability with requiredForDiscovery=true, or the mechanical coverage gate will stop downstream work.`
-      : "Use only the complete embedded stage context; no tools or additional source reads are allowed.",
+    workPackage.stage === "discover" && discovery?.recovery
+      ? `Follow this frozen Discover recovery: ${JSON.stringify(discovery.recovery)}. activeRouteIds define the complete citation-chase scope. A formalizationRouteId becomes usable only after a candidate has been linked to a completed trace from legalSeedCandidateIds. Unrelated capabilities and general coverage remain outside this generation, and allAgentRoutesExhaustedBeforeHandoff does not apply. The broker may spend at most ${discovery.calls.max} identity-formalization calls, while the eligible-candidate floor ends the work immediately.`
+      : workPackage.stage === "discover"
+        ? `Follow the reviewed discovery plan: ${JSON.stringify(discovery)}. The plan's max broker-view count is a hard working ceiling, not a target to exhaust. Execute required first-pass channels before supplemental channels, prefer broad high-yield queries, assess registered candidates between batches, and use the next gap-fill batch only for explicit uncovered dimensions, source types, date ranges, full text, limitations, or counterevidence. Stop fetching as soon as the declared coverage minimums are supportable. Native Web/Browser may broaden lead discovery, but every such action must be recorded through recordActivity, every useful result must be registered as a candidate, and the same URL/DOI must then be formalized through the broker before admission. The broker or an immutable registered input is the sole admissible evidence path. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. Invoke fetch_candidate_source with the manifest capability ID and obey its exact declared HTTP method. GET capabilities use only declared query parameters; POST capabilities require request_body containing only the documented non-secret request JSON. Never place API keys, tokens, authorization data, cookies, or other credential-like fields in request_body. The broker injects the sole declared logical credential, disables caching for credentialed requests, and never persists the POST body (only its hash). The tool result includes exact bounded context, registered candidate IDs, its receipt, whether a network call was avoided, and remaining view budget. Exercise every manifest capability with requiredForDiscovery=true, or the mechanical coverage gate will stop downstream work.`
+        : "Use only the complete embedded stage context; no tools or additional source reads are allowed.",
     stageInstructions[workPackage.stage],
     "Do not write stage output files directly. Your final response must be only the JSON object required by the supplied output schema; the CLI will validate and atomically materialize it.",
     "Do not edit project.json, input manifests, prior outputs, evidence objects, or staged capability files.",

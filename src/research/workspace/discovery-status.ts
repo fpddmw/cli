@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { loadCapabilityDeclarations } from "./capabilities.js";
+import { loadBoundAcquisitionDesign } from "./acquisition-routes.js";
+import { activeDiscoveryRecovery } from "./discovery-recovery.js";
 import { deriveDiscoveryPlan, type DiscoveryPlan } from "./discovery-planning.js";
 import { evidenceLedgerPath, listEvidenceCandidates } from "./evidence-ledger.js";
 import { readJournal } from "./journal.js";
@@ -45,6 +47,22 @@ export interface DiscoveryProgress {
     unformalizedNativeCandidates: number;
   };
   providers: DiscoveryProviderProgress[];
+  recovery: {
+    contractSha256: string;
+    sourceProjectId: string;
+    evidenceRoleId: string;
+    activeRouteIds: string[];
+    formalizationRouteIds: string[];
+    legalSeedCandidateIds: string[];
+    inheritedEligibleCandidates: number;
+    eligibleCandidates: number;
+    minimumDistinctCandidates: number;
+    floorClosureAction: "reject-further-citation-chase-formalization-and-admission";
+    completedCitationChaseActivities: number;
+    formalizedCandidateIds: string[];
+    pendingFormalizationCandidateIds: string[];
+    remainingEligibleCandidates: number;
+  } | null;
   gaps: string[];
   nextBatch: { kind: string; capabilityIds: string[]; maxCalls: number } | null;
   recommendedAction:
@@ -53,6 +71,10 @@ export interface DiscoveryProgress {
     | "run-gap-fill-batch"
     | "submit-admission-judgments"
     | "review-call-ceiling-or-stop"
+    | "run-bounded-citation-chase"
+    | "formalize-recovery-candidates"
+    | "assess-recovery-candidates"
+    | "submit-bounded-recovery"
     | "continue-pipeline";
 }
 
@@ -80,6 +102,7 @@ export async function inspectDiscoveryProgress(
   const reused = projectEvents.filter((event) => event.type === "capability.fetch.reused");
   const failed = projectEvents.filter((event) => event.type === "capability.fetch.failed");
   const latestDecisions = new Map<string, "admitted" | "rejected">();
+  const latestEvidenceRoleIds = new Map<string, string[]>();
   for (const event of ledgerEvents) {
     if (
       event.type === "candidate.assessed" &&
@@ -88,6 +111,13 @@ export async function inspectDiscoveryProgress(
       latestDecisions.set(
         String(event.payload.candidateId),
         event.payload.decision === "admit" ? "admitted" : "rejected",
+      );
+      const assessment = event.payload.assessment;
+      latestEvidenceRoleIds.set(
+        String(event.payload.candidateId),
+        isObject(assessment) && Array.isArray(assessment.evidenceRoleIds)
+          ? assessment.evidenceRoleIds.filter((item): item is string => typeof item === "string")
+          : [],
       );
     } else if (event.type === "candidate.admitted") {
       latestDecisions.set(String(event.payload.candidateId), "admitted");
@@ -131,6 +161,158 @@ export async function inspectDiscoveryProgress(
       uniqueCandidates,
     };
   });
+  const recovery = activeDiscoveryRecovery(project);
+  if (recovery) {
+    const recoveryActivities = activityEvents.filter(
+      (event) => event.payload.recoveryContractSha256 === recovery.contractSha256,
+    );
+    const completedRecoveryActivities = recoveryActivities.filter(
+      (event) => event.payload.status === "completed",
+    );
+    const chasedCandidateIds = new Set(
+      completedRecoveryActivities.flatMap((event) =>
+        Array.isArray(event.payload.candidateIds)
+          ? event.payload.candidateIds.filter((item): item is string => typeof item === "string")
+          : [],
+      ),
+    );
+    const recoveryCompleted = mainEvents.filter(
+      (event) =>
+        event.scope === project.id &&
+        event.type === "capability.fetch.completed" &&
+        event.payload.recoveryContractSha256 === recovery.contractSha256,
+    );
+    const formalizedCandidateIds = new Set(
+      recoveryCompleted
+        .map((event) => event.payload.formalizeCandidateId)
+        .filter((item): item is string => typeof item === "string"),
+    );
+    const eligibleCandidateIds = new Set(
+      [...admitted].filter(
+        (candidateId) =>
+          recovery.inheritedEligibleCandidateIds.includes(candidateId) ||
+          latestEvidenceRoleIds.get(candidateId)?.includes(recovery.evidenceRoleId),
+      ),
+    );
+    const pendingFormalizationCandidateIds = [...chasedCandidateIds].filter(
+      (candidateId) =>
+        !recovery.seedCandidateIds.includes(candidateId) &&
+        !formalizedCandidateIds.has(candidateId),
+    );
+    const pendingAssessmentCandidateIds = [...formalizedCandidateIds].filter(
+      (candidateId) => !eligibleCandidateIds.has(candidateId),
+    );
+    const recoveryRequested = requested.filter(
+      (event) => event.payload.recoveryContractSha256 === recovery.contractSha256,
+    );
+    const recoveryAttempted = attempted.filter(
+      (event) => event.payload.recoveryContractSha256 === recovery.contractSha256,
+    );
+    const recoveryReused = reused.filter(
+      (event) => event.payload.recoveryContractSha256 === recovery.contractSha256,
+    );
+    const callsRemaining = Math.max(
+      0,
+      recovery.maxBrokerFormalizationCalls - recoveryRequested.length,
+    );
+    const remainingEligibleCandidates = Math.max(
+      0,
+      recovery.minimumDistinctCandidates - eligibleCandidateIds.size,
+    );
+    const gaps: string[] = [];
+    if (!completedRecoveryActivities.length) {
+      gaps.push("no completed citation chase from a frozen legal seed");
+    }
+    if (remainingEligibleCandidates) {
+      gaps.push(
+        `closest-work recovery floor not met: ${eligibleCandidateIds.size}/${recovery.minimumDistinctCandidates}`,
+      );
+    }
+    if (pendingFormalizationCandidateIds.length) {
+      gaps.push(
+        `citation-chase candidates awaiting identity formalization: ${pendingFormalizationCandidateIds.length}`,
+      );
+    }
+    let recommendedAction: DiscoveryProgress["recommendedAction"];
+    const terminalDiscover =
+      project.packages.find((workPackage) => workPackage.stage === "discover")?.status ===
+      "complete";
+    if (terminalDiscover) recommendedAction = "continue-pipeline";
+    else if (!remainingEligibleCandidates) recommendedAction = "submit-bounded-recovery";
+    else if (pendingFormalizationCandidateIds.length) {
+      recommendedAction = "formalize-recovery-candidates";
+    } else if (pendingAssessmentCandidateIds.length) {
+      recommendedAction = "assess-recovery-candidates";
+    } else {
+      recommendedAction = "run-bounded-citation-chase";
+    }
+    const design = await loadBoundAcquisitionDesign(root, project);
+    const formalizationCapabilityIds = recovery.formalizationRouteIds.flatMap((routeId) => {
+      const capabilityId = design.acquisitionPlan.routes.find(
+        (route) => route.id === routeId,
+      )?.capabilityId;
+      return capabilityId ? [capabilityId] : [];
+    });
+    return {
+      plan,
+      calls: {
+        used: recoveryRequested.length,
+        networkUsed: recoveryAttempted.length,
+        reused: recoveryReused.length,
+        max: recovery.maxBrokerFormalizationCalls,
+        remaining: callsRemaining,
+        hardLimit: recovery.maxBrokerFormalizationCalls,
+      },
+      candidates: {
+        unique: candidates.length,
+        duplicateOccurrences,
+        admitted: admitted.size,
+        rejected: rejected.size,
+        unassessed: Math.max(0, candidates.length - admitted.size - rejected.size),
+      },
+      nativeActivities: {
+        total: recoveryActivities.length,
+        byKind: recoveryActivities.reduce<Record<string, number>>((summary, event) => {
+          const kind = String(event.payload.kind);
+          summary[kind] = (summary[kind] ?? 0) + 1;
+          return summary;
+        }, {}),
+        blockedChallenges: recoveryActivities.filter(
+          (event) => event.payload.status === "blocked" && event.payload.challenge !== "none",
+        ).length,
+        nativeCandidates: nativeCandidates.length,
+        formalizedNativeCandidates: formalizedNativeCandidates.length,
+        unformalizedNativeCandidates: nativeCandidates.length - formalizedNativeCandidates.length,
+      },
+      providers,
+      recovery: {
+        contractSha256: recovery.contractSha256,
+        sourceProjectId: recovery.sourceProjectId,
+        evidenceRoleId: recovery.evidenceRoleId,
+        activeRouteIds: recovery.activeRouteIds,
+        formalizationRouteIds: recovery.formalizationRouteIds,
+        legalSeedCandidateIds: recovery.seedCandidateIds,
+        inheritedEligibleCandidates: recovery.inheritedEligibleCandidateIds.length,
+        eligibleCandidates: eligibleCandidateIds.size,
+        minimumDistinctCandidates: recovery.minimumDistinctCandidates,
+        floorClosureAction: "reject-further-citation-chase-formalization-and-admission",
+        completedCitationChaseActivities: completedRecoveryActivities.length,
+        formalizedCandidateIds: [...formalizedCandidateIds].sort(),
+        pendingFormalizationCandidateIds: pendingFormalizationCandidateIds.sort(),
+        remainingEligibleCandidates,
+      },
+      gaps,
+      nextBatch:
+        recommendedAction === "formalize-recovery-candidates" && callsRemaining
+          ? {
+              kind: "identity-formalization-only",
+              capabilityIds: [...new Set(formalizationCapabilityIds)].sort(),
+              maxCalls: Math.min(callsRemaining, pendingFormalizationCandidateIds.length),
+            }
+          : null,
+      recommendedAction,
+    };
+  }
   const exercised = new Set(
     providers
       .filter((provider) => provider.networkCalls > 0 || provider.completedReceipts > 0)
@@ -201,6 +383,7 @@ export async function inspectDiscoveryProgress(
       unformalizedNativeCandidates: nativeCandidates.length - formalizedNativeCandidates.length,
     },
     providers,
+    recovery: null,
     gaps: [...new Set(gaps)],
     nextBatch,
     recommendedAction,
