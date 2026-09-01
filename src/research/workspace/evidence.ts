@@ -2,6 +2,7 @@ import { constants as fsConstants } from "node:fs";
 import { cp, lstat, open, readFile, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import type { DataMissingRange } from "../../data/contracts.js";
 import { CliError } from "../../errors.js";
 import {
   ensureDirectory,
@@ -61,6 +62,21 @@ export interface DataEvidenceBinding {
   inputSchemaDigest: string;
   outputSchemaDigest: string;
   resultStatus: "success" | "partial";
+  coverage?: {
+    status: "bounded" | "complete" | "partial";
+    truncated: boolean;
+    stopReason: string | null;
+    recordCount: number;
+    missing: DataMissingRange[];
+  };
+  contextView?: {
+    status: "full" | "metadata-only" | "projected";
+    strategy: string;
+    itemCount: number;
+    totalItems: number;
+    maxItems: number;
+    maxBytes: number;
+  };
   artifacts: DataEvidenceArtifactBinding[];
 }
 
@@ -427,6 +443,37 @@ function parseDataEvidenceBinding(value: unknown): DataEvidenceBinding {
       typeof artifact.locator !== "string"
     ) {
       throw evidenceStoreError("Data evidence artifact receipt has an unsupported shape.");
+    }
+  }
+  const binding = value as DataEvidenceBinding;
+  if (binding.coverage !== undefined) {
+    if (
+      !binding.coverage ||
+      !["bounded", "complete", "partial"].includes(binding.coverage.status) ||
+      typeof binding.coverage.truncated !== "boolean" ||
+      (binding.coverage.stopReason !== null && typeof binding.coverage.stopReason !== "string") ||
+      !Number.isInteger(binding.coverage.recordCount) ||
+      binding.coverage.recordCount < 0 ||
+      !Array.isArray(binding.coverage.missing)
+    ) {
+      throw evidenceStoreError("Data evidence coverage binding is invalid.");
+    }
+  }
+  if (binding.contextView !== undefined) {
+    if (
+      !binding.contextView ||
+      !["full", "metadata-only", "projected"].includes(binding.contextView.status) ||
+      typeof binding.contextView.strategy !== "string" ||
+      !Number.isInteger(binding.contextView.itemCount) ||
+      binding.contextView.itemCount < 0 ||
+      !Number.isInteger(binding.contextView.totalItems) ||
+      binding.contextView.totalItems < 0 ||
+      !Number.isInteger(binding.contextView.maxItems) ||
+      binding.contextView.maxItems < 1 ||
+      !Number.isInteger(binding.contextView.maxBytes) ||
+      binding.contextView.maxBytes < 1
+    ) {
+      throw evidenceStoreError("Data evidence context-view binding is invalid.");
     }
   }
   return value as DataEvidenceBinding;

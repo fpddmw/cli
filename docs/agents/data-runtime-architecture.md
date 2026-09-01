@@ -121,7 +121,8 @@ CLI 拥有与 connector 实现直接相关的客观来源语义、覆盖范围�
 - 稳定的 `providerId`、官方 endpoint scope、认证类型和逻辑 credential ID；
 - operation ID/version、输入/输出 Schema ID/digest 和执行 limits；
 - operation 可选的受控本地 `artifactOutput` 声明；未声明的 operation 不能接收输出目录；
-- capability 级超时、请求/响应字节、分页/分块、重试、速率、记录数和诊断上限；
+- capability 级超时、请求/provider response 字节、分页/分块、重试、速率、记录数和
+  诊断上限；
 - 仅覆盖上述执行字段的 `manifestDigest`。
 
 `DataCapabilityDiscovery` 是 **Discovery Metadata**，至少包含：
@@ -175,7 +176,9 @@ codebook 字段合同。它们仅接受 latest 或最多二十个、精确对齐
 解压上限、CRC32、UTF-8 与精确列数。四个 capability 都明确 GDELT 的翻译、entity/theme、
 event 和 mention coding 是自动化结果，coverage 不均衡；provider 的 article-list 模式对长
 窗口只考虑所选窗口末端三个月，而 timeline 可覆盖更长区间。结果不能当作代表性样本、ground truth
-或 causal evidence。接口与 cadence 依据 [GDELT DOC 2.0](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/)、
+或 causal evidence。压缩 TSV/ZIP 到闭合 named-field JSON 的结构放大属于数据表示语义，
+CLI 不以 Agent context 字节预算截断已验证 rows；Research 把完整结果保存为 Evidence，再
+生成受限表格视图供 Agent 使用。接口与 cadence 依据 [GDELT DOC 2.0](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/)、
 [GDELT 2.0 introduction](https://blog.gdeltproject.org/gdelt-2-0-our-global-world-in-realtime/)
 及官方 codebook；fixture 仅为按公开格式重建的合成字节。
 
@@ -204,7 +207,9 @@ fixture 仅按官方 v3 API 形状构造虚构数据。
 显式坐标、最多十六个官方变量，以及不超过 92 个日期的闭合窗口。变量按 code point
 排序而坐标保持调用顺序；请求固定使用 GMT，输出按坐标保存 model grid、时间、单位和
 对齐的 nullable value arrays。单个坐标或变量异常保留其余有效列并返回 `partial`，
-record cap 按 location-hour 截断所有变量列。Discovery Metadata 明确该来源是 CAMS
+requested series 缺失使用 `series-missing`；长度、单位和类型有效但 provider 返回全部
+`null` 时保留该列并使用 `series-all-null`。record cap 按 location-hour 截断所有变量列。
+Discovery Metadata 明确该来源是 CAMS
 模型网格背景值，不是站点观测；公开 endpoint 仅限非商业使用，并要求同时署名
 Open-Meteo 和底层 CAMS 数据提供方。接口和变量依据官方
 [Air Quality API 文档](https://open-meteo.com/en/docs/air-quality-api)，许可与端点边界依据
@@ -216,7 +221,9 @@ Open-Meteo 和底层 CAMS 数据提供方。接口和变量依据官方
 七个官方 discharge 变量、不超过 366 个日期的闭合窗口，以及可选 ensemble members。
 输出按请求坐标顺序保存 selected river-grid coordinate、GMT 日期、单位和对齐的 nullable
 series；单坐标、变量或 member 异常保留其余有效列并返回 `partial`，record cap 按
-location-day 同步截断全部列。Discovery Metadata 明确该来源是 GloFAS v4 约 5 km
+location-day 同步截断全部列。requested series 缺失与 provider 返回合法全 `null` series
+分别使用 `series-missing` 和 `series-all-null`，后者原样保留。Discovery Metadata 明确
+该来源是 GloFAS v4 约 5 km
 网格模拟值，endpoint 选择坐标附近最大河流，不能替代 gauge observation、告警、严重度
 分类或应急建议。公开 endpoint 仅限非商业使用并要求同时署名 Open-Meteo 与 GloFAS；
 商业 customer endpoint/API key 必须单独评审。接口与限制依据官方
@@ -231,7 +238,10 @@ daily 变量，以及不超过 366 个日期的闭合窗口；hourly/daily 数�
 grid coordinate、elevation、单位和对齐的 nullable series；record cap 按 location 内
 hourly 后 daily 的稳定顺序截断时间行。Discovery Metadata 明确该来源是 gap-filled
 reanalysis/model grid estimate，不是 station observation；跨年代趋势输入应优先选
-ERA5 或 ERA5-Land，避免 Best Match 的模型升级产生非气候断点。公开 endpoint 仅限
+ERA5 或 ERA5-Land，避免 Best Match 的模型升级产生非气候断点。requested series 未返回或
+不是数组时记录 `series-missing`；数组、长度和单位有效但所有值均为 `null` 时保留原始
+空序列并记录 `series-all-null`。两者都是明确 partial，Agent 不需要解析自然语言来区分
+“没取到变量”和“provider 返回全空覆盖”。公开 endpoint 仅限
 非商业使用并要求 Open-Meteo 与底层数据提供方署名；商业 endpoint/API key 不在该
 capability 中。接口、模型和值域依据官方
 [Historical Weather API 文档](https://open-meteo.com/en/docs/historical-weather-api) 与
@@ -380,7 +390,9 @@ URL query、header、环境变量值、本地绝对路径和 provider 原始错�
   必须逐项声明来源、优先级、文件权限和禁用方式，并加入泄漏回归测试。
 - endpoint 和重定向必须在 connector 的 HTTPS scope 内；IP literal、降级到 HTTP、
   跨域重定向和 credential 转发默认拒绝。
-- 请求体和响应体必须有字节上限；超时、重试和 `Retry-After` 处理必须有硬上限。
+- 请求体和 provider 响应体必须有字节上限；超时、重试和 `Retry-After` 处理必须有
+  硬上限。Agent context 与 Evidence package 的大小控制属于 Research 层，不能反向改写
+  connector 的采集语义。
 - 独立 `data run` 默认不创建 Research project、ledger 或 evidence。可选缓存/断点只服务
   确定性执行，按 capability/operation/request digest 隔离，并可关闭、检查和清除。
 - Research 持久化由 adapter 在核心结果校验后完成，不能由 connector 直接写入。
@@ -407,11 +419,17 @@ lock、预算、候选/来源准入、永久证据、journal 和 review 规则�
 `data:<capability-id>:<operation-id>` Research capability；十九个 connector 当前产生
 二十三个 operation 投影。native discover packet 携带这份摘要 catalog、独立
 `data describe` 命令和 `research project evidence data run` 命令。后者在同一进程调用
-`executeDataRun`，施加 Research 证据调用/响应/记录/context 上限，从 owner-only credential
-map 把命名空间化逻辑凭证映射到 manifest 环境变量；它不会接收完整宿主环境，也不允许
-宿主同名 provider key 作为后备。adapter 把成功或 partial 结果、核心 receipt digest 与
-可选 artifact bytes 内容寻址地写入既有 receipt/ledger/audit 链。blocked 结果只记失败
-journal，不晋升为证据。新增 registry operation 无需修改 Research provider 代码。
+`executeDataRun`。三层预算相互独立：connector manifest 与调用者显式 overrides 控制采集；
+`maxBytesPerPackage` 与文件数控制完整结果和 artifacts 的 Evidence 持久化；
+`maxBrokerItems` 与 `maxBrokerContextTokens` 只控制 Agent 可见视图。adapter 不再把 broker
+response/item budget 下压为 `maxResponseBytes` 或 `maxRecords`。它按 record list、thread
+group、对齐 time-series chunk 和 artifact manifest 生成语义化视图，并在 receipt、candidate
+和 journal 中分别声明 validation issue、request coverage（complete/bounded/partial）与
+context view（full/projected/metadata-only）。owner-only credential map 只映射当前 connector
+需要的命名空间化逻辑凭证；adapter 不接收完整宿主环境，也不允许宿主同名 provider key
+作为后备。成功或 partial 结果、核心 receipt digest 与可选 artifact bytes 内容寻址地写入
+既有 receipt/ledger/audit 链；blocked 结果只记失败 journal，不晋升为证据。新增 registry
+operation 无需修改 Research provider 代码。
 
 ## 明确不做
 

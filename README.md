@@ -70,7 +70,9 @@ tiangong-ai data run <capability-id> <operation-id> \
 The command-line capability and operation must match the versions in the input
 envelope. Credentials are never accepted in argv or input JSON. Each connector
 declares exact logical environment-variable bindings, HTTPS endpoint scopes,
-and execution limits in its execution manifest. Data commands deliberately do
+and acquisition limits in its execution manifest. Callers may explicitly
+tighten those limits, but upper layers do not silently reinterpret Agent
+context budgets as provider or record limits. Data commands deliberately do
 not load a cwd `.env` file.
 
 `data catalog` also returns a concise capability summary, what the capability
@@ -80,6 +82,13 @@ granularity, selection hints, typical uses, official documentation, freshness,
 license restrictions, and operation descriptions. Narrative discovery changes
 do not change the execution manifest digest used for compatibility binding.
 Operation input schemas include field-level descriptions and examples.
+
+Auto Research keeps three budgets separate: connector acquisition limits,
+Evidence package bytes/files, and the Agent-visible context view. A validated
+result is persisted in full when it fits the Evidence package budget;
+`maxBrokerItems` and the context-token ceiling only shape the Agent view.
+Receipts distinguish request coverage (`complete`, `bounded`, or `partial`)
+from context projection (`full`, shape-aware `projected`, or `metadata-only`).
 
 JSON exits are `0` for success, `2` for request/contract errors, `3` for a
 blocked execution, and `4` for an explicit partial result. Public machine
@@ -111,21 +120,26 @@ The built-in capabilities are:
   discoverable GDELT 2.0 table capabilities backed by one bounded TypeScript
   file-feed core. They fetch either the latest provider entry or at most twenty
   aligned 15-minute files, verify ZIP/CRC and advertised latest-file checksums,
-  and emit closed named columns without persisting downloaded files.
+  and emit closed named columns without persisting downloaded files. Their
+  wide named-field JSON is preserved as Evidence; Agent context projection is
+  handled by Auto Research without changing the connector result.
 - `nasa-firms.active-fire` / `fetch-area`: retrieves bounded NASA FIRMS MODIS,
   VIIRS, or Landsat active-fire point detections, optionally validates source
   availability, and exposes chunk-level partial coverage. Hotspots are thermal
   anomalies, not fire perimeters or confirmed incident identities.
 - `open-meteo.air-quality` / `fetch-hourly`: retrieves bounded GMT hourly CAMS
   model-grid air-quality series for known coordinates; these are modeled
-  background values rather than station observations.
+  background values rather than station observations. Missing and explicitly
+  returned all-null series are distinct machine-readable partial issues.
 - `open-meteo.flood` / `fetch-daily`: retrieves bounded daily GloFAS simulated
   river-discharge series for the represented river grid; it is neither gauge
-  data nor a flood-alert service.
+  data nor a flood-alert service. Missing and explicitly returned all-null
+  series are distinct machine-readable partial issues.
 - `open-meteo.historical-weather` / `fetch`: retrieves bounded GMT hourly and/or
   daily historical weather reanalysis for one controlled model and known
   coordinates. ERA5 or ERA5-Land should be selected when multi-decade model
-  consistency matters.
+  consistency matters. Missing requested series and provider-returned series
+  whose values are all `null` are distinct machine-readable partial issues.
 - `openaq.air-quality` / `search-locations` and `fetch-sensor-measurements`:
   discovers filtered OpenAQ v3 locations and retrieves a bounded raw, hourly,
   or daily series for one sensor. It preserves provider/license context but

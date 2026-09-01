@@ -8,7 +8,6 @@ import type { DataRegistry } from "../../data/catalog.js";
 import type {
   DataArtifactRecord,
   DataCatalogCapability,
-  DataLimitOverrides,
   DataRunRequest,
   DataRunResult,
 } from "../../data/contracts.js";
@@ -31,6 +30,13 @@ import { appendJournalEvent, readJournal } from "./journal.js";
 import { loadProject } from "./projects.js";
 import { canonicalJson, sha256Bytes, sha256Text, workspacePaths } from "./storage.js";
 import { loadWorkspaceConfig } from "./workspace.js";
+import {
+  boundedResearchDataContext,
+  buildResearchDataCommunication,
+  inferResearchDataResultShape,
+  type ResearchDataCommunication,
+  type ResearchDataResultShape,
+} from "./data-evidence-view.js";
 
 const DATA_CONTEXT_BYTES_PER_TOKEN = 4;
 
@@ -50,6 +56,7 @@ export interface ResearchDataCapability {
   inputSchemaDigest: string;
   outputSchemaDigest: string;
   artifactOutput: boolean;
+  resultShape: ResearchDataResultShape;
   credentials: Array<{
     id: string;
     credentialId: string;
@@ -75,6 +82,7 @@ export interface ResearchDataExecutionResult {
     text: string;
     truncated: boolean;
   } | null;
+  communication: ResearchDataCommunication | null;
   dataBudget: {
     maxCalls: number;
     startedCalls: number;
@@ -163,7 +171,7 @@ export async function executeResearchDataCapability(
     );
   }
 
-  const effectiveRequest = boundedRequest(request, operation.manifest.limits, config.budget);
+  const effectiveRequest = structuredClone(request);
   validateDataPublicContract("runRequest", effectiveRequest);
   const researchCapabilityId = researchDataCapabilityId(request.capabilityId, request.operationId);
   const attemptId = randomUUID();
@@ -230,24 +238,34 @@ export async function executeResearchDataCapability(
         evidenceReceipt: null,
         candidate: null,
         boundedContext: null,
+        communication: null,
         dataBudget: budget(config.budget.maxBrokerCalls, startedCalls + 1),
       };
     }
 
     const serialized = Buffer.from(`${canonicalJson(coreResult)}\n`, "utf8");
-    if (serialized.byteLength > config.budget.maxBytesPerPackage) {
-      throw researchDataError(
-        "The validated data result exceeds the Research evidence object byte ceiling.",
-        "RESEARCH_DATA_RESULT_TOO_LARGE",
-      );
-    }
-    const context = boundedResultContext(
-      coreResult,
-      config.budget.maxBrokerContextTokens * DATA_CONTEXT_BYTES_PER_TOKEN,
-    );
     const artifacts = artifactDirectory
       ? await loadDataEvidenceArtifacts(artifactDirectory, coreResult.data)
       : [];
+    assertEvidencePackageBudget(serialized, artifacts, config.budget);
+    const maxContextBytes = config.budget.maxBrokerContextTokens * DATA_CONTEXT_BYTES_PER_TOKEN;
+    let context;
+    try {
+      context = boundedResearchDataContext(
+        coreResult,
+        maxContextBytes,
+        config.budget.maxBrokerItems,
+      );
+    } catch {
+      throw researchDataError(
+        "Data evidence metadata exceeds the Research bounded-context ceiling.",
+        "RESEARCH_DATA_CONTEXT_TOO_LARGE",
+      );
+    }
+    const communication = buildResearchDataCommunication(coreResult, context, {
+      maxBytes: maxContextBytes,
+      maxItems: config.budget.maxBrokerItems,
+    });
     const receipt = await persistDataEvidence(
       input.root,
       {
@@ -261,11 +279,11 @@ export async function executeResearchDataCapability(
           coreResult.receipt.aggregateResponseDigest ??
           coreResult.receipt.normalizedDataDigest ??
           coreResult.receipt.receiptDigest,
-        contextItems: coreResult.summary.recordCount,
+        contextItems: context.itemCount,
         contextOffset: 0,
         contextTotalItems: coreResult.summary.recordCount,
         contextNextOffset: null,
-        contextTruncated: context.truncated,
+        contextTruncated: context.projected,
         redactions: 0,
         retrievedAt: coreResult.receipt.generatedAt,
         cacheHit: false,
@@ -280,6 +298,8 @@ export async function executeResearchDataCapability(
           inputSchemaDigest: coreResult.contract.inputSchema!.digest,
           outputSchemaDigest: coreResult.contract.outputSchema!.digest,
           resultStatus: coreResult.status,
+          coverage: communication.requestCoverage,
+          contextView: communication.contextView,
         },
       },
       serialized,
@@ -295,7 +315,7 @@ export async function executeResearchDataCapability(
       projectId: input.projectId,
       receipt,
       title: `${discovery.source.name}: ${operationDiscovery.summary}`,
-      excerpt: `${discovery.summary} Returned ${coreResult.summary.recordCount} record(s) with ${coreResult.summary.completeness} completeness.`,
+      excerpt: candidateExcerpt(discovery.summary, communication),
     });
     await appendJournalEvent(
       workspacePaths(input.root).journal,
@@ -310,6 +330,10 @@ export async function executeResearchDataCapability(
         candidateId: candidate.id,
         status: coreResult.status,
         recordCount: coreResult.summary.recordCount,
+        coverageStatus: communication.requestCoverage.status,
+        coverageTruncated: communication.requestCoverage.truncated,
+        contextStatus: communication.contextView.status,
+        contextItems: communication.contextView.itemCount,
         artifactCount: receipt.data?.artifacts.length ?? 0,
       },
     );
@@ -320,8 +344,9 @@ export async function executeResearchDataCapability(
       boundedContext: {
         encoding: "utf8",
         text: Buffer.from(context.bytes).toString("utf8"),
-        truncated: context.truncated,
+        truncated: context.projected,
       },
+      communication,
       dataBudget: budget(config.budget.maxBrokerCalls, startedCalls + 1),
     };
   } catch (error) {
@@ -364,6 +389,10 @@ function projectCapability(
     artifactOutput: Boolean(
       registered.operations.get(operation.operationId)?.manifest.artifactOutput,
     ),
+    resultShape: inferResearchDataResultShape(
+      registered.operations.get(operation.operationId)!.definition.outputSchema,
+      Boolean(registered.operations.get(operation.operationId)?.manifest.artifactOutput),
+    ),
     credentials: registered.manifest.credentials.map((credential) => ({
       id: researchDataCredentialId(capability.capabilityId, credential.credentialId),
       credentialId: credential.credentialId,
@@ -371,59 +400,6 @@ function projectCapability(
       required: credential.required,
     })),
   }));
-}
-
-function boundedRequest(
-  request: DataRunRequest,
-  operationLimits: { maxResponseBytes: number; maxRecords: number },
-  budgetValue: { maxBrokerResponseBytes: number; maxBrokerItems: number },
-): DataRunRequest {
-  const currentResponseBytes = request.limits?.maxResponseBytes ?? operationLimits.maxResponseBytes;
-  const currentRecords = request.limits?.maxRecords ?? operationLimits.maxRecords;
-  const maxResponseBytes = Math.min(currentResponseBytes, budgetValue.maxBrokerResponseBytes);
-  const maxRecords = Math.min(currentRecords, budgetValue.maxBrokerItems);
-  const changed =
-    maxResponseBytes !== operationLimits.maxResponseBytes ||
-    maxRecords !== operationLimits.maxRecords ||
-    request.limits !== undefined;
-  if (!changed) return structuredClone(request);
-  const limits: DataLimitOverrides = {
-    ...(request.limits ?? {}),
-    maxResponseBytes,
-    maxRecords,
-  };
-  return { ...structuredClone(request), limits };
-}
-
-function boundedResultContext(
-  result: DataRunResult,
-  maxBytes: number,
-): { bytes: Uint8Array; truncated: boolean } {
-  const full = Buffer.from(`${canonicalJson(result)}\n`, "utf8");
-  if (full.byteLength <= maxBytes) return { bytes: full, truncated: false };
-  const projection = {
-    schemaVersion: result.schemaVersion,
-    status: result.status,
-    requestId: result.requestId,
-    contract: result.contract,
-    summary: result.summary,
-    warnings: result.warnings,
-    errors: result.errors,
-    receipt: result.receipt,
-    data: {
-      omittedFromBoundedContext: true,
-      normalizedDataDigest: result.receipt.normalizedDataDigest,
-      fullEvidenceLocatorAvailableInReceipt: true,
-    },
-  };
-  const bytes = Buffer.from(`${canonicalJson(projection)}\n`, "utf8");
-  if (bytes.byteLength > maxBytes) {
-    throw researchDataError(
-      "Data evidence metadata exceeds the Research bounded-context ceiling.",
-      "RESEARCH_DATA_CONTEXT_TOO_LARGE",
-    );
-  }
-  return { bytes, truncated: true };
 }
 
 async function loadDataEvidenceArtifacts(
@@ -443,6 +419,48 @@ async function loadDataEvidenceArtifacts(
       return { ...record, bytes };
     }),
   );
+}
+
+function assertEvidencePackageBudget(
+  resultBytes: Uint8Array,
+  artifacts: DataEvidenceArtifactInput[],
+  limits: { maxBytesPerPackage: number; maxFilesPerPackage: number },
+): void {
+  // Artifact-producing connectors may bind one machine-readable manifest in
+  // addition to the bounded source files.
+  if (artifacts.length > limits.maxFilesPerPackage + 1) {
+    throw researchDataError(
+      `The validated data result has ${artifacts.length} artifacts; the Research evidence package allows ${limits.maxFilesPerPackage} source files plus one manifest.`,
+      "RESEARCH_DATA_RESULT_TOO_LARGE",
+    );
+  }
+  const totalBytes = artifacts.reduce(
+    (total, artifact) => total + artifact.bytes.byteLength,
+    resultBytes.byteLength,
+  );
+  if (totalBytes > limits.maxBytesPerPackage) {
+    throw researchDataError(
+      `The validated data result and artifacts require ${totalBytes} bytes; the Research evidence package allows ${limits.maxBytesPerPackage}.`,
+      "RESEARCH_DATA_RESULT_TOO_LARGE",
+    );
+  }
+}
+
+function candidateExcerpt(sourceSummary: string, communication: ResearchDataCommunication): string {
+  const coverage = communication.requestCoverage;
+  const stopReason = coverage.stopReason ? ` (stop reason: ${coverage.stopReason})` : "";
+  const coverageText =
+    coverage.status === "complete"
+      ? "Request coverage is complete."
+      : coverage.status === "bounded"
+        ? `Request coverage is bounded${stopReason}; the persisted evidence contains every returned record.`
+        : `Request coverage is partial${stopReason}; inspect missing ranges and validation issues.`;
+  const context = communication.contextView;
+  const contextText =
+    context.status === "full"
+      ? "The Agent context contains the full result."
+      : `The Agent context is a ${context.strategy} view of ${context.itemCount}/${context.totalItems} returned records; the full result remains in evidence.`;
+  return `${sourceSummary} Returned ${coverage.recordCount} record(s). ${coverageText} ${contextText}`;
 }
 
 function collectArtifactRecords(value: unknown): DataArtifactRecord[] {

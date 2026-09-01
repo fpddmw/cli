@@ -106,6 +106,112 @@ describe("research data evidence adapter", () => {
     }
   });
 
+  it("keeps acquisition limits intact and applies item budgets only to the Agent context view", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-research-data-view-budget-"));
+    let observedLimits: { maxRecords: number; maxResponseBytes: number } | undefined;
+    const outputSchema = {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $id: "https://schemas.tiangong.ai/data/test/synthetic-records-output.v1.json",
+      type: "object",
+      additionalProperties: false,
+      required: ["records"],
+      properties: {
+        records: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["id", "value"],
+            properties: {
+              id: { type: "integer" },
+              value: { type: "string" },
+            },
+          },
+        },
+      },
+    } as const;
+    const records = Array.from({ length: 144 }, (_, id) => ({ id, value: `record-${id}` }));
+    const registry = createDataRegistry([
+      syntheticConnector({
+        limits: { maxRecords: 1_000, maxResponseBytes: 1_048_576 },
+        outputSchema,
+        execute: (context) => {
+          observedLimits = {
+            maxRecords: context.limits.maxRecords,
+            maxResponseBytes: context.limits.maxResponseBytes,
+          };
+          return {
+            status: "success",
+            data: { records },
+            summary: {
+              recordCount: records.length,
+              pageCount: 1,
+              chunkCount: 1,
+              truncated: false,
+              completeness: "complete",
+            },
+            warnings: [],
+            errors: [],
+            observations: [],
+          };
+        },
+      }),
+    ]);
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, "data-view-budget", "Preserve all returned data records.");
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "data-view-budget",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+
+      const result = await executeResearchDataCapability({
+        root,
+        projectId: "data-view-budget",
+        request: request(),
+        registry,
+      });
+
+      assert.deepEqual(observedLimits, { maxRecords: 1_000, maxResponseBytes: 1_048_576 });
+      assert.equal(result.coreResult.summary.recordCount, 144);
+      assert.equal(result.coreResult.summary.truncated, false);
+      assert.equal(result.communication?.requestCoverage.status, "complete");
+      assert.equal(result.communication?.contextView.status, "projected");
+      assert.equal(result.communication?.contextView.strategy, "record-prefix");
+      assert.equal(result.communication?.contextView.itemCount, 100);
+      assert.equal(result.communication?.contextView.totalItems, 144);
+      assert.equal(result.evidenceReceipt?.contextItems, 100);
+      assert.equal(result.evidenceReceipt?.contextTotalItems, 144);
+      assert.equal(result.evidenceReceipt?.contextTruncated, true);
+      assert.equal(result.evidenceReceipt?.data?.coverage?.status, "complete");
+      assert.equal(result.evidenceReceipt?.data?.contextView?.status, "projected");
+
+      const bounded = JSON.parse(result.boundedContext!.text) as {
+        data: { contextView: { itemCount: number }; value: { records: unknown[] } };
+      };
+      assert.equal(bounded.data.contextView.itemCount, 100);
+      assert.equal(bounded.data.value.records.length, 100);
+      const persisted = JSON.parse(
+        await readFile(join(workspacePaths(root).control, result.evidenceReceipt!.locator), "utf8"),
+      ) as { data: { records: unknown[] } };
+      assert.equal(persisted.data.records.length, 144);
+      assert.match(result.candidate?.excerpt ?? "", /Request coverage is complete/);
+      assert.match(result.candidate?.excerpt ?? "", /100\/144/);
+
+      const projected = projectResearchDataCapabilities(registry).capabilities[0];
+      assert.equal(projected?.resultShape, "record-list");
+      await abortNativeResearchStage({
+        root,
+        projectId: "data-view-budget",
+        sessionId: packet.sessionId,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("publishes the built-in data registry through the native discover packet", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-research-data-packet-"));
     try {

@@ -223,14 +223,18 @@ storage writes, queueing, and document status transitions.
   GDELT table capabilities share one bounded ZIP/feed core without collapsing
   their separate discovery and binding identities; the two YouTube operations
   share one provider and credential contract without merging video discovery
-  with explicit-ID comment retrieval.
+  with explicit-ID comment retrieval. Structural expansion from compressed
+  provider bytes into closed named-field JSON remains part of the validated
+  connector result; Research stores that result as Evidence and independently
+  projects a bounded Agent context view.
 - `src/research/workspace/data-evidence-adapter.ts`: dynamically projects every
   built-in data operation into the native Research discovery packet, invokes
   the shared TypeScript data service in-process, constructs its provider
   credential environment exclusively from the owner-only Research store,
-  applies call, item, byte, context, receipt, ledger, and audit bindings, and
-  never inherits host provider credentials or introduces provider-specific
-  Research adapters.
+  applies call, Evidence-package, shape-aware context, coverage, receipt,
+  ledger, and audit bindings, and never inherits host provider credentials,
+  silently lowers connector acquisition limits, or introduces
+  provider-specific Research adapters.
 - `scripts/**`: validation helpers.
 - `test/**`: Node test runner suites.
 
