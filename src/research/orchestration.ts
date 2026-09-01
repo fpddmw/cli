@@ -1270,7 +1270,6 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
           root,
           projectId,
           request,
-          environment: io.env,
         }),
       );
       writeJson(io, result, args);

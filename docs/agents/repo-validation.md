@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-31
-lastReviewedCommit: 37d73ceb0e0f80ba3f6ac05759e0bad59182ca35
+lastReviewedAt: 2026-09-01
+lastReviewedCommit: e387a5e66221ab91920a6e6c960cc717919caecb
 ---
 
 # Repo Validation
@@ -243,6 +243,13 @@ with archived bindings, and non-zero apply/status/doctor results until overall
 readiness is complete. The suite uses injected setup operations for
 provider-free execution and must not contact a real provider or reviewer
 service.
+
+`test/research-data-evidence-adapter.test.ts` covers dynamic operation
+projection, standalone/core receipt parity, owner-only namespaced credential
+injection, secret-free evidence persistence, and the Research credential-source
+boundary. A host provider variable without the corresponding workspace
+credential must return `credential-missing` before connector execution or any
+network request.
 
 ## Release Flow
 
