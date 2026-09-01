@@ -675,6 +675,14 @@ export async function applyResearchSetupPlan(
     setupSecretValues(plan, environment),
   );
   const release = await acquireFileLock(paths.setupLock, setupLockPayload(plan.planSha256));
+  let installerCacheDirectory: string;
+  try {
+    installerCacheDirectory = await mkdtemp(join(tmpdir(), "tiangong-research-npm-cache-"));
+  } catch (error) {
+    await release();
+    throw error;
+  }
+  const setupInstallerEnvironment = installerEnvironment(environment, installerCacheDirectory);
   let state = await loadSetupState(root, plan.planSha256);
   state = await updateSetupState(root, {
     ...state,
@@ -729,7 +737,7 @@ export async function applyResearchSetupPlan(
     const missing = installInspection.filter((item) => item.status === "missing");
     if (missing.length) {
       state = await startSetupStep(root, state, "source-checkout");
-      await verifyInstallerPackage(runner, root, installerEnvironment(environment));
+      await verifyInstallerPackage(runner, root, setupInstallerEnvironment);
       const requiredSourceIds = [
         ...new Set(missing.map((item) => setupSkill(item.skillId).sourceId)),
       ].sort();
@@ -738,12 +746,7 @@ export async function applyResearchSetupPlan(
         try {
           sourceDirectories.set(
             sourceId,
-            await ensureSetupSourceCheckout(
-              plan,
-              sourceId,
-              runner,
-              installerEnvironment(environment),
-            ),
+            await ensureSetupSourceCheckout(plan, sourceId, runner, setupInstallerEnvironment),
           );
         } catch (error) {
           throw await annotateSetupSourceCheckoutFailure(error, plan, sourceId);
@@ -768,7 +771,12 @@ export async function applyResearchSetupPlan(
             skills,
             sourceDirectory: sourceDirectories.get(sourceId)!,
             runner,
-            environment: installerEnvironmentForTarget(plan, agent, environment),
+            environment: installerEnvironmentForTarget(
+              plan,
+              agent,
+              environment,
+              installerCacheDirectory,
+            ),
           });
         }
       }
@@ -889,7 +897,11 @@ export async function applyResearchSetupPlan(
       exitCode: 3,
     });
   } finally {
-    await release();
+    try {
+      await rm(installerCacheDirectory, { recursive: true, force: true });
+    } finally {
+      await release();
+    }
   }
 }
 
@@ -4867,7 +4879,10 @@ async function assertNoSymlinkedExistingPath(path: string, boundary?: string): P
   }
 }
 
-function installerEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+function installerEnvironment(
+  source: NodeJS.ProcessEnv,
+  npmCacheDirectory?: string,
+): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = {};
   const exact = new Set([
     "PATH",
@@ -4910,6 +4925,7 @@ function installerEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   result.npm_config_update_notifier = "false";
   result.npm_config_fund = "false";
   result.npm_config_audit = "false";
+  if (npmCacheDirectory) result.npm_config_cache = npmCacheDirectory;
   return result;
 }
 
@@ -4917,8 +4933,9 @@ function installerEnvironmentForTarget(
   plan: ResearchSetupPlan,
   agent: ResearchSetupAgent,
   source: NodeJS.ProcessEnv,
+  npmCacheDirectory?: string,
 ): NodeJS.ProcessEnv {
-  const result = installerEnvironment(source);
+  const result = installerEnvironment(source, npmCacheDirectory);
   if (plan.install.scope !== "global") return result;
   const target = plannedTargetRoot(plan, agent);
   if (agent === "codex") {

@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { platform, tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { Readable } from "node:stream";
 import { describe, it } from "node:test";
 
@@ -932,6 +932,7 @@ describe("research setup execution and operator safety", () => {
     const skill = RESEARCH_SETUP_SKILLS.find((candidate) => candidate.id === "hugohe3.ppt-master")!;
     const originalTreeSha256 = skill.expectedTreeSha256;
     const calls: string[][] = [];
+    let installerCachePath: string | null = null;
     try {
       const fixture = join(root, "fixture-ppt-master");
       await mkdir(fixture, { recursive: true });
@@ -949,7 +950,7 @@ describe("research setup execution and operator safety", () => {
       let hasHead = false;
       const result = await applyResearchSetupPlan(workspacePaths(root).setupPlan, {
         skipDoctor: true,
-        runner: async ({ command, args }) => {
+        runner: async ({ command, args, environment }) => {
           calls.push([command, ...args]);
           if (command === "npm") {
             return {
@@ -983,6 +984,10 @@ describe("research setup execution and operator safety", () => {
           }
           if (command === "git") return { exitCode: 0, stdout: "", stderr: "" };
           if (command === "npx") {
+            installerCachePath = environment.npm_config_cache ?? null;
+            assert.ok(installerCachePath && isAbsolute(installerCachePath));
+            assert.equal(installerCachePath.startsWith(environment.HOME ?? ""), false);
+            assert.equal((await lstat(installerCachePath)).isDirectory(), true);
             const destination = join(plan.install.targets[0]!.root, skill.skillName);
             await mkdir(destination, { recursive: true });
             await writeFile(join(destination, "SKILL.md"), "# deterministic checkout fixture\n");
@@ -1009,8 +1014,42 @@ describe("research setup execution and operator safety", () => {
         "skills",
         "add",
       ]);
+      assert.ok(installerCachePath);
+      assert.equal(await pathExistsSafe(installerCachePath), false);
     } finally {
       skill.expectedTreeSha256 = originalTreeSha256;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("removes the isolated setup npm cache after an installer verification failure", async () => {
+    const root = await temporaryDirectory();
+    let installerCachePath: string | null = null;
+    try {
+      await createResearchSetupPlan({
+        workspace: root,
+        mode: "smoke-test",
+        evidenceProfile: "none",
+        skillIds: ["tiangong.auto-research"],
+        acceptedLicenseIds: ["tiangong-ai-skills:MIT"],
+        confirmNetworkDownloads: true,
+      });
+      await assert.rejects(
+        applyResearchSetupPlan(workspacePaths(root).setupPlan, {
+          skipDoctor: true,
+          runner: async ({ command, environment }) => {
+            if (command !== "npm") throw new Error(`Unexpected command before npm: ${command}`);
+            installerCachePath = environment.npm_config_cache ?? null;
+            assert.ok(installerCachePath && isAbsolute(installerCachePath));
+            assert.equal((await lstat(installerCachePath)).isDirectory(), true);
+            return { exitCode: 1, stdout: "", stderr: "registry unavailable" };
+          },
+        }),
+        errorCode("RESEARCH_SETUP_COMMAND_FAILED"),
+      );
+      assert.ok(installerCachePath);
+      assert.equal(await pathExistsSafe(installerCachePath), false);
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   });

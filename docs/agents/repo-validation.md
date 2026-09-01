@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-09-01
-lastReviewedCommit: e387a5e66221ab91920a6e6c960cc717919caecb
+lastReviewedCommit: ca716c2fea59d0a8085aa32dbd8f65a686b3353e
 ---
 
 # Repo Validation
@@ -317,6 +317,9 @@ The setup execution regression also fixes the nested installer argv as
 `npx --package skills@<pin> -- skills ...`; positional package invocation is
 not accepted because it fails inside a clean outer `npx --package
 @tiangong-ai/cli` consumer environment.
+The same regression requires one absolute apply-scoped npm cache outside HOME,
+verifies that nested installer calls receive it, and proves cleanup after both
+successful installation and installer verification failure.
 `test/research-setup-audit-bundle.test.ts` proves setup-only export is portable,
 closed, secret-free, movable, exact-file and semantically hash-bound; missing,
 extra, tampered, symlinked, or invalid-attestation inputs fail closed without

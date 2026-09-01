@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-09-01
-lastReviewedCommit: 2824bacb08ee7079e2b9e47ebd5694f61e3e9c0a
+lastReviewedCommit: ca716c2fea59d0a8085aa32dbd8f65a686b3353e
 ---
 
 # Repo Architecture
@@ -374,8 +374,12 @@ configured or executed. The tree-hash contract rejects symlinks and
 canonically equivalent path collisions, normalizes logical paths to NFC, and
 orders directory entries by UTF-8 bytes rather than locale collation. New Git
 source caches set repository-local `core.autocrlf=false` and `core.eol=lf`
-before materializing the detached commit. Hash failures stop before installer
-execution and expose only sanitized, non-secret identifiers and digests.
+before materializing the detached commit. Apply also gives all nested npm
+installer processes one owner-only, operation-scoped cache under the OS
+temporary directory and removes it on every exit path; it neither depends on
+an executable HOME nor admits the caller's mutable npm cache. Hash failures
+stop before installer execution and expose only sanitized, non-secret
+identifiers and digests.
 
 The current interactive host is the producer boundary: the CLI prepares an
 ephemeral hash-bound packet but does not start Codex or Claude for discover,
