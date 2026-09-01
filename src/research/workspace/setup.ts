@@ -3420,7 +3420,10 @@ async function installSetupSkills(input: {
   if (!input.skills.length) return;
   const args = [
     "--yes",
+    "--package",
     `skills@${RESEARCH_SETUP_INSTALLER.version}`,
+    "--",
+    "skills",
     "add",
     input.sourceDirectory,
     "--skill",

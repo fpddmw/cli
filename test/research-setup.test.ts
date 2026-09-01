@@ -999,6 +999,16 @@ describe("research setup execution and operator safety", () => {
       const checkoutIndex = calls.findIndex((call) => call.includes("checkout"));
       const autocrlfIndex = calls.findIndex((call) => call.includes("core.autocrlf"));
       assert.ok(autocrlfIndex >= 0 && autocrlfIndex < checkoutIndex);
+      const installerCall = calls.find((call) => call[0] === "npx");
+      assert.deepEqual(installerCall?.slice(0, 7), [
+        "npx",
+        "--yes",
+        "--package",
+        `skills@${RESEARCH_SETUP_INSTALLER.version}`,
+        "--",
+        "skills",
+        "add",
+      ]);
     } finally {
       skill.expectedTreeSha256 = originalTreeSha256;
       await rm(root, { recursive: true, force: true });
