@@ -46,7 +46,7 @@ export type EvidenceLedgerEventType =
   | "project.superseded";
 
 export interface EvidenceCandidateOrigin {
-  kind: "broker" | "input" | "native";
+  kind: "broker" | "data" | "input" | "native";
   receiptId: string | null;
   inputId: string | null;
   capabilityId: string | null;
@@ -234,6 +234,59 @@ export async function registerBrokerCandidates(input: {
   return registered;
 }
 
+export async function registerDataResultCandidate(input: {
+  root: string;
+  projectId: string;
+  receipt: BrokerEvidenceReceipt;
+  title: string;
+  excerpt: string;
+}): Promise<EvidenceCandidate> {
+  if (
+    input.receipt.projectId !== input.projectId ||
+    input.receipt.evidenceKind !== "data" ||
+    !input.receipt.data
+  ) {
+    throw evidenceLedgerError("Data receipt does not match the evidence ledger.");
+  }
+  const occurrence: EvidenceCandidateOrigin = {
+    kind: "data",
+    receiptId: input.receipt.attemptId,
+    inputId: null,
+    capabilityId: input.receipt.capabilityId,
+    locator: input.receipt.locator,
+    jsonPointer: "/data",
+    retrievedAt: input.receipt.retrievedAt,
+  };
+  const canonicalKeySha256 = sha256Text(`data:${input.receipt.data.coreReceiptDigest}`);
+  const existing = (await listEvidenceCandidates(input.root, input.projectId)).find(
+    (candidate) => candidate.canonicalKeySha256 === canonicalKeySha256,
+  );
+  if (existing) {
+    await appendEvidenceLedgerEvent(input.root, input.projectId, "candidate.duplicate", {
+      candidateId: existing.id,
+      canonicalKeySha256,
+      occurrence,
+    });
+    return { ...existing, origin: occurrence, occurrences: [...existing.occurrences, occurrence] };
+  }
+  const candidate: EvidenceCandidate = {
+    id: `candidate-${canonicalKeySha256.slice(0, 24)}`,
+    canonicalKeySha256,
+    title: boundedText(input.title, MAX_TITLE_LENGTH),
+    url: null,
+    doi: null,
+    publicationDate: null,
+    excerpt: boundedText(input.excerpt, MAX_EXCERPT_LENGTH),
+    discoveredAt: input.receipt.retrievedAt,
+    origin: occurrence,
+    occurrences: [occurrence],
+  };
+  await appendEvidenceLedgerEvent(input.root, input.projectId, "candidate.discovered", {
+    candidate,
+  });
+  return candidate;
+}
+
 export async function registerProjectInputCandidates(
   root: string,
   projectId: string,
@@ -349,7 +402,9 @@ export async function registerNativeDiscoveryCandidate(input: {
     });
     const formalized = existing.occurrences.some(
       (existingOccurrence) =>
-        existingOccurrence.kind === "broker" || existingOccurrence.kind === "input",
+        existingOccurrence.kind === "broker" ||
+        existingOccurrence.kind === "data" ||
+        existingOccurrence.kind === "input",
     );
     return {
       candidate: { ...existing, occurrences: [...existing.occurrences, occurrence] },
@@ -603,7 +658,7 @@ function parseCandidate(value: unknown): EvidenceCandidate {
 function parseOrigin(value: unknown): EvidenceCandidateOrigin {
   if (
     !isObject(value) ||
-    !["broker", "input", "native"].includes(String(value.kind)) ||
+    !["broker", "data", "input", "native"].includes(String(value.kind)) ||
     (value.receiptId !== null && typeof value.receiptId !== "string") ||
     (value.inputId !== null && typeof value.inputId !== "string") ||
     (value.capabilityId !== null && typeof value.capabilityId !== "string") ||

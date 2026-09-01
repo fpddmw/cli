@@ -36,6 +36,7 @@ import { isObject, responseData, stringField } from "./data.js";
 import { firstEnv, loadDotenv } from "./env.js";
 import { CliError, HttpError, toErrorPayload } from "./errors.js";
 import { jsonRequest } from "./http.js";
+import { runDataCommand } from "./data/commands.js";
 import { runEducationCommand } from "./education/commands.js";
 import {
   collectionKey,
@@ -344,14 +345,18 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       return 0;
     }
 
-    loadDotenv(io.env);
-
     if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
       write(io.stdout, topHelp());
       return 0;
     }
 
     const [command, subcommand, ...rest] = argv;
+
+    if (command === "data") {
+      return await runDataCommand(subcommand ? [subcommand, ...rest] : rest, io);
+    }
+
+    loadDotenv(io.env);
 
     if (command === "doctor") {
       if (subcommand === "--help" || subcommand === "-h") {
@@ -3558,6 +3563,10 @@ Usage:
   tiangong-ai kb ingest status <document-id>
   tiangong-ai kb collections list [--capability upload]
   tiangong-ai kb course fulltext --document-id <id> --tags <tag>
+  tiangong-ai data catalog [--json]
+  tiangong-ai data describe <capability-id> [--json]
+  tiangong-ai data doctor <capability-id> [--live] [--json]
+  tiangong-ai data run <capability-id> <operation-id> --input <path|-> [--json]
   tiangong-ai research workspace init <absolute-path>
   tiangong-ai research run [--workspace <absolute-path>] [--project <project-id>] [--max-parallel 1]
   tiangong-ai research search --input <request.json>|--query <query> [--sources default|all|sci|report|patent|esg]
@@ -3568,6 +3577,7 @@ Options:
   -v, --version   Show the CLI version.
 
 Run "tiangong-ai kb --help" for KB options.
+Run "tiangong-ai data --help" for atomic data options.
 Run "tiangong-ai research --help" for research options.
 Run "tiangong-ai education --help" for education options.
 `;

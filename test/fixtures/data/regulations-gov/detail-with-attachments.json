@@ -1,0 +1,61 @@
+{
+  "data": {
+    "id": "EPA-HQ-OAR-2026-0001-0002",
+    "type": "comments",
+    "attributes": {
+      "agencyId": "EPA",
+      "comment": "Synthetic public comment text for connector testing.",
+      "commentOnDocumentId": "EPA-HQ-OAR-2026-0001-0001",
+      "docketId": "EPA-HQ-OAR-2026-0001",
+      "documentType": "Proposed Rule",
+      "postedDate": "2026-03-02T12:00:00Z",
+      "modifyDate": "2026-03-02T14:30:00Z",
+      "receiveDate": "2026-03-02T10:00:00Z",
+      "title": "Synthetic comment two",
+      "trackingNbr": "synthetic-tracking-number",
+      "withdrawn": false,
+      "reasonWithdrawn": null,
+      "restrictReason": null,
+      "restrictReasonType": null,
+      "organization": "Synthetic Research Organization",
+      "govAgency": null,
+      "govAgencyType": null,
+      "duplicateComments": 4,
+      "firstName": "Sensitive-name-must-not-be-normalized",
+      "lastName": "Sensitive-name-must-not-be-normalized",
+      "email": "sensitive@example.invalid",
+      "phone": "000-000-0000",
+      "city": "Sensitive-city-must-not-be-normalized",
+      "zip": "00000"
+    },
+    "relationships": {
+      "attachments": {
+        "data": [{ "id": "EPA-HQ-OAR-2026-0001-0002-ATTACHMENT-1", "type": "attachments" }]
+      }
+    }
+  },
+  "included": [
+    {
+      "id": "EPA-HQ-OAR-2026-0001-0002-ATTACHMENT-1",
+      "type": "attachments",
+      "attributes": {
+        "agencyNote": null,
+        "authors": ["Synthetic Organization"],
+        "docAbstract": "Synthetic attachment abstract.",
+        "docOrder": 1,
+        "fileFormats": [
+          {
+            "fileUrl": "https://downloads.regulations.gov/synthetic/attachment.pdf",
+            "format": "pdf",
+            "size": 12345
+          }
+        ],
+        "modifyDate": "2026-03-02T14:20:00Z",
+        "publication": null,
+        "restrictReason": null,
+        "restrictReasonType": null,
+        "title": "Synthetic supporting attachment"
+      }
+    }
+  ]
+}

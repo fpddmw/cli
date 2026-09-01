@@ -13,7 +13,10 @@ import {
 } from "./workspace/capabilities.js";
 import { inspectResearchContext } from "./workspace/context.js";
 import { packageVersion } from "./workspace/constants.js";
-import { setCapabilityCredentialFromEnvironment } from "./workspace/credentials.js";
+import {
+  researchDataCredentialIds,
+  setCapabilityCredentialValue,
+} from "./workspace/credentials.js";
 import {
   configureExternalSkillProfile,
   doctorExternalCapabilities,
@@ -26,6 +29,7 @@ import {
 import { appendJournalEvent, readJournal } from "./workspace/journal.js";
 import { fetchNativeCandidateSource } from "./workspace/broker.js";
 import { registerEvidenceArtifact } from "./workspace/artifacts.js";
+import { executeResearchDataCapability } from "./workspace/data-evidence-adapter.js";
 import { exportProjectAuditBundle, verifyProjectAuditBundle } from "./workspace/audit-bundle.js";
 import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
 import {
@@ -204,6 +208,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project stage submit <project-id> --session <id> --output <absolute-json> [--confirm-model <id>] [--workspace <path>] [--json]
   tiangong-ai research project stage abort <project-id> --session <id> [--workspace <path>] [--json]
   tiangong-ai research project evidence fetch <project-id> --request <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence data run <project-id> --request <absolute-data-run-request.json> [--workspace <path>] [--json]
   tiangong-ai research project evidence activity record <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence candidate register <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence assessment record <project-id> --record <absolute-json> [--workspace <path>] [--json]
@@ -799,12 +804,32 @@ async function runCapability(argv: string[], io: CliIO): Promise<number> {
     const root = await workspaceFromArgs(args);
     const result = await withWorkspaceLock(root, "capability.credential.set", async () => {
       const declarations = await loadCapabilityDeclarations(root);
-      const value = await setCapabilityCredentialFromEnvironment({
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(environmentName)) {
+        throw new CliError("credential source environment name is invalid", {
+          code: "RESEARCH_CAPABILITY_CREDENTIAL_INVALID",
+          exitCode: 3,
+        });
+      }
+      const credentialValue = io.env[environmentName];
+      if (typeof credentialValue !== "string" || Buffer.byteLength(credentialValue, "utf8") < 8) {
+        throw new CliError(
+          `credential source environment variable is missing or too short: ${environmentName}`,
+          { code: "RESEARCH_CAPABILITY_CREDENTIAL_INVALID", exitCode: 3 },
+        );
+      }
+      const value = await setCapabilityCredentialValue({
         root,
-        capabilities: declarations.capabilities,
+        declaredCredentialIds: [
+          ...new Set([
+            ...declarations.capabilities.flatMap((capability) =>
+              capability.credentials.map((credential) => credential.id),
+            ),
+            ...researchDataCredentialIds(),
+          ]),
+        ],
         credentialId,
-        environmentName,
-        environment: io.env,
+        value: credentialValue,
+        minimumUtf8Bytes: 8,
       });
       await appendJournalEvent(
         workspacePaths(root).journal,
@@ -812,11 +837,11 @@ async function runCapability(argv: string[], io: CliIO): Promise<number> {
         "workspace",
         {
           credentialId: value.credentialId,
-          sourceEnvironmentNameSha256: sha256Text(value.sourceEnvironmentName),
+          sourceEnvironmentNameSha256: sha256Text(environmentName),
           configuredCredentialIds: value.configuredCredentialIds,
         },
       );
-      return value;
+      return { ...value, sourceEnvironmentName: environmentName };
     });
     writeJson(io, result, args);
     return 0;
@@ -1215,6 +1240,45 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   }
   if (action === "evidence") {
     const [evidenceAction, ...evidenceRest] = rest;
+    if (evidenceAction === "data") {
+      const [dataAction, ...dataRest] = evidenceRest;
+      if (dataAction !== "run") {
+        throw unknownAction("research project evidence data", dataAction ?? "");
+      }
+      const args = parseStrictArgs(
+        dataRest,
+        { ...WORKSPACE_OPTIONS, request: "string" },
+        "research project evidence data run",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project evidence data run");
+      const requestPath = strictString(args, "request");
+      if (!requestPath) {
+        throw new CliError("evidence data run requires --request.", {
+          code: "RESEARCH_DATA_REQUEST_INVALID",
+          exitCode: 2,
+        });
+      }
+      const request = await readBoundedJsonRecord(
+        requestPath,
+        "--request",
+        "RESEARCH_DATA_REQUEST_INVALID",
+      );
+      const root = await workspaceFromArgs(args);
+      const result = await withWorkspaceLock(root, "research.data-evidence.run", () =>
+        executeResearchDataCapability({
+          root,
+          projectId,
+          request,
+        }),
+      );
+      writeJson(io, result, args);
+      return result.coreResult.status === "success"
+        ? 0
+        : result.coreResult.status === "partial"
+          ? 4
+          : 3;
+    }
     if (evidenceAction === "activity") {
       const [activityAction, ...activityRest] = evidenceRest;
       if (activityAction !== "record") {

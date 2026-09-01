@@ -1,0 +1,40 @@
+{
+  "value": {
+    "queryInfo": {},
+    "timeSeries": [
+      {
+        "sourceInfo": {
+          "siteName": "SYNTHETIC RIVER AT TEST CITY",
+          "siteCode": [{ "value": "01646500", "agencyCode": "USGS" }],
+          "geoLocation": {
+            "geogLocation": { "latitude": 38.94978, "longitude": -77.12764 }
+          },
+          "siteProperty": [{ "value": "ST", "name": "siteTypeCd" }]
+        },
+        "variable": {
+          "variableCode": [{ "value": "00060" }],
+          "variableName": "Streamflow, ft3/s",
+          "variableDescription": "Discharge, cubic feet per second",
+          "unit": { "unitCode": "ft3/s" },
+          "noDataValue": -999999
+        },
+        "values": [
+          {
+            "value": [
+              {
+                "value": "125.5",
+                "qualifiers": ["P"],
+                "dateTime": "2026-03-22T00:00:00Z"
+              },
+              {
+                "value": " ",
+                "qualifiers": [],
+                "dateTime": "2026-03-22T01:00:00Z"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

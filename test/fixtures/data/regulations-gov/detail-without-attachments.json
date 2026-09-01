@@ -1,0 +1,26 @@
+{
+  "data": {
+    "id": "EPA-HQ-OAR-2026-0001-0001",
+    "type": "comments",
+    "attributes": {
+      "agencyId": "EPA",
+      "comment": "Another synthetic public comment.",
+      "commentOnDocumentId": "EPA-HQ-OAR-2026-0001-0001",
+      "docketId": "EPA-HQ-OAR-2026-0001",
+      "documentType": "Proposed Rule",
+      "postedDate": "2026-03-01T15:00:00Z",
+      "modifyDate": "2026-03-01T16:15:00Z",
+      "receiveDate": "2026-03-01T14:00:00Z",
+      "title": "Synthetic comment one",
+      "trackingNbr": "synthetic-tracking-number-2",
+      "withdrawn": false,
+      "reasonWithdrawn": null,
+      "restrictReason": null,
+      "restrictReasonType": null,
+      "organization": null,
+      "govAgency": "Synthetic Public Agency",
+      "govAgencyType": "Federal",
+      "duplicateComments": 0
+    }
+  }
+}

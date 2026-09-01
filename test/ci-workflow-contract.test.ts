@@ -31,9 +31,11 @@ describe("GitHub CI workflow contract", () => {
   it("runs one full suite per platform, Linux-only coverage, and targeted platform contracts", () => {
     const quality = workflow(".github/workflows/quality-gate.yml");
     const fullSuite = stepByName(quality, "Full test suite");
+    const typecheck = stepByName(quality, "Typecheck");
     const platformSuite = stepByName(quality, "Platform contract suite");
     const coverage = stepByName(quality, "Coverage gate");
 
+    assert.equal(typecheck.run, "npm run typecheck");
     assert.equal(fullSuite.run, "npm test");
     assert.match(String(fullSuite.if), /runner\.os != 'Linux'/);
     assert.match(String(fullSuite.if), /matrix\.arch != 'x64'/);

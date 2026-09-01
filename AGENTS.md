@@ -18,7 +18,7 @@ checkPaths:
   - docs/agents/**
   - src/**
 lastReviewedAt: 2026-09-01
-lastReviewedCommit: 7b7fc682698778edf5b77d69f0fa3f944e6da4a6
+lastReviewedCommit: e387a5e66221ab91920a6e6c960cc717919caecb
 ---
 
 # Tiangong AI CLI Contract
@@ -40,6 +40,10 @@ This repository owns the Tiangong AI command-line interface.
 
 - `tiangong-ai --version`
 - `tiangong-ai doctor`
+- `tiangong-ai data catalog`
+- `tiangong-ai data describe`
+- `tiangong-ai data doctor`
+- `tiangong-ai data run`
 - `tiangong-ai kb ingest`
 - `tiangong-ai kb ingest bulk`
 - `tiangong-ai kb ingest jobs`
@@ -61,6 +65,16 @@ This repository owns the Tiangong AI command-line interface.
 - `tiangong-ai research search`
 - `tiangong-ai education search`
 
+The built-in atomic data catalog currently contains 19 independently
+discoverable capabilities for public environmental, regulatory, news-event,
+social, video, and water-project data, including bounded USBR RISE and project
+record capabilities.
+Connector execution, normalization, schemas, provider limits, and
+source/license restrictions belong under `src/data/**`. The execution manifest
+digest is deliberately separate from the Agent-facing discovery metadata
+digest; Skills may bind to execution contracts but must not copy connector
+logic or treat discovery wording as runtime drift.
+
 ## Validation
 
 Run before delivery:
@@ -68,6 +82,7 @@ Run before delivery:
 ```bash
 npm run test:clean:cold
 npm run lint
+npm run typecheck
 npm run build
 npm test
 npm run test:platform
@@ -106,3 +121,8 @@ test, coverage, and pack checks before publishing.
   skill handoff boundaries.
 - Read `docs/agents/repo-validation.md` before changing package scripts,
   coverage thresholds, CI, or docpact configuration.
+- Read `docs/agents/data-runtime-architecture.md` before changing proposed
+  atomic data commands, connectors, machine schemas, receipts, credentials, or
+  the Skills/Research data boundary.
+- Read `docs/agents/data-runtime-implementation-plan.md` before starting or
+  sequencing the TypeScript 7 and atomic data migration work packages.

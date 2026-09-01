@@ -1,6 +1,6 @@
 {
   "name": "@tiangong-ai/cli",
-  "version": "0.0.51",
+  "version": "0.0.55",
   "description": "Tiangong AI command-line interface.",
   "repository": {
     "type": "git",
@@ -31,7 +31,7 @@
     "test": "npm run build && node --import tsx --test test/*.test.ts",
     "test:platform": "npm run build && node --import tsx --test test/research-platform-contract.test.ts",
     "test:coverage": "npm run build && node ./scripts/run-test-coverage.cjs",
-    "test:container": "node ./scripts/assert-clean-container.mjs && npm run lint && npm run test:coverage",
+    "test:container": "node ./scripts/assert-clean-container.mjs && npm run lint && npm run typecheck && npm run test:coverage",
     "test:clean": "sh ./scripts/test-clean-container.sh",
     "test:clean:cold": "sh ./scripts/test-clean-container.sh --cold-build",
     "audit:research-setup-pins": "npm run build && node ./scripts/audit-research-setup-pins.mjs",
@@ -59,7 +59,7 @@
     "c8": "^12.0.0",
     "prettier": "^3.8.1",
     "tsx": "^4.23.11",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1056.0",

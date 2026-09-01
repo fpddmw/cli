@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-20
-lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
+lastReviewedAt: 2026-09-01
+lastReviewedCommit: e387a5e66221ab91920a6e6c960cc717919caecb
 ---
 
 # Repo Validation
@@ -28,7 +28,8 @@ lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
 
 - Node: `>=24 <25`
 - Package manager: `npm`
-- Source: TypeScript
+- Source: TypeScript 7.0.2 native compiler (`typescript` range `^7.0.2`, exact
+  resolution locked by `package-lock.json`)
 - Stable launcher: `bin/tiangong-ai.js`
 - Research execution sandbox: macOS `sandbox-exec` or Linux Bubblewrap
 - Windows validates setup and deterministic logic in smoke-test mode, but
@@ -37,6 +38,92 @@ lastReviewedCommit: 4b5339bf7b2760d7ffd51827b87a820dd8f57ebe
 - Repository text checkout uses LF line endings through `.gitattributes`; this
   keeps Prettier behavior consistent across Linux, macOS, and Windows CI
   runners.
+
+## TypeScript 7 Baseline And Data Gates
+
+The TypeScript 7 toolchain gate is complete before connector business logic.
+The repository uses the native `tsc` from TypeScript 7.0.2, explicitly loads
+Node declarations through `types: ["node"]`, and does not import the compiler's
+programmatic API. Node stays on `>=24 <25`.
+
+Every hosted matrix row runs the full TypeScript check, and the clean-container
+gate runs it before coverage. This includes test sources, while the declaration
+build remains scoped to `src/**`. The migration fixed pre-existing test-only
+inference/nullability failures without changing runtime behavior.
+
+The data runtime has a dedicated connector conformance harness rather than
+relying only on the repository's aggregate coverage threshold. It covers
+execution-manifest, discovery-metadata and schema stability; proves that
+discovery-only wording changes do not alter execution bindings; and covers
+canonical cross-platform digests, endpoint and redirect policy, bounded HTTP
+behavior, header and protected path-segment logical credential injection,
+secret-independent request digests, redaction, pagination/partial results,
+stable errors, receipt binding, and npm package discovery of the published
+schemas. Provider live tests remain explicit opt-ins; ordinary and
+clean-container CI use privacy-safe fixtures and synthetic connectors only.
+
+`test/data-airnow-connector.test.ts` reconstructs the official HourlyAQObs CSV
+shape and proves multi-file planning, filters, header/value handling, partial
+file coverage, source lineage, and preliminary-use restrictions.
+`test/data-federal-register-connector.test.ts` uses metadata-only JSON fixtures
+to prove stable filter encoding, pagination, empty results, record/page caps,
+provider metadata validation, and preservation of earlier pages after a later
+failure. Fixture provenance notes live beside the fixtures under
+`test/fixtures/data/**`; no provider response, credential, or user data is
+checked in.
+
+`test/data-gdelt-connectors.test.ts` generates synthetic DOC JSON and
+single-member ZIP/TSV fixtures in memory. It proves four independent capability
+contracts, exact 15-minute path planning without `masterfilelist.txt`, latest
+size/MD5 verification, bounded ZIP/CRC/UTF-8/column validation, closed named
+fields, later-file partial preservation, record-cap early stop, and the
+automated-coding/non-representative/content-download discovery boundaries.
+
+`test/data-bluesky-cascade-connector.test.ts` proves bounded public search,
+author-feed, custom-feed, and list-feed selection; UTC filtering; optional
+thread expansion; failed-request accounting; seed preservation on partial
+thread failure; and the public-UGC, indexing, moderation, and mutable-metric
+discovery boundaries.
+
+`test/data-youtube-public-content-connector.test.ts` proves header-only API-key
+injection, bounded video discovery and enrichment, complete reply pagination,
+credential preflight, duplicate-ID and empty-query rejection, per-video partial
+isolation, explicit empty partial results for disabled comments, and the quota,
+visibility, ranking, and non-representative-public-opinion discovery boundaries.
+The bounded HTTP suite separately proves that only a short machine-readable
+provider reason is retained from an error body; provider prose and unsafe values
+remain excluded.
+
+`test/data-nasa-firms-fire-connector.test.ts` proves required MAP_KEY preflight,
+five-day chunk planning, provider availability checks, bbox/window/transaction
+limits, VIIRS field normalization, no-results, record caps, invalid-row and
+later-chunk partial isolation, and hotspot/non-perimeter discovery boundaries.
+The shared CSV parser has its own quoted-field and malformed-input regression,
+and the bounded HTTP suite proves a path credential never enters the public
+request digest or result.
+
+`test/data-openaq-connector.test.ts` proves required API-key preflight for both
+operations, bounded and stable location filters, raw/hourly/daily sensor route
+selection, pagination metadata validation, attribution/coverage normalization,
+pre-network request rejection, record caps, later-page partial isolation, and
+the explicit S3-download, AQI, health, and regulatory boundaries.
+
+`test/data-regulations-gov-connector.test.ts` proves API-key preflight for both
+read-only operations, posted and Eastern-wall-clock last-modified filters,
+stable JSON:API pagination, curated detail and attachment metadata, omission of
+named personal-profile fields, pre-network request rejection, record caps,
+per-ID partial isolation, and the non-posting, non-download, and
+non-representative-public-opinion discovery boundaries.
+
+Target the foundation during iteration with
+`node --import tsx --test test/data-*.test.ts`. The ordinary `npm test` and
+coverage commands discover the same suites automatically. A build must emit all
+nine public contract files under `dist/data/schemas/`, including the independent
+discovery metadata contract; the package contract test compares those bytes
+with the runtime-loaded documents.
+
+The exact work-package sequence and completion criteria are authoritative in
+`docs/agents/data-runtime-implementation-plan.md`.
 
 ## Hosted CI Matrix
 
@@ -51,11 +138,12 @@ used by the reference workspace CLI:
 
 The runner label selects the actual GitHub-hosted architecture; the explicit
 `arch` value keeps job names and matrix intent auditable. Both Linux rows
-install Bubblewrap and smoke-test an unprivileged capsule. Every row runs lint,
-but each row runs the full test suite only once: Ubuntu x64 obtains that result
-through coverage, Ubuntu ARM runs `npm test`, and macOS/Windows run `npm test`
-plus the small pure `test:platform` contract. Coverage therefore runs only on
-Linux x64 and never follows a duplicate `npm test` in that job.
+install Bubblewrap and smoke-test an unprivileged capsule. Every row runs lint
+and the full TypeScript check, but each row runs the full runtime test suite only
+once: Ubuntu x64 obtains that result through coverage, Ubuntu ARM runs
+`npm test`, and macOS/Windows run `npm test` plus the small pure
+`test:platform` contract. Coverage therefore runs only on Linux x64 and never
+follows a duplicate `npm test` in that job.
 
 The pure platform contract models Windows drive letters, separators,
 case-insensitive containment and cross-drive paths plus the macOS `/var` to
@@ -75,6 +163,7 @@ Run before delivery:
 ```bash
 npm run test:clean:cold
 npm run lint
+npm run typecheck
 npm test
 npm run test:platform
 npm run test:coverage
@@ -86,7 +175,7 @@ docpact lint --root . --worktree --mode enforce
 `npm run test:clean` is the iterative red/green/refactor entrypoint. It builds
 from the digest-pinned Node 24 image, may reuse Docker layers whose declared
 inputs still match, copies only the `.dockerignore`-filtered checkout, and runs
-the full lint/coverage gate as a non-root user in a newly created,
+the full lint/typecheck/coverage gate as a non-root user in a newly created,
 runtime-offline container. Tests run after container creation and are never a
 build-cache result. Host tests cannot replace this gate.
 
@@ -154,6 +243,13 @@ with archived bindings, and non-zero apply/status/doctor results until overall
 readiness is complete. The suite uses injected setup operations for
 provider-free execution and must not contact a real provider or reviewer
 service.
+
+`test/research-data-evidence-adapter.test.ts` covers dynamic operation
+projection, standalone/core receipt parity, owner-only namespaced credential
+injection, secret-free evidence persistence, and the Research credential-source
+boundary. A host provider variable without the corresponding workspace
+credential must return `credential-missing` before connector execution or any
+network request.
 
 ## Release Flow
 

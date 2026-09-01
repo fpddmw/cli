@@ -30,7 +30,7 @@ const provenanceSchema = {
   additionalProperties: false,
   required: ["kind", "id"],
   properties: {
-    kind: { type: "string", enum: ["input", "broker"] },
+    kind: { type: "string", enum: ["input", "broker", "data"] },
     id: { type: "string", pattern: IDENTIFIER },
   },
 } as const;

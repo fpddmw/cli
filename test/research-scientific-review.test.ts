@@ -1082,7 +1082,7 @@ describe("top-journal early scientific reviews", () => {
         fixture,
         sharedIndependent.map((id, index) => ({
           id,
-          sourceType: sourceTypes[index % sourceTypes.length],
+          sourceType: sourceTypes[index % sourceTypes.length]!,
           publicationDate: "2025-01-01",
           fullTextAvailable: true,
           coverageDimensions: dimensions,
