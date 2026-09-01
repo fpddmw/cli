@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-09-01
-lastReviewedCommit: 2824bacb08ee7079e2b9e47ebd5694f61e3e9c0a
+lastReviewedCommit: ca716c2fea59d0a8085aa32dbd8f65a686b3353e
 ---
 
 # Tiangong AI CLI
@@ -510,6 +510,11 @@ ordered by UTF-8 bytes rather than the host locale, and newly created detached
 source checkouts disable Git line-ending conversion before checkout. A source
 hash mismatch remains fail-closed before `npx skills add`; its structured error
 reports only the Skill/source IDs, hash algorithm, and expected/observed hashes.
+Setup runs every nested npm installer through one apply-scoped owner-only cache
+under the OS temporary directory, never through the caller's HOME or global npm
+cache, and removes it after either success or failure. This keeps nested
+executables usable when HOME is mounted `noexec` without admitting mutable host
+cache state into a reviewed installation.
 It never treats file existence as installation success or silently rewrites an
 immutable plan. Plans created by an earlier CLI release are rejected at the
 execution boundary; create and review a new plan with the active release. The
