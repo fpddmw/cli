@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-31
-lastReviewedCommit: 36918b2ce7255631657d928d4ce84cfdb3b49891
+lastReviewedAt: 2026-09-01
+lastReviewedCommit: e387a5e66221ab91920a6e6c960cc717919caecb
 ---
 
 # Repo Architecture
@@ -206,9 +206,11 @@ storage writes, queueing, and document status transitions.
   with explicit-ID comment retrieval.
 - `src/research/workspace/data-evidence-adapter.ts`: dynamically projects every
   built-in data operation into the native Research discovery packet, invokes
-  the shared TypeScript data service in-process, applies Research credential,
-  call, item, byte, context, receipt, ledger, and audit bindings, and never
-  introduces provider-specific Research adapters.
+  the shared TypeScript data service in-process, constructs its provider
+  credential environment exclusively from the owner-only Research store,
+  applies call, item, byte, context, receipt, ledger, and audit bindings, and
+  never inherits host provider credentials or introduces provider-specific
+  Research adapters.
 - `scripts/**`: validation helpers.
 - `test/**`: Node test runner suites.
 

@@ -16,8 +16,8 @@ checkPaths:
   - src/data/**
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
-lastReviewedAt: 2026-08-31
-lastReviewedCommit: 5dc7dc20eb94bc29616528bc3b20c428b5d10c31
+lastReviewedAt: 2026-09-01
+lastReviewedCommit: e387a5e66221ab91920a6e6c960cc717919caecb
 ---
 
 # 原子数据运行时目标架构
@@ -369,6 +369,10 @@ URL query、header、环境变量值、本地绝对路径和 provider 原始错�
 
 - manifest 只引用逻辑 credential ID；运行时从明确允许的环境变量或未来受审阅的
   owner-only store 解析值。
+- 独立 `data run` 只从 manifest 声明的宿主环境变量解析凭证；Research adapter 不接收、
+  复制或 fallback 到宿主 provider 环境变量，只把 owner-only workspace credential map 中
+  与当前 capability/credential 精确匹配的值映射到本次调用的最小环境。缺失时必须在
+  connector 执行和网络请求前返回 `credential-missing`。
 - credential injection 只支持 manifest 声明的受控 header 或完整 path-segment
   placeholder；endpoint 校验和安全 request digest 使用不含 secret 的逻辑 target，实际
   注入发生在校验后，输出、回执和错误不得暴露注入后的 URL。
@@ -404,9 +408,10 @@ lock、预算、候选/来源准入、永久证据、journal 和 review 规则�
 二十三个 operation 投影。native discover packet 携带这份摘要 catalog、独立
 `data describe` 命令和 `research project evidence data run` 命令。后者在同一进程调用
 `executeDataRun`，施加 Research 证据调用/响应/记录/context 上限，从 owner-only credential
-map 把命名空间化逻辑凭证映射到 manifest 环境变量，并把成功或 partial 结果、核心 receipt
-digest 与可选 artifact bytes 内容寻址地写入既有 receipt/ledger/audit 链。blocked 结果只记
-失败 journal，不晋升为证据。新增 registry operation 无需修改 Research provider 代码。
+map 把命名空间化逻辑凭证映射到 manifest 环境变量；它不会接收完整宿主环境，也不允许
+宿主同名 provider key 作为后备。adapter 把成功或 partial 结果、核心 receipt digest 与
+可选 artifact bytes 内容寻址地写入既有 receipt/ledger/audit 链。blocked 结果只记失败
+journal，不晋升为证据。新增 registry operation 无需修改 Research provider 代码。
 
 ## 明确不做
 

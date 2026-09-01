@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-31
-lastReviewedCommit: 36df568230534c0c0d35ae459f266e6010f51c4c
+lastReviewedAt: 2026-09-01
+lastReviewedCommit: e387a5e66221ab91920a6e6c960cc717919caecb
 ---
 
 # Tiangong AI CLI
@@ -1102,7 +1102,12 @@ This Research command calls the same TypeScript data service in-process; it does
 not spawn `tiangong-ai data run`. It preserves the core data and receipt digest,
 then adds the project budget, namespaced owner-only credential mapping,
 content-addressed evidence/optional artifacts, candidate, ledger, journal, and
-review bindings. A blocked data result is not promoted to evidence.
+review bindings. Research data execution never inherits provider credentials
+from the CLI host environment and does not fall back to `process.env`; every
+credentialed operation must resolve its namespaced logical credential from the
+workspace's owner-only store or it is blocked before any provider request.
+Standalone `tiangong-ai data run` keeps its separate manifest-declared
+environment-variable policy. A blocked data result is not promoted to evidence.
 Analyze and synthesize packets contain bounded, hash-verified prior-stage
 artifacts and require no external evidence calls. Review is tool-free and uses the
 reviewer's route-specific structured-output turn cap:

@@ -72,7 +72,6 @@ describe("research data evidence adapter", () => {
         projectId: "data-evidence",
         request: request(),
         registry,
-        environment: {},
         clock,
       });
 
@@ -179,7 +178,6 @@ describe("research data evidence adapter", () => {
         projectId: "data-credential",
         request: request(),
         registry,
-        environment: {},
       });
 
       assert.equal(result.coreResult.status, "success");
@@ -197,6 +195,79 @@ describe("research data evidence adapter", () => {
         sessionId: packet.sessionId,
       });
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not inherit provider credentials from the host environment", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-research-data-ambient-credential-"));
+    let networkRequests = 0;
+    const registry = createDataRegistry([
+      syntheticConnector({
+        credential: true,
+        execute: async (context) => {
+          const response = await context.http.request({
+            endpointId: "primary",
+            method: "GET",
+            path: "/v1/echo",
+            credentialId: "api-token",
+          });
+          return {
+            status: "success",
+            data: { echoed: response.text() },
+            summary: {
+              recordCount: 1,
+              pageCount: 1,
+              chunkCount: 0,
+              truncated: false,
+              completeness: "complete",
+            },
+            warnings: [],
+            errors: [],
+            observations: [response.observation],
+          };
+        },
+      }),
+    ]);
+    const previous = process.env.TIANGONG_DATA_TEST_TOKEN;
+    process.env.TIANGONG_DATA_TEST_TOKEN = "ambient-provider-secret";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await initializeProject(root, "data-ambient", "Reject ambient provider credentials.");
+      const packet = await prepareNativeResearchStage({
+        root,
+        projectId: "data-ambient",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+
+      const result = await executeResearchDataCapability({
+        root,
+        projectId: "data-ambient",
+        request: request(),
+        registry,
+        fetchImpl: async () => {
+          networkRequests += 1;
+          return new Response('"network-result"', {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      });
+      await abortNativeResearchStage({
+        root,
+        projectId: "data-ambient",
+        sessionId: packet.sessionId,
+      });
+
+      assert.equal(result.coreResult.status, "blocked");
+      assert.equal(result.coreResult.errors[0]?.code, "credential-missing");
+      assert.equal(result.evidenceReceipt, null);
+      assert.equal(result.candidate, null);
+      assert.equal(networkRequests, 0);
+    } finally {
+      if (previous === undefined) delete process.env.TIANGONG_DATA_TEST_TOKEN;
+      else process.env.TIANGONG_DATA_TEST_TOKEN = previous;
       await rm(root, { recursive: true, force: true });
     }
   });

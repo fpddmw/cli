@@ -18,8 +18,8 @@ checkPaths:
   - src/data/**
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
-lastReviewedAt: 2026-08-31
-lastReviewedCommit: 5dc7dc20eb94bc29616528bc3b20c428b5d10c31
+lastReviewedAt: 2026-09-01
+lastReviewedCommit: e387a5e66221ab91920a6e6c960cc717919caecb
 ---
 
 # 原子数据运行时实施计划
@@ -202,7 +202,10 @@ runtime primitive。
 精确运行命令，进程内复用 data runtime，并把核心 receipt digest、connector/operation
 版本、永久结果对象、可选下载 artifacts、candidate、预算和 journal 绑定到 Research。
 parity、credential 脱敏、动态投影和 packet 合同均有独立回归；隔离容器 RED/GREEN 证据
-按本工作包门禁保留。
+按本工作包门禁保留。Research 数据调用只从 owner-only workspace credential store 构造
+当前 connector 所需的最小凭证环境，不继承或 fallback 到 CLI 宿主的 provider 环境变量；
+缺失 workspace credential 时在 connector 和网络执行前返回 blocked，并由显式 ambient-key
+回归冻结该边界。
 
 ## 工作包 6：后续分批迁移
 

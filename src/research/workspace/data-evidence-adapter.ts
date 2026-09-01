@@ -86,7 +86,6 @@ export interface ExecuteResearchDataCapabilityInput {
   root: string;
   projectId: string;
   request: unknown;
-  environment: NodeJS.ProcessEnv;
   registry?: DataRegistry;
   fetchImpl?: typeof fetch;
   clock?: () => Date;
@@ -200,7 +199,7 @@ export async function executeResearchDataCapability(
       input.root,
       declaredCredentialIds,
     );
-    const environment = { ...input.environment };
+    const environment: NodeJS.ProcessEnv = {};
     for (const credential of connector.manifest.credentials) {
       const value = credentialMap.get(
         researchDataCredentialId(connector.manifest.capabilityId, credential.credentialId),
