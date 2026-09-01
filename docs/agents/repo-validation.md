@@ -313,6 +313,10 @@ canaries, and the prohibition on implicit pip/npm/system installation.
 and Claude routing targets, owner-byte preservation, idempotent apply,
 new-session status, exact owned-byte removal, pre-mutation conflict detection,
 user-modified managed blocks, and symlink escape rejection.
+The setup execution regression also fixes the nested installer argv as
+`npx --package skills@<pin> -- skills ...`; positional package invocation is
+not accepted because it fails inside a clean outer `npx --package
+@tiangong-ai/cli` consumer environment.
 `test/research-setup-audit-bundle.test.ts` proves setup-only export is portable,
 closed, secret-free, movable, exact-file and semantically hash-bound; missing,
 extra, tampered, symlinked, or invalid-attestation inputs fail closed without
