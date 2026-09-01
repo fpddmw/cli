@@ -361,6 +361,18 @@ the default; global writes, network downloads, live provider checks, synthetic
 document uploads, and paid agent smokes each require their applicable
 confirmation.
 
+When the orchestrator is selected with project scope, the reviewed plan also
+binds its host-routing instructions. Codex receives one bounded managed block
+in the workspace-root `AGENTS.md`; setup preserves every owner byte outside
+that block. Claude Code receives the dedicated
+`.claude/rules/tiangong-auto-research.md` file and setup never replaces an
+owner `CLAUDE.md`. Existing conflicting, modified, linked, or otherwise unsafe
+targets stop apply before mutation. Replacement plans remove only routing
+bytes still proven to be setup-owned. Status and Doctor verify the installed
+bytes and report that a new native-host session is required before the routing
+instruction becomes active. Global-scope Skill installation does not create
+project instruction files.
+
 ### Declarative setup
 
 For repeatable provisioning without a TTY, generate a safe workspace-local
