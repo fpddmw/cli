@@ -18,7 +18,7 @@ import {
   materializeAcquisitionAudit,
   parseMaterializedAcquisitionAudit,
 } from "./acquisition.js";
-import { stageEvidenceArtifacts } from "./artifacts.js";
+import { loadEvidenceArtifactOwnerInputAdoptions, stageEvidenceArtifacts } from "./artifacts.js";
 import {
   commitCurrentDiscoveryAssessments,
   commitDiscoveryDecisions,
@@ -457,6 +457,7 @@ export interface NativeStagePacket {
       supportedMediaTypes: string[];
       optionalMetadataFields: string[];
     } | null;
+    adoptOwnerInput: { argv: string[] } | null;
     submit: { argv: string[] };
     abort: { argv: string[] };
   };
@@ -726,7 +727,7 @@ export async function prepareNativeResearchStage(input: {
           : input.stage === "discover" && hasBrokeredEvidence
             ? "Use native Web/Browser broadly for discovery when useful, but record every native search/navigation with recordActivity and register its candidates. Before admitting any native lead, formalize the same URL or DOI through fetchEvidence so it receives an immutable broker receipt. Assess candidates in bounded batches with recordAssessment as they arrive; the final output is only a small coverage closeout. Native results without broker/input provenance are discovery leads, never evidence."
             : input.stage === "acquire"
-              ? "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. Capture the exact browser/adapter Download object, save it to the planned unique staging path, and call bindDownload before registerArtifact. Record browser/download/file-inspection activity with recordActivity. Failed or cancelled downloads cannot create bindings or artifacts. Never scan a download directory or infer success from file existence."
+              ? "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. A browser/adapter download must be bound with bindDownload before registerArtifact. If the owner supplies an exact file outside the research control directory, add it as a project input, register the artifact, and use adoptOwnerInput to append its provenance. Record browser/download/file-inspection activity with recordActivity. Failed or cancelled downloads cannot create bindings or artifacts. Never scan a download directory or infer success from file existence."
               : "Do not acquire additional evidence in this stage.",
         basePrompt,
         "Save only the final schema-conforming JSON object to a new regular file, then submit it with the packet's submit command. The CLI remains the sole authority for validation and atomic promotion.",
@@ -884,6 +885,29 @@ export async function prepareNativeResearchStage(input: {
                     "license-url",
                     "host-type",
                     "article-version",
+                  ],
+                }
+              : null,
+          adoptOwnerInput:
+            input.stage === "acquire"
+              ? {
+                  argv: [
+                    "tiangong-ai",
+                    "research",
+                    "project",
+                    "evidence",
+                    "artifact",
+                    "adopt-input",
+                    project.id,
+                    "--candidate",
+                    "<candidate-id>",
+                    "--artifact",
+                    "<artifact-id>",
+                    "--input",
+                    "<project-input-id>",
+                    "--workspace",
+                    input.root,
+                    "--json",
                   ],
                 }
               : null,
@@ -1219,7 +1243,7 @@ export async function refreshNativeResearchStage(input: {
       const prompt = [
         "Perform this producer stage in the current interactive host session. Do not launch codex exec, claude -p, or any other nested reasoning agent.",
         capsule.publicationPolicyDocumentation,
-        "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. Capture the exact browser/adapter Download object, save it to the planned unique staging path, and call bindDownload before registerArtifact. Record browser/download/file-inspection activity with recordActivity. Failed or cancelled downloads cannot create bindings or artifacts. Never scan a download directory or infer success from file existence.",
+        "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. A browser/adapter download must be bound with bindDownload before registerArtifact. If the owner supplies an exact file outside the research control directory, add it as a project input, register the artifact, and use adoptOwnerInput to append its provenance. Record browser/download/file-inspection activity with recordActivity. Failed or cancelled downloads cannot create bindings or artifacts. Never scan a download directory or infer success from file existence.",
         basePrompt,
         "Save only the final schema-conforming JSON object to a new regular file, then submit it with the packet's submit command. The CLI remains the sole authority for validation and atomic promotion.",
       ].join("\n\n");
@@ -5319,8 +5343,14 @@ async function assertNewNativeInputsAdmitted(
   const admittedCandidateIds = new Set(
     (await admittedSourceCandidateBindings(root, project.id)).map((binding) => binding.candidateId),
   );
+  const adoptedInputIds = new Set(
+    [...(await loadEvidenceArtifactOwnerInputAdoptions(root, project.id)).values()].map(
+      (adoption) => adoption.inputId,
+    ),
+  );
   const notAdmittedInputIds = added
     .filter((input) => {
+      if (adoptedInputIds.has(input.id)) return false;
       const candidateId = candidateByInputId.get(input.id);
       return !candidateId || !admittedCandidateIds.has(candidateId);
     })

@@ -32,6 +32,7 @@ import {
   writeJsonAtomic,
 } from "./storage.js";
 import { loadWorkspaceConfig } from "./workspace.js";
+import type { ProjectInput, ProjectState } from "./types.js";
 
 const SENSITIVE_QUERY_KEY =
   /^(?:access[_-]?token|api[_-]?key|apikey|auth|authorization|code|cookie|credential|key|password|secret|session(?:[_-]?id)?|sig|signature|token|x[_-]amz[_-](?:credential|security[_-]?token|signature)|x[_-]goog[_-](?:credential|signature))$/i;
@@ -61,6 +62,146 @@ export interface EvidenceArtifactRecord {
     checks: string[];
     details: Record<string, string | number | boolean | string[]>;
   };
+}
+
+export interface EvidenceArtifactOwnerInputAdoption {
+  schemaVersion: 1;
+  projectId: string;
+  candidateId: string;
+  artifactId: string;
+  inputId: string;
+  inputSha256: string;
+  inputBytes: number;
+  adoptedAt: string;
+}
+
+export interface EvidenceArtifactOwnerInputAdoptionResult extends EvidenceArtifactOwnerInputAdoption {
+  status: "adopted" | "existing";
+}
+
+export async function adoptEvidenceArtifactOwnerInput(input: {
+  root: string;
+  projectId: string;
+  candidateId: string;
+  artifactId: string;
+  inputId: string;
+}): Promise<EvidenceArtifactOwnerInputAdoptionResult> {
+  if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(input.projectId)) {
+    throw artifactError("Artifact project ID is invalid.", "RESEARCH_ARTIFACT_PATH_INVALID");
+  }
+  const project = await readJsonFile<ProjectState>(
+    resolveContained(workspacePaths(input.root).projects, `${input.projectId}/project.json`),
+    `Research project ${input.projectId}`,
+  );
+  const acquire = project.packages.find((workPackage) => workPackage.stage === "acquire");
+  if (acquire?.status !== "running" || acquire.executor !== "producer") {
+    throw artifactError(
+      "Owner-input adoption is allowed only during the active native acquisition stage.",
+      "RESEARCH_ACQUISITION_STAGE_REQUIRED",
+    );
+  }
+  const artifact = (await loadEvidenceArtifactRecords(input.root, input.projectId)).find(
+    (record) => record.artifactId === input.artifactId,
+  );
+  if (!artifact || artifact.candidateId !== input.candidateId) {
+    throw artifactError(
+      "Owner-input adoption refers to an unknown or differently bound artifact.",
+      "RESEARCH_ARTIFACT_OWNER_INPUT_INVALID",
+    );
+  }
+  if (artifact.downloadBinding || artifact.derivedFromArtifactId) {
+    throw artifactError(
+      "Only a legacy unbound artifact can adopt owner-input provenance.",
+      "RESEARCH_ARTIFACT_OWNER_INPUT_INVALID",
+    );
+  }
+  const projectInput = project.inputs.find((record) => record.id === input.inputId);
+  if (!projectInput) {
+    throw artifactError(
+      `Owner-input adoption refers to unknown project input ${input.inputId}.`,
+      "RESEARCH_ARTIFACT_OWNER_INPUT_INVALID",
+    );
+  }
+  await assertOwnerInputMatchesArtifact(projectInput, artifact);
+  const existing = (await loadEvidenceArtifactOwnerInputAdoptions(input.root, input.projectId)).get(
+    artifact.artifactId,
+  );
+  if (existing) {
+    if (existing.inputId !== projectInput.id) {
+      throw artifactError(
+        `Artifact ${artifact.artifactId} already adopted a different owner input.`,
+        "RESEARCH_ARTIFACT_OWNER_INPUT_CONFLICT",
+      );
+    }
+    return { ...existing, status: "existing" };
+  }
+  const adoption: EvidenceArtifactOwnerInputAdoption = {
+    schemaVersion: 1,
+    projectId: input.projectId,
+    candidateId: artifact.candidateId,
+    artifactId: artifact.artifactId,
+    inputId: projectInput.id,
+    inputSha256: projectInput.sha256,
+    inputBytes: projectInput.bytes,
+    adoptedAt: new Date().toISOString(),
+  };
+  await appendEvidenceLedgerEvent(input.root, input.projectId, "artifact.owner-input-adopted", {
+    ...adoption,
+  });
+  return { ...adoption, status: "adopted" };
+}
+
+export async function loadEvidenceArtifactOwnerInputAdoptions(
+  root: string,
+  projectId: string,
+): Promise<Map<string, EvidenceArtifactOwnerInputAdoption>> {
+  const [project, artifacts, events] = await Promise.all([
+    readJsonFile<ProjectState>(
+      resolveContained(workspacePaths(root).projects, `${projectId}/project.json`),
+      `Research project ${projectId}`,
+    ),
+    loadEvidenceArtifactRecords(root, projectId),
+    readJournal(evidenceLedgerPath(root, projectId)),
+  ]);
+  const artifactById = new Map(artifacts.map((artifact) => [artifact.artifactId, artifact]));
+  const inputById = new Map(project.inputs.map((projectInput) => [projectInput.id, projectInput]));
+  const adoptions = new Map<string, EvidenceArtifactOwnerInputAdoption>();
+  for (const event of events) {
+    if (event.type !== "artifact.owner-input-adopted") continue;
+    const adoption = parseOwnerInputAdoption(event.payload);
+    if (adoption.projectId !== projectId) {
+      throw artifactError(
+        "Owner-input adoption scope does not match the project.",
+        "RESEARCH_ARTIFACT_STORE_INVALID",
+      );
+    }
+    const artifact = artifactById.get(adoption.artifactId);
+    const projectInput = inputById.get(adoption.inputId);
+    if (
+      !artifact ||
+      artifact.candidateId !== adoption.candidateId ||
+      artifact.sha256 !== adoption.inputSha256 ||
+      artifact.bytes !== adoption.inputBytes ||
+      !projectInput ||
+      projectInput.sha256 !== adoption.inputSha256 ||
+      projectInput.bytes !== adoption.inputBytes
+    ) {
+      throw artifactError(
+        `Owner-input adoption binding drifted: ${adoption.artifactId}.`,
+        "RESEARCH_ARTIFACT_DRIFT",
+      );
+    }
+    await assertOwnerInputMatchesArtifact(projectInput, artifact);
+    const existing = adoptions.get(adoption.artifactId);
+    if (existing && canonicalJson(existing) !== canonicalJson(adoption)) {
+      throw artifactError(
+        `Artifact ${adoption.artifactId} has conflicting owner-input adoptions.`,
+        "RESEARCH_ARTIFACT_OWNER_INPUT_CONFLICT",
+      );
+    }
+    adoptions.set(adoption.artifactId, adoption);
+  }
+  return adoptions;
 }
 
 export async function registerEvidenceArtifact(input: {
@@ -717,6 +858,59 @@ function sanitizeFilename(value: string): string {
     .replace(/[\r\n/\\]/g, "_")
     .trim();
   return (safe || "artifact").slice(0, 255);
+}
+
+async function assertOwnerInputMatchesArtifact(
+  projectInput: ProjectInput,
+  artifact: EvidenceArtifactRecord,
+): Promise<void> {
+  const info = await lstat(projectInput.path).catch(() => undefined);
+  if (
+    !info?.isFile() ||
+    info.isSymbolicLink() ||
+    info.size !== projectInput.bytes ||
+    projectInput.sha256 !== artifact.sha256 ||
+    projectInput.bytes !== artifact.bytes ||
+    (await sha256File(projectInput.path)) !== projectInput.sha256
+  ) {
+    throw artifactError(
+      `Project input ${projectInput.id} is not the exact registered artifact bytes.`,
+      "RESEARCH_ARTIFACT_OWNER_INPUT_INVALID",
+    );
+  }
+}
+
+function parseOwnerInputAdoption(value: unknown): EvidenceArtifactOwnerInputAdoption {
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    typeof value.projectId !== "string" ||
+    typeof value.candidateId !== "string" ||
+    typeof value.artifactId !== "string" ||
+    typeof value.inputId !== "string" ||
+    typeof value.inputSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.inputSha256) ||
+    typeof value.inputBytes !== "number" ||
+    !Number.isSafeInteger(value.inputBytes) ||
+    value.inputBytes < 1 ||
+    typeof value.adoptedAt !== "string" ||
+    !Number.isFinite(Date.parse(value.adoptedAt))
+  ) {
+    throw artifactError(
+      "Owner-input adoption ledger payload is invalid.",
+      "RESEARCH_ARTIFACT_STORE_INVALID",
+    );
+  }
+  return {
+    schemaVersion: 1,
+    projectId: value.projectId,
+    candidateId: value.candidateId,
+    artifactId: value.artifactId,
+    inputId: value.inputId,
+    inputSha256: value.inputSha256,
+    inputBytes: value.inputBytes,
+    adoptedAt: value.adoptedAt,
+  };
 }
 
 function requireExactAbsolutePath(value: string): string {

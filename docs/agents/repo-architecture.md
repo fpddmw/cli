@@ -336,7 +336,13 @@ review. Acquisition binds a completed network download to
 the exact selected file and download event before artifact registration,
 requires derived text to name its parent artifact, and lets that derivative
 inherit only the parent's canonical source URL instead of fabricating a second
-download binding; a conflicting URL is rejected. Acquisition then produces a
+download binding; a conflicting URL is rejected. When the project owner supplies
+the exact bytes for an already admitted network source, the input and artifact
+remain immutable objects and an `artifact.owner-input-adopted` ledger event binds
+their matching SHA-256 and size. That event preserves the existing source identity
+and exempts the provenance-only input from duplicate admission during an active
+acquisition refresh. It cannot bind a different file or overwrite an earlier
+adoption. Acquisition then produces a
 complete source audit and verified immutable snapshot even when its separate
 inference gate stops on honest gaps. The native acquisition packet embeds the
 exact admitted source-to-candidate bindings required by artifact registration

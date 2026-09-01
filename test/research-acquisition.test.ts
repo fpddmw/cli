@@ -14,7 +14,10 @@ import {
   loadCurrentEvidenceSnapshot,
   loadImmutableEvidenceSnapshotChain,
 } from "../src/research/workspace/acquisition.js";
-import { registerEvidenceArtifact } from "../src/research/workspace/artifacts.js";
+import {
+  adoptEvidenceArtifactOwnerInput,
+  registerEvidenceArtifact,
+} from "../src/research/workspace/artifacts.js";
 import { exportProjectAuditBundle } from "../src/research/workspace/audit-bundle.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import {
@@ -1387,6 +1390,173 @@ describe("research acquisition and evidence snapshots", () => {
         blockedChallenges: 0,
         linkedCandidateIds: [native.candidate.id],
       });
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("adopts an exact registered owner input for a legacy unbound network artifact", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-owner-input-adoption-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-owner-input-adoption-files-"));
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      await initializeProject(
+        root,
+        "owner-input-adoption",
+        "Recover exact owner-provided evidence.",
+      );
+      const discover = await prepareNativeResearchStage({
+        root,
+        projectId: "owner-input-adoption",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const contextBytes = Buffer.from(
+        JSON.stringify([
+          {
+            title: "Owner-provided network source",
+            url: "https://example.test/owner-source",
+            publicationDate: "2024-05-01",
+          },
+        ]),
+      );
+      const receipt = await persistBrokerEvidence(
+        root,
+        {
+          attemptId: "owner-input-attempt",
+          projectId: "owner-input-adoption",
+          capabilityId: "method.test-search",
+          credentialId: null,
+          status: 200,
+          contentType: "application/json",
+          sourceSha256: "c".repeat(64),
+          contextItems: 1,
+          contextOffset: 0,
+          contextTotalItems: 1,
+          contextNextOffset: null,
+          contextTruncated: false,
+          redactions: 0,
+          retrievedAt: "2026-08-31T00:00:00.000Z",
+          cacheHit: false,
+        },
+        contextBytes,
+        contextBytes,
+      );
+      await registerBrokerCandidates({
+        root,
+        projectId: "owner-input-adoption",
+        receipt,
+        contextBytes,
+      });
+      const [candidate] = await listEvidenceCandidates(root, "owner-input-adoption");
+      assert.ok(candidate);
+      await recordAdmission(root, "owner-input-adoption", candidate.id, "owner-source");
+      const discoverOutput = join(staging, "discover.json");
+      await writeFile(discoverOutput, JSON.stringify(discoveryValue(candidate.id, "owner-source")));
+      await submitNativeResearchStage({
+        root,
+        projectId: "owner-input-adoption",
+        sessionId: discover.sessionId,
+        outputPath: discoverOutput,
+        confirmedModel: discover.expectedModel,
+      });
+      const acquire = await prepareNativeResearchStage({
+        root,
+        projectId: "owner-input-adoption",
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+
+      const ownerPath = join(staging, "owner-source.txt");
+      await writeFile(ownerPath, "exact bytes supplied by the project owner\n");
+      const legacyArtifact = await registerEvidenceArtifact({
+        root,
+        projectId: "owner-input-adoption",
+        candidateId: candidate.id,
+        path: ownerPath,
+      });
+      const ownerInput = await addProjectInput(root, "owner-input-adoption", ownerPath, "primary");
+      const adoptionResult = await invokeCli([
+        "research",
+        "project",
+        "evidence",
+        "artifact",
+        "adopt-input",
+        "owner-input-adoption",
+        "--candidate",
+        candidate.id,
+        "--artifact",
+        legacyArtifact.artifactId,
+        "--input",
+        ownerInput.id,
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(adoptionResult.exitCode, 0, adoptionResult.stderr);
+      const adoption = JSON.parse(adoptionResult.stdout) as Awaited<
+        ReturnType<typeof adoptEvidenceArtifactOwnerInput>
+      >;
+      assert.equal(adoption.status, "adopted");
+      assert.equal(adoption.inputSha256, legacyArtifact.sha256);
+      assert.equal(
+        (
+          await adoptEvidenceArtifactOwnerInput({
+            root,
+            projectId: "owner-input-adoption",
+            candidateId: candidate.id,
+            artifactId: legacyArtifact.artifactId,
+            inputId: ownerInput.id,
+          })
+        ).status,
+        "existing",
+      );
+
+      await assert.rejects(
+        adoptEvidenceArtifactOwnerInput({
+          root,
+          projectId: "owner-input-adoption",
+          candidateId: candidate.id,
+          artifactId: legacyArtifact.artifactId,
+          inputId: "missing-owner-input",
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_ARTIFACT_OWNER_INPUT_INVALID",
+      );
+
+      const refresh = await invokeCli([
+        "research",
+        "project",
+        "stage",
+        "refresh",
+        "owner-input-adoption",
+        "--session",
+        acquire.sessionId,
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(refresh.exitCode, 0, refresh.stderr);
+
+      const acquireOutput = join(staging, "acquisition.json");
+      await writeFile(
+        acquireOutput,
+        JSON.stringify(acquisitionValue(candidate.id, "owner-source", [legacyArtifact.artifactId])),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId: "owner-input-adoption",
+        sessionId: acquire.sessionId,
+        outputPath: acquireOutput,
+        confirmedModel: acquire.expectedModel,
+      });
+      const snapshot = await loadCurrentEvidenceSnapshot(root, "owner-input-adoption");
+      assert.equal(snapshot.sources[0]?.locallyAcquired, true);
+      assert.equal(snapshot.artifacts[0]?.artifactId, legacyArtifact.artifactId);
     } finally {
       await Promise.all([
         rm(root, { recursive: true, force: true }),

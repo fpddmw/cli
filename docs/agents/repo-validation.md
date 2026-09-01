@@ -324,7 +324,10 @@ stop and a hard ceiling. `test/research-acquisition.test.ts` covers native-lead
 formalization, hashed native activity, exact download-event and concurrent-file
 isolation, failed/cancelled non-commit behavior, sensitive locator redaction,
 PDF/ZIP/OpenXML structure checks, false-PDF rejection, derived-artifact lineage,
-parent URL inheritance and conflicting derivative URL rejection, binary-only
+parent URL inheritance and conflicting derivative URL rejection, exact
+owner-input adoption for legacy unbound network artifacts, adoption idempotency,
+input/artifact hash enforcement, acquisition-refresh admission exemption,
+binary-only
 versus producer-readable full text, artifact drift, immutable
 snapshot/delta lineage, and non-destructive addenda. Workspace/runtime tests
 additionally verify default superseded-project filtering, authoritative fork

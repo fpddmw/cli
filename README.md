@@ -759,6 +759,32 @@ drifted; it then rebuilds the admitted evidence record and native packet without
 changing the session start time or consuming another package attempt. Any
 non-append-only drift still fails closed and requires explicit recovery.
 
+An exact file supplied by the project owner for an already admitted network
+source does not need to become a duplicate source. Register the file as a
+project input, register its artifact against the existing candidate, and append
+the owner-input binding:
+
+```bash
+tiangong-ai research project input add gpu-resource-impact \
+  --path /absolute/path/to/owner-supplied-paper.pdf --role primary \
+  --workspace /absolute/path/to/workspace --json
+tiangong-ai research project evidence artifact register gpu-resource-impact \
+  --candidate CANDIDATE_ID --path /absolute/path/to/owner-supplied-paper.pdf \
+  --workspace /absolute/path/to/workspace --json
+tiangong-ai research project evidence artifact adopt-input gpu-resource-impact \
+  --candidate CANDIDATE_ID --artifact ARTIFACT_ID --input PROJECT_INPUT_ID \
+  --workspace /absolute/path/to/workspace --json
+tiangong-ai research project stage refresh gpu-resource-impact \
+  --session SESSION_ID --workspace /absolute/path/to/workspace --json
+```
+
+The adoption command verifies the external input and immutable artifact have
+identical size and SHA-256, records the relationship in the append-only evidence
+ledger, and is idempotent. Acquisition accepts that proof without requiring the
+input-derived candidate to be admitted separately. Browser or adapter downloads
+still require their exact download binding; owner-input adoption cannot relabel
+different bytes or replace download provenance.
+
 For WorkBuddy/CodeBuddy, keep Default Permission and start the sidecar from a
 separate native terminal with a private non-symlink state directory outside the
 workspace:

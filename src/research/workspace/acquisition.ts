@@ -2,7 +2,11 @@ import { chmod, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { CliError } from "../../errors.js";
-import { loadEvidenceArtifactRecords, type EvidenceArtifactRecord } from "./artifacts.js";
+import {
+  loadEvidenceArtifactOwnerInputAdoptions,
+  loadEvidenceArtifactRecords,
+  type EvidenceArtifactRecord,
+} from "./artifacts.js";
 import { loadProjectEvidenceReceipts } from "./evidence.js";
 import {
   appendEvidenceLedgerEvent,
@@ -120,6 +124,7 @@ export async function materializeAcquisitionAudit(
       record,
     ]),
   );
+  const ownerInputAdoptions = await loadEvidenceArtifactOwnerInputAdoptions(root, project.id);
   const decisions = parsed.decisions.map((decision) => {
     const expectedCandidateId = sourceCandidates.get(decision.sourceId);
     if (!expectedCandidateId || expectedCandidateId !== decision.candidateId) {
@@ -140,10 +145,14 @@ export async function materializeAcquisitionAudit(
     const provenance = source && isObject(source.provenance) ? source.provenance : {};
     if (
       provenance.kind === "broker" &&
-      boundArtifacts.some((artifact) => !artifactHasDownloadProvenance(artifact, artifacts))
+      boundArtifacts.some(
+        (artifact) =>
+          !artifactHasDownloadProvenance(artifact, artifacts) &&
+          !ownerInputAdoptions.has(artifact.artifactId),
+      )
     ) {
       throw acquisitionOutputError(
-        `Network source ${decision.sourceId} includes an artifact without an exact download or derived-file binding.`,
+        `Network source ${decision.sourceId} includes an artifact without an exact download, derived-file, or owner-input binding.`,
       );
     }
     return { ...decision, artifacts: boundArtifacts };

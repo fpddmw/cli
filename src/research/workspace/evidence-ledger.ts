@@ -33,6 +33,7 @@ export type EvidenceLedgerEventType =
   | "handoff.requested"
   | "handoff.resolved"
   | "artifact.registered"
+  | "artifact.owner-input-adopted"
   | "artifact.assessed"
   | "decomposition.recorded"
   | "atom.registered"
@@ -110,6 +111,7 @@ export async function cloneEvidenceLedger(
     "handoff.requested",
     "handoff.resolved",
     "artifact.registered",
+    "artifact.owner-input-adopted",
     "artifact.assessed",
     "decomposition.recorded",
     "atom.registered",

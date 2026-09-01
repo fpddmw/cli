@@ -25,7 +25,10 @@ import {
 } from "./workspace/external-skills.js";
 import { appendJournalEvent, readJournal } from "./workspace/journal.js";
 import { fetchNativeCandidateSource } from "./workspace/broker.js";
-import { registerEvidenceArtifact } from "./workspace/artifacts.js";
+import {
+  adoptEvidenceArtifactOwnerInput,
+  registerEvidenceArtifact,
+} from "./workspace/artifacts.js";
 import { exportProjectAuditBundle, verifyProjectAuditBundle } from "./workspace/audit-bundle.js";
 import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
 import {
@@ -212,6 +215,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project evidence assessment record <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence download bind <project-id> --candidate <id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence artifact register <project-id> --candidate <id> --path <absolute-file> [--download-binding <id> | --derived-from-artifact <id>] [--media-type <type>] [--source-url <https-url>] [--license <declared-license>] [--license-url <https-url>] [--host-type <type>] [--article-version <version>] [--workspace <path>] [--json]
+  tiangong-ai research project evidence artifact adopt-input <project-id> --candidate <id> --artifact <id> --input <project-input-id> [--workspace <path>] [--json]
   tiangong-ai research project evidence decomposition record <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence atom register <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence content freeze <project-id> [--workspace <path>] [--json]
@@ -1374,6 +1378,47 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     }
     if (evidenceAction === "artifact") {
       const [artifactAction, ...artifactRest] = evidenceRest;
+      if (artifactAction === "adopt-input") {
+        const args = parseStrictArgs(
+          artifactRest,
+          {
+            ...WORKSPACE_OPTIONS,
+            candidate: "string",
+            artifact: "string",
+            input: "string",
+          },
+          "research project evidence artifact adopt-input",
+        );
+        if (strictBoolean(args, "help")) return writeHelp(io);
+        const projectId = onePositional(
+          args.positionals,
+          "research project evidence artifact adopt-input",
+        );
+        const candidateId = strictString(args, "candidate");
+        const artifactId = strictString(args, "artifact");
+        const inputId = strictString(args, "input");
+        if (!candidateId || !artifactId || !inputId) {
+          throw new CliError(
+            "artifact adopt-input requires --candidate, --artifact, and --input.",
+            {
+              code: "RESEARCH_ARTIFACT_OWNER_INPUT_INVALID",
+              exitCode: 2,
+            },
+          );
+        }
+        const root = await workspaceFromArgs(args);
+        const result = await withWorkspaceLock(root, "research.artifact.adopt-input", () =>
+          adoptEvidenceArtifactOwnerInput({
+            root,
+            projectId,
+            candidateId,
+            artifactId,
+            inputId,
+          }),
+        );
+        writeJson(io, result, args);
+        return 0;
+      }
       if (artifactAction !== "register") {
         throw unknownAction("research project evidence artifact", artifactAction ?? "");
       }
