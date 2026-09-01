@@ -26,6 +26,7 @@ import {
   type ResearchSetupAgent,
   type ResearchSetupScope,
 } from "./setup-catalog.js";
+import { planResearchSetupInstructionRouting } from "./setup-instructions.js";
 import {
   applyResearchSetupPlan,
   createResearchSetupPlan,
@@ -661,6 +662,12 @@ export async function executeResearchSetupWizard(input: {
           root: setupTargetRoot({ workspace, scope, agent, environment: input.environment }),
         })),
       },
+      instructionRouting: planResearchSetupInstructionRouting({
+        workspace,
+        scope,
+        agents,
+        selectedSkillIds: selected.map((skill) => skill.id),
+      }),
       installer: RESEARCH_SETUP_INSTALLER,
       sourcePins: [...new Set(selected.map((skill) => skill.sourceId))].map((sourceId) => {
         const source = setupSource(sourceId);

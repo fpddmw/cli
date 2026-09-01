@@ -62,6 +62,13 @@ import {
   type ResearchSetupSkill,
 } from "./setup-catalog.js";
 import {
+  inspectResearchSetupInstructionRouting,
+  isResearchSetupInstructionRoutingPlan,
+  planResearchSetupInstructionRouting,
+  reconcileResearchSetupInstructionRouting,
+  type ResearchSetupInstructionRoutingPlan,
+} from "./setup-instructions.js";
+import {
   acquireFileLock,
   canonicalJson,
   ensureDirectory,
@@ -141,6 +148,7 @@ export interface ResearchSetupPlan {
       root: string;
     }>;
   };
+  instructionRouting: ResearchSetupInstructionRoutingPlan;
   selection: {
     evidenceProfile: ResearchSetupEvidenceProfile;
     skillIds: string[];
@@ -432,6 +440,12 @@ export async function createResearchSetupPlan(
   const selectedSources = [...new Set(selected.map((skill) => skill.sourceId))]
     .map(setupSource)
     .sort((left, right) => left.id.localeCompare(right.id));
+  const instructionRouting = planResearchSetupInstructionRouting({
+    workspace: root,
+    scope,
+    agents,
+    selectedSkillIds: selected.map((skill) => skill.id),
+  });
   const unsigned = {
     schemaVersion: 1 as const,
     kind: "tiangong-research-setup-plan" as const,
@@ -450,6 +464,7 @@ export async function createResearchSetupPlan(
       installer: RESEARCH_SETUP_INSTALLER,
       targets,
     },
+    instructionRouting,
     selection: {
       evidenceProfile: input.evidenceProfile,
       skillIds: selected.map((skill) => skill.id),
@@ -488,7 +503,7 @@ export async function createResearchSetupPlan(
       globalMutation: scope === "global",
       agentSmokeCost: input.agentSmoke === true,
     },
-    mutations: setupMutations(root, targets, selected),
+    mutations: setupMutations(root, targets, selected, instructionRouting),
   };
   const plan: ResearchSetupPlan = {
     ...unsigned,
@@ -775,6 +790,14 @@ export async function applyResearchSetupPlan(
       state = await completeSetupStep(root, state, "skill-install");
     }
 
+    state = await startSetupStep(root, state, "project-instruction-routing");
+    const instructionRouting = await reconcileResearchSetupInstructionRouting({
+      workspace: root,
+      planSha256: plan.planSha256,
+      routing: plan.instructionRouting,
+    });
+    state = await completeSetupStep(root, state, "project-instruction-routing");
+
     if (plan.selection.skillIds.includes("tiangong.auto-research")) {
       state = await startSetupStep(root, state, "recovery-shim-cleanup");
       await removeResearchSetupRecoveryShims(plan);
@@ -809,6 +832,12 @@ export async function applyResearchSetupPlan(
         npmIntegrity: plan.install.installer.npmIntegrity,
       },
       configuredCredentialIds: plan.credentialSources.map((credential) => credential.id),
+      instructionRouting: {
+        policy: plan.instructionRouting.policy,
+        targetAgents: plan.instructionRouting.targets.map((target) => target.agent),
+        status: instructionRouting.status,
+        restartRequired: instructionRouting.restartRequired,
+      },
     });
 
     if (options.skipDoctor) {
@@ -891,6 +920,10 @@ export async function inspectResearchSetupStatus(
   const state = setupStateForOutput(storedState, plan, root);
   const selected = plan.selection.skillIds.map(setupSkill);
   const installations = await inspectSelectedInstallations(plan, selected, environment);
+  const instructionRouting = await inspectResearchSetupInstructionRouting({
+    workspace: root,
+    routing: plan.instructionRouting,
+  });
   const credentialReadiness = await inspectSetupCredentialReadiness(plan);
   const provenance = await inspectSetupProvenance(plan, installations, environment);
   const report = (await pathExists(paths.setupReport))
@@ -910,6 +943,7 @@ export async function inspectResearchSetupStatus(
     },
     state,
     installations,
+    instructionRouting,
     credentialReadiness,
     provenance,
     report,
@@ -1848,6 +1882,28 @@ export async function doctorResearchSetup(
           : "Restore the pinned Skill bytes; setup will not overwrite a drifted or symlinked directory.",
     });
   }
+  const instructionRouting = await inspectResearchSetupInstructionRouting({
+    workspace: root,
+    routing: plan.instructionRouting,
+  });
+  for (const target of instructionRouting.targets) {
+    checks.push({
+      id: `project-instruction-routing.${target.agent}`,
+      category: "skill-installation",
+      scope: "research-core",
+      status: target.status === "installed" ? "pass" : "fail",
+      detail:
+        target.status === "installed"
+          ? `${target.detail} Start a new ${target.agent} session before relying on this routing instruction.`
+          : target.detail,
+      minimumAction:
+        target.status === "installed"
+          ? null
+          : "Resolve the reported project instruction conflict or drift, re-apply the exact setup plan, then start a new native-host session.",
+      blocking: target.status !== "installed",
+      requiredFor: ["setup", "research-core"],
+    });
+  }
   for (const installation of installations.filter(
     (candidate) => candidate.skillId === "tiangong.auto-research",
   )) {
@@ -2352,6 +2408,7 @@ function parseResearchSetupPlan(value: unknown): ResearchSetupPlan {
     ) ||
     new Set(value.install.agents).size !== value.install.agents.length ||
     value.install.targets.length !== value.install.agents.length ||
+    !isResearchSetupInstructionRoutingPlan(value.instructionRouting) ||
     !isObject(value.selection) ||
     !validEvidenceProfile(value.selection.evidenceProfile) ||
     !Array.isArray(value.selection.skillIds) ||
@@ -2522,13 +2579,27 @@ function assertPlanMatchesCatalog(plan: ResearchSetupPlan): void {
   if (canonicalJson(plan.install.targets) !== canonicalJson(expectedTargets)) {
     throw planCatalogDrift("install targets");
   }
+  const expectedInstructionRouting = planResearchSetupInstructionRouting({
+    workspace: plan.workspace.path,
+    scope: plan.install.scope,
+    agents: plan.install.agents,
+    selectedSkillIds: selected.map((skill) => skill.id),
+  });
+  if (canonicalJson(plan.instructionRouting) !== canonicalJson(expectedInstructionRouting)) {
+    throw planCatalogDrift("project instruction routing");
+  }
   if ((plan.install.scope === "global") !== plan.confirmations.globalMutation) {
     throw planCatalogDrift("global mutation confirmation");
   }
   if (plan.checks.agentSmoke !== plan.confirmations.agentSmokeCost) {
     throw planCatalogDrift("agent smoke confirmation");
   }
-  const expectedMutations = setupMutations(plan.workspace.path, plan.install.targets, selected);
+  const expectedMutations = setupMutations(
+    plan.workspace.path,
+    plan.install.targets,
+    selected,
+    expectedInstructionRouting,
+  );
   if (canonicalJson(plan.mutations) !== canonicalJson(expectedMutations)) {
     throw planCatalogDrift("declared mutations");
   }
@@ -4669,6 +4740,7 @@ function setupMutations(
   root: string,
   targets: ResearchSetupPlan["install"]["targets"],
   selected: ResearchSetupSkill[],
+  instructionRouting: ResearchSetupInstructionRoutingPlan,
 ): ResearchSetupPlan["mutations"] {
   const mutations: ResearchSetupPlan["mutations"] = [
     {
@@ -4698,6 +4770,16 @@ function setupMutations(
         reason: `Copy pinned ${skill.id} bytes for ${target.agent}.`,
       });
     }
+  }
+  for (const target of instructionRouting.targets) {
+    mutations.push({
+      step: "project-instruction-routing",
+      target: target.path,
+      reason:
+        target.strategy === "managed-block"
+          ? "Install or verify the bounded Auto Research routing block without replacing owner AGENTS.md content."
+          : "Install or verify the dedicated Auto Research Claude project rule without replacing owner CLAUDE.md content.",
+    });
   }
   mutations.push({
     step: "capability-configuration",

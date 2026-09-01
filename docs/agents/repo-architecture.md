@@ -77,6 +77,12 @@ storage writes, queueing, and document status transitions.
   shell expansion, omitted optional catalog entries, YAML aliases, secret
   persistence in plans, implicit replacement, and Wizard fallback after a
   declaration error are forbidden.
+- `src/research/workspace/setup-instructions.ts`: project-only native-host
+  routing installation. It owns one bounded Codex `AGENTS.md` block and one
+  dedicated Claude Code rule file, records content ownership under the setup
+  control directory, preserves unrelated owner bytes, rejects links and
+  conflicts before mutation, removes only verified owned content, and reports
+  new-session activation separately from structural installation.
 - `src/research/workspace/platform-capabilities.ts`: pure cross-platform path
   relation and research execution capability contracts. It models Windows
   separators, drive/case behavior, macOS `/var` aliases, native isolation
@@ -254,6 +260,13 @@ with a `workspace-lock` runtime contract and marks direct SCI/report/patent
 wrappers only with their separate `standaloneTestedCliVersion`. Setup verifies
 the bundled resolver and forbids stale exact CLI literals in orchestrator
 instructions before installation.
+
+For project-scoped orchestrator installation, the immutable plan also declares
+exact host instruction mutations. Codex routing is a marker-bounded block in
+the workspace-root `AGENTS.md`; Claude routing is an owned file under
+`.claude/rules/`. Setup never assumes a WorkBuddy/CodeBuddy private instruction
+format: those hosts retain the separately installed thin adapter Skill. Global
+Skill scope does not write project instruction files.
 
 The CLI may generate a separate project-local recovery-only Skill after an
 accepted apply has stored credentials but before external checkout. It contains

@@ -213,6 +213,10 @@ including a sanitized actionable missing-runtime error. Authoring readiness
 tests cover the complete DOCX/PDF/PPTX/XLSX package and command matrices,
 same-runtime binding, component-scoped blocking, all four exact-file functional
 canaries, and the prohibition on implicit pip/npm/system installation.
+`test/research-setup-instructions.test.ts` covers reviewed project-only Codex
+and Claude routing targets, owner-byte preservation, idempotent apply,
+new-session status, exact owned-byte removal, pre-mutation conflict detection,
+user-modified managed blocks, and symlink escape rejection.
 `test/research-setup-audit-bundle.test.ts` proves setup-only export is portable,
 closed, secret-free, movable, exact-file and semantically hash-bound; missing,
 extra, tampered, symlinked, or invalid-attestation inputs fail closed without
