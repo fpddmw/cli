@@ -1,0 +1,66 @@
+{
+  "meta": { "name": "openaq-api", "website": "/", "page": 1, "limit": 2, "found": 3 },
+  "results": [
+    {
+      "id": 101,
+      "name": "Harbor North",
+      "locality": "Example City",
+      "timezone": "Europe/Amsterdam",
+      "country": { "id": 7, "code": "NL", "name": "Netherlands" },
+      "owner": { "id": 41, "name": "Example Environment Agency" },
+      "provider": { "id": 51, "name": "Example Provider" },
+      "isMobile": false,
+      "isMonitor": true,
+      "instruments": [{ "id": 61, "name": "Reference Analyzer" }],
+      "sensors": [
+        {
+          "id": 1001,
+          "name": "pm25 µg/m³",
+          "parameter": { "id": 2, "name": "pm25", "units": "µg/m³", "displayName": "PM2.5" }
+        }
+      ],
+      "coordinates": { "latitude": 52.371, "longitude": 4.899 },
+      "licenses": [
+        {
+          "id": 81,
+          "name": "Example Attribution License",
+          "attribution": {
+            "name": "Example Environment Agency",
+            "url": "https://example.invalid/attribution"
+          },
+          "dateFrom": "2020-01-01",
+          "dateTo": null
+        }
+      ],
+      "bounds": [4.899, 52.371, 4.899, 52.371],
+      "distance": 320.5,
+      "datetimeFirst": { "utc": "2020-01-01T00:00:00Z", "local": "2020-01-01T01:00:00+01:00" },
+      "datetimeLast": { "utc": "2026-03-07T23:00:00Z", "local": "2026-03-08T00:00:00+01:00" }
+    },
+    {
+      "id": 102,
+      "name": "Harbor South",
+      "locality": null,
+      "timezone": "Europe/Amsterdam",
+      "country": { "id": 7, "code": "NL", "name": "Netherlands" },
+      "owner": { "id": 42, "name": "Community Network" },
+      "provider": { "id": 52, "name": "Community Provider" },
+      "isMobile": false,
+      "isMonitor": false,
+      "instruments": [{ "id": 62, "name": "Optical Particle Sensor" }],
+      "sensors": [
+        {
+          "id": 1002,
+          "name": "pm10 µg/m³",
+          "parameter": { "id": 1, "name": "pm10", "units": "µg/m³", "displayName": "PM10" }
+        }
+      ],
+      "coordinates": { "latitude": 52.351, "longitude": 4.91 },
+      "licenses": [],
+      "bounds": [4.91, 52.351, 4.91, 52.351],
+      "distance": 2100,
+      "datetimeFirst": null,
+      "datetimeLast": null
+    }
+  ]
+}

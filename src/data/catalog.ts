@@ -130,6 +130,9 @@ function registerConnector(source: DataConnectorDefinition): RegisteredDataConne
         digest: sha256CanonicalJson(operation.outputSchema),
       },
       limits,
+      ...(operation.artifactOutput === undefined
+        ? {}
+        : { artifactOutput: structuredClone(operation.artifactOutput) }),
     };
     const inputAjv = operationAjv();
     const outputAjv = operationAjv();
@@ -244,6 +247,9 @@ function cloneAndFreezeConnector(source: DataConnectorDefinition): DataConnector
       inputSchema: structuredClone(operation.inputSchema),
       outputSchema: structuredClone(operation.outputSchema),
       ...(operation.limits === undefined ? {} : { limits: structuredClone(operation.limits) }),
+      ...(operation.artifactOutput === undefined
+        ? {}
+        : { artifactOutput: structuredClone(operation.artifactOutput) }),
     })),
   };
   return deepFreeze(clone);

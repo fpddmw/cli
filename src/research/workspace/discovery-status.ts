@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { loadCapabilityDeclarations } from "./capabilities.js";
+import { projectResearchDataCapabilities } from "./data-evidence-adapter.js";
 import { deriveDiscoveryPlan, type DiscoveryPlan } from "./discovery-planning.js";
 import { evidenceLedgerPath, listEvidenceCandidates } from "./evidence-ledger.js";
 import { readJournal } from "./journal.js";
@@ -72,13 +73,28 @@ export async function inspectDiscoveryProgress(
     .filter((capability) => capability.permissions.includes("brokered-network"))
     .map((capability) => capability.id)
     .sort();
-  const plan = deriveDiscoveryPlan(project.evidenceRequirements, config, networkCapabilityIds);
+  const dataCapabilityIds = projectResearchDataCapabilities().capabilities.map(
+    (capability) => capability.id,
+  );
+  const availableCapabilityIds = [...networkCapabilityIds, ...dataCapabilityIds].sort();
+  const plan = deriveDiscoveryPlan(project.evidenceRequirements, config, availableCapabilityIds);
   const projectEvents = mainEvents.filter((event) => event.scope === project.id);
-  const requested = projectEvents.filter((event) => event.type === "capability.fetch.requested");
-  const attempted = projectEvents.filter((event) => event.type === "capability.fetch.attempted");
-  const completed = projectEvents.filter((event) => event.type === "capability.fetch.completed");
+  const requested = projectEvents.filter(
+    (event) =>
+      event.type === "capability.fetch.requested" || event.type === "data.capability.requested",
+  );
+  const attempted = projectEvents.filter(
+    (event) =>
+      event.type === "capability.fetch.attempted" || event.type === "data.capability.requested",
+  );
+  const completed = projectEvents.filter(
+    (event) =>
+      event.type === "capability.fetch.completed" || event.type === "data.capability.completed",
+  );
   const reused = projectEvents.filter((event) => event.type === "capability.fetch.reused");
-  const failed = projectEvents.filter((event) => event.type === "capability.fetch.failed");
+  const failed = projectEvents.filter(
+    (event) => event.type === "capability.fetch.failed" || event.type === "data.capability.failed",
+  );
   const latestDecisions = new Map<string, "admitted" | "rejected">();
   for (const event of ledgerEvents) {
     if (
@@ -114,9 +130,11 @@ export async function inspectDiscoveryProgress(
     candidate.occurrences.some((origin) => origin.kind === "native"),
   );
   const formalizedNativeCandidates = nativeCandidates.filter((candidate) =>
-    candidate.occurrences.some((origin) => origin.kind === "broker" || origin.kind === "input"),
+    candidate.occurrences.some(
+      (origin) => origin.kind === "broker" || origin.kind === "data" || origin.kind === "input",
+    ),
   );
-  const providers = networkCapabilityIds.map((capabilityId) => {
+  const providers = availableCapabilityIds.map((capabilityId) => {
     const uniqueCandidates = candidates.filter((candidate) =>
       candidate.occurrences.some((origin) => origin.capabilityId === capabilityId),
     ).length;

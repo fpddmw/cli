@@ -58,7 +58,7 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
           { details: { endpointId: endpoint.endpointId, method: request.method } },
         );
       }
-      const target = buildTarget(endpoint, request);
+      const safeTarget = buildTarget(endpoint, request);
       const timeoutMs = boundedOverride(request.timeoutMs, options.limits.timeoutMs, "timeoutMs");
       const maxResponseBytes = boundedOverride(
         request.maxResponseBytes,
@@ -67,6 +67,7 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
       );
       const headers = new Headers({ Accept: endpoint.allowedContentTypes.join(", ") });
       let credential: DataCredentialDeclaration | undefined;
+      let credentialedPath = request.path;
       if (request.credentialId) {
         credential = declarations.get(request.credentialId);
         if (!credential) {
@@ -76,12 +77,23 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
             { details: { credentialId: request.credentialId } },
           );
         }
-        injectLogicalCredential({
+        credentialedPath = injectLogicalCredential({
           declaration: credential,
           value: resolved.values.get(credential.credentialId),
           endpointId: endpoint.endpointId,
           headers,
+          path: request.path,
         });
+      }
+      const target =
+        credentialedPath === request.path
+          ? safeTarget
+          : buildTarget(endpoint, { ...request, path: credentialedPath });
+      if (/%7b|%7d/i.test(target.pathname)) {
+        throw new DataRuntimeError(
+          "endpoint-policy-blocked",
+          "Data HTTP paths must not contain unresolved credential placeholders.",
+        );
       }
       const body = encodeRequestBody(request, options.limits.maxRequestBytes);
       if (body !== undefined) headers.set("Content-Type", "application/json");
@@ -89,8 +101,8 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
         capabilityId: options.capabilityId,
         endpointId: endpoint.endpointId,
         method: request.method,
-        path: target.pathname,
-        query: sortedQuery(target),
+        path: safeTarget.pathname,
+        query: sortedQuery(safeTarget),
         bodyDigest: body === undefined ? null : sha256Bytes(Buffer.from(body, "utf8")),
       });
       const { response, attempts } = await performBoundedFetch({
@@ -119,7 +131,9 @@ export function createBoundedHttpClient(options: BoundedHttpClientOptions): Data
           "The provider response reflected a configured credential and was blocked.",
         );
       }
-      if (!response.ok) throwHttpStatus(response, credential, options.limits.maxRetryDelayMs);
+      if (!response.ok) {
+        throwHttpStatus(response, credential, options.limits.maxRetryDelayMs, bytes);
+      }
       const contentType = normalizedContentType(response.headers.get("content-type"));
       if (!contentTypeAllowed(contentType, endpoint.allowedContentTypes)) {
         throw new DataRuntimeError(
@@ -345,7 +359,9 @@ function throwHttpStatus(
   response: Response,
   credential: DataCredentialDeclaration | undefined,
   maxRetryDelayMs: number,
+  bytes: Buffer,
 ): never {
+  const providerReason = safeProviderErrorReason(bytes);
   if (response.status === 401 || response.status === 403) {
     throw new DataRuntimeError(
       credential ? "credential-invalid" : "provider-auth-blocked",
@@ -357,6 +373,7 @@ function throwHttpStatus(
         details: {
           status: response.status,
           ...(credential ? { credentialId: credential.credentialId } : {}),
+          ...(providerReason ? { providerReason } : {}),
         },
       },
     );
@@ -369,6 +386,7 @@ function throwHttpStatus(
       details: {
         status: response.status,
         ...(retryAfterMs === null ? {} : { retryAfterMs }),
+        ...(providerReason ? { providerReason } : {}),
       },
     });
   }
@@ -377,9 +395,39 @@ function throwHttpStatus(
     "The provider returned an unsuccessful HTTP response.",
     {
       retryable: response.status >= 500,
-      details: { status: response.status },
+      details: {
+        status: response.status,
+        ...(providerReason ? { providerReason } : {}),
+      },
     },
   );
+}
+
+function safeProviderErrorReason(bytes: Buffer): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } catch {
+    return undefined;
+  }
+  const root = plainRecord(parsed);
+  const error = plainRecord(root?.error);
+  if (!error) return undefined;
+  const candidates: unknown[] = [];
+  if (Array.isArray(error.errors)) {
+    for (const item of error.errors) candidates.push(plainRecord(item)?.reason);
+  }
+  candidates.push(error.reason, error.status);
+  return candidates.find(
+    (candidate): candidate is string =>
+      typeof candidate === "string" && /^[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(candidate),
+  );
+}
+
+function plainRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function createHttpResponse(
@@ -416,11 +464,20 @@ function createHttpResponse(
 
 function safeResponseHeaders(headers: Headers): Record<string, string> {
   const result: Record<string, string> = {};
+  const contentType = safeContentTypeMetadata(headers.get("content-type"));
+  if (contentType) result["content-type"] = contentType;
   for (const name of [...SAFE_RESPONSE_HEADERS].sort(codePointOrder)) {
     const value = headers.get(name);
     if (value) result[name] = value.slice(0, 256);
   }
   return result;
+}
+
+function safeContentTypeMetadata(value: string | null): string | null {
+  if (!value) return null;
+  const mediaType = normalizedContentType(value);
+  const charset = /(?:^|;)\s*charset\s*=\s*["']?([A-Za-z0-9._-]{1,64})/i.exec(value)?.[1];
+  return charset ? `${mediaType}; charset=${charset.toLowerCase()}` : mediaType;
 }
 
 function normalizedContentType(value: string | null): string {

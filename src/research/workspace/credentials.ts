@@ -1,11 +1,31 @@
 import { lstat, readFile } from "node:fs/promises";
 
+import { builtInDataRegistry } from "../../data/builtins.js";
+import type { DataRegistry } from "../../data/catalog.js";
 import { CliError } from "../../errors.js";
 import { isObject, pathExists, workspacePaths, writeTextAtomic } from "./storage.js";
 import type { CapabilityDeclaration } from "./types.js";
 
 const CREDENTIAL_ENV_KEY = "TIANGONG_RESEARCH_CAPABILITY_CREDENTIALS_JSON";
 const MAX_CREDENTIAL_ENV_BYTES = 64 * 1024;
+
+export function researchDataCredentialId(capabilityId: string, credentialId: string): string {
+  return `data:${capabilityId}:${credentialId}`;
+}
+
+export function researchDataCredentialIds(registry: DataRegistry = builtInDataRegistry): string[] {
+  return [
+    ...new Set(
+      registry
+        .catalog()
+        .capabilities.flatMap((capability) =>
+          (registry.describe(capability.capabilityId)?.credentials ?? []).map((credential) =>
+            researchDataCredentialId(capability.capabilityId, credential.credentialId),
+          ),
+        ),
+    ),
+  ].sort();
+}
 
 export async function loadCapabilityCredentialMap(
   root: string,
@@ -14,7 +34,12 @@ export async function loadCapabilityCredentialMap(
 ): Promise<Map<string, string>> {
   return loadCapabilityCredentialMapForIds(
     root,
-    capabilities.flatMap((capability) => capability.credentials.map((credential) => credential.id)),
+    [
+      ...capabilities.flatMap((capability) =>
+        capability.credentials.map((credential) => credential.id),
+      ),
+      ...researchDataCredentialIds(),
+    ],
     options,
   );
 }
@@ -111,7 +136,7 @@ export async function inspectCapabilityCredentialEnvironment(
     ),
   ].sort();
   const configured = await loadCapabilityCredentialMap(root, capabilities);
-  const configuredIds = [...configured.keys()].sort();
+  const configuredIds = [...configured.keys()].filter((id) => declaredIds.includes(id)).sort();
   const missingIds = declaredIds.filter((credentialId) => !configured.has(credentialId));
   const detail =
     declaredIds.length === 0
@@ -145,9 +170,12 @@ export async function setCapabilityCredentialFromEnvironment(input: {
   }
   const result = await setCapabilityCredentialValue({
     root: input.root,
-    declaredCredentialIds: input.capabilities.flatMap((capability) =>
-      capability.credentials.map((credential) => credential.id),
-    ),
+    declaredCredentialIds: [
+      ...input.capabilities.flatMap((capability) =>
+        capability.credentials.map((credential) => credential.id),
+      ),
+      ...researchDataCredentialIds(),
+    ],
     credentialId: input.credentialId,
     value,
     minimumUtf8Bytes: 8,

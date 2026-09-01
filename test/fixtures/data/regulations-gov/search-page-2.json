@@ -1,0 +1,30 @@
+{
+  "data": [
+    {
+      "id": "EPA-HQ-OAR-2026-0001-0003",
+      "type": "comments",
+      "attributes": {
+        "agencyId": "EPA",
+        "documentType": "Proposed Rule",
+        "highlightedContent": null,
+        "lastModifiedDate": "2026-03-02T18:00:00Z",
+        "objectId": "0900006480000003",
+        "postedDate": "2026-03-02T17:00:00Z",
+        "title": "Synthetic comment three",
+        "withdrawn": true
+      },
+      "links": { "self": "https://api.regulations.gov/v4/comments/EPA-HQ-OAR-2026-0001-0003" }
+    }
+  ],
+  "meta": {
+    "hasNextPage": false,
+    "hasPreviousPage": true,
+    "numberOfElements": 1,
+    "pageNumber": 2,
+    "pageSize": 5,
+    "totalElements": 6,
+    "totalPages": 2,
+    "firstPage": false,
+    "lastPage": true
+  }
+}

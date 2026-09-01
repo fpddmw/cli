@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { createDataRegistry } from "../src/data/catalog.js";
@@ -131,6 +134,48 @@ describe("data execution", () => {
     assert.equal(result.status, "blocked");
     assert.equal(result.data, null);
     assert.equal(result.errors[0]?.code, "provider-response-invalid");
+  });
+
+  it("rolls back staged artifacts when normalized output validation fails", async () => {
+    const artifactOutputDirectory = await mkdtemp(join(tmpdir(), "tiangong-data-rollback-"));
+    try {
+      const result = await executeDataRun(request(), {
+        registry: createDataRegistry([
+          syntheticConnector({
+            artifactOutput: true,
+            execute: async (context) => {
+              assert.ok(context.artifacts);
+              await context.artifacts.stage(
+                "must-not-commit.txt",
+                Buffer.from("unvalidated output", "utf8"),
+              );
+              return {
+                status: "success",
+                data: { wrong: true },
+                summary: {
+                  recordCount: 1,
+                  pageCount: 0,
+                  chunkCount: 1,
+                  truncated: false,
+                  completeness: "complete",
+                },
+                warnings: [],
+                errors: [],
+                observations: [],
+              };
+            },
+          }),
+        ]),
+        environment: {},
+        artifactOutputDirectory,
+      });
+
+      assert.equal(result.status, "blocked");
+      assert.equal(result.errors[0]?.code, "provider-response-invalid");
+      assert.deepEqual(await readdir(artifactOutputDirectory), []);
+    } finally {
+      await rm(artifactOutputDirectory, { force: true, recursive: true });
+    }
   });
 
   it("keeps partial data explicit and exits the semantic happy path", async () => {

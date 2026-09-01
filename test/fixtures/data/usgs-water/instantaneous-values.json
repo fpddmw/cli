@@ -1,0 +1,79 @@
+{
+  "name": "ns1:timeSeriesResponse",
+  "declaredType": "org.cuahsi.waterml.TimeSeriesResponseType",
+  "scope": "javax.xml.bind.JAXBElement$GlobalScope",
+  "value": {
+    "queryInfo": {
+      "queryURL": "https://example.invalid/synthetic-usgs-query",
+      "criteria": {
+        "locationParam": "[ALL:01646500]",
+        "variableParam": "[00060]"
+      }
+    },
+    "timeSeries": [
+      {
+        "sourceInfo": {
+          "siteName": "SYNTHETIC RIVER AT TEST CITY",
+          "siteCode": [
+            {
+              "value": "01646500",
+              "network": "NWIS",
+              "agencyCode": "USGS"
+            }
+          ],
+          "geoLocation": {
+            "geogLocation": {
+              "srs": "EPSG:4326",
+              "latitude": 38.94978,
+              "longitude": -77.12764
+            }
+          },
+          "siteProperty": [
+            { "value": "ST", "name": "siteTypeCd" },
+            { "value": "02070010", "name": "hucCd" },
+            { "value": "51", "name": "stateCd" },
+            { "value": "51059", "name": "countyCd" }
+          ]
+        },
+        "variable": {
+          "variableCode": [
+            {
+              "value": "00060",
+              "network": "NWIS",
+              "vocabulary": "NWIS:UnitValues"
+            }
+          ],
+          "variableName": "Streamflow, ft3/s",
+          "variableDescription": "Discharge, cubic feet per second",
+          "valueType": "Derived Value",
+          "unit": { "unitCode": "ft3/s" },
+          "noDataValue": -999999,
+          "options": {
+            "option": [{ "name": "Statistic", "optionCode": "00011" }]
+          }
+        },
+        "values": [
+          {
+            "value": [
+              {
+                "value": "125.5",
+                "qualifiers": ["P"],
+                "dateTime": "2026-03-22T00:00:00.000-04:00"
+              },
+              {
+                "value": "130",
+                "qualifiers": ["A"],
+                "dateTime": "2026-03-22T01:00:00.000-04:00"
+              },
+              {
+                "value": "-999999",
+                "qualifiers": [],
+                "dateTime": "2026-03-22T02:00:00.000-04:00"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

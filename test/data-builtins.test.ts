@@ -19,11 +19,31 @@ function captureIo() {
 }
 
 describe("built-in data connectors", () => {
-  it("publishes both first-batch capabilities in deterministic order", () => {
+  it("publishes every built-in capability in deterministic order", () => {
     const capabilities = builtInDataRegistry.catalog().capabilities;
     assert.deepEqual(
       capabilities.map((item) => item.capabilityId),
-      ["airnow.hourly-observations", "federal-register.documents"],
+      [
+        "airnow.hourly-observations",
+        "bluesky.public-posts",
+        "epa.eis-records",
+        "federal-register.documents",
+        "gdelt.doc-search",
+        "gdelt.events",
+        "gdelt.gkg",
+        "gdelt.mentions",
+        "nasa-firms.active-fire",
+        "open-meteo.air-quality",
+        "open-meteo.flood",
+        "open-meteo.historical-weather",
+        "openaq.air-quality",
+        "regulations-gov.attachments",
+        "regulations-gov.comments",
+        "usbr.project-records",
+        "usbr.rise",
+        "usgs.water-instantaneous-values",
+        "youtube.public-content",
+      ],
     );
     for (const capability of capabilities) {
       assert.equal(typeof capability.summary, "string");
@@ -36,9 +56,39 @@ describe("built-in data connectors", () => {
   });
 
   it("describes and diagnoses each capability offline", async () => {
-    for (const capabilityId of ["airnow.hourly-observations", "federal-register.documents"]) {
+    for (const capabilityId of [
+      "airnow.hourly-observations",
+      "bluesky.public-posts",
+      "epa.eis-records",
+      "federal-register.documents",
+      "gdelt.doc-search",
+      "gdelt.events",
+      "gdelt.gkg",
+      "gdelt.mentions",
+      "nasa-firms.active-fire",
+      "open-meteo.air-quality",
+      "open-meteo.flood",
+      "open-meteo.historical-weather",
+      "openaq.air-quality",
+      "regulations-gov.attachments",
+      "regulations-gov.comments",
+      "usbr.project-records",
+      "usbr.rise",
+      "usgs.water-instantaneous-values",
+      "youtube.public-content",
+    ]) {
       const description = builtInDataRegistry.describe(capabilityId);
-      assert.equal(description?.operations.length, 1);
+      assert.equal(
+        description?.operations.length,
+        [
+          "openaq.air-quality",
+          "regulations-gov.comments",
+          "usbr.rise",
+          "youtube.public-content",
+        ].includes(capabilityId)
+          ? 2
+          : 1,
+      );
       const discovery = (
         builtInDataRegistry as unknown as {
           discovery(id: string):
@@ -66,9 +116,57 @@ describe("built-in data connectors", () => {
           throw new Error("offline doctor must not fetch");
         }) as typeof fetch,
       });
-      assert.equal(exitCode, 0);
+      const requiresCredential = [
+        "nasa-firms.active-fire",
+        "openaq.air-quality",
+        "regulations-gov.attachments",
+        "regulations-gov.comments",
+        "youtube.public-content",
+      ].includes(capabilityId);
+      assert.equal(exitCode, requiresCredential ? 3 : 0);
       assert.equal(fetched, false);
-      assert.equal(JSON.parse(capture.stdout()).networkAttempted, false);
+      const doctor = JSON.parse(capture.stdout()) as {
+        networkAttempted: boolean;
+        status: string;
+        checks: Array<{ checkId: string; status: string }>;
+      };
+      assert.equal(doctor.networkAttempted, false);
+      assert.equal(doctor.status, requiresCredential ? "blocked" : "ready");
+      if (capabilityId === "nasa-firms.active-fire") {
+        assert.ok(
+          doctor.checks.some(
+            (check) => check.checkId === "credential:map-key" && check.status === "fail",
+          ),
+        );
+      }
+      if (capabilityId === "openaq.air-quality") {
+        assert.ok(
+          doctor.checks.some(
+            (check) => check.checkId === "credential:api-key" && check.status === "fail",
+          ),
+        );
+      }
+      if (capabilityId === "regulations-gov.comments") {
+        assert.ok(
+          doctor.checks.some(
+            (check) => check.checkId === "credential:api-key" && check.status === "fail",
+          ),
+        );
+      }
+      if (capabilityId === "regulations-gov.attachments") {
+        assert.ok(
+          doctor.checks.some(
+            (check) => check.checkId === "credential:api-key" && check.status === "fail",
+          ),
+        );
+      }
+      if (capabilityId === "youtube.public-content") {
+        assert.ok(
+          doctor.checks.some(
+            (check) => check.checkId === "credential:api-key" && check.status === "fail",
+          ),
+        );
+      }
       assert.equal(capture.stderr(), "");
     }
   });

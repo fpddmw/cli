@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-08-30
-lastReviewedCommit: 7523757200cc863dd07c882a41b0299b8bc712b1
+lastReviewedAt: 2026-08-31
+lastReviewedCommit: 36918b2ce7255631657d928d4ce84cfdb3b49891
 ---
 
 # Repo Architecture
@@ -193,8 +193,22 @@ storage writes, queueing, and document status transitions.
   immutable registry, public JSON Schemas, canonical digest and receipt rules,
   strict command router, logical credential resolution, bounded HTTPS client,
   stable error taxonomy, and connector execution/conformance contracts. Its
-  built-in registry currently ships AirNow hourly observations and Federal
-  Register document metadata as independent consumers of the same runtime.
+  built-in registry currently ships nineteen independently discoverable
+  capabilities on the same runtime: AirNow hourly observations, public Bluesky
+  post cascades, EPA EIS records, Federal Register document metadata, four GDELT
+  DOC/table surfaces, NASA FIRMS active-fire detections, three Open-Meteo series,
+  OpenAQ location and sensor measurements, Regulations.gov public comments and
+  attachment downloads, two USBR data surfaces, USGS Water instantaneous values,
+  and YouTube public video/comment metadata. The three
+  GDELT table capabilities share one bounded ZIP/feed core without collapsing
+  their separate discovery and binding identities; the two YouTube operations
+  share one provider and credential contract without merging video discovery
+  with explicit-ID comment retrieval.
+- `src/research/workspace/data-evidence-adapter.ts`: dynamically projects every
+  built-in data operation into the native Research discovery packet, invokes
+  the shared TypeScript data service in-process, applies Research credential,
+  call, item, byte, context, receipt, ledger, and audit bindings, and never
+  introduces provider-specific Research adapters.
 - `scripts/**`: validation helpers.
 - `test/**`: Node test runner suites.
 

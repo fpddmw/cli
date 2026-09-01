@@ -16,8 +16,8 @@ checkPaths:
   - src/data/**
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
-lastReviewedAt: 2026-08-30
-lastReviewedCommit: 7523757200cc863dd07c882a41b0299b8bc712b1
+lastReviewedAt: 2026-08-31
+lastReviewedCommit: 5dc7dc20eb94bc29616528bc3b20c428b5d10c31
 ---
 
 # 原子数据运行时目标架构
@@ -37,14 +37,14 @@ HTTP、认证、分页、重试、缓存或回执实现。Auto Research 复用�
 
 ## 公共命令契约
 
-以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册首批两个
-connector：
+以下基础命令已经实现并由闭合 Schema 和合同测试冻结；内置 catalog 已注册十九个
+独立可发现 capability：
 
 ```text
 tiangong-ai data catalog
 tiangong-ai data describe <capability-id>
 tiangong-ai data doctor <capability-id> [--live]
-tiangong-ai data run <capability-id> <operation-id> --input <path|->
+tiangong-ai data run <capability-id> <operation-id> --input <path|-> [--artifact-dir <absolute-existing-directory>]
 ```
 
 - `catalog` 离线、无副作用，返回内置能力、稳定版本/Schema 摘要，以及供 Agent
@@ -54,6 +54,10 @@ tiangong-ai data run <capability-id> <operation-id> --input <path|->
 - `doctor` 默认只做静态配置诊断；只有显式 `--live` 才允许有界的 provider 探测。
 - `run` 每次只执行一个 capability 的一个 operation。一个来源内部的分页、分块文件或
   重试仍属于该原子操作；跨来源 fan-out 或结果组合不属于它。
+- 只有 Execution Manifest 明确声明 `artifactOutput` 的 operation 才能接收
+  `--artifact-dir`。目录必须是显式、绝对、已存在且非符号链接的目录；runtime 使用隐藏
+  临时文件暂存，在业务输出和公共 envelope 校验后以 no-overwrite 语义提交，blocked 时
+  回滚。绝对路径不进入 request、result 或 receipt。
 - 机器输入优先来自文件或 stdin。凭证、令牌和敏感 header 不得进入 argv、输入 JSON、
   stdout、错误详情或回执。
 - JSON 模式返回稳定 envelope；pretty/人类输出只是投影，不改变退出码和机器语义。
@@ -75,6 +79,7 @@ src/data/
 ├── catalog.ts                  # 内置、静态、可排序的 connector registry
 ├── runtime/
 │   ├── execute.ts              # 单次原子调用编排
+│   ├── artifacts.ts            # 显式目录、事务暂存、no-overwrite commit 与回滚
 │   ├── bounded-http.ts         # endpoint、重定向、大小、超时和重试策略
 │   ├── credentials.ts          # 逻辑凭证解析与最小注入
 │   ├── canonical-json.ts       # 稳定序列化和语义摘要
@@ -115,6 +120,7 @@ CLI 拥有与 connector 实现直接相关的客观来源语义、覆盖范围�
   `minimumCliVersion`；
 - 稳定的 `providerId`、官方 endpoint scope、认证类型和逻辑 credential ID；
 - operation ID/version、输入/输出 Schema ID/digest 和执行 limits；
+- operation 可选的受控本地 `artifactOutput` 声明；未声明的 operation 不能接收输出目录；
 - capability 级超时、请求/响应字节、分页/分块、重试、速率、记录数和诊断上限；
 - 仅覆盖上述执行字段的 `manifestDigest`。
 
@@ -136,7 +142,7 @@ catalog、两个公共对象、canonical JSON 和 digest 计算必须与 locale�
 主机无关。connector 可以共同编译进一个 npm 包，但不得导入另一个 connector 的业务
 实现。
 
-## 首批内置 Connectors
+## 内置 Connectors
 
 `airnow.hourly-observations/fetch-hourly` 从
 `https://files.airnowtech.org/airnow/` 按 UTC 小时规划官方 `HourlyAQObs` 文件，校验
@@ -158,8 +164,144 @@ document search metadata，不访问结果中的正文、XML 或 PDF 链接，�
 法律使用限制依据其
 [About This Site](https://www.federalregister.gov/reader-aids/government-policy-and-ofr-procedures/about-this-site)。
 
-两个 connector 均无凭证、默认 static doctor 完全离线，且互不导入业务函数。测试
-fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制的 live provider 响应。
+GDELT 保留四个独立发现与 binding 单元。`gdelt.doc-search/search` 使用 DOC 2.0 JSON
+endpoint，只接受一个由 CLI 限制为最长 366 天的 rolling 或 absolute window，并封闭为 article list、
+volume/raw volume、tone、language 和 source-country timeline 模式；输出只含链接元数据或
+aggregate points，不下载 article body/image。`gdelt.events/fetch`、`gdelt.gkg/fetch` 与
+`gdelt.mentions/fetch` 则共享一个 TypeScript 文件流核心，但各自发布独立 capability 与
+codebook 字段合同。它们仅接受 latest 或最多二十个、精确对齐 15 分钟的 UTC range；range
+直接生成固定 HTTPS 路径，普通运行不下载约百 MB 的 `masterfilelist.txt`。latest 文件核对
+`lastupdate.txt` 声明的压缩大小与 MD5；所有 ZIP 均限制为单个安全 member，并验证 header、
+解压上限、CRC32、UTF-8 与精确列数。四个 capability 都明确 GDELT 的翻译、entity/theme、
+event 和 mention coding 是自动化结果，coverage 不均衡；provider 的 article-list 模式对长
+窗口只考虑所选窗口末端三个月，而 timeline 可覆盖更长区间。结果不能当作代表性样本、ground truth
+或 causal evidence。接口与 cadence 依据 [GDELT DOC 2.0](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/)、
+[GDELT 2.0 introduction](https://blog.gdeltproject.org/gdelt-2-0-our-global-world-in-realtime/)
+及官方 codebook；fixture 仅为按公开格式重建的合成字节。
+
+`bluesky.public-posts/fetch-cascades` 只使用公开 AppView，保留 search、author feed、
+custom feed 与 list feed 四种明确种子来源；可选 UTC 窗口按 post record `createdAt` 过滤，
+缺失时才回退到 `indexedAt`。线程展开逐个调用稳定的 `app.bsky.feed.getPostThread`，把可见
+reply tree 展平为 URI、parent URI、depth 与 blocked/not-found 状态，共享 operation-wide
+request/record limits，不读取 optional auth、viewer state 或 private feed。Discovery Metadata
+明确 search syntax/ranking/cursor reach、feed 算法、AppView indexing、moderation、删除与 engagement
+counter 都是可变快照，不能代表总体意见、验证身份、证明事实或直接支持因果扩散结论。接口形状
+依据官方 `app.bsky.feed` Lexicon 与 public AppView 文档；fixture 仅使用虚构 DID、handle、AT-URI、
+文本、时间和计数。
+
+`youtube.public-content` 共享一个 `YOUTUBE_API_KEY` 逻辑凭证，但保持两个 operation：
+`search-videos` 用 `search.list` 得到去重 candidate IDs，再以最多 50 个 ID 的 `videos.list`
+批次补齐 snippet/statistics/contentDetails/status 并执行显式公开计数过滤；`fetch-comments` 只接受
+最多 25 个显式 video IDs，以 `commentThreads.list` 获取 top-level comments，并在需要 replies
+时始终使用 `comments.list` 分页，不把 embedded reply sample 当作完整回复。凭证仅经
+`X-Goog-Api-Key` header 注入，绝不进入 URL。两个 operation 共用全局 request/record limits，
+评论还具有 per-video thread page 与 per-thread reply page cap；失败视频保留已经验证的其他记录。
+Discovery Metadata 明确 quota、search ranking、visibility、moderation、统计和用户文本均为可变
+provider 状态，不提供 media/transcript 下载、代表性 opinion、sentiment、身份或事实验证。
+fixture 仅按官方 v3 API 形状构造虚构数据。
+
+`open-meteo.air-quality/fetch-hourly` 对应一个公开 Air Quality API 请求，接受最多十个
+显式坐标、最多十六个官方变量，以及不超过 92 个日期的闭合窗口。变量按 code point
+排序而坐标保持调用顺序；请求固定使用 GMT，输出按坐标保存 model grid、时间、单位和
+对齐的 nullable value arrays。单个坐标或变量异常保留其余有效列并返回 `partial`，
+record cap 按 location-hour 截断所有变量列。Discovery Metadata 明确该来源是 CAMS
+模型网格背景值，不是站点观测；公开 endpoint 仅限非商业使用，并要求同时署名
+Open-Meteo 和底层 CAMS 数据提供方。接口和变量依据官方
+[Air Quality API 文档](https://open-meteo.com/en/docs/air-quality-api)，许可与端点边界依据
+[Open-Meteo License](https://open-meteo.com/en/license) 和
+[API Terms](https://open-meteo.com/en/terms)。商业 customer endpoint 与 API key 不在
+该 capability 中隐式切换，若需要必须单独评审。
+
+`open-meteo.flood/fetch-daily` 对应一个公开 Flood API 请求，接受最多十个显式坐标、
+七个官方 discharge 变量、不超过 366 个日期的闭合窗口，以及可选 ensemble members。
+输出按请求坐标顺序保存 selected river-grid coordinate、GMT 日期、单位和对齐的 nullable
+series；单坐标、变量或 member 异常保留其余有效列并返回 `partial`，record cap 按
+location-day 同步截断全部列。Discovery Metadata 明确该来源是 GloFAS v4 约 5 km
+网格模拟值，endpoint 选择坐标附近最大河流，不能替代 gauge observation、告警、严重度
+分类或应急建议。公开 endpoint 仅限非商业使用并要求同时署名 Open-Meteo 与 GloFAS；
+商业 customer endpoint/API key 必须单独评审。接口与限制依据官方
+[Flood API 文档](https://open-meteo.com/en/docs/flood-api)、
+[Open-Meteo License](https://open-meteo.com/en/license) 和
+[API Terms](https://open-meteo.com/en/terms)。
+
+`open-meteo.historical-weather/fetch` 对应一个公开 Historical Weather archive 请求，
+接受最多十个显式坐标、一个受控 reanalysis/model、最多十二个 hourly 与十二个 numeric
+daily 变量，以及不超过 366 个日期的闭合窗口；hourly/daily 数组都必须显式传入，
+不需要的粒度使用空数组。请求固定 GMT、摄氏度、km/h 和 mm，输出保存 requested/model
+grid coordinate、elevation、单位和对齐的 nullable series；record cap 按 location 内
+hourly 后 daily 的稳定顺序截断时间行。Discovery Metadata 明确该来源是 gap-filled
+reanalysis/model grid estimate，不是 station observation；跨年代趋势输入应优先选
+ERA5 或 ERA5-Land，避免 Best Match 的模型升级产生非气候断点。公开 endpoint 仅限
+非商业使用并要求 Open-Meteo 与底层数据提供方署名；商业 endpoint/API key 不在该
+capability 中。接口、模型和值域依据官方
+[Historical Weather API 文档](https://open-meteo.com/en/docs/historical-weather-api) 与
+[OpenAPI 规范](https://github.com/open-meteo/open-meteo/blob/main/openapi/historical-weather.yml)，
+许可与端点边界依据 [Open-Meteo License](https://open-meteo.com/en/license) 和
+[API Terms](https://open-meteo.com/en/terms)。
+
+`usgs.water-instantaneous-values/fetch` 对应一个有界的 legacy WaterServices IV 请求。
+它要求 bbox 或最多 100 个显式 site number 二选一，以及 ISO-8601 period 或显式
+RFC3339 起止时间二选一；默认参数为 discharge `00060` 与 gage height `00065`，默认
+site type/status 为 `ST/active`。WaterML JSON 归一化保留站点、坐标、参数、单位、
+timestamp、qualifier 和 provisional 状态；单个坏 series/value row 作为明确 partial
+隔离，整体 envelope 错误或超过 500 series、每 series 10,000 values 时阻断。接口和
+25 平方度 bbox/100 sites 限制依据官方
+[Instantaneous Values 文档](https://waterservices.usgs.gov/docs/instantaneous-values/instantaneous-values-details/)；
+Discovery Metadata 同时标明 legacy WaterServices 计划于 2027 年第一季度下线，并指向
+[现代 Water Data APIs](https://www.usgs.gov/tools/usgs-water-data-apis)。
+
+`nasa-firms.active-fire/fetch-area` 对应一个受限 NASA FIRMS Area API 工作流，要求一个
+逻辑 `map-key` 凭证、一个 source、非跨日界线 bbox 和最多 31 个闭合 UTC 日期。运行时
+先按 provider 的五天上限拆成至多七个 CSV 请求，可选先查询 source availability，并在
+250 estimated transactions 与 50,000 records 上限内输出统一 active-fire point 字段；
+后续 chunk 或单行失败保留已验证记录并返回明确 partial。Discovery Metadata 区分 NRT
+与 Standard Processing，明确 thermal anomaly/hotspot 不是 fire perimeter、burned area、
+incident identity 或应急告警。接口、source 和 quota 依据官方
+[FIRMS Area API](https://firms.modaps.eosdis.nasa.gov/api/area/) 与
+[API tutorial](https://firms.modaps.eosdis.nasa.gov/content/academy/data_api/firms_api_use.html)，
+引用和使用边界依据
+[NASA Earthdata Data Use and Citation Guidance](https://www.earthdata.nasa.gov/engage/open-data-services-software/data-use-policy)。
+
+`openaq.air-quality/search-locations` 要求至少一个 country/provider/parameter/license、
+monitor/mobile 或有界空间条件，返回 location、sensor、coverage 和 source-specific
+license/attribution metadata；`fetch-sensor-measurements` 只接受一个 sensor、raw/hourly/daily
+粒度和最长 366 天的 RFC3339 窗口。两个 operation 共用 `OPENAQ_API_KEY` 逻辑凭证、稳定
+分页、record/page cap 和 later-page partial 语义。该 capability 不开放任意 API path，也不
+把公开 S3 archive 的 list/download 混入原子 JSON 执行合同；批量文件获取留给单独治理的
+content/download 工作流。Discovery Metadata 明确来源质量与许可证各异，raw 与预计算
+aggregate 不可无方法混用，也不提供 AQI、健康或监管判断。接口、分页和限流依据官方
+[OpenAQ API 文档](https://docs.openaq.org/)、[pagination](https://docs.openaq.org/using-the-api/pagination)
+与 [rate limits](https://docs.openaq.org/using-the-api/rate-limits)，使用边界依据
+[OpenAQ terms](https://docs.openaq.org/about/terms)。
+
+`regulations-gov.comments/search` 要求 posted 或 last-modified 二选一的最长 366 天窗口，
+按对应日期字段与 document ID 稳定排序，并可用 agency、comment-on ID 和 search term
+收窄；`fetch-details` 只接受最多 100 个显式 comment ID，可选择返回 attachment metadata，
+但不下载文件。两个 operation 共用 `REGGOV_API_KEY` 逻辑凭证。详情输出只保留评论证据、
+docket/document linkage、日期、withdrawal/restriction、组织/政府机构上下文和 duplicate
+计数，不扩散姓名、邮箱、电话、地址或 locality 等个人 profile 字段；自由文本仍须按可能
+包含个人或不安全内容处理。Discovery Metadata 明确跨 agency 字段与发布实践不一致，
+mass-mail、duplicate、withdrawn 与自选择机制使评论数量不能代表公众意见或统计 sentiment，
+并明确不提供 post/submit/modify、attachment download 或法律判断。接口、分页、字段和
+Eastern wall-clock last-modified filter 依据官方
+[Regulations.gov API 文档](https://open.gsa.gov/api/regulationsgov/) 与
+[v4 OpenAPI](https://open.gsa.gov/api/regulationsgov/v4/openapi.yaml)，共享限流依据
+[api.data.gov rate limits](https://api.data.gov/docs/rate-limits/)。
+
+`regulations-gov.attachments/download` 只接受最多 20 个显式 comment ID 和可选的 exact
+attachment ID allowlist，通过官方 `GET /v4/comments/{id}?include=attachments` 获取关系与
+metadata，再只从精确 `https://downloads.regulations.gov` origin 下载 bounded files。
+operation 要求独立 artifact directory，按 file/total-byte/runtime limits 执行，输出相对
+文件名、SHA-256、实际与 provider 声明字节数对比及 hash-bound manifest；拒绝 overwrite、
+任意 URL、redirect 和旧脚本假设的独立 attachment endpoint。文件按不可信 public-submission
+bytes 处理，不做 malware scan、打开、OCR、text extraction、stance、法律或证据判断。
+
+十九个 capability 的默认 static doctor 均完全离线。四个 GDELT capability 共享受限的
+文件流机制，但不互相调用 capability 业务入口；其余 connector 也互不导入业务函数。十四个
+capability 无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY`、OpenAQ 从 `OPENAQ_API_KEY`、
+两个 Regulations.gov capability 从 `REGGOV_API_KEY`、YouTube 从 `YOUTUBE_API_KEY` 解析逻辑凭证，
+缺失时离线报告 blocked。测试 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制
+的 live provider 响应或真实凭证。
 
 ## 机器 Envelope
 
@@ -188,6 +330,11 @@ fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制的 l
 `partial` 必须说明缺失了哪些页、文件、范围或字段，不能把不完整结果伪装为成功。
 `blocked` 不携带可误用为完整证据的业务结果。
 
+声明 `artifactOutput` 的 operation 仍以 `DataRunResult` 返回机器结果，但二进制内容只写入
+调用方显式选择的目录。业务输出只能引用安全单段相对文件名、SHA-256 和字节数；manifest
+本身同样作为 hash-bound artifact 返回。说明文字或本地绝对路径不参与 provider 请求，
+也不进入核心回执。
+
 ### 错误
 
 稳定错误至少区分：
@@ -200,7 +347,8 @@ fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制的 l
 
 每个机器错误包含 `code`、`retryable`、`userActionRequired` 和最小安全详情。HTTP body、
 URL query、header、环境变量值、本地绝对路径和 provider 原始错误不得未经 allowlist
-进入输出。
+进入输出。bounded HTTP 最多从 JSON 错误体保留一个 64 字符以内、只含字母数字和
+`._-` 的 provider reason 机器码；不保留 provider message 或其他自由文本。
 
 ## 回执与摘要
 
@@ -221,6 +369,9 @@ URL query、header、环境变量值、本地绝对路径和 provider 原始错�
 
 - manifest 只引用逻辑 credential ID；运行时从明确允许的环境变量或未来受审阅的
   owner-only store 解析值。
+- credential injection 只支持 manifest 声明的受控 header 或完整 path-segment
+  placeholder；endpoint 校验和安全 request digest 使用不含 secret 的逻辑 target，实际
+  注入发生在校验后，输出、回执和错误不得暴露注入后的 URL。
 - data 命令不得隐式扩大现有 cwd `.env` 自动加载语义。若保留兼容行为，基础契约 PR
   必须逐项声明来源、优先级、文件权限和禁用方式，并加入泄漏回归测试。
 - endpoint 和重定向必须在 connector 的 HTTPS scope 内；IP literal、降级到 HTTP、
@@ -247,6 +398,15 @@ Research adapter 接受已经通过核心 Schema 校验的 `DataRunResult`，额
 lock、预算、候选/来源准入、永久证据、journal 和 review 规则。相同 connector 输入在
 独立调用与 Research 调用中必须得到相同核心数据和核心回执；Research 只增加上层证据
 链，不改变 connector 语义。
+
+当前实现从内置 registry 动态投影每个 operation 为
+`data:<capability-id>:<operation-id>` Research capability；十九个 connector 当前产生
+二十三个 operation 投影。native discover packet 携带这份摘要 catalog、独立
+`data describe` 命令和 `research project evidence data run` 命令。后者在同一进程调用
+`executeDataRun`，施加 Research 证据调用/响应/记录/context 上限，从 owner-only credential
+map 把命名空间化逻辑凭证映射到 manifest 环境变量，并把成功或 partial 结果、核心 receipt
+digest 与可选 artifact bytes 内容寻址地写入既有 receipt/ledger/audit 链。blocked 结果只记
+失败 journal，不晋升为证据。新增 registry operation 无需修改 Research provider 代码。
 
 ## 明确不做
 

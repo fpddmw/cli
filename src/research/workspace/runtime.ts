@@ -3,6 +3,7 @@ import { cp, lstat, readFile, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { CliError } from "../../errors.js";
+import { dataPublicSchemas } from "../../data/schemas.js";
 import {
   loadCapabilityDeclarations,
   stageLockedCapabilities,
@@ -19,6 +20,10 @@ import {
   parseMaterializedAcquisitionAudit,
 } from "./acquisition.js";
 import { stageEvidenceArtifacts } from "./artifacts.js";
+import {
+  projectResearchDataCapabilities,
+  type ResearchDataCapabilityCatalog,
+} from "./data-evidence-adapter.js";
 import { commitDiscoveryDecisions, materializeDiscoveryEvidence } from "./discovery.js";
 import { inspectDiscoveryProgress, type DiscoveryProgress } from "./discovery-status.js";
 import { downloadBindingRecordSchema } from "./downloads.js";
@@ -441,6 +446,12 @@ export interface NativeStagePacket {
   };
   commands: {
     fetchEvidence: { argv: string[]; requestSchema: Record<string, unknown> } | null;
+    runDataCapability: {
+      argv: string[];
+      describeArgv: string[];
+      requestSchema: Record<string, unknown>;
+      catalog: ResearchDataCapabilityCatalog;
+    } | null;
     recordActivity: { argv: string[]; recordSchema: Record<string, unknown> } | null;
     registerCandidate: { argv: string[]; recordSchema: Record<string, unknown> } | null;
     recordAssessment: { argv: string[]; recordSchema: Record<string, unknown> } | null;
@@ -685,6 +696,8 @@ export async function prepareNativeResearchStage(input: {
       const hasBrokeredEvidence = declarations.capabilities.some((capability) =>
         capability.permissions.includes("brokered-network"),
       );
+      const dataCapabilities = projectResearchDataCapabilities();
+      const hasDataEvidence = dataCapabilities.capabilities.length > 0;
       const basePrompt = packagePrompt(
         project,
         workPackage,
@@ -701,8 +714,18 @@ export async function prepareNativeResearchStage(input: {
       const prompt = [
         "Perform this producer stage in the current interactive host session. Do not launch codex exec, claude -p, or any other nested reasoning agent.",
         capsule.publicationPolicyDocumentation,
-        input.stage === "discover" && hasBrokeredEvidence
-          ? "Use native Web/Browser broadly for discovery when useful, but record every native search/navigation with recordActivity and register its candidates. Before admitting any native lead, formalize the same URL or DOI through fetchEvidence so it receives an immutable broker receipt. Assess candidates in bounded batches with recordAssessment as they arrive; the final output is only a small coverage closeout. Native results without broker/input provenance are discovery leads, never evidence."
+        input.stage === "discover" && (hasBrokeredEvidence || hasDataEvidence)
+          ? [
+              hasBrokeredEvidence
+                ? "Use native Web/Browser broadly for discovery when useful, but record every native search/navigation with recordActivity and register its candidates. Before admitting any native lead, formalize the same URL or DOI through fetchEvidence so it receives an immutable broker receipt."
+                : null,
+              hasDataEvidence
+                ? "Use the dynamically projected structured data capabilities when their source coverage and operation semantics fit the question. Inspect a selected capability with the supplied describe command, then call runDataCapability with the exact published DataRunRequest. The Research adapter invokes the same TypeScript runtime in-process and returns an immutable data receipt plus candidate ID; do not invoke standalone data run for project evidence."
+                : null,
+              "Assess candidates in bounded batches with recordAssessment as they arrive; the final output is only a small coverage closeout. Native results without broker/data/input provenance are discovery leads, never evidence.",
+            ]
+              .filter((value): value is string => value !== null)
+              .join(" ")
           : input.stage === "acquire"
             ? "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. Capture the exact browser/adapter Download object, save it to the planned unique staging path, and call bindDownload before registerArtifact. Record browser/download/file-inspection activity with recordActivity. Failed or cancelled downloads cannot create bindings or artifacts. Never scan a download directory or infer success from file existence."
             : "Do not acquire additional evidence in this stage.",
@@ -726,7 +749,7 @@ export async function prepareNativeResearchStage(input: {
         outputSchema: schemaForStage(
           input.stage,
           null,
-          input.stage === "discover" && !hasBrokeredEvidence
+          input.stage === "discover" && !hasBrokeredEvidence && !hasDataEvidence
             ? { inputOnlyProvenanceIds: capsule.inputManifest.map((record) => record.id) }
             : {},
         ),
@@ -814,6 +837,31 @@ export async function prepareNativeResearchStage(input: {
                     "--json",
                   ],
                   requestSchema: nativeEvidenceRequestSchema(Boolean(project.scientificDesign)),
+                }
+              : null,
+          runDataCapability:
+            input.stage === "discover" && hasDataEvidence
+              ? {
+                  argv: [
+                    "tiangong-ai",
+                    "research",
+                    "project",
+                    "evidence",
+                    "data",
+                    "run",
+                    project.id,
+                    "--request",
+                    "<absolute-data-run-request.json>",
+                    "--workspace",
+                    input.root,
+                    "--json",
+                  ],
+                  describeArgv: ["tiangong-ai", "data", "describe", "<capability-id>", "--json"],
+                  requestSchema: structuredClone(dataPublicSchemas.runRequest) as Record<
+                    string,
+                    unknown
+                  >,
+                  catalog: dataCapabilities,
                 }
               : null,
           registerArtifact:
@@ -975,10 +1023,10 @@ export async function prepareNativeResearchStage(input: {
         },
         rules: [
           "Current native host performs producer reasoning; the CLI does not spawn a producer.",
-          "Native Web/Browser activity is visible in the evidence ledger but becomes admissible only after broker/input formalization and strict assessment.",
+          "Native Web/Browser activity is visible in the evidence ledger but becomes admissible only after broker/data/input formalization and strict assessment.",
           "An interactive challenge pauses immediately. A material evidence-exhausted handoff is valid only after inspectAccess proves every required plan-bound agent route with exact terminal event hashes.",
           "When the next material step requires user authorization or an external response, request a durable handoff and stop; do not keep searching low-yield substitutes.",
-          "Only broker receipts or registered immutable inputs may support discover output.",
+          "Only broker receipts, data-runtime receipts, or registered immutable inputs may support discover output.",
           "Only exact, structurally validated, content-addressed artifacts may support full-text acquisition claims.",
           "Do not place credentials, cookies, authorization data, or sensitive URL parameters in request/output files.",
           "A file's existence is not success; submit performs schema, provenance, budget, hash, and atomic-commit checks.",
@@ -2447,7 +2495,11 @@ async function writeReviewPacket(
   ];
   const evidenceFiles = new Map<string, OutputRecord>();
   for (const receipt of evidenceReceipts) {
-    for (const locator of [receipt.locator, receipt.contextLocator]) {
+    for (const locator of [
+      receipt.locator,
+      receipt.contextLocator,
+      ...(receipt.data?.artifacts.map((artifact) => artifact.locator) ?? []),
+    ]) {
       if (!evidenceFiles.has(locator)) {
         evidenceFiles.set(
           locator,
@@ -2565,7 +2617,7 @@ async function writeReviewEvidenceContext(
       : "[No admitted evidence source cites this receipt; its raw object and bounded context remain hash-bound in the review packet.]";
     views.push({
       prefix: [
-        `--- BROKER RECEIPT ${receipt.attemptId} ---`,
+        `--- ${receipt.evidenceKind === "data" ? "DATA" : "BROKER"} RECEIPT ${receipt.attemptId} ---`,
         `metadata: ${JSON.stringify(metadata)}`,
         "--- BEGIN BOUNDED REVIEW EXCERPT ---",
         "",
@@ -2741,7 +2793,11 @@ async function loadBrokerReviewReferences(
   if (!Array.isArray(evidence.sources)) return references;
   for (const source of evidence.sources) {
     if (!isObject(source) || !isObject(source.provenance)) continue;
-    if (source.provenance.kind !== "broker" || typeof source.provenance.id !== "string") continue;
+    if (
+      !["broker", "data"].includes(String(source.provenance.kind)) ||
+      typeof source.provenance.id !== "string"
+    )
+      continue;
     if (typeof source.id !== "string" || typeof source.title !== "string") continue;
     const current = references.get(source.provenance.id) ?? [];
     current.push({
@@ -3041,6 +3097,7 @@ function reviewSafeReceipt(
 ): Record<string, unknown> {
   return {
     schemaVersion: receipt.schemaVersion,
+    evidenceKind: receipt.evidenceKind ?? "broker",
     attemptId: receipt.attemptId,
     capabilityId: receipt.capabilityId,
     status: receipt.status,
@@ -3061,6 +3118,7 @@ function reviewSafeReceipt(
     retrievedAt: receipt.retrievedAt,
     servedAt: receipt.servedAt,
     cacheHit: receipt.cacheHit,
+    data: receipt.data ?? null,
   };
 }
 
@@ -3275,7 +3333,15 @@ async function validateEvidenceSources(
     ]),
   );
   const receipts = await loadProjectEvidenceReceipts(root, project.id);
-  const brokerLocators = new Map(receipts.map((receipt) => [receipt.attemptId, receipt.locator]));
+  const receiptLocators = new Map(
+    receipts.map((receipt) => [
+      receipt.attemptId,
+      {
+        kind: receipt.evidenceKind === "data" ? "data" : "broker",
+        locator: receipt.locator,
+      },
+    ]),
+  );
   const sourceIds = new Set<string>();
   for (const source of sources) {
     if (!isObject(source) || !isObject(source.provenance)) {
@@ -3290,15 +3356,17 @@ async function validateEvidenceSources(
     const expectedLocator =
       source.provenance.kind === "input"
         ? inputLocators.get(String(source.provenance.id))
-        : source.provenance.kind === "broker"
-          ? brokerLocators.get(String(source.provenance.id))
+        : source.provenance.kind === "broker" || source.provenance.kind === "data"
+          ? receiptLocators.get(String(source.provenance.id))?.kind === source.provenance.kind
+            ? receiptLocators.get(String(source.provenance.id))?.locator
+            : undefined
           : undefined;
     if (!expectedLocator || expectedLocator !== source.locator) {
       throw new StructuredOutputError(
         `discover output contains invalid provenance for evidence source ${String(id)}.`,
         {
           validation: [
-            "provenance.id must be an exact immutable input ID or broker receipt attemptId",
+            "provenance.id must be an exact immutable input ID or evidence receipt attemptId",
             "locator must exactly match the locator bound to that provenance record",
           ],
           actual: {
@@ -3311,10 +3379,10 @@ async function validateEvidenceSources(
             id: inputId,
             locator,
           })),
-          allowedBrokerReceipts: [...brokerLocators].map(([attemptId, locator]) => ({
-            kind: "broker",
+          allowedEvidenceReceipts: [...receiptLocators].map(([attemptId, receipt]) => ({
+            kind: receipt.kind,
             id: attemptId,
-            locator,
+            locator: receipt.locator,
           })),
         },
       );
@@ -3711,16 +3779,23 @@ async function assertDiscoveryCoverage(
   // establish breadth, dates, source types and dimensions, but cannot claim
   // that a search-result receipt is already acquired full text.
   const gaps = computed.mechanicalGaps.filter((gap) => !/full-text source\(s\)/.test(gap));
-  const requiredCapabilities = requiredDiscoveryCapabilityIds(
-    await loadCapabilityDeclarations(root),
-  );
+  const requiredCapabilities = [
+    ...new Set([
+      ...requiredDiscoveryCapabilityIds(await loadCapabilityDeclarations(root)),
+      ...(project.evidenceRequirements.requiredCapabilityIds ?? []),
+    ]),
+  ];
   const exercisedCapabilities = new Set(
     (await loadProjectEvidenceReceipts(root, project.id)).map((receipt) => receipt.capabilityId),
   );
   const journalEvents = await readJournal(workspacePaths(root).journal);
   const attemptedCapabilities = new Map<string, { attempts: number; failureKinds: Set<string> }>();
   for (const event of journalEvents) {
-    if (event.scope !== project.id || event.type !== "capability.fetch.attempted") continue;
+    if (
+      event.scope !== project.id ||
+      (event.type !== "capability.fetch.attempted" && event.type !== "data.capability.requested")
+    )
+      continue;
     const capabilityId = event.payload.capabilityId;
     if (typeof capabilityId !== "string") continue;
     const current = attemptedCapabilities.get(capabilityId) ?? {
@@ -3731,7 +3806,11 @@ async function assertDiscoveryCoverage(
     attemptedCapabilities.set(capabilityId, current);
   }
   for (const event of journalEvents) {
-    if (event.scope !== project.id || event.type !== "capability.fetch.failed") continue;
+    if (
+      event.scope !== project.id ||
+      (event.type !== "capability.fetch.failed" && event.type !== "data.capability.failed")
+    )
+      continue;
     const capabilityId = event.payload.capabilityId;
     const failureKind = event.payload.failureKind;
     if (typeof capabilityId !== "string" || typeof failureKind !== "string") continue;
@@ -4125,7 +4204,7 @@ function packagePrompt(
 ): string {
   const stageInstructions: Record<WorkPackage["stage"], string> = {
     discover:
-      "Assess candidates incrementally through the packet's recordAssessment command; do not accumulate a source-sized final response. The control plane has already assigned every immutable input and broker result a candidateId and retains its title, URL, DOI, dates, receipt, locator, JSON Pointer, hashes, and retrieval metadata. Reference candidateId; never repeat or invent those deterministic fields. Give each admitted candidate a concise sourceId plus source type, relevance, quality, applicability, coverage dimensions, and limitations. Record meaningful explicit rejections; omitted candidates remain unassessed for later gap filling. Native Web or Browser discoveries are supplemental candidates only and cannot be admitted until an immutable broker receipt is attached to the same canonical URL or DOI. After broad search, strict assessment, and focused gap filling, return only the small closeout object with one judgment for every reviewed dimension plus limitations and remaining gaps. The CLI mechanically joins the latest recorded assessments to provenance, derives counts/date range/coverage, and rejects unknown or unformalized candidates.",
+      "Assess candidates incrementally through the packet's recordAssessment command; do not accumulate a source-sized final response. The control plane has already assigned every immutable input, broker result, and structured data result a candidateId and retains its title, URL, DOI, dates, receipt, locator, JSON Pointer, hashes, and retrieval metadata. Reference candidateId; never repeat or invent those deterministic fields. Give each admitted candidate a concise sourceId plus source type, relevance, quality, applicability, coverage dimensions, and limitations. Record meaningful explicit rejections; omitted candidates remain unassessed for later gap filling. Native Web or Browser discoveries are supplemental candidates only and cannot be admitted until an immutable broker receipt is attached to the same canonical URL or DOI. After broad search, strict assessment, and focused gap filling, return only the small closeout object with one judgment for every reviewed dimension plus limitations and remaining gaps. The CLI mechanically joins the latest recorded assessments to provenance, derives counts/date range/coverage, and rejects unknown or unformalized candidates.",
     acquire:
       "Audit every provisionally admitted source exactly once. For each source, bind its ledger candidateId, list only artifactIds returned by the exact artifact registration command, and choose accepted, limited, or rejected with a concise rationale and explicit limitations. A broker receipt is an immutable discovery record but is not full text. Use an empty artifactIds array only when intentionally retaining a source as metadata/abstract evidence or when the source is an already registered local input. Put unresolved blocking acquisition or coverage deficiencies in gaps; put honest non-blocking scope constraints in limitations. Do not invent file paths, hashes, URLs, artifact IDs, or successful downloads.",
     analyze:
@@ -4150,7 +4229,7 @@ function packagePrompt(
         ? "Use the installed external acquisition/document Skills in the current native host, but treat the CLI artifact registry and acquisition schema as the only authority for durable evidence."
         : "Capability files are provenance-bound but are not available as execution tools in this stage.",
     workPackage.stage === "discover"
-      ? `Follow the reviewed discovery plan: ${JSON.stringify(discovery)}. The plan's max broker-view count is a hard working ceiling, not a target to exhaust. Execute required first-pass channels before supplemental channels, prefer broad high-yield queries, assess registered candidates between batches, and use the next gap-fill batch only for explicit uncovered dimensions, source types, date ranges, full text, limitations, or counterevidence. Stop fetching as soon as the declared coverage minimums are supportable. Native Web/Browser may broaden lead discovery, but every such action must be recorded through recordActivity, every useful result must be registered as a candidate, and the same URL/DOI must then be formalized through the broker before admission. The broker or an immutable registered input is the sole admissible evidence path. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. Invoke fetch_candidate_source with the manifest capability ID and obey its exact declared HTTP method. GET capabilities use only declared query parameters; POST capabilities require request_body containing only the documented non-secret request JSON. Never place API keys, tokens, authorization data, cookies, or other credential-like fields in request_body. The broker injects the sole declared logical credential, disables caching for credentialed requests, and never persists the POST body (only its hash). The tool result includes exact bounded context, registered candidate IDs, its receipt, whether a network call was avoided, and remaining view budget. Exercise every manifest capability with requiredForDiscovery=true, or the mechanical coverage gate will stop downstream work.`
+      ? `Follow the reviewed discovery plan: ${JSON.stringify(discovery)}. The plan's max evidence-call count is a hard working ceiling, not a target to exhaust. Execute required first-pass channels before supplemental channels, prefer broad high-yield queries, assess registered candidates between batches, and use the next gap-fill batch only for explicit uncovered dimensions, source types, date ranges, full text, limitations, or counterevidence. Stop fetching as soon as the declared coverage minimums are supportable. Native Web/Browser may broaden lead discovery, but every such action must be recorded through recordActivity, every useful result must be registered as a candidate, and the same URL/DOI must then be formalized through the broker before admission. A broker receipt, structured data-runtime receipt, or immutable registered input is an admissible evidence path. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. For generic broker capabilities, invoke fetch_candidate_source with the manifest capability ID and obey its exact declared HTTP method. For structured data capabilities, use the packet's dynamic catalog and describe command, then invoke runDataCapability; never call standalone data run for project evidence. Never place API keys, tokens, authorization data, cookies, or other credential-like fields in request files. The Research control plane injects declared logical credentials and persists only safe hash-bound results. Exercise every manifest capability with requiredForDiscovery=true and every project-required data capability ID, or the mechanical coverage gate will stop downstream work.`
       : "Use only the complete embedded stage context; no tools or additional source reads are allowed.",
     stageInstructions[workPackage.stage],
     "Do not write stage output files directly. Your final response must be only the JSON object required by the supplied output schema; the CLI will validate and atomically materialize it.",

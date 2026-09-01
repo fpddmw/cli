@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-08-30
-lastReviewedCommit: 7523757200cc863dd07c882a41b0299b8bc712b1
+lastReviewedAt: 2026-08-31
+lastReviewedCommit: 37d73ceb0e0f80ba3f6ac05759e0bad59182ca35
 ---
 
 # Repo Validation
@@ -56,7 +56,8 @@ relying only on the repository's aggregate coverage threshold. It covers
 execution-manifest, discovery-metadata and schema stability; proves that
 discovery-only wording changes do not alter execution bindings; and covers
 canonical cross-platform digests, endpoint and redirect policy, bounded HTTP
-behavior, logical credential injection, redaction, pagination/partial results,
+behavior, header and protected path-segment logical credential injection,
+secret-independent request digests, redaction, pagination/partial results,
 stable errors, receipt binding, and npm package discovery of the published
 schemas. Provider live tests remain explicit opt-ins; ordinary and
 clean-container CI use privacy-safe fixtures and synthetic connectors only.
@@ -70,6 +71,49 @@ provider metadata validation, and preservation of earlier pages after a later
 failure. Fixture provenance notes live beside the fixtures under
 `test/fixtures/data/**`; no provider response, credential, or user data is
 checked in.
+
+`test/data-gdelt-connectors.test.ts` generates synthetic DOC JSON and
+single-member ZIP/TSV fixtures in memory. It proves four independent capability
+contracts, exact 15-minute path planning without `masterfilelist.txt`, latest
+size/MD5 verification, bounded ZIP/CRC/UTF-8/column validation, closed named
+fields, later-file partial preservation, record-cap early stop, and the
+automated-coding/non-representative/content-download discovery boundaries.
+
+`test/data-bluesky-cascade-connector.test.ts` proves bounded public search,
+author-feed, custom-feed, and list-feed selection; UTC filtering; optional
+thread expansion; failed-request accounting; seed preservation on partial
+thread failure; and the public-UGC, indexing, moderation, and mutable-metric
+discovery boundaries.
+
+`test/data-youtube-public-content-connector.test.ts` proves header-only API-key
+injection, bounded video discovery and enrichment, complete reply pagination,
+credential preflight, duplicate-ID and empty-query rejection, per-video partial
+isolation, explicit empty partial results for disabled comments, and the quota,
+visibility, ranking, and non-representative-public-opinion discovery boundaries.
+The bounded HTTP suite separately proves that only a short machine-readable
+provider reason is retained from an error body; provider prose and unsafe values
+remain excluded.
+
+`test/data-nasa-firms-fire-connector.test.ts` proves required MAP_KEY preflight,
+five-day chunk planning, provider availability checks, bbox/window/transaction
+limits, VIIRS field normalization, no-results, record caps, invalid-row and
+later-chunk partial isolation, and hotspot/non-perimeter discovery boundaries.
+The shared CSV parser has its own quoted-field and malformed-input regression,
+and the bounded HTTP suite proves a path credential never enters the public
+request digest or result.
+
+`test/data-openaq-connector.test.ts` proves required API-key preflight for both
+operations, bounded and stable location filters, raw/hourly/daily sensor route
+selection, pagination metadata validation, attribution/coverage normalization,
+pre-network request rejection, record caps, later-page partial isolation, and
+the explicit S3-download, AQI, health, and regulatory boundaries.
+
+`test/data-regulations-gov-connector.test.ts` proves API-key preflight for both
+read-only operations, posted and Eastern-wall-clock last-modified filters,
+stable JSON:API pagination, curated detail and attachment metadata, omission of
+named personal-profile fields, pre-network request rejection, record caps,
+per-ID partial isolation, and the non-posting, non-download, and
+non-representative-public-opinion discovery boundaries.
 
 Target the foundation during iteration with
 `node --import tsx --test test/data-*.test.ts`. The ordinary `npm test` and

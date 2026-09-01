@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-08-30
-lastReviewedCommit: 40396601e751ffecff4c51294e4056d4ac968a5e
+lastReviewedAt: 2026-08-31
+lastReviewedCommit: 36df568230534c0c0d35ae459f266e6010f51c4c
 ---
 
 # Tiangong AI CLI
@@ -75,22 +75,95 @@ JSON exits are `0` for success, `2` for request/contract errors, `3` for a
 blocked execution, and `4` for an explicit partial result. Public machine
 schemas ship under `dist/data/schemas/`.
 
-The first built-in capabilities are:
+The built-in capabilities are:
 
 - `airnow.hourly-observations` / `fetch-hourly`: fetches official AirNow
   `HourlyAQObs` files for a bounded UTC-hour window, bounding box, and pollutant
   list. Results retain source-file lineage and always state that AirNow data are
   preliminary and unsuitable as regulatory-grade AQS evidence.
+- `bluesky.public-posts` / `fetch-cascades`: fetches bounded public Bluesky
+  post seeds from search, an author feed, a custom feed, or a list feed and can
+  flatten visible reply cascades. Ranking, counters, moderation visibility, and
+  missing nodes remain explicit mutable AppView limitations.
+- `epa.eis-records` / `search`: retrieves bounded official EPA EIS Database
+  common-search or UI-created search pages and parses title, CEQ/provider IDs,
+  document type, dates, agencies, state, detail links, and document-availability
+  cues. It does not fetch or assess linked EIS documents.
 - `federal-register.documents` / `search`: searches bounded
   FederalRegister.gov document metadata by publication date plus term, agency,
   document type, topic, docket, or RIN filters. It does not follow result links,
   fetch document full text, or provide legal interpretation.
+- `gdelt.doc-search` / `search`: searches the rolling GDELT DOC 2.0 index for
+  bounded article-link metadata or supported aggregate timelines. Automated
+  multilingual extraction and uneven monitored-source coverage are explicit;
+  it does not retrieve article bodies or establish ground-truth facts.
+- `gdelt.events`, `gdelt.gkg`, and `gdelt.mentions` / `fetch`: independently
+  discoverable GDELT 2.0 table capabilities backed by one bounded TypeScript
+  file-feed core. They fetch either the latest provider entry or at most twenty
+  aligned 15-minute files, verify ZIP/CRC and advertised latest-file checksums,
+  and emit closed named columns without persisting downloaded files.
+- `nasa-firms.active-fire` / `fetch-area`: retrieves bounded NASA FIRMS MODIS,
+  VIIRS, or Landsat active-fire point detections, optionally validates source
+  availability, and exposes chunk-level partial coverage. Hotspots are thermal
+  anomalies, not fire perimeters or confirmed incident identities.
+- `open-meteo.air-quality` / `fetch-hourly`: retrieves bounded GMT hourly CAMS
+  model-grid air-quality series for known coordinates; these are modeled
+  background values rather than station observations.
+- `open-meteo.flood` / `fetch-daily`: retrieves bounded daily GloFAS simulated
+  river-discharge series for the represented river grid; it is neither gauge
+  data nor a flood-alert service.
+- `open-meteo.historical-weather` / `fetch`: retrieves bounded GMT hourly and/or
+  daily historical weather reanalysis for one controlled model and known
+  coordinates. ERA5 or ERA5-Land should be selected when multi-decade model
+  consistency matters.
+- `openaq.air-quality` / `search-locations` and `fetch-sensor-measurements`:
+  discovers filtered OpenAQ v3 locations and retrieves a bounded raw, hourly,
+  or daily series for one sensor. It preserves provider/license context but
+  does not calculate AQI or make health or regulatory determinations.
+- `regulations-gov.comments` / `search` and `fetch-details`: searches bounded
+  Regulations.gov public-comment metadata and retrieves curated details for
+  explicit comment IDs. It omits named personal-profile fields, never submits
+  comments, and returns attachment metadata without downloading file bytes.
+- `regulations-gov.attachments` / `download`: retrieves attachment metadata for
+  exact public comment IDs and writes bounded files only from the official
+  Regulations.gov download origin. It requires `--artifact-dir`, refuses to
+  overwrite files, and commits SHA-256-bound relative files plus a manifest;
+  it does not scan, open, extract, or interpret the untrusted bytes.
+- `usbr.project-records` / `fetch`: inventories caller-supplied official
+  `www.usbr.gov` project or program pages plus bounded same-origin links. It
+  preserves page response provenance but does not follow, download, parse, or
+  assess linked records and is not USBR-wide search.
+- `usbr.rise` / `discover-items` and `fetch-results`: scans bounded Bureau of
+  Reclamation RISE catalog pages for client-filtered candidate item IDs, then
+  retrieves bounded result rows for explicitly selected items. Provider scan
+  order is not ranking, and operational values require item metadata and domain
+  context before interpretation.
+- `usgs.water-instantaneous-values` / `fetch`: retrieves bounded legacy USGS
+  WaterServices instantaneous observations while preserving site, parameter,
+  qualifier, provisional status, and source lifecycle warnings.
+- `youtube.public-content` / `search-videos` and `fetch-comments`: discovers
+  public YouTube videos with detail enrichment and fetches bounded visible
+  comment/reply text for explicit video IDs. It does not download media or
+  transcripts and does not treat ranking or comments as representative opinion.
 
-Both connectors are keyless. Their exact input and output schemas, endpoint
-scopes and limits are available through the execution manifest, while source
-notes, coverage, selection guidance and license restrictions are available in
-the discovery metadata returned by `data describe`; static `data doctor`
-remains offline.
+Fourteen capabilities are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
+CLI injects as a protected provider path segment; OpenAQ requires
+`OPENAQ_API_KEY`, Regulations.gov requires `REGGOV_API_KEY`, and YouTube requires
+`YOUTUBE_API_KEY`; the CLI injects all three as protected provider headers, with
+YouTube using `X-Goog-Api-Key` rather than a URL parameter. No secret is accepted
+in argv or input JSON. Exact input and output schemas,
+endpoint scopes and limits are available through the execution manifest, while
+source notes, coverage, selection guidance and license restrictions are
+available in the discovery metadata returned by `data describe`; static
+`data doctor` remains offline and reports a missing required credential without
+making a network request.
+
+Operations that declare local artifact output must be invoked with
+`data run ... --artifact-dir <absolute-existing-directory>`. The path is an
+out-of-band execution parameter and is excluded from the request, result, and
+receipt. Files are staged under hidden temporary names, validated before an
+atomic no-overwrite commit, and rolled back when execution or output validation
+is blocked.
 
 ## KB Ingest
 
@@ -993,26 +1066,43 @@ records and JSONL progress preserve sanitized accounting mode, event/item
 counts, provider turns, tool calls, reasoning tokens, and bounded provider
 errors.
 
-Every evidence source must resolve to an admitted input or a completed broker
-receipt. Successful broker bodies are immutable content-addressed objects under
+Every evidence source must resolve to an admitted input, a completed broker
+receipt, or a completed structured data-runtime receipt. Successful broker and
+data results are immutable content-addressed objects under
 `.tiangong-research/evidence/objects`; receipts are project-scoped and verified
 for existence, size, and SHA-256 before every capsule stages them. Independent
 review binds the requirements, receipts, permanent evidence objects, inputs,
 and artifact hashes. Its exact packet and merged bounded evidence context are
 also content-addressed under the project `review/packets/` and
 `review/contexts/` directories. Mechanical closure re-verifies the packet,
-context, broker objects, and registered local input hashes before recording
+context, evidence objects, and registered local input hashes before recording
 their safe locators. Capsule deletion therefore does not delete the durable
 review chain.
 
 Native discovery preparation embeds the exact staged capability manifest and
-each external Skill's top-level `SKILL.md`. The current host may fetch admitted
-evidence only with `research project evidence fetch`, whose bounded request file
+each external Skill's top-level `SKILL.md`. It also projects every built-in data
+operation dynamically, with no per-provider Research adapter. The current host
+may fetch generic broker evidence with `research project evidence fetch`, whose bounded request file
 contains logical IDs but no credential values. The manifest includes the locked,
 non-secret HTTPS endpoint rather than only its host, and each response returns
 the exact bounded context plus a hash-bound receipt while retaining the raw
 object in the permanent evidence store. Host web/search/database tools cannot
 substitute for a required broker receipt.
+
+For structured sources, inspect the packet catalog and the selected operation
+with `tiangong-ai data describe`, then run the exact request through:
+
+```bash
+tiangong-ai research project evidence data run <project-id> \
+  --request /absolute/path/to/data-run-request.json \
+  --workspace /absolute/path/to/workspace --json
+```
+
+This Research command calls the same TypeScript data service in-process; it does
+not spawn `tiangong-ai data run`. It preserves the core data and receipt digest,
+then adds the project budget, namespaced owner-only credential mapping,
+content-addressed evidence/optional artifacts, candidate, ledger, journal, and
+review bindings. A blocked data result is not promoted to evidence.
 Analyze and synthesize packets contain bounded, hash-verified prior-stage
 artifacts and require no external evidence calls. Review is tool-free and uses the
 reviewer's route-specific structured-output turn cap:

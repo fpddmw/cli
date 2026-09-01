@@ -74,11 +74,16 @@ export interface DataCredentialDeclaration {
   environmentVariable: string;
   required: boolean;
   endpointIds: string[];
-  injection: {
-    kind: "header";
-    name: string;
-    prefix: string;
-  };
+  injection:
+    | {
+        kind: "header";
+        name: string;
+        prefix: string;
+      }
+    | {
+        kind: "path-segment";
+        placeholder: `{${string}}`;
+      };
 }
 
 export interface DataSchemaReference {
@@ -92,6 +97,23 @@ export interface DataOperationManifest {
   inputSchema: DataSchemaReference;
   outputSchema: DataSchemaReference;
   limits: DataExecutionLimits;
+  artifactOutput?: DataArtifactOutputDeclaration | undefined;
+}
+
+export interface DataArtifactOutputDeclaration {
+  kind: "directory";
+  required: true;
+}
+
+export interface DataArtifactRecord {
+  relativePath: string;
+  sha256: string;
+  byteSize: number;
+}
+
+export interface DataArtifactSink {
+  assertAvailable(relativePath: string): Promise<void>;
+  stage(relativePath: string, bytes: Uint8Array): Promise<DataArtifactRecord>;
 }
 
 /** The capability's execution contract. Discovery prose is intentionally excluded. */
@@ -318,6 +340,7 @@ export interface DataOperationExecutionContext {
   request: DataRunRequest;
   limits: DataExecutionLimits;
   http: DataHttpClient;
+  artifacts: DataArtifactSink | null;
 }
 
 export interface DataOperationExecution {
@@ -337,6 +360,7 @@ export interface DataOperationDefinition {
   inputSchema: JsonSchema;
   outputSchema: JsonSchema;
   limits?: Partial<DataExecutionLimits> | undefined;
+  artifactOutput?: DataArtifactOutputDeclaration | undefined;
   execute(
     context: DataOperationExecutionContext,
   ): DataOperationExecution | Promise<DataOperationExecution>;

@@ -33,7 +33,9 @@ describe("bounded data HTTP", () => {
         authorization = new Headers(init?.headers).get("authorization") ?? "";
         return new Response('{"items":[]}', {
           status: 200,
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json; charset=UTF-8; boundary=super-secret-token",
+          },
         });
       }) as typeof fetch,
     });
@@ -49,6 +51,47 @@ describe("bounded data HTTP", () => {
     assert.equal(authorization, "Bearer super-secret-token");
     assert.deepEqual(response.json(), { items: [] });
     assert.equal(response.observation.attempts, 1);
+    assert.equal(response.safeHeaders["content-type"], "application/json; charset=utf-8");
+    assert.doesNotMatch(JSON.stringify(response.safeHeaders), /super-secret-token/);
+  });
+
+  it("injects a path-segment credential without exposing it to the request digest", async () => {
+    const first = syntheticConnector({ credential: true });
+    first.credentials[0]!.injection = {
+      kind: "path-segment",
+      placeholder: "{api-token}",
+    };
+    const requested: string[] = [];
+    const run = async (secret: string) => {
+      const client = createBoundedHttpClient({
+        capabilityId: first.capabilityId,
+        endpoints: first.endpoints,
+        credentials: first.credentials,
+        environment: { TIANGONG_DATA_TEST_TOKEN: secret },
+        limits: first.limits,
+        fetchImpl: (async (target) => {
+          requested.push(String(target));
+          return new Response('{"items":[]}', {
+            headers: { "content-type": "application/json" },
+          });
+        }) as typeof fetch,
+      });
+      return client.request({
+        endpointId: "primary",
+        method: "GET",
+        path: "/v1/{api-token}/items",
+        credentialId: "api-token",
+      });
+    };
+
+    const left = await run("first-secret");
+    const right = await run("second-secret");
+    assert.deepEqual(requested, [
+      "https://example.test/v1/first-secret/items",
+      "https://example.test/v1/second-secret/items",
+    ]);
+    assert.equal(left.observation.requestDigest, right.observation.requestDigest);
+    assert.doesNotMatch(JSON.stringify([left.observation, right.observation]), /first|second/);
   });
 
   it("rejects cross-origin redirects without forwarding credentials", async () => {
@@ -146,6 +189,50 @@ describe("bounded data HTTP", () => {
     const machine = toDataMachineError(thrown, [secret]);
     assert.equal(machine.code, "timeout");
     assert.doesNotMatch(JSON.stringify(machine), new RegExp(secret));
+  });
+
+  it("retains only a bounded machine-readable provider error reason", async () => {
+    const safe = httpClient({
+      fetchImpl: (async () =>
+        Response.json(
+          { error: { errors: [{ reason: "commentsDisabled" }], message: "ignored prose" } },
+          { status: 403 },
+        )) as typeof fetch,
+    });
+    let safeError: unknown;
+    try {
+      await safe.request({
+        endpointId: "primary",
+        method: "GET",
+        path: "/v1/items",
+        credentialId: "api-token",
+      });
+    } catch (error) {
+      safeError = error;
+    }
+    assert.ok(safeError instanceof DataRuntimeError);
+    assert.equal(safeError.options.details?.providerReason, "commentsDisabled");
+
+    const unsafe = httpClient({
+      fetchImpl: (async () =>
+        Response.json(
+          { error: { errors: [{ reason: "comments disabled for jane@example.test" }] } },
+          { status: 403 },
+        )) as typeof fetch,
+    });
+    let unsafeError: unknown;
+    try {
+      await unsafe.request({
+        endpointId: "primary",
+        method: "GET",
+        path: "/v1/items",
+        credentialId: "api-token",
+      });
+    } catch (error) {
+      unsafeError = error;
+    }
+    assert.ok(unsafeError instanceof DataRuntimeError);
+    assert.equal(unsafeError.options.details?.providerReason, undefined);
   });
 
   it("blocks a provider response that reflects the injected credential", async () => {

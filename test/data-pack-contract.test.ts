@@ -31,13 +31,45 @@ describe("data package contract", () => {
     }
   });
 
-  it("emits the built-in registry and both connector contracts into dist", async () => {
+  it("emits the built-in registry and every connector contract into dist", async () => {
     const modules = [
       "data/builtins.js",
       "data/connectors/airnow-hourly-observations.js",
       "data/connectors/airnow-hourly-observations.schemas.js",
+      "data/connectors/bluesky-public-posts.js",
+      "data/connectors/bluesky-public-posts.schemas.js",
+      "data/connectors/epa-eis-records.js",
+      "data/connectors/epa-eis-records.schemas.js",
       "data/connectors/federal-register-documents.js",
       "data/connectors/federal-register-documents.schemas.js",
+      "data/connectors/gdelt-doc-search.js",
+      "data/connectors/gdelt-doc-search.schemas.js",
+      "data/connectors/gdelt-file-feeds.js",
+      "data/connectors/gdelt-file-feeds.schemas.js",
+      "data/connectors/nasa-firms-fire.js",
+      "data/connectors/nasa-firms-fire.schemas.js",
+      "data/connectors/open-meteo-air-quality.js",
+      "data/connectors/open-meteo-air-quality.schemas.js",
+      "data/connectors/open-meteo-flood.js",
+      "data/connectors/open-meteo-flood.schemas.js",
+      "data/connectors/open-meteo-historical-weather.js",
+      "data/connectors/open-meteo-historical-weather.schemas.js",
+      "data/connectors/openaq-air-quality.js",
+      "data/connectors/openaq-air-quality.schemas.js",
+      "data/connectors/regulations-gov-attachments.js",
+      "data/connectors/regulations-gov-attachments.schemas.js",
+      "data/connectors/regulations-gov-comments.js",
+      "data/connectors/regulations-gov-comments.schemas.js",
+      "data/connectors/usbr-project-records.js",
+      "data/connectors/usbr-project-records.schemas.js",
+      "data/connectors/usbr-rise.js",
+      "data/connectors/usbr-rise.schemas.js",
+      "data/connectors/usgs-water-instantaneous-values.js",
+      "data/connectors/usgs-water-instantaneous-values.schemas.js",
+      "data/connectors/youtube-public-content.js",
+      "data/connectors/youtube-public-content.schemas.js",
+      "data/runtime/csv.js",
+      "data/runtime/artifacts.js",
     ];
     for (const modulePath of modules) {
       await access(join(repositoryRoot, "dist", ...modulePath.split("/")));
@@ -51,7 +83,27 @@ describe("data package contract", () => {
     };
     assert.deepEqual(
       builtins.builtInDataRegistry.catalog().capabilities.map((item) => item.capabilityId),
-      ["airnow.hourly-observations", "federal-register.documents"],
+      [
+        "airnow.hourly-observations",
+        "bluesky.public-posts",
+        "epa.eis-records",
+        "federal-register.documents",
+        "gdelt.doc-search",
+        "gdelt.events",
+        "gdelt.gkg",
+        "gdelt.mentions",
+        "nasa-firms.active-fire",
+        "open-meteo.air-quality",
+        "open-meteo.flood",
+        "open-meteo.historical-weather",
+        "openaq.air-quality",
+        "regulations-gov.attachments",
+        "regulations-gov.comments",
+        "usbr.project-records",
+        "usbr.rise",
+        "usgs.water-instantaneous-values",
+        "youtube.public-content",
+      ],
     );
   });
 });
