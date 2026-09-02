@@ -105,6 +105,26 @@ export interface ProjectTaskView {
   events: JournalEvent[];
 }
 
+export type TaskObjectReader = <T>(group: string, hash: string, hashField: string) => Promise<T>;
+
+export function latestTaskBinding(
+  events: Array<Pick<JournalEvent, "scope" | "type" | "payload">>,
+  projectId: string,
+) {
+  const latest = events.findLast(
+    (event) =>
+      event.scope === projectId &&
+      (["project.task.defined", "project.task.scope.approved"].includes(event.type) ||
+        (["project.forked", "project.addendum.created"].includes(event.type) &&
+          isObject(event.payload.taskContract))),
+  );
+  return latest
+    ? isObject(latest.payload.taskContract)
+      ? latest.payload.taskContract
+      : latest.payload
+    : null;
+}
+
 export function isTaskSchemaName(value: string): value is TaskSchemaName {
   return Object.hasOwn(inputSchemas, value);
 }
@@ -156,17 +176,26 @@ export async function loadProjectTask(
   const events = (knownEvents ?? (await readVerifiedJournal(workspacePaths(root).journal))).filter(
     (event) => event.scope === projectId,
   );
-  const latest = events.findLast(
-    (event) =>
-      ["project.task.defined", "project.task.scope.approved"].includes(event.type) ||
-      (["project.forked", "project.addendum.created"].includes(event.type) &&
-        isObject(event.payload.taskContract)),
+  const binding = latestTaskBinding(events, projectId);
+  if (!binding) return null;
+  const history = await loadTaskHistory(
+    projectId,
+    String(binding.contractSha256),
+    <T>(group: string, hash: string, hashField: string) =>
+      readTaskObject<T>(root, projectId, group, hash, hashField),
   );
-  if (!latest) return null;
-  const binding = isObject(latest.payload.taskContract)
-    ? latest.payload.taskContract
-    : latest.payload;
-  const current = await readContract(root, projectId, String(binding.contractSha256));
+  return { ...history, events };
+}
+
+/** Shared live/audit relationship validation over already hash-verified immutable objects. */
+export async function loadTaskHistory(
+  projectId: string,
+  currentHash: string,
+  read: TaskObjectReader,
+) {
+  const readContract = async (hash: string) =>
+    validateTaskContract(await read<TaskContract>("contracts", hash, "contractSha256"));
+  const current = await readContract(currentHash);
   if (current.projectId !== projectId)
     throw invalid("Current task contract belongs to another project.");
   const contracts = [current];
@@ -175,7 +204,7 @@ export async function loadProjectTask(
   while (cursor.parentContractSha256) {
     if (seen.has(cursor.parentContractSha256) || contracts.length >= 1000)
       throw invalid("Task history is cyclic or exceeds its bound.");
-    const parent = await readContract(root, projectId, cursor.parentContractSha256);
+    const parent = await readContract(cursor.parentContractSha256);
     if (
       cursor.version !== parent.version + 1 ||
       cursor.originalRequest !== parent.originalRequest ||
@@ -197,9 +226,7 @@ export async function loadProjectTask(
     throw invalid("Task original requirement binding drifted.");
   for (const contract of contracts) {
     if (!contract.authorization) continue;
-    const proposal = await readTaskObject<ScopeProposal>(
-      root,
-      projectId,
+    const proposal = await read<ScopeProposal>(
       "proposals",
       contract.authorization.proposalSha256,
       "proposalSha256",
@@ -210,7 +237,7 @@ export async function loadProjectTask(
     )
       throw invalid("Task scope authorization does not bind this exact change.");
   }
-  return { current, original, contracts, events };
+  return { current, original, contracts };
 }
 
 export async function defineProjectTask(
@@ -554,14 +581,7 @@ async function requireTask(root: string, projectId: string, events: JournalEvent
   return view;
 }
 
-async function readContract(root: string, projectId: string, hash: string) {
-  const record = await readTaskObject<TaskContract>(
-    root,
-    projectId,
-    "contracts",
-    hash,
-    "contractSha256",
-  );
+function validateTaskContract(record: TaskContract) {
   validateInput("task-contract", {
     schemaVersion: record.schemaVersion,
     originalRequest: record.originalRequest,
@@ -611,6 +631,10 @@ export async function readTaskObject<T>(
     throw invalid("Task object address is invalid.");
   const directory = await taskDirectory(root, projectId, group, false);
   const record = await readRegularJson(join(directory, `${hash}.json`));
+  return validateTaskObject<T>(record, hash, hashField);
+}
+
+export function validateTaskObject<T>(record: unknown, hash: string, hashField: string): T {
   if (!isObject(record)) throw invalid("Stored task object must be an object.");
   const { [hashField]: declared, ...core } = record;
   if (declared !== hash || sha256Text(canonicalJson(core)) !== hash)

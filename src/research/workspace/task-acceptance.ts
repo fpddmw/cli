@@ -105,7 +105,7 @@ export interface TaskAcceptanceRecord {
   recordSha256: string;
 }
 
-interface ReferenceView {
+export interface ReferenceView {
   ready: boolean;
   sources: Map<string, string>;
   atoms: Map<string, string>;
@@ -286,25 +286,7 @@ export async function compileTaskAcceptanceContext(
 ): Promise<TaskAcceptanceContext | null> {
   const view = knownView === undefined ? await loadProjectTask(root, project.id) : knownView;
   if (!view) return null;
-  const rows = new Map<string, TaskAcceptanceContext["requirements"][number]>();
-  for (const [items, scope] of [
-    [view.original.requirements, "original"],
-    [view.current.requirements, "current"],
-  ] as const) {
-    for (const item of items) {
-      const hash = taskRequirementSha256(item);
-      const row = rows.get(hash) ?? {
-        ...item,
-        requirementSha256: hash,
-        original: false,
-        current: false,
-        status: "unanswered",
-        record: null,
-      };
-      row[scope] = true;
-      rows.set(hash, row);
-    }
-  }
+  const rows = taskRequirementRows(view);
   const latest = latestAcceptanceEvents(view.events, project.id);
   const references = latest.size ? await referenceView(root, project) : null;
   const results = new Map<string, OutputRecord>();
@@ -319,18 +301,7 @@ export async function compileTaskAcceptanceContext(
     )
       throw taskError("Check record and requirement identity disagree.");
     row.record = record;
-    const current =
-      references!.ready &&
-      record.designSha256 === (project.scientificDesign?.designSha256 ?? null) &&
-      record.policySha256 === (project.publicationPolicy?.resolvedPolicySha256 ?? null) &&
-      bindingsMatch(record.sourceBindings, references!.sources) &&
-      bindingsMatch(record.atomBindings, references!.atoms) &&
-      bindingsMatch(record.findingBindings, references!.findings);
-    row.status = !current
-      ? "stale"
-      : ["satisfied", "negative-result"].includes(record.outcome)
-        ? "recorded"
-        : record.outcome;
+    row.status = taskRecordStatus(record, references!, project);
     for (const result of record.results) {
       if (results.has(result.sha256)) continue;
       const content = await readSafeResult(
@@ -350,6 +321,48 @@ export async function compileTaskAcceptanceContext(
     results: [...results.values()].sort((a, b) => a.sha256.localeCompare(b.sha256)),
   };
   return { ...core, contextSha256: sha256Text(canonicalJson(core)) };
+}
+
+export function taskRequirementRows(view: Pick<ProjectTaskView, "original" | "current">) {
+  const rows = new Map<string, TaskAcceptanceContext["requirements"][number]>();
+  for (const [items, scope] of [
+    [view.original.requirements, "original"],
+    [view.current.requirements, "current"],
+  ] as const) {
+    for (const item of items) {
+      const hash = taskRequirementSha256(item);
+      const row = rows.get(hash) ?? {
+        ...item,
+        requirementSha256: hash,
+        original: false,
+        current: false,
+        status: "unanswered",
+        record: null,
+      };
+      row[scope] = true;
+      rows.set(hash, row);
+    }
+  }
+  return rows;
+}
+
+export function taskRecordStatus(
+  record: TaskAcceptanceRecord,
+  references: ReferenceView,
+  project: ProjectState,
+) {
+  const current =
+    references.ready &&
+    record.designSha256 === (project.scientificDesign?.designSha256 ?? null) &&
+    record.policySha256 === (project.publicationPolicy?.resolvedPolicySha256 ?? null) &&
+    bindingsMatch(record.sourceBindings, references.sources) &&
+    bindingsMatch(record.atomBindings, references.atoms) &&
+    bindingsMatch(record.findingBindings, references.findings);
+  return !current
+    ? "stale"
+    : ["satisfied", "negative-result"].includes(record.outcome)
+      ? "recorded"
+      : record.outcome;
 }
 
 export function taskReviewAssessmentSchema(binding?: {
@@ -610,6 +623,10 @@ async function readAcceptance(
     hash,
     "recordSha256",
   );
+  return validateTaskAcceptanceRecord(record, projectId);
+}
+
+export function validateTaskAcceptanceRecord(record: TaskAcceptanceRecord, projectId: string) {
   if (
     record.kind !== "tiangong-task-acceptance" ||
     record.projectId !== projectId ||

@@ -13,6 +13,7 @@ import { loadCurrentClaimEvidenceGraph, loadCurrentInferenceSnapshot } from "./i
 import { readJournal, verifyJournal } from "./journal.js";
 import { loadProject } from "./projects.js";
 import { inspectPublicationStatus } from "./publication-workflow.js";
+import { verifyTaskAudit, writeTaskAuditContext, type TaskAuditBinding } from "./task-audit.js";
 import { sanitizeResearchText, sanitizeResearchValue } from "./sanitization.js";
 import {
   canonicalJson,
@@ -54,6 +55,7 @@ export interface ProjectAuditManifest {
     sourceWorkspacePathSha256: string;
   };
   researchChain: {
+    task?: TaskAuditBinding;
     acquisitionSnapshot: AuditChainBinding | null;
     contentSnapshot: AuditChainBinding | null;
     inferenceSnapshot: AuditChainBinding | null;
@@ -114,6 +116,8 @@ export async function exportProjectAuditBundle(input: {
 
       const projectRoot = join(paths.projects, project.id);
       const researchChain = await loadVerifiedResearchChain(input.root, project);
+      const task = await writeTaskAuditContext(input.root, project, temporary);
+      if (task) researchChain.task = task;
       const projectFiles = await regularTreeFiles(projectRoot).catch((error) => {
         throw auditError("Project tree contains a non-portable entry.", error);
       });
@@ -332,9 +336,13 @@ async function loadVerifiedResearchChain(
   };
 }
 
-export async function verifyProjectAuditBundle(
-  bundlePath: string,
-): Promise<{ status: "verified"; projectId: string; manifestSha256: string; files: number }> {
+export async function verifyProjectAuditBundle(bundlePath: string): Promise<{
+  status: "verified";
+  projectId: string;
+  manifestSha256: string;
+  files: number;
+  task?: TaskAuditBinding & { executionCertified: false };
+}> {
   if (!isAbsolute(bundlePath) || resolve(bundlePath) !== bundlePath) {
     throw auditPathError("Audit bundle path must be absolute and normalized.");
   }
@@ -381,11 +389,23 @@ export async function verifyProjectAuditBundle(
     }
   }
   await assertPortableTextFiles(bundlePath);
+  let task: Awaited<ReturnType<typeof verifyTaskAudit>>;
+  try {
+    task = await verifyTaskAudit(
+      bundlePath,
+      manifest.projectId,
+      manifest.researchChain.task,
+      manifest.files,
+    );
+  } catch (error) {
+    throw auditError("Task audit relationship verification failed.", error);
+  }
   return {
     status: "verified",
     projectId: manifest.projectId,
     manifestSha256,
     files: manifest.files.length,
+    ...(task ? { task } : {}),
   };
 }
 
@@ -539,6 +559,15 @@ function parseManifest(value: unknown): ProjectAuditManifest {
 
 function validResearchChain(value: unknown): boolean {
   if (!isObject(value)) return false;
+  const task = value.task;
+  if (
+    task !== undefined &&
+    (!isObject(task) ||
+      !["contractSha256", "originalContractSha256", "contextSha256"].every(
+        (key) => typeof task[key] === "string" && SHA256.test(task[key] as string),
+      ))
+  )
+    return false;
   for (const key of [
     "acquisitionSnapshot",
     "contentSnapshot",
