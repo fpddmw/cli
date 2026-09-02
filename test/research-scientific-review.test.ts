@@ -125,7 +125,10 @@ describe("top-journal early scientific reviews", () => {
         assert.equal(result.projects[0]?.scientificGate.status, gateStatus);
         assert.doesNotMatch(result.projects[0]?.recommendedAction ?? "", /stage prepare/);
         if (gateStatus === "prepared")
-          assert.match(result.projects[0]?.recommendedAction ?? "", /prepared|submit/i);
+          assert.match(
+            result.projects[0]?.recommendedAction ?? "",
+            /scientific review execute .*--confirm-review-cost/,
+          );
         if (gateStatus === "revision-required")
           assert.match(result.projects[0]?.recommendedAction ?? "", /revise|revision/i);
         if (gateStatus === "stopped")
