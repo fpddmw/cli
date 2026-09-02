@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
 import type { CliIO } from "../src/io.js";
+import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import { exportProjectAuditBundle } from "../src/research/workspace/audit-bundle.js";
 import {
   appendEvidenceLedgerEvent,
@@ -21,6 +22,12 @@ import {
   nextScientificGate,
   saveProject,
 } from "../src/research/workspace/projects.js";
+import {
+  approveResearchPolicy,
+  completeResearchPublicationBrief,
+  initializeResearchPolicy,
+  loadApprovedResearchPolicy,
+} from "../src/research/workspace/research-policy.js";
 import {
   assertScientificGateForStage,
   inspectScientificReviewStatus,
@@ -53,7 +60,7 @@ import { scientificDesignInput } from "./helpers/scientific-design.js";
 describe("top-journal early scientific reviews", () => {
   for (const gateStatus of ["pending", "prepared", "revision-required", "stopped"] as const) {
     it(`reports a ${gateStatus} due scientific gate consistently without inviting a native stage`, async () => {
-      const fixture = await projectFixture(`scientific-run-${gateStatus}`);
+      const fixture = await projectFixture(`scientific-run-${gateStatus}`, { runtimePolicy: true });
       try {
         if (gateStatus !== "pending") {
           const assessmentPath = join(fixture.root, "assessment.json");
@@ -1410,7 +1417,7 @@ describe("top-journal early scientific reviews", () => {
   });
 
   it("exposes review prepare, submit, schemas, status, and the next safe action through the CLI", async () => {
-    const fixture = await projectFixture("scientific-review-cli");
+    const fixture = await projectFixture("scientific-review-cli", { runtimePolicy: true });
     try {
       const assessmentPath = join(fixture.root, "cli-design-assessment.json");
       await writeJsonAtomic(assessmentPath, researchDesignAssessment(fixture.designSha256));
@@ -1521,6 +1528,7 @@ async function projectFixture(
     pendingUncertainty?: boolean;
     pendingModels?: boolean;
     optionalLicensedRoute?: boolean;
+    runtimePolicy?: boolean;
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "tiangong-scientific-review-"));
@@ -1529,9 +1537,13 @@ async function projectFixture(
     ...(options.pendingUncertainty ? ["uncertainty-propagated"] : []),
     ...(options.pendingModels ? ["model-calibrated-or-justified"] : []),
   ];
-  const policy = policyBinding(projectId, policyRules);
+  const policy = options.runtimePolicy
+    ? await approvedGatePolicy(root, projectId)
+    : policyBinding(projectId, policyRules);
+  if (options.runtimePolicy) await lockCapabilities(root);
   const designInput = await scientificDesignInput(root, projectId, {
     targetJournal: policy.targetJournal,
+    ...(policy.targetJournal === null ? { approvalStatus: "candidate-only" } : {}),
     policyRules,
     ...(options.pendingUncertainty === undefined
       ? {}
@@ -1557,6 +1569,76 @@ async function projectFixture(
     designSha256: project.scientificDesign!.designSha256,
     design: designInput.design.contract,
   };
+}
+
+async function approvedGatePolicy(root: string, projectId: string): Promise<ResearchPolicyBinding> {
+  const sourceRoot = join(root, "gate-policy-source");
+  const documents = [
+    ["baseline/top-journal.md", "baseline", "bundled-default"],
+    ["article-types/computational-modeling.md", "article-type", "bundled-default"],
+    ["fields/pavement-engineering.md", "field", "bundled-default"],
+    ["journal-classes/discipline-flagship.md", "journal-class", "bundled-default"],
+    ...["evidence", "methods-reproducibility", "domain-novelty", "journal-editor"].map((role) => [
+      `reviewer-rubrics/${role}.md`,
+      "reviewer-rubric",
+      "bundled-default",
+    ]),
+    ["project/publication-brief.md", "publication-brief", "project-template"],
+    ["journals/exact-journal-template.md", "exact-journal", "exact-journal-template"],
+  ];
+  for (const [relative, kind, templateClass] of documents) {
+    const path = join(sourceRoot, "assets", "research-policy", "defaults", relative!);
+    await ensureDirectory(dirname(path));
+    const metadata = {
+      schemaVersion: 1,
+      id: `gate.${relative!.replaceAll("/", ".").replace(/\.md$/, "")}`,
+      kind,
+      templateClass,
+      policyVersion: 1,
+      targetTier: "top",
+      articleType: "computational-modeling",
+      field: "pavement-engineering",
+      journalClass: "discipline-flagship",
+      targetJournal: "none",
+      centralQuestion: "How can model discrepancy be bounded without inventing field validation?",
+      centralClaim: "Cross-model discrepancy is bounded within declared assumptions.",
+      centralOutcome: "Bounded model discrepancy",
+      contributionType: "cross-model-comparison",
+      rules: [],
+      constraints: {
+        requireScientificDesignContract: true,
+        requireEarlyScientificReviews: true,
+        requireRealRecordConstructCanary: true,
+      },
+      requiredReviewers: [
+        "evidence",
+        "methods-reproducibility",
+        "domain-novelty",
+        "journal-editor",
+      ],
+      reviewAfterDays: 365,
+    };
+    await writeTextAtomic(
+      path,
+      `---\n${JSON.stringify(metadata)}\n---\n\n# Synthetic gate policy\n\nReviewed deterministic scientific gate fixture.\n`,
+    );
+  }
+  await initializeResearchPolicy({
+    root,
+    projectId,
+    sourceRoot,
+    articleType: "computational-modeling",
+    field: "pavement-engineering",
+    journalClass: "discipline-flagship",
+  });
+  await completeResearchPublicationBrief(root, projectId, {
+    centralQuestion: "How can model discrepancy be bounded without inventing field validation?",
+    centralClaim: "Cross-model discrepancy is bounded within declared assumptions.",
+    centralOutcome: "Bounded model discrepancy",
+    contributionType: "cross-model-comparison",
+  });
+  await approveResearchPolicy(root, projectId, { confirm: true, acknowledgeDefaults: true });
+  return loadApprovedResearchPolicy(root, projectId);
 }
 
 async function passResearchDesign(fixture: Awaited<ReturnType<typeof projectFixture>>) {
