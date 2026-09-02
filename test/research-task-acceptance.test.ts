@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -12,7 +12,12 @@ import {
   initializeProject,
   loadProject,
 } from "../src/research/workspace/projects.js";
-import { sha256File, workspacePaths } from "../src/research/workspace/storage.js";
+import {
+  canonicalJson,
+  sha256File,
+  sha256Text,
+  workspacePaths,
+} from "../src/research/workspace/storage.js";
 import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
 import { loadCurrentEvidenceSnapshot } from "../src/research/workspace/acquisition.js";
 import {
@@ -112,6 +117,98 @@ async function fixture() {
 }
 
 describe("lightweight original task and authorized scope", () => {
+  it("exports task relationships and verifies a moved audit without the source workspace", async () => {
+    const fx = await acquiredFixture();
+    try {
+      const recorded = await recordAcceptance(
+        fx,
+        acceptanceInput(fx.rows[0]!, fx.atom.atomId, [], "negative-result"),
+      );
+      assert.equal(recorded.exitCode, 0, recorded.stderr);
+      const destination = join(fx.files, "audit");
+      const exported = await cli([
+        "research",
+        "project",
+        "audit",
+        "export",
+        "task-project",
+        "--output",
+        destination,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(exported.exitCode, 0, exported.stderr);
+      const manifest = JSON.parse(exported.stdout);
+      assert.match(manifest.researchChain.task.contextSha256, /^[a-f0-9]{64}$/);
+      const moved = join(fx.files, "moved-audit");
+      await cp(destination, moved, { recursive: true });
+      await rm(fx.root, { recursive: true });
+      const verified = await cli([
+        "research",
+        "project",
+        "audit",
+        "verify",
+        "--bundle",
+        moved,
+        "--json",
+      ]);
+      assert.equal(verified.exitCode, 0, verified.stderr);
+      assert.equal(
+        JSON.parse(verified.stdout).task.contractSha256,
+        manifest.researchChain.task.contractSha256,
+      );
+      assert.equal(JSON.parse(verified.stdout).task.executionCertified, false);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("rejects audit task-binding changes even when the manifest hash is recomputed", async () => {
+    const fx = await acquiredFixture();
+    try {
+      const destination = join(fx.files, "task-binding-audit");
+      const exported = await cli([
+        "research",
+        "project",
+        "audit",
+        "export",
+        "task-project",
+        "--output",
+        destination,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(exported.exitCode, 0, exported.stderr);
+      const manifestPath = join(destination, "manifest.json");
+      const original = JSON.parse(await readFile(manifestPath, "utf8"));
+      const altered = structuredClone(original);
+      altered.researchChain.task = {
+        contractSha256: "a".repeat(64),
+        originalContractSha256: "b".repeat(64),
+        contextSha256: "c".repeat(64),
+      };
+      const { manifestSha256: _old, ...core } = altered;
+      altered.manifestSha256 = sha256Text(canonicalJson(core));
+      await chmod(manifestPath, 0o600);
+      await writeFile(manifestPath, JSON.stringify(altered, null, 2) + "\n");
+      const invalid = await cli([
+        "research",
+        "project",
+        "audit",
+        "verify",
+        "--bundle",
+        destination,
+        "--json",
+      ]);
+      assert.equal(invalid.exitCode, 3);
+      assert.match(invalid.stderr, /RESEARCH_AUDIT_BUNDLE_INVALID/);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
   it("preserves the exact BOM and CRLF bytes of native result files", async () => {
     const fx = await acquiredFixture();
     try {
