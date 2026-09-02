@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-09-02
-lastReviewedCommit: e1eacc2565571ad15a0051246c92fe695ba94e35
+lastReviewedAt: 2026-09-03
+lastReviewedCommit: 94a837b9fb9ac19ba7abd191a0d5c23c8741fab9
 ---
 
 # Tiangong AI CLI
@@ -1022,6 +1022,10 @@ deficits; exit `0` means only potential eligibility, never successful atom
 registration, content freeze, independence certification, or review. Pending
 input materialization, decomposition, and exact atom assignments remain
 explicit. Re-run after material acquisition changes, not after every atom.
+`submissionGate` separately reports deterministic acquire-submit blockers;
+`potentially-ready` is not an inference/content pass. An accepted binary without
+required readable content stops before submission, while an honest incomplete
+audit may still freeze its limitations and separate inference-stop decision.
 An admitted local PDF/Office file alone is not producer-readable. Forecast uses
 the same media rules as artifact registration and reports a missing readable
 derivative unless a verified readable artifact or admitted text/context input
@@ -1407,17 +1411,91 @@ directories without project state and reports existing uncommitted derived
 states as invalid. Missing state for a committed project is still an error.
 Recovery does not truncate a corrupt journal or claim power-loss durability.
 
-To repair completed acquisition before analysis, use
-`research project fork SOURCE --to TARGET --resume-through discover`. This
-preserves the original frozen audit, inherits verified discovery/receipts and
-exact acquired artifacts, and opens TARGET's acquire stage. Reuse the returned
-artifact IDs from the source acquisition audit, run
-`project evidence content forecast TARGET --input AUDIT`,
-then prepare/submit TARGET's acquire stage and rebuild typed content. There is
-no need to repeat paid searches or download unchanged files. Top-journal
-recovery additionally requires a Policy approved for TARGET and `--design`,
-`--design-producer-agent`, and `--design-producer-session`; new generation
-reviews cannot inherit the source generation's scientific approval.
+To repair completed acquisition before any analysis attempt, prefer an explicit
+same-project revision when question, Policy, design, and requirements are unchanged:
+
+```bash
+tiangong-ai research project evidence acquisition revise PROJECT \
+  --expected-snapshot <current-acquisition-sha256> \
+  --reason "Add the verified readable derivative before analysis" \
+  --workspace /absolute/workspace --json
+```
+
+This reopens acquire, preserves discovery, exact artifacts/receipts, historical
+snapshot bytes, budgets already spent, and the research-design approval. It
+invalidates evidence-construct and pilot-methods approvals because their evidence
+changed. Add `--include-discovery` only when new sources must be discovered or
+admitted; that explicitly reopens discover then acquire without a new project or
+automatic provider call. Prepare the returned stage, reuse unchanged objects,
+forecast once per meaningful batch, submit the complete revised audit, and rebuild
+typed content. Exact revision replay is idempotent. Stale snapshots, active native
+sessions, unresolved handoffs, inference freezes, and later attempts are refused.
+
+Changed failed/limited decomposition records can be superseded under a descendant
+acquisition snapshot; unchanged records are reused. Single and batch intake share
+this rule. Historical records remain immutable, and atoms from deselected artifacts
+cannot fill current coverage. Same-snapshot conflicting extraction still fails.
+
+Actual question/Policy/design changes or post-analysis work require the existing
+fork/addendum flow. Pre-feature snapshots without immutable evidence records cannot
+be repaired in place; use `research project fork SOURCE --to TARGET
+--resume-through discover` to reuse discovery/receipts/artifacts, or explicitly
+start a new generation. There is no automatic migration. A top-journal successor
+requires a Policy approved for TARGET and `--design`, `--design-producer-agent`,
+and `--design-producer-session`; it cannot inherit scientific approval.
+
+### Original task, current scope, and actual checks
+
+For a new research project, record a small original-requirement checklist after
+project initialization and before any producer execution or scientific review.
+The native host authors the content; the CLI owns its schema and hash bindings:
+
+```bash
+tiangong-ai research schema show task-contract --json
+tiangong-ai research project task define PROJECT \
+  --input /absolute/task.json --workspace /absolute/workspace --json
+tiangong-ai research project task status PROJECT --workspace /absolute/workspace --json
+```
+
+Each requirement has a stable ID, acceptance condition, `checkKind` (`evidence`,
+`computation`, or `proof`), and optional bindings to existing design claims and
+coverage dimensions. Original wording cannot be overwritten. Old projects without
+a task remain explicitly unassessed rather than retrospectively accepted.
+
+Before analysis, use `research schema show task-scope-change` and
+`project task scope propose PROJECT --input FILE --expected-contract SHA` to
+propose a change. Review the returned `changes.details` before/after values, then
+approve only with both `--proposal SHA` and `--confirm-change SHA` on
+`project task scope approve`. A generic continue instruction is not scope consent.
+The record is an **operator confirmation**, not authenticated proof of a human's
+identity. Scope approval does not rewrite scientific design or evidence floors;
+it invalidates prior scoped scientific reviews. Withdrawn original requirements
+remain visible and a fork/addendum retains original history without inheriting
+task completion.
+
+Use `research schema show task-acceptance` and
+`project task acceptance record PROJECT --input FILE` after acquisition and
+between native stages. Records bind the exact requirement version, source/atom/
+finding IDs, and explicitly selected bounded UTF-8 result files. The declared
+command is stored only by hash and is **not executed by this command**. Raw result
+bytes are copied into immutable hash-addressed objects; secrets and control-store
+sources are rejected. Positive/negative computational outcomes need a command and
+results; failed, inconclusive, and not-run checks remain honest without invented
+results. All records say `trust=native-observation`, `executionCertified=false`.
+
+One unchanged result blob is stored and included once per reviewer context. The
+existing independent review receives the original request, original/current
+requirements, exact checks and results, and returns a bound `taskAssessment`;
+there is no additional default paid review round. Missing current checks stop
+before review, and stale/failed/inconclusive checks cannot be promoted to answered.
+Publication packets and portable audit verification retain these relationships;
+hash integrity does not prove execution, scientific validity, or editorial acceptance.
+
+`project task status` and each `research run` project summary report original and
+current task completion separately from workflow completion and publication verdict.
+A completed workflow or approved reduced scope must not be described as satisfying
+unanswered original requirements. Use the selected runtime's help/schema discovery
+once before adopting these commands; they are not an implicit runtime upgrade.
 
 ## Research Search
 

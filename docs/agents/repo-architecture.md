@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-09-02
-lastReviewedCommit: e1eacc2565571ad15a0051246c92fe695ba94e35
+lastReviewedAt: 2026-09-03
+lastReviewedCommit: 94a837b9fb9ac19ba7abd191a0d5c23c8741fab9
 ---
 
 # Repo Architecture
@@ -442,8 +442,9 @@ status, run and native/reviewer admission. Successor resolution is memoized only
 inside that operation-local view, making long-history enumeration linear
 without a persistent cache or artifact rescan.
 
-`project-mutations.ts` is limited to fork and package-retry metadata, not a
-general workflow engine. A journal-bound pending intent precedes fork target
+`project-mutations.ts` is limited to fork, package retry, pre-analysis acquisition
+revision, and task-scope approval metadata, not a general workflow engine.
+A journal-bound pending intent precedes fork target
 creation; all target bytes precede the `project.forked` commit point. Source
 state and supersession ledger records are idempotent post-commit projections.
 Before commit, recovery retains interrupted target bytes outside the project
@@ -457,6 +458,35 @@ records and corrupt journals fail closed without deleting their bytes.
 This handles process interruption at filesystem operation boundaries, not
 physical power-loss repair. Existing uncommitted derived states cannot execute;
 never-committed directories without state are not formal projects.
+
+`acquisition-revision.ts` reopens an idle authoritative project at acquire,
+optionally at discover through an explicit flag, before analysis or inference.
+It binds the parent snapshot and request hash, keeps immutable evidence/acquisition
+record bytes and old snapshots, reuses artifacts/receipts and spent budgets, and
+preserves unchanged Policy/design/research-design review. Only post-acquisition
+scientific gates reset. Decomposition revisions are explicit descendant-snapshot
+chains shared by single/batch registration; superseded artifact atoms do not count
+toward current coverage. No operation silently searches, downloads, migrates old
+mutable snapshots, or changes the scientific contract. Forecast exposes the same
+deterministic submit blockers without turning potential coverage into acceptance.
+
+`task-contract.ts`, `task-acceptance.ts`, and `task-audit.ts` reuse the verified
+journal, immutable objects, evidence IDs and existing reviewer pipeline. The
+original request and small versioned requirement set are recorded before execution
+or review. Scope changes require separate exact-hash operator confirmation and
+reset scoped scientific approvals; this is not authenticated human identity.
+Native observations bind requirement/source/atom/finding/result versions, store
+declared commands by hash, and never certify or execute them. Positive and supported
+negative outcomes need review; failed, stale, unrun, withdrawn and unanswered
+requirements remain distinct. The existing review uses a dynamic taskAssessment
+schema, one unique result object per context, and no extra paid round. Missing
+checks stop before a call; existing prompt/reservation limits still apply.
+Scientific/publication packets carry the current task binding. Status/run derive
+original/current scope completion independently of workflow/publication state;
+there is no mutable acceptance cache. Portable audit shares relationship validation
+and uses an operation-local file/JSON index after the original workspace is gone.
+It verifies integrity, not execution, authorship, or scientific truth. Absent-task
+projects have a cheap unassessed path; there is no retrospective completion.
 
 `analysis-run.ts` centralizes mode consistency for both stage submission and
 publication freeze. Qualitative records retain `not-applicable` computational
