@@ -1221,7 +1221,7 @@ export function scientificGateRecommendedAction(
     return `Scientific ${gate.role} review stopped the project; inspect the frozen review and request user or external action instead of continuing.`;
   }
   if (gate.status === "prepared") {
-    return `Scientific ${gate.role} review is prepared; complete the independent review of its bound packet, then submit it: tiangong-ai research project scientific review submit ${project.id} --role ${gate.role} --review <absolute-review.json> --workspace ${root}`;
+    return `Scientific ${gate.role} review is prepared. After approving its bounded review cost, explicitly execute the configured independent reviewer: tiangong-ai research project scientific review execute ${project.id} --role ${gate.role} --confirm-review-cost --workspace ${root}. Manual submission of an independently produced bound review remains available through scientific review submit; research run never launches this early review automatically.`;
   }
   const canaryOption =
     gate.role === "evidence-construct" ? " --canary-artifacts <absolute-json-array>" : "";

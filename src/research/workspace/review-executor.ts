@@ -255,7 +255,14 @@ export async function inspectReviewerStatus(
   const marker = await loadWorkspaceMarker(root);
   await requireCurrentRuntimeLock(root, marker);
   const platform = researchPlatformCapabilities();
-  const doctor = await verifyDoctorAttestation(root);
+  const production = config.mode === "production-research";
+  const doctor = production
+    ? await verifyDoctorAttestation(root)
+    : {
+        status: "not-required" as const,
+        attestation: null,
+        errors: [] as string[],
+      };
   const errors: Array<{ code: string; message: string }> = [];
   let runtime: AgentRuntimeFingerprint | null = null;
   try {
@@ -286,7 +293,13 @@ export async function inspectReviewerStatus(
   }
   return sanitizeResearchValue(
     {
-      status: errors.length ? "blocked" : doctor.status === "verified" ? "ready" : "incomplete",
+      status: errors.length
+        ? "blocked"
+        : !production || doctor.status === "verified"
+          ? "ready"
+          : "incomplete",
+      readinessScope: production ? "production-attestation" : "smoke-configuration",
+      productionReady: production && errors.length === 0 && doctor.status === "verified",
       transport: "native-direct" as const,
       workspaceId: marker.workspaceId,
       packageVersion: packageVersion(),
@@ -298,9 +311,10 @@ export async function inspectReviewerStatus(
         errors: doctor.errors,
       },
       errors,
-      minimumAction:
-        errors.length || doctor.status !== "verified"
-          ? "Check the configured native reviewer route, then explicitly run research workspace doctor --agent-smoke. Status does not run a paid smoke."
+      minimumAction: errors.length
+        ? "Check the configured native reviewer executable and supported platform capsule. Status does not run a paid smoke."
+        : production && doctor.status !== "verified"
+          ? "Explicitly run research workspace doctor --agent-smoke --capability-smoke to refresh the production attestation. Status does not run paid checks."
           : null,
     },
     configuredResearchSecrets(environment),

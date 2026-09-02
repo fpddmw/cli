@@ -59,7 +59,7 @@ describe("transport-aware reviewer operator commands", () => {
       assert.equal(value.transport, "native-direct");
       assert.equal(value.status, "blocked");
       assert.equal(result.exitCode, 3);
-      assert.equal(value.doctorAttestation.status, "missing");
+      assert.equal(value.doctorAttestation.status, "not-required");
       assert.ok(
         value.errors.some(
           (error: { code: string }) => error.code === "RESEARCH_EXECUTOR_UNAVAILABLE",

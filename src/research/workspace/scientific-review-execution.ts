@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { copyFile, lstat, mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { CliError } from "../../errors.js";
 import { verifyCapabilities } from "./capabilities.js";
 import type { AgentExecutionRequest } from "./executor.js";
-import { appendJournalEvent, readJournal, verifyJournal } from "./journal.js";
+import { appendJournalEvent, readVerifiedJournal } from "./journal.js";
 import {
   calculateAgentCallTokenReservation,
   RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
@@ -38,10 +38,16 @@ import {
   workspacePaths,
   writeJsonAtomic,
 } from "./storage.js";
-import type { ExecutionResult, ScientificReviewRole, WorkspaceConfig } from "./types.js";
+import type {
+  ExecutionResult,
+  ResearchPolicyBinding,
+  ScientificReviewRole,
+  WorkspaceConfig,
+} from "./types.js";
 import { loadWorkspaceConfig, verifyDoctorAttestation, withWorkspaceLock } from "./workspace.js";
 
 type ReviewerExecutor = (request: AgentExecutionRequest) => Promise<ExecutionResult>;
+const MAX_EXECUTION_RECEIPT_BYTES = 1024 * 1024;
 
 export async function executeScientificReview(
   input: {
@@ -62,10 +68,11 @@ export async function executeScientificReview(
   }
   const prepared = await withWorkspaceLock(input.root, "scientific-review.execute", async () => {
     const paths = workspacePaths(input.root);
-    await verifyJournal(paths.journal);
+    const journal = await readVerifiedJournal(paths.journal);
     const existingProject = await loadProject(input.root, input.projectId);
-    const packetHash = existingProject.scientificDesign?.gates[input.role].packetSha256;
-    const events = (await readJournal(paths.journal)).filter(
+    const existingGate = existingProject.scientificDesign?.gates[input.role];
+    const packetHash = existingGate?.packetSha256;
+    const events = journal.filter(
       (event) =>
         event.scope === input.projectId &&
         event.payload.packetSha256 === packetHash &&
@@ -79,6 +86,12 @@ export async function executeScientificReview(
         input.root,
         completed.payload.receiptLocator,
         completed.payload.receiptSha256,
+        {
+          projectId: input.projectId,
+          role: input.role,
+          packetSha256: packetHash,
+          reviewerSessionSha256: existingGate?.reviewerSessionSha256,
+        },
       );
       return {
         packetSha256: String(packetHash),
@@ -163,9 +176,17 @@ export async function executeScientificReview(
     await ensureDirectory(capsuleProject);
     let started = false;
     let completedCall = false;
+    let usageBeforeReservation: typeof project.usage | null = null;
+    let callStartedAt: bigint | null = null;
+    let usageSettled = false;
     try {
-      await copyPacketInputs(input.root, capsuleProject, packet);
-      const prompt = await scientificReviewPrompt(capsuleProject, packet, config);
+      await copyPacketInputs(input.root, capsuleProject, packet, project.publicationPolicy!);
+      const prompt = await scientificReviewPrompt(
+        capsuleProject,
+        packet,
+        config,
+        project.publicationPolicy!,
+      );
       const schema = scientificReviewSchema(input.role);
       const maxTurns = researchStructuredOutputMaxTurns(config.reviewer);
       const reservation = calculateAgentCallTokenReservation({
@@ -198,10 +219,13 @@ export async function executeScientificReview(
       }
       // Reserve before spawning. An interrupted call remains conservatively charged;
       // a returned result replaces that reservation with measured usage.
+      const priorUsage = { ...project.usage };
       project.usage.tokens += reservation;
       project.usage.inputTokens += reservation;
       project.usage.costUsd += reservedCostUsd;
+      project.usage.wallSeconds += timeoutSeconds;
       await saveProject(input.root, project);
+      usageBeforeReservation = priorUsage;
       await appendJournalEvent(paths.journal, "scientific-review.execution.started", project.id, {
         role: input.role,
         packetSha256: packet.packetSha256,
@@ -209,12 +233,14 @@ export async function executeScientificReview(
         attempt: attempts + 1,
         reservedTokens: reservation,
         reservedCostUsd,
+        reservedWallSeconds: timeoutSeconds,
         transport: config.reviewerExecution.transport,
       });
       started = true;
       const execute =
         executor ??
         createReviewExecutor({ root: input.root, execution: config.reviewerExecution }).execute;
+      callStartedAt = process.hrtime.bigint();
       const result = await execute({
         route: config.reviewer,
         prompt,
@@ -234,14 +260,24 @@ export async function executeScientificReview(
         brokerUrl: null,
         environment: input.environment,
       });
-      const usage = checkedUsage(result);
-      project.usage.tokens += usage.tokens - reservation;
-      project.usage.inputTokens += usage.inputTokens - reservation;
-      project.usage.cachedInputTokens += usage.cachedInputTokens;
-      project.usage.outputTokens += usage.outputTokens;
-      project.usage.costUsd += usage.costUsd - reservedCostUsd;
-      project.usage.wallSeconds += usage.wallSeconds;
+      const reportedUsage = checkedUsage(result);
+      const usageKnown = reportedUsage.tokens > 0;
+      const usage = usageKnown
+        ? reportedUsage
+        : {
+            ...reportedUsage,
+            tokens: reservation,
+            inputTokens: reservation,
+            costUsd: Math.max(reportedUsage.costUsd, reservedCostUsd),
+          };
+      project.usage.tokens = priorUsage.tokens + usage.tokens;
+      project.usage.inputTokens = priorUsage.inputTokens + usage.inputTokens;
+      project.usage.cachedInputTokens = priorUsage.cachedInputTokens + usage.cachedInputTokens;
+      project.usage.outputTokens = priorUsage.outputTokens + usage.outputTokens;
+      project.usage.costUsd = priorUsage.costUsd + usage.costUsd;
+      project.usage.wallSeconds = priorUsage.wallSeconds + usage.wallSeconds;
       await saveProject(input.root, project);
+      usageSettled = true;
       if (result.exitCode !== 0) {
         throw executionError(
           "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_FAILED",
@@ -329,6 +365,7 @@ export async function executeScientificReview(
           reviewLocator,
           reviewSha256,
           usage,
+          accountingMode: usageKnown ? "measured" : "reserved-unknown-usage",
           runtime: result.runtime,
           isolation: result.isolation,
           reviewAttestation: result.reviewAttestation ?? null,
@@ -352,6 +389,19 @@ export async function executeScientificReview(
       completedCall = true;
       return { packetSha256: packet.packetSha256, receipt: core, receiptSha256, replayed: false };
     } catch (error) {
+      if (usageBeforeReservation && !usageSettled) {
+        // A live process can measure elapsed time even if the executor throws.
+        // SIGKILL cannot reach this settlement, so the durable timeout stays reserved.
+        const elapsed =
+          callStartedAt === null
+            ? 0
+            : Number(process.hrtime.bigint() - callStartedAt) / 1_000_000_000;
+        project.usage.wallSeconds = usageBeforeReservation.wallSeconds + elapsed;
+        if (callStartedAt === null) {
+          project.usage = { ...usageBeforeReservation };
+        }
+        await saveProject(input.root, project);
+      }
       if (started) {
         await appendJournalEvent(paths.journal, "scientific-review.execution.failed", project.id, {
           role: input.role,
@@ -392,26 +442,11 @@ export async function executeScientificReview(
       "The saved reviewer output drifted after execution.",
     );
   }
-  const current = await loadProject(input.root, input.projectId);
-  const gate = current.scientificDesign?.gates[input.role];
-  if (gate?.packetSha256 !== prepared.packetSha256) {
-    throw executionError(
-      "RESEARCH_SCIENTIFIC_REVIEW_BINDING_INVALID",
-      "The scientific gate changed before reviewer submission.",
-    );
-  }
-  const submission =
-    gate.status === "prepared"
-      ? await submitScientificReview({ ...input, reviewPath })
-      : gate.reviewSha256 === reviewSha256
-        ? { status: gate.status, reviewSha256, issueCodes: [] }
-        : null;
-  if (!submission) {
-    throw executionError(
-      "RESEARCH_SCIENTIFIC_REVIEW_BINDING_INVALID",
-      "The executed review no longer matches the current submitted gate.",
-    );
-  }
+  const submission = await submitScientificReview({
+    ...input,
+    reviewPath,
+    executionBinding: { packetSha256: prepared.packetSha256, reviewSha256 },
+  });
   return {
     ...submission,
     packetSha256: prepared.packetSha256,
@@ -424,27 +459,75 @@ async function readReceipt(
   root: string,
   locator: unknown,
   digest: unknown,
+  expected: {
+    projectId: string;
+    role: ScientificReviewRole;
+    packetSha256: unknown;
+    reviewerSessionSha256: unknown;
+  },
 ): Promise<Record<string, unknown>> {
-  if (typeof locator !== "string" || typeof digest !== "string") {
+  if (
+    typeof digest !== "string" ||
+    !/^[a-f0-9]{64}$/.test(digest) ||
+    locator !== `projects/${expected.projectId}/scientific/execution-receipts/${digest}.json`
+  ) {
     throw executionError(
       "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_BINDING_INVALID",
       "The completed execution has invalid receipt metadata.",
     );
   }
-  const path = resolveContained(workspacePaths(root).control, locator);
+  const path = resolveContained(workspacePaths(root).control, String(locator));
   const info = await lstat(path).catch(() => null);
-  if (!info?.isFile() || info.isSymbolicLink() || (await sha256File(path)) !== digest) {
+  if (!info?.isFile() || info.isSymbolicLink() || info.size > MAX_EXECUTION_RECEIPT_BYTES) {
     throw executionError(
       "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_BINDING_INVALID",
       "The completed execution receipt failed its hash check.",
     );
   }
-  const value = JSON.parse(await readFile(path, "utf8")) as unknown;
-  if (!isObject(value))
+  let value: unknown;
+  try {
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.size < 2 || opened.size > MAX_EXECUTION_RECEIPT_BYTES)
+        throw new Error("invalid receipt size");
+      const buffer = Buffer.alloc(opened.size + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const result = await handle.read(buffer, length, buffer.length - length, length);
+        if (result.bytesRead === 0) break;
+        length += result.bytesRead;
+      }
+      const bytes = buffer.subarray(0, length);
+      if (length !== opened.size || createHash("sha256").update(bytes).digest("hex") !== digest)
+        throw new Error("receipt hash mismatch");
+      value = JSON.parse(bytes.toString("utf8"));
+    } finally {
+      await handle.close();
+    }
+  } catch {
     throw executionError(
       "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_BINDING_INVALID",
-      "Invalid execution receipt.",
+      "The completed execution receipt failed its bounded snapshot check.",
     );
+  }
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    value.projectId !== expected.projectId ||
+    value.role !== expected.role ||
+    value.packetSha256 !== expected.packetSha256 ||
+    value.reviewerSessionSha256 !== expected.reviewerSessionSha256 ||
+    typeof value.reviewSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.reviewSha256) ||
+    value.reviewLocator !==
+      `projects/${expected.projectId}/scientific/execution-outputs/${value.reviewSha256}.json`
+  ) {
+    throw executionError(
+      "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_BINDING_INVALID",
+      "The execution receipt does not match its project, packet, or review binding.",
+    );
+  }
   return value;
 }
 
@@ -473,6 +556,7 @@ async function scientificReviewPrompt(
   controlRoot: string,
   packet: ScientificReviewPacket,
   config: WorkspaceConfig,
+  policy: ResearchPolicyBinding,
 ) {
   const mandatory = [
     "Review the exact prepared scientific packet independently. Tools are disabled. Read only embedded content; complete files are bound for audit but are not evidence that you read omitted bytes.",
@@ -483,6 +567,7 @@ async function scientificReviewPrompt(
     packet.design.objectLocator,
     packet.assessment.objectLocator,
     packet.policy.objectLocator,
+    ...new Set(policy.documents.map((document) => document.objectLocator)),
   ]) {
     const path = resolveContained(controlRoot, locator);
     mandatory.push("### " + locator + "\n" + (await readFile(path, "utf8")));
@@ -528,12 +613,14 @@ async function copyPacketInputs(
   root: string,
   capsuleProject: string,
   packet: ScientificReviewPacket,
+  policy: ResearchPolicyBinding,
 ) {
   const paths = workspacePaths(root);
   const records = new Map(packet.stageInputs.map((record) => [record.path, record.sha256]));
   records.set(packet.design.objectLocator, packet.design.sha256);
   records.set(packet.assessment.objectLocator, packet.assessment.sha256);
   records.set(packet.policy.objectLocator, packet.policy.bindingSha256);
+  for (const document of policy.documents) records.set(document.objectLocator, document.sha256);
   for (const [locator, digest] of records) {
     const source = resolveContained(paths.control, locator);
     const info = await lstat(source).catch(() => null);
