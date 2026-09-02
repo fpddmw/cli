@@ -63,7 +63,7 @@ describe("research acquisition and evidence snapshots", () => {
     try {
       await initializeResearchWorkspace(root, undefined);
       await lockCapabilities(root);
-      const { snapshot } = await freezeInputOnlyProject(root, staging, "recovery-source");
+      const { snapshot } = await freezeInputOnlyProject(root, staging, "recovery-source", true);
       const sourceSnapshotBytes = await readFile(
         join(workspacePaths(root).projects, "recovery-source", "outputs/evidence-snapshot.json"),
       );
@@ -71,6 +71,11 @@ describe("research acquisition and evidence snapshots", () => {
       assert.equal(target.packages.find((item) => item.stage === "discover")?.status, "complete");
       assert.notEqual(target.packages.find((item) => item.stage === "acquire")?.status, "complete");
       const artifacts = await loadEvidenceArtifactRecords(root, target.id);
+      assert.equal(artifacts[0]?.downloadBinding?.projectId, "recovery-source");
+      assert.equal(
+        artifacts[0]?.downloadBinding?.bindingSha256,
+        snapshot.artifacts[0]?.downloadBinding?.bindingSha256,
+      );
       assert.deepEqual(
         artifacts.map((item) => item.artifactId),
         snapshot.artifacts.map((item) => item.artifactId),
@@ -157,6 +162,13 @@ describe("research acquisition and evidence snapshots", () => {
           join(workspacePaths(root).projects, "recovery-source", "outputs/evidence-snapshot.json"),
         ),
         sourceSnapshotBytes,
+      );
+      await forkProject(root, target.id, "recovery-target-again", "discover");
+      const repeated = await loadEvidenceArtifactRecords(root, "recovery-target-again");
+      assert.equal(repeated[0]?.downloadBinding?.projectId, "recovery-source");
+      assert.deepEqual(
+        repeated.map((item) => item.artifactId),
+        artifacts.map((item) => item.artifactId),
       );
     } finally {
       await Promise.all([
@@ -1732,6 +1744,7 @@ async function freezeInputOnlyProject(
   root: string,
   staging: string,
   projectId: string,
+  withDownload = false,
 ): Promise<{ snapshot: Awaited<ReturnType<typeof loadCurrentEvidenceSnapshot>> }> {
   await initializeProject(root, projectId, "Evaluate an immutable input evidence source.");
   const input = join(staging, `${projectId}.txt`);
@@ -1761,11 +1774,21 @@ async function freezeInputOnlyProject(
     stage: "acquire",
     hostAgent: "codex",
   });
+  const download = withDownload
+    ? await completedDownload(
+        root,
+        projectId,
+        candidate.id,
+        input,
+        "https://example.test/unchanged-source.txt",
+      )
+    : null;
   const artifact = await registerEvidenceArtifact({
     root,
     projectId,
     candidateId: candidate.id,
     path: input,
+    ...(download ? { downloadBindingId: download.binding.bindingId } : {}),
     mediaType: "text/plain",
   });
   const acquireOutput = join(staging, `${projectId}-acquire.json`);

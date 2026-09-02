@@ -18,6 +18,7 @@ import {
   registerProjectInputCandidates,
 } from "./evidence-ledger.js";
 import { cloneProjectArtifactRecords } from "./artifacts.js";
+import { loadBoundAcquisitionDesign } from "./acquisition-routes.js";
 import {
   freezeEvidenceSnapshot,
   loadCurrentEvidenceSnapshot,
@@ -653,7 +654,50 @@ export async function forkProject(
         await cloneEvidenceLedger(root, sourceProjectId, targetProjectId);
       }
       if (inheritedStages.includes("discover")) {
-        await cloneProjectArtifactRecords(root, sourceProjectId, targetProjectId);
+        const sourceDesign = source.scientificDesign
+          ? await loadBoundAcquisitionDesign(root, source)
+          : null;
+        const inheritedArtifacts = await cloneProjectArtifactRecords(
+          root,
+          sourceProjectId,
+          targetProjectId,
+        );
+        // Retain the original signed Download binding as historical provenance;
+        // never pretend a recovery generation made a fresh network request.
+        const provenanceDesigns = new Map([[source.id, sourceDesign]]);
+        for (const artifact of inheritedArtifacts) {
+          const binding = artifact.downloadBinding;
+          if (!binding) continue;
+          // A second recovery may retain an earlier ancestor's receipt. Validate
+          // the plan that actually authorized that download, not a later plan.
+          if (!provenanceDesigns.has(binding.projectId)) {
+            const origin = await loadProject(root, binding.projectId);
+            provenanceDesigns.set(
+              origin.id,
+              origin.scientificDesign ? await loadBoundAcquisitionDesign(root, origin) : null,
+            );
+          }
+          const originDesign = provenanceDesigns.get(binding.projectId);
+          if (!originDesign && binding.acquisitionRouteId === null) continue;
+          const route = originDesign?.acquisitionPlan.routes.find(
+            (item) => item.id === binding.acquisitionRouteId,
+          );
+          if (
+            !route ||
+            route.executor !== "agent" ||
+            !["open-access-download", "authorized-browser"].includes(route.routeClass) ||
+            !route.downloadBackends.includes(binding.backend)
+          ) {
+            throw new CliError(
+              "Inherited artifact no longer binds its original acquisition route and download backend.",
+              {
+                code: "RESEARCH_PROJECT_FORK_ARTIFACT_ROUTE_INVALID",
+                exitCode: 3,
+                details: { artifactId: artifact.artifactId },
+              },
+            );
+          }
+        }
       }
       refreshProject(project);
       await writeJsonAtomic(join(targetRoot, "project.json"), project);

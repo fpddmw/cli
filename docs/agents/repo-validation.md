@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-09-01
-lastReviewedCommit: ca716c2fea59d0a8085aa32dbd8f65a686b3353e
+lastReviewedAt: 2026-09-02
+lastReviewedCommit: 6fafd3a831917e202ed3782268fa7da095cf5e73
 ---
 
 # Repo Validation
@@ -395,6 +395,13 @@ evidence atoms, typed-content snapshots, target-bound content reconstruction on
 recovery fork, inference snapshots, generated Claim-Evidence
 Graphs, operator-visible `evidencePipeline` status, semantic audit-chain export,
 safe journal-proof derivatives, and pre-export tamper rejection.
+The recovery/forecast regressions additionally require read-only acquisition
+forecasting, no atom-pass inference from source metadata, non-blocking sealed
+outcomes in `limitations`, and exact Download binding reuse across repeated
+discovery-resuming forks. Source scientific-design drift still rejects and
+rolls back inheritance. `test/research-role-coverage.test.ts` checks shared
+role deficits, flat-array all-of, combined allOf/anyOf/distinct-atLeast groups,
+and exclusion of unrelated dimensions and duplicate source counts.
 `test/research-scientific-design.test.ts` uses the EV pavement-model R9 failure
 as a fixed regression for truth-role confusion, non-independent validation,
 effective-sample inflation, quantity/threshold overclaim, closest-work

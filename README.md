@@ -1336,7 +1336,8 @@ To repair completed acquisition before analysis, use
 `research project fork SOURCE --to TARGET --resume-through discover`. This
 preserves the original frozen audit, inherits verified discovery/receipts and
 exact acquired artifacts, and opens TARGET's acquire stage. Reuse the returned
-artifact IDs, run `project evidence content forecast TARGET --input AUDIT`,
+artifact IDs from the source acquisition audit, run
+`project evidence content forecast TARGET --input AUDIT`,
 then prepare/submit TARGET's acquire stage and rebuild typed content. There is
 no need to repeat paid searches or download unchanged files. Top-journal
 recovery additionally requires a Policy approved for TARGET and `--design`,
