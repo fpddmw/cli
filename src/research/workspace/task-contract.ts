@@ -392,38 +392,6 @@ export async function approveProjectTaskScope(
   });
 }
 
-export async function inspectProjectTask(
-  root: string,
-  projectId: string,
-  knownEvents?: JournalEvent[],
-) {
-  await loadProject(root, projectId);
-  const view = await loadProjectTask(root, projectId, knownEvents);
-  if (!view) return { projectId, status: "not-configured", executionCertified: false };
-  const currentById = new Map(view.current.requirements.map((item) => [item.id, item]));
-  const row = (item: TaskRequirement, original: boolean) => ({
-    ...item,
-    requirementSha256: taskRequirementSha256(item),
-    status: original && !currentById.has(item.id) ? "withdrawn" : "unanswered",
-  });
-  return {
-    projectId,
-    status: "configured",
-    ...taskBinding(view.current, view.original),
-    origin: view.current.origin,
-    scopeAuthorization: view.current.authorization,
-    originalScope: {
-      status: "incomplete",
-      requirements: view.original.requirements.map((item) => row(item, true)),
-    },
-    currentScope: {
-      status: "incomplete",
-      requirements: view.current.requirements.map((item) => row(item, false)),
-    },
-    executionCertified: false,
-  };
-}
-
 /** Materialize before a fork/addendum's existing commit; never copy completion claims. */
 export async function inheritProjectTask(root: string, source: ProjectState, target: ProjectState) {
   const view = await loadProjectTask(root, source.id);
@@ -614,7 +582,12 @@ export async function readTaskObject<T>(
   return record as T;
 }
 
-async function taskDirectory(root: string, projectId: string, group: string, create: boolean) {
+export async function taskDirectory(
+  root: string,
+  projectId: string,
+  group: string,
+  create: boolean,
+) {
   if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(projectId))
     throw invalid("Task project identity is invalid.");
   const paths = workspacePaths(root);

@@ -42,11 +42,15 @@ import { reviseProjectAcquisition } from "./workspace/acquisition-revision.js";
 import {
   approveProjectTaskScope,
   defineProjectTask,
-  inspectProjectTask,
   isTaskSchemaName,
   proposeProjectTaskScope,
   taskInputSchema,
 } from "./workspace/task-contract.js";
+import {
+  inspectProjectTask,
+  recordProjectTaskAcceptance,
+  taskAcceptanceInputSchema,
+} from "./workspace/task-acceptance.js";
 import {
   freezeEvidenceContentSnapshot,
   loadCurrentEvidenceContentSnapshot,
@@ -214,6 +218,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project retry <project-id> [--package <package-id>] [--workspace <path>] [--json]
   tiangong-ai research project task define <project-id> --input <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project task status <project-id> [--workspace <path>] [--json]
+  tiangong-ai research project task acceptance record <project-id> --input <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project task scope propose <project-id> --input <absolute-json> --expected-contract <sha256> [--workspace <path>] [--json]
   tiangong-ai research project task scope approve <project-id> --proposal <sha256> --confirm-change <sha256> [--workspace <path>] [--json]
   tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|acquire|analyze|synthesize] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--workspace <path>] [--json]
@@ -694,7 +699,9 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
   if (strictBoolean(args, "help")) return writeHelp(io);
   const stage = onePositional(args.positionals, "research schema show");
   let schema: Record<string, unknown>;
-  if (isTaskSchemaName(stage)) {
+  if (stage === "task-acceptance") {
+    schema = taskAcceptanceInputSchema();
+  } else if (isTaskSchemaName(stage)) {
     schema = taskInputSchema(stage);
   } else if (isEvidenceContentSchemaName(stage)) {
     schema = evidenceContentInputSchema(stage);
@@ -1307,6 +1314,29 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   }
   if (action === "task") {
     const [taskAction, ...taskRest] = rest;
+    if (taskAction === "acceptance") {
+      const [acceptanceAction, ...acceptanceRest] = taskRest;
+      if (acceptanceAction !== "record")
+        throw unknownAction("research project task acceptance", acceptanceAction ?? "");
+      const args = parseStrictArgs(
+        acceptanceRest,
+        { ...WORKSPACE_OPTIONS, input: "string" },
+        "research project task acceptance record",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, "research project task acceptance record");
+      const result = await recordProjectTaskAcceptance(
+        await workspaceFromArgs(args),
+        projectId,
+        await readBoundedJsonRecord(
+          strictString(args, "input") ?? "",
+          "--input",
+          "RESEARCH_TASK_ACCEPTANCE_INVALID",
+        ),
+      );
+      writeJson(io, result, args);
+      return 0;
+    }
     if (taskAction === "scope") {
       const [scopeAction, ...scopeRest] = taskRest;
       if (!["propose", "approve"].includes(scopeAction ?? ""))
