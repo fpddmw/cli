@@ -7,6 +7,7 @@ import { CliError } from "../../errors.js";
 import { verifyCapabilities } from "./capabilities.js";
 import type { AgentExecutionRequest } from "./executor.js";
 import { appendJournalEvent, readVerifiedJournal } from "./journal.js";
+import { assertProjectAuthority, projectAuthorityIndex } from "./project-authority.js";
 import {
   calculateAgentCallTokenReservation,
   RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
@@ -105,6 +106,7 @@ export async function executeScientificReview(
       input.projectId,
       input.role,
     );
+    assertProjectAuthority(project, projectAuthorityIndex(journal));
     const config = await loadWorkspaceConfig(input.root);
     if (
       project.lineage.supersededBy ||

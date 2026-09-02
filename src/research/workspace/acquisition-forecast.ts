@@ -8,6 +8,7 @@ import {
   projectAcquisitionSources,
 } from "./acquisition.js";
 import { loadBoundAcquisitionDesign } from "./acquisition-routes.js";
+import { producerReadableArtifactPath } from "./artifacts.js";
 import { verifyEvidenceLedger } from "./evidence-ledger.js";
 import { computeRoleCoverage, type EvidenceRoleRequirement } from "./evidence-role-coverage.js";
 import { loadProject } from "./projects.js";
@@ -72,9 +73,27 @@ export async function inspectAcquisitionForecast(
   ]);
   const evidence = parseEvidenceRecord(evidenceBytes);
   const audit = await materializeAcquisitionAudit(root, project, parsed.value, { readOnly: true });
+  // Accepted input hashes were already verified by materializeAcquisitionAudit.
+  // Reuse registration's media classification; do not reread large files.
+  const inputsById = new Map(project.inputs.map((input) => [input.id, input]));
+  const inputReadability = new Map<string, boolean>();
+  for (const source of evidence.sources as Array<Record<string, unknown>>) {
+    const provenance = isObject(source.provenance) ? source.provenance : {};
+    if (provenance.kind !== "input") continue;
+    const input = inputsById.get(String(provenance.id));
+    inputReadability.set(
+      String(source.id),
+      Boolean(
+        input &&
+        (producerReadableArtifactPath(input.path) ||
+          (input.contextPath && producerReadableArtifactPath(input.contextPath))),
+      ),
+    );
+  }
   const sources = projectAcquisitionSources(
     evidence.sources as Array<Record<string, unknown>>,
     audit,
+    inputReadability,
   );
   const coverage = computeSnapshotCoverage(
     project,

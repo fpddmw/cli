@@ -2,6 +2,11 @@ import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { CliError } from "../errors.js";
+import {
+  projectAuthority,
+  projectWithEffectiveAuthority,
+  readProjectAuthorityIndex,
+} from "./workspace/project-authority.js";
 import type { CliIO } from "../io.js";
 import { stringifyJson, write } from "../io.js";
 import { parseStrictArgs, strictBoolean, strictString } from "../strict-args.js";
@@ -2038,17 +2043,8 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
   const root = await workspaceFromArgs(args);
   const config = await loadWorkspaceConfig(root);
   const selectedProject = strictString(args, "project");
-  const workspaceProjects = await listProjects(root);
-  const committedForkTargets = new Set(
-    (await readJournal(workspacePaths(root).journal))
-      .filter(
-        (event) =>
-          event.type === "project.forked" &&
-          isObject(event.payload) &&
-          typeof event.payload.targetProjectId === "string",
-      )
-      .map((event) => String(event.payload.targetProjectId)),
-  );
+  const authorityIndex = await readProjectAuthorityIndex(root);
+  const workspaceProjects = await listProjects(root, authorityIndex);
   const allProjects = selectedProject
     ? [
         workspaceProjects.find((project) => project.id === selectedProject) ??
@@ -2058,11 +2054,8 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
   const projects =
     selectedProject || strictBoolean(args, "all")
       ? allProjects
-      : allProjects.filter(
-          (project) =>
-            project.lineage.supersededBy === null &&
-            project.status !== "archived" &&
-            project.status !== "abandoned",
+      : allProjects.filter((project) =>
+          ["authoritative", "invalid"].includes(projectAuthority(project, authorityIndex).state),
         );
   const result = {
     workspace: root,
@@ -2083,7 +2076,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
     hiddenSupersededProjects:
       selectedProject || strictBoolean(args, "all")
         ? 0
-        : workspaceProjects.filter((project) => project.lineage.supersededBy !== null).length,
+        : workspaceProjects.filter((project) => authorityIndex.successors.has(project.id)).length,
     hiddenArchivedProjects:
       selectedProject || strictBoolean(args, "all")
         ? 0
@@ -2094,8 +2087,8 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
         : workspaceProjects.filter((project) => project.status === "abandoned").length,
     projects: await Promise.all(
       projects.map(async (project) => {
-        const current = refreshProject(project);
-        const authority = projectAuthority(current, workspaceProjects, committedForkTargets);
+        const current = refreshProject(projectWithEffectiveAuthority(project, authorityIndex));
+        const authority = projectAuthority(current, authorityIndex);
         const nativeStage = await inspectNativeResearchStage(root, current);
         const evidencePipeline = await inspectEvidencePipelineForStatus(root, current);
         const snapshot = evidencePipeline.acquisition;
@@ -2259,36 +2252,6 @@ async function inspectEvidenceAccessForStatus(
       code: error instanceof CliError ? error.code : "RESEARCH_EVIDENCE_ACCESS_PLAN_INVALID",
     };
   }
-}
-
-function projectAuthority(
-  project: Awaited<ReturnType<typeof loadProject>>,
-  projects: Awaited<ReturnType<typeof listProjects>>,
-  committedForkTargets: Set<string>,
-): {
-  state: "authoritative" | "superseded" | "archived" | "abandoned" | "invalid";
-  projectId: string;
-} {
-  if (project.lineage.kind === "fork" && !committedForkTargets.has(project.id)) {
-    return { state: "invalid", projectId: project.id };
-  }
-  const byId = new Map(projects.map((candidate) => [candidate.id, candidate]));
-  const visited = new Set([project.id]);
-  let current = project;
-  while (current.lineage.supersededBy) {
-    if (visited.has(current.lineage.supersededBy)) break;
-    visited.add(current.lineage.supersededBy);
-    const next = byId.get(current.lineage.supersededBy);
-    if (!next) return { state: "superseded", projectId: current.lineage.supersededBy };
-    if (next.lineage.kind === "fork" && !committedForkTargets.has(next.id)) break;
-    current = next;
-  }
-  if (project.status === "archived") return { state: "archived", projectId: current.id };
-  if (project.status === "abandoned") return { state: "abandoned", projectId: current.id };
-  return {
-    state: project.id === current.id ? "authoritative" : "superseded",
-    projectId: current.id,
-  };
 }
 
 async function inspectSnapshotForStatus(

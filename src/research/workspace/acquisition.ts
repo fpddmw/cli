@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { CliError } from "../../errors.js";
 import {
   loadEvidenceArtifactRecords,
+  producerVisibleMediaType,
   registerEvidenceArtifact,
   type EvidenceArtifactRecord,
 } from "./artifacts.js";
@@ -438,6 +439,7 @@ export async function freezeEvidenceSnapshot(
 export function projectAcquisitionSources(
   sources: Array<Record<string, unknown>>,
   audit: MaterializedAcquisitionAudit,
+  inputReadability?: ReadonlyMap<string, boolean>,
 ): Array<Record<string, unknown>> {
   const decisions = new Map(audit.decisions.map((decision) => [decision.sourceId, decision]));
   return sources.flatMap((source) => {
@@ -449,7 +451,8 @@ export function projectAcquisitionSources(
       .filter((artifact) => producerVisibleMediaType(artifact.mediaType))
       .map((artifact) => artifact.artifactId);
     const registeredInputFullText = source.fullTextAvailable === true;
-    const producerContextLevel = registeredInputFullText
+    const readableInput = registeredInputFullText && (inputReadability?.get(sourceId) ?? true);
+    const producerContextLevel = readableInput
       ? "full-input"
       : producerVisibleArtifactIds.length
         ? "bounded-text-artifact"
@@ -471,13 +474,6 @@ export function projectAcquisitionSources(
       },
     ];
   });
-}
-
-function producerVisibleMediaType(mediaType: string): boolean {
-  // HTML is frequently a login, paywall, challenge, or error page returned in
-  // place of the requested file. Keep it auditable as an artifact, but never
-  // let it mechanically satisfy producer-visible/full-text coverage.
-  return ["application/json", "text/plain", "text/markdown", "text/csv"].includes(mediaType);
 }
 
 export async function loadCurrentEvidenceSnapshot(

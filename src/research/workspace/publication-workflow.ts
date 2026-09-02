@@ -3,6 +3,7 @@ import { chmod, lstat, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
+import { isConsistentAnalysisRunMetadata } from "./analysis-run.js";
 import { RESEARCH_CONTROL_DIRECTORY } from "./constants.js";
 import { appendJournalEvent, readJournal, verifyJournal } from "./journal.js";
 import {
@@ -1238,7 +1239,7 @@ async function validateSubmissionBindings(
     inference.policySha256 !== policySha256 ||
     analysis.schemaVersion !== 2 ||
     analysis.inferenceSnapshotSha256 !== inference.snapshotSha256 ||
-    analysisRun.status !== "reproduced" ||
+    !isConsistentAnalysisRunMetadata(analysisRun) ||
     typeof analysisRun.id !== "string" ||
     findings.length === 0 ||
     graph.kind !== "tiangong-claim-evidence-graph" ||
@@ -1268,7 +1269,7 @@ async function validateSubmissionBindings(
   ) {
     throw publicationError(
       "RESEARCH_PUBLICATION_SUBMISSION_BINDING_INVALID",
-      "The submission package does not bind passing content/inference gates, a reproduced analysis, and a complete Claim–Evidence Graph.",
+      "The submission package does not bind passing content/inference gates, mode-consistent analysis metadata, and a complete Claim–Evidence Graph.",
       3,
     );
   }

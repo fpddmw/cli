@@ -21,6 +21,7 @@ import {
 import { parseStructuredStageOutput, schemaForStage } from "../src/research/workspace/schemas.js";
 import {
   addProjectInput,
+  forkProject,
   initializeProject,
   loadProject,
   saveProject,
@@ -2085,15 +2086,13 @@ describe("research workspace CLI", () => {
     const root = await temporaryDirectory();
     try {
       await initializeResearchWorkspace(root, undefined);
-      const source = await initializeProject(
+      await initializeProject(
         root,
         "status-source",
         "Evaluate superseded status filtering behavior.",
       );
-      await initializeProject(root, "status-addendum", "Evaluate replacement status behavior.");
-      source.lineage.supersededBy = "status-addendum";
-      source.evidenceState.staleReason = "Superseded by evidence addendum status-addendum.";
-      await saveProject(root, source);
+      // A real committed successor, not manually forged mutable supersession.
+      await forkProject(root, "status-source", "status-addendum");
 
       const visible = await invoke(["research", "status", "--workspace", root, "--json"]);
       assert.equal(visible.exitCode, 0, visible.stderr);

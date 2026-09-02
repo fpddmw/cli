@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-09-02
-lastReviewedCommit: 8a18ba69f432d2c639517549157ef29545722cff
+lastReviewedCommit: e1eacc2565571ad15a0051246c92fe695ba94e35
 ---
 
 # Tiangong AI CLI
@@ -712,9 +712,15 @@ submission manifest must bind distinct absolute files for cover letter, title
 page, reporting checklist, data availability, code availability, and source
 data; figure/table index, extended data, and supplementary methods are optional.
 `research publication freeze` then content-addresses the Policy, scientific
-design and early reviews, acquisition/content/inference snapshots, reproduced
+design and early reviews, acquisition/content/inference snapshots, mode-bound
 analysis, Claim-Evidence Graph, base outputs, manuscript, assessment,
 supplements, role-complete submission files, and reproducibility manifest.
+Computational/mixed analysis still requires reproduced metadata with exact
+implementation/environment bindings. Qualitative analysis uses
+`status: not-applicable`, null command/seed and empty implementation/environment
+lists; it must not invent a computation. Both paths retain the same evidence,
+graph, Policy and independent-review checks. Metadata alone is not proof that
+a computation was executed.
 Exactly four fresh independent sessions review that frozen generation:
 evidence, methods/reproducibility, domain/novelty, and journal-editor. A revised
 manuscript invalidates prior reviews. Every reviewer must use the configured
@@ -1016,6 +1022,10 @@ deficits; exit `0` means only potential eligibility, never successful atom
 registration, content freeze, independence certification, or review. Pending
 input materialization, decomposition, and exact atom assignments remain
 explicit. Re-run after material acquisition changes, not after every atom.
+An admitted local PDF/Office file alone is not producer-readable. Forecast uses
+the same media rules as artifact registration and reports a missing readable
+derivative unless a verified readable artifact or admitted text/context input
+is available. This classification does not reread or decode the binary again.
 Flat `sourceTypeRequirements` arrays mean **all-of**. A design may instead use
 `{"allOf":["academic-paper"],"anyOf":["government","industry"],"atLeast":{"count":2,"from":["academic-paper","government","industry"]}}`;
 every present group applies, and counts use distinct types. Forecast, typed
@@ -1370,15 +1380,32 @@ read-only under `outputs/revisions/synthesize/<sha256>/report.md`; review and
 closure are invalidated, while unchanged discovery, acquisition, content,
 inference, analysis, and graph objects remain bound.
 
-Recovery fork writes are rollback-protected. If inherited output, content,
-inference, or graph validation fails, the target directory is removed and
-source authority is restored. A source typed-content snapshot is revalidated
+Recovery forks have one journal commit point. Before `project.forked` commits,
+their target is staging, not an authoritative project; the original source
+remains authoritative. Status, run and native/reviewer admission share that
+same verified lineage view. A source typed-content snapshot is revalidated
 and re-signed for the target generation instead of copying its project-bound
 hash. Top-journal generations may resume only through `acquire`, because the
 target-specific scientific design must complete fresh evidence-construct and
-pilot-methods reviews before analysis. `research status --all` marks any legacy
-fork directory without a `project.forked` commit marker as
-`authority.state = "invalid"` rather than authoritative.
+pilot-methods reviews before analysis.
+
+After process interruption, repeat the same explicit fork request. The next
+lease holder settles only hash-bound CLI-owned pending operations: before
+commit it retains the interrupted target under
+`lineage/interrupted-project-mutations/<operation-id>/target`, outside the
+project namespace; after commit it finishes source/ledger projections. Exact
+committed replay returns the existing target without recopying evidence or
+repeating provider work. A different request for that target is a conflict.
+An unchanged completed retry request is likewise acknowledged without another
+revision or attempt. A subsequent real failure can still be retried normally.
+
+Unknown targets, symlink replacements, modified source state and invalid
+recovery metadata are not overwritten or deleted. Resolve the reported
+`RESEARCH_PROJECT_RECOVERY_REQUIRED` conflict or restore a trusted backup before
+retrying; do not forge control files. Read-only status ignores never-committed
+directories without project state and reports existing uncommitted derived
+states as invalid. Missing state for a committed project is still an error.
+Recovery does not truncate a corrupt journal or claim power-loss durability.
 
 To repair completed acquisition before analysis, use
 `research project fork SOURCE --to TARGET --resume-through discover`. This

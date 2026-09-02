@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { cp, lstat, readFile, readdir, rm } from "node:fs/promises";
+import { cp, lstat, readFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
@@ -10,7 +10,20 @@ import {
   recordArtifactDecomposition,
   registerEvidenceAtom,
 } from "./content-evidence.js";
-import { appendJournalEvent } from "./journal.js";
+import { appendJournalEvent, readVerifiedJournal } from "./journal.js";
+import {
+  assertProjectAuthority,
+  projectAuthorityIndex,
+  readProjectAuthorityIndex,
+  visibleProjectIds,
+  type ProjectAuthorityIndex,
+} from "./project-authority.js";
+import {
+  beginProjectMutation,
+  prepareProjectMutation,
+  projectMutationBinding,
+  settleProjectMutation,
+} from "./project-mutations.js";
 import { cloneProjectEvidenceReceipts } from "./evidence.js";
 import {
   appendEvidenceLedgerEvent,
@@ -34,6 +47,7 @@ import {
 import { assertScientificDesignObjectBindings } from "./scientific-objects.js";
 import {
   ensureDirectory,
+  canonicalJson,
   fileRecord,
   fileSize,
   isObject,
@@ -302,13 +316,13 @@ export async function loadProject(root: string, projectId: string): Promise<Proj
   return project;
 }
 
-export async function listProjects(root: string): Promise<ProjectState[]> {
-  const entries = await readdir(workspacePaths(root).projects, { withFileTypes: true });
+export async function listProjects(
+  root: string,
+  authority?: ProjectAuthorityIndex,
+): Promise<ProjectState[]> {
+  const ids = await visibleProjectIds(root, authority ?? (await readProjectAuthorityIndex(root)));
   const projects: ProjectState[] = [];
-  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-    projects.push(await loadProject(root, entry.name));
-  }
+  for (const id of ids) projects.push(await loadProject(root, id));
   return projects;
 }
 
@@ -325,24 +339,9 @@ export async function retryProjectPackage(
   validateProjectId(projectId);
   return withWorkspaceLock(root, "project.retry", async () => {
     const project = await loadProject(root, projectId);
-    if (
-      project.status === "archived" ||
-      project.status === "abandoned" ||
-      project.lineage.supersededBy
-    ) {
-      throw new CliError(
-        "Historical projects cannot be retried; continue from the authoritative project.",
-        {
-          code: "RESEARCH_PROJECT_NOT_AUTHORITATIVE",
-          exitCode: 3,
-          details: {
-            projectId,
-            status: project.status,
-            supersededBy: project.lineage.supersededBy,
-          },
-        },
-      );
-    }
+    const events = await readVerifiedJournal(workspacePaths(root).journal);
+    assertProjectAuthority(project, projectAuthorityIndex(events));
+    const requestSha256 = sha256Text(canonicalJson({ projectId, packageId: packageId ?? null }));
     const selected = packageId
       ? packageById(project, packageId)
       : project.packages.find((item) => item.status === "failed" || item.status === "retry");
@@ -357,42 +356,63 @@ export async function retryProjectPackage(
       !selected ||
       (selected.status !== "failed" && selected.status !== "retry" && !reviewerRevision)
     ) {
+      const replay = events.findLast(
+        (event) =>
+          event.type === "project.retry.requested" &&
+          event.scope === projectId &&
+          isObject(event.payload.mutation) &&
+          event.payload.mutation.requestSha256 === requestSha256,
+      );
+      if (
+        replay &&
+        isObject(replay.payload.mutation) &&
+        replay.payload.mutation.resultSha256 === sha256Text(canonicalJson(project))
+      )
+        return project;
       throw new CliError("Project retry requires a failed or retryable package.", {
         code: "RESEARCH_RETRY_NOT_AVAILABLE",
         exitCode: 2,
       });
     }
-    const archivedReport = reviewerRevision
-      ? await archiveSynthesisRevision(root, projectId)
-      : null;
-    const selectedIndex = project.packages.indexOf(selected);
-    const previous = {
-      status: selected.status,
-      attempts: selected.attempts,
-      failureKind: selected.lastFailureKind,
-    };
-    for (const [index, workPackage] of project.packages.entries()) {
-      if (index < selectedIndex) continue;
-      workPackage.status = index === selectedIndex ? "ready" : "pending";
-      workPackage.maxAttempts = Math.max(workPackage.maxAttempts, workPackage.attempts + 1);
-      workPackage.startedAt = null;
-      workPackage.completedAt = null;
-      workPackage.lastError = null;
-      workPackage.lastFailureKind = null;
-      workPackage.retryNotBefore = null;
+    let mutation = await beginProjectMutation(root, "retry", project, requestSha256);
+    try {
+      const archivedReport = reviewerRevision
+        ? await archiveSynthesisRevision(root, projectId)
+        : null;
+      const selectedIndex = project.packages.indexOf(selected);
+      const previous = {
+        status: selected.status,
+        attempts: selected.attempts,
+        failureKind: selected.lastFailureKind,
+      };
+      for (const [index, workPackage] of project.packages.entries()) {
+        if (index < selectedIndex) continue;
+        workPackage.status = index === selectedIndex ? "ready" : "pending";
+        workPackage.maxAttempts = Math.max(workPackage.maxAttempts, workPackage.attempts + 1);
+        workPackage.startedAt = null;
+        workPackage.completedAt = null;
+        workPackage.lastError = null;
+        workPackage.lastFailureKind = null;
+        workPackage.retryNotBefore = null;
+      }
+      project.status = "ready";
+      project.updatedAt = new Date().toISOString();
+      mutation = await prepareProjectMutation(root, mutation, project);
+      await appendJournalEvent(workspacePaths(root).journal, "project.retry.requested", projectId, {
+        projectId,
+        packageId: selected.id,
+        previous,
+        preservedOutputs: true,
+        reason: reviewerRevision ? "reviewer-revision" : "package-failure",
+        archivedReport,
+        mutation: projectMutationBinding(mutation),
+      });
+      await settleProjectMutation(root, mutation);
+      return project;
+    } catch (error) {
+      if (await settleProjectMutation(root, mutation)) return loadProject(root, projectId);
+      throw error;
     }
-    project.status = "ready";
-    project.updatedAt = new Date().toISOString();
-    await saveProject(root, project);
-    await appendJournalEvent(workspacePaths(root).journal, "project.retry.requested", projectId, {
-      projectId,
-      packageId: selected.id,
-      previous,
-      preservedOutputs: true,
-      reason: reviewerRevision ? "reviewer-revision" : "package-failure",
-      archivedReport,
-    });
-    return project;
   });
 }
 
@@ -450,6 +470,20 @@ export async function forkProject(
   }
   return withWorkspaceLock(root, "project.fork", async () => {
     const source = await loadProject(root, sourceProjectId);
+    const authority = await readProjectAuthorityIndex(root);
+    const requestSha256 = sha256Text(
+      canonicalJson({
+        sourceProjectId,
+        targetProjectId,
+        resumeThrough: resumeThrough ?? null,
+        policy: scientificReapproval?.publicationPolicy ?? null,
+        design: scientificReapproval?.scientificDesign.design.contract ?? null,
+        producerAgent: scientificReapproval?.scientificDesign.producerAgent ?? null,
+        producerSessionSha256: scientificReapproval
+          ? sha256Text(scientificReapproval.scientificDesign.producerSessionId)
+          : null,
+      }),
+    );
     const sourceRequiresScientificReapproval = Boolean(
       source.publicationPolicy || source.scientificDesign,
     );
@@ -465,12 +499,43 @@ export async function forkProject(
         exitCode: 2,
       });
     }
-    if (source.lineage.supersededBy) {
-      throw new CliError(
-        `Project ${sourceProjectId} is historical; fork the authoritative project ${source.lineage.supersededBy}.`,
-        { code: "RESEARCH_PROJECT_NOT_AUTHORITATIVE", exitCode: 3 },
-      );
+    const previous = authority.forks.get(targetProjectId);
+    if (previous) {
+      const binding = isObject(previous.payload.mutation) ? previous.payload.mutation : null;
+      const sameRequest = binding
+        ? binding.requestSha256 === requestSha256
+        : previous.payload.resumeThrough === (resumeThrough ?? null) &&
+          previous.payload.publicationPolicySha256 ===
+            (scientificReapproval?.publicationPolicy.resolvedPolicySha256 ?? null) &&
+          previous.payload.scientificDesignSha256 ===
+            (scientificReapproval?.scientificDesign.design.sha256 ?? null) &&
+          previous.payload.scientificDesignProducerSessionSha256 ===
+            (scientificReapproval
+              ? sha256Text(scientificReapproval.scientificDesign.producerSessionId)
+              : null);
+      if (previous.payload.sourceProjectId !== sourceProjectId || !sameRequest) {
+        throw new CliError("Fork target already belongs to a different committed request.", {
+          code: "RESEARCH_PROJECT_FORK_CONFLICT",
+          exitCode: 3,
+          details: { sourceProjectId, targetProjectId },
+        });
+      }
+      const target = await loadProject(root, targetProjectId);
+      if (
+        target.lineage.kind !== "fork" ||
+        target.lineage.derivedFrom !== sourceProjectId ||
+        target.lineage.supersedes !== sourceProjectId ||
+        target.question !== source.question
+      ) {
+        throw new CliError("Committed fork target identity changed.", {
+          code: "RESEARCH_PROJECT_FORK_CONFLICT",
+          exitCode: 3,
+          details: { sourceProjectId, targetProjectId },
+        });
+      }
+      return target;
     }
+    assertProjectAuthority(source, authority);
     if (source.status === "archived" || source.status === "abandoned") {
       throw new CliError(`Project ${sourceProjectId} is ${source.status} and cannot be forked.`, {
         code: "RESEARCH_PROJECT_NOT_AUTHORITATIVE",
@@ -484,7 +549,10 @@ export async function forkProject(
       );
     }
     const targetRoot = join(workspacePaths(root).projects, targetProjectId);
-    if (await lstat(targetRoot).catch(() => undefined)) {
+    if (
+      authority.registered.has(targetProjectId) ||
+      (await lstat(targetRoot).catch(() => undefined))
+    ) {
       throw new CliError(`Research project already exists: ${targetProjectId}`, {
         code: "RESEARCH_PROJECT_EXISTS",
         exitCode: 2,
@@ -617,11 +685,8 @@ export async function forkProject(
       handoff: initialHandoffState(),
       evidenceState: initialEvidenceState(),
     };
-    const sourceBeforeMutation = structuredClone(source);
-    let targetMutationStarted = false;
-    let sourceMutationAttempted = false;
+    let mutation = await beginProjectMutation(root, "fork", source, requestSha256, targetProjectId);
     try {
-      targetMutationStarted = true;
       await Promise.all([
         ensureDirectory(targetRoot),
         ensureDirectory(join(targetRoot, "outputs")),
@@ -787,13 +852,9 @@ export async function forkProject(
       source.lineage.supersededBy = targetProjectId;
       source.evidenceState.staleReason = `Superseded by recovery fork ${targetProjectId}.`;
       refreshProject(source);
-      sourceMutationAttempted = true;
-      await saveProject(root, source);
-      await appendEvidenceLedgerEvent(root, sourceProjectId, "project.superseded", {
-        sourceProjectId,
-        supersededBy: targetProjectId,
-        reason: "recovery-fork",
-      });
+      // All target bytes and metadata precede the single journal commit point.
+      await saveProject(root, project);
+      mutation = await prepareProjectMutation(root, mutation, source);
       await appendJournalEvent(workspacePaths(root).journal, "project.forked", targetProjectId, {
         sourceProjectId,
         targetProjectId,
@@ -801,36 +862,16 @@ export async function forkProject(
         inheritedOutputs,
         inheritedUsage: false,
         sourceSuperseded: true,
+        mutation: projectMutationBinding(mutation),
         publicationPolicySha256: targetPolicy?.resolvedPolicySha256 ?? null,
         scientificDesignSha256: targetScientificDesign?.designSha256 ?? null,
         scientificDesignProducerSessionSha256:
           targetScientificDesign?.producer.sessionSha256 ?? null,
       });
+      await settleProjectMutation(root, mutation);
       return project;
     } catch (error) {
-      const rollbackFailures: string[] = [];
-      if (sourceMutationAttempted) {
-        await saveProject(root, sourceBeforeMutation).catch((rollbackError: unknown) => {
-          rollbackFailures.push(`source:${String(rollbackError)}`);
-        });
-      }
-      if (targetMutationStarted) {
-        await rm(targetRoot, { recursive: true, force: true }).catch((rollbackError: unknown) => {
-          rollbackFailures.push(`target:${String(rollbackError)}`);
-        });
-      }
-      if (rollbackFailures.length) {
-        throw new CliError("Recovery fork failed and rollback could not restore a clean state.", {
-          code: "RESEARCH_PROJECT_FORK_ROLLBACK_FAILED",
-          exitCode: 3,
-          details: {
-            sourceProjectId,
-            targetProjectId,
-            originalError: error instanceof Error ? error.message : String(error),
-            rollbackFailures,
-          },
-        });
-      }
+      if (await settleProjectMutation(root, mutation)) return loadProject(root, targetProjectId);
       throw error;
     }
   });

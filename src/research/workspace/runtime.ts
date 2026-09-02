@@ -3,6 +3,14 @@ import { cp, lstat, readFile, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { CliError } from "../../errors.js";
+import { isConsistentAnalysisRunMetadata } from "./analysis-run.js";
+import {
+  assertProjectAuthority,
+  projectAuthority,
+  projectWithEffectiveAuthority,
+  readProjectAuthorityIndex,
+  type ProjectAuthorityIndex,
+} from "./project-authority.js";
 import { dataPublicSchemas } from "../../data/schemas.js";
 import {
   loadCapabilityDeclarations,
@@ -328,13 +336,13 @@ async function runResearchWorkspaceInternal(
   const requestId = randomUUID();
   if (options.dryRun) return dryRunResult(root, requestId, options.projectId);
   return withWorkspaceLock(root, "research.run", async () => {
-    await verifyJournal(workspacePaths(root).journal);
+    const authority = await readProjectAuthorityIndex(root);
     const config = await loadWorkspaceConfig(root);
     assertExecutionConfiguration(config);
     const reviewerPackageExecutor = useConfiguredReviewerExecutor
       ? createReviewExecutor({ root, execution: config.reviewerExecution }).execute
       : null;
-    for (const project of await projectsForRun(root, options.projectId)) {
+    for (const project of await projectsForRun(root, options.projectId, authority)) {
       await assertProjectPublicationPolicy(root, project);
     }
     let doctorAttestation: WorkspaceDoctorAttestation | null = null;
@@ -359,7 +367,7 @@ async function runResearchWorkspaceInternal(
         );
       }
       doctorAttestation = verification.attestation;
-      const unconfirmed = (await projectsForRun(root, options.projectId)).filter(
+      const unconfirmed = (await projectsForRun(root, options.projectId, authority)).filter(
         (project) =>
           config.budget.maxCostUsd > config.budget.confirmationCostUsd &&
           !project.budgetConfirmedAt,
@@ -380,7 +388,7 @@ async function runResearchWorkspaceInternal(
     let cycles = 0;
 
     while (cycles < options.maxCycles) {
-      const projects = await projectsForRun(root, options.projectId);
+      const projects = await projectsForRun(root, options.projectId, authority);
       const selected = projects
         .map((project) => ({ project, workPackage: nextReadyPackage(project) }))
         .filter(
@@ -418,6 +426,7 @@ async function runResearchWorkspaceInternal(
       executed,
       options.maxCycles,
       options.projectId,
+      authority,
     );
     emitProgress(
       options,
@@ -604,10 +613,14 @@ export async function prepareNativeResearchStage(input: {
   hostAgent: AgentRoute["agent"];
 }): Promise<NativeStagePacket> {
   return withWorkspaceLock(input.root, "research.native-stage.prepare", async () => {
-    await verifyJournal(workspacePaths(input.root).journal);
+    const authority = await readProjectAuthorityIndex(input.root);
     const config = await loadWorkspaceConfig(input.root);
     assertExecutionConfiguration(config);
-    const project = await loadProject(input.root, input.projectId);
+    const project = projectWithEffectiveAuthority(
+      await loadProject(input.root, input.projectId),
+      authority,
+    );
+    assertProjectAuthority(project, authority);
     await assertScientificGateForStage(input.root, project, input.stage);
     await assertProjectPublicationPolicy(input.root, project);
     if (config.producer.agent !== input.hostAgent) {
@@ -1160,6 +1173,8 @@ export async function submitNativeResearchStage(input: {
   usage: Record<string, unknown>;
 }> {
   return withWorkspaceLock(input.root, "research.native-stage.submit", async () => {
+    const authority = await readProjectAuthorityIndex(input.root);
+    assertProjectAuthority(await loadProject(input.root, input.projectId), authority);
     const session = await readNativeStageSession(input.root, input.projectId);
     if (session.packet.sessionId !== input.sessionId) {
       throw new CliError("Native stage session ID does not match the active session.", {
@@ -3503,27 +3518,11 @@ async function validateAnalysis(path: string, value: Record<string, unknown>): P
       "Analysis run refers to an artifact outside the inference snapshot.",
     );
   }
-  if (run.mode === "qualitative") {
-    if (
-      run.status !== "not-applicable" ||
-      run.command !== null ||
-      run.randomSeed !== null ||
-      implementationSha256s.length > 0 ||
-      environmentSha256s.length > 0
-    ) {
-      throw new StructuredOutputError("Qualitative analysis run metadata is inconsistent.");
-    }
-  } else if (
-    run.status !== "reproduced" ||
-    typeof run.command !== "string" ||
-    run.command.trim().length < 1 ||
-    typeof run.randomSeed !== "string" ||
-    run.randomSeed.trim().length < 1 ||
-    implementationSha256s.length < 1 ||
-    environmentSha256s.length < 1
-  ) {
+  if (!isConsistentAnalysisRunMetadata(run)) {
     throw new StructuredOutputError(
-      "Computational analysis requires exact reproduced run metadata.",
+      run.mode === "qualitative"
+        ? "Qualitative analysis run metadata is inconsistent."
+        : "Computational analysis requires exact reproduced run metadata.",
     );
   }
   const findings = value.findings as unknown[];
@@ -4830,8 +4829,9 @@ async function summarizeRun(
   executed: WorkspaceRunResult["executed"],
   maxCycles: number,
   projectId?: string,
+  authority?: ProjectAuthorityIndex,
 ): Promise<WorkspaceRunResult> {
-  const projects = await projectsForRun(root, projectId);
+  const projects = await projectsForRun(root, projectId, authority);
   const summaries = projects.map((project) => projectRunSummary(root, project));
   const unfinished = summaries.filter((project) => project.status !== "complete");
   const waiting = unfinished.filter(
@@ -4895,32 +4895,20 @@ async function summarizeRun(
   };
 }
 
-async function projectsForRun(root: string, projectId?: string): Promise<ProjectState[]> {
+async function projectsForRun(
+  root: string,
+  projectId?: string,
+  knownAuthority?: ProjectAuthorityIndex,
+): Promise<ProjectState[]> {
+  const authority = knownAuthority ?? (await readProjectAuthorityIndex(root));
   if (projectId) {
-    const project = await loadProject(root, projectId);
-    if (
-      project.lineage.supersededBy ||
-      project.status === "archived" ||
-      project.status === "abandoned"
-    ) {
-      throw new CliError(`Research project ${projectId} is historical and cannot be executed.`, {
-        code: "RESEARCH_PROJECT_NOT_AUTHORITATIVE",
-        exitCode: 3,
-        details: {
-          projectId,
-          status: project.status,
-          authoritativeProjectId: project.lineage.supersededBy ?? null,
-        },
-      });
-    }
+    const project = projectWithEffectiveAuthority(await loadProject(root, projectId), authority);
+    assertProjectAuthority(project, authority);
     return [project];
   }
-  return (await listProjects(root)).filter(
-    (project) =>
-      project.lineage.supersededBy === null &&
-      project.status !== "archived" &&
-      project.status !== "abandoned",
-  );
+  return (await listProjects(root, authority))
+    .filter((project) => projectAuthority(project, authority).state === "authoritative")
+    .map((project) => projectWithEffectiveAuthority(project, authority));
 }
 
 function assertPublicEvidenceUrl(value: string, sourceId: string): void {

@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-09-02
-lastReviewedCommit: 8a18ba69f432d2c639517549157ef29545722cff
+lastReviewedCommit: e1eacc2565571ad15a0051246c92fe695ba94e35
 ---
 
 # Repo Architecture
@@ -437,9 +437,35 @@ Recovery forks validate top-journal resume limits before target creation, clone
 and re-register decomposition/atom records against the target acquisition, and
 freeze a new target-bound content snapshot. Top-journal recovery stops at
 acquire so the new Policy/design generation can complete its own scientific
-reviews. Once mutation starts, every failure rolls back source state and removes
-the target. Status requires the append-only `project.forked` marker before a fork
-can be authoritative, so legacy half-written targets are reported as invalid.
+reviews. `project-authority.ts` builds one verified journal index shared by
+status, run and native/reviewer admission. Successor resolution is memoized only
+inside that operation-local view, making long-history enumeration linear
+without a persistent cache or artifact rescan.
+
+`project-mutations.ts` is limited to fork and package-retry metadata, not a
+general workflow engine. A journal-bound pending intent precedes fork target
+creation; all target bytes precede the `project.forked` commit point. Source
+state and supersession ledger records are idempotent post-commit projections.
+Before commit, recovery retains interrupted target bytes outside the project
+namespace; after commit, it completes only projections whose before/after
+digests still match. Retry archives remain immutable and their state follows a
+`project.retry.requested` commit. Replaying a committed fork or an unchanged
+retry acknowledgement performs no provider work. Recovery runs under the
+existing workspace lease and has only a constant-size absent-directory check
+on the ordinary path. Unknown/symlinked targets, changed state, malformed
+records and corrupt journals fail closed without deleting their bytes.
+This handles process interruption at filesystem operation boundaries, not
+physical power-loss repair. Existing uncommitted derived states cannot execute;
+never-committed directories without state are not formal projects.
+
+`analysis-run.ts` centralizes mode consistency for both stage submission and
+publication freeze. Qualitative records retain `not-applicable` computational
+status rather than inventing a run; computational/mixed records retain exact
+reproduced metadata. Neither mode bypasses scientific, evidence, graph or
+independent-review validation, and this predicate is not a trusted execution
+receipt. Acquisition forecast reuses the artifact media predicate and already
+verified input hashes, so local binaries without readable text are not counted
+as atom-eligible merely because an admitted full file exists.
 
 `scientific-review-execution.ts` executes an already prepared early review
 through the same reviewer abstraction. It reserves finite token/cost/wall

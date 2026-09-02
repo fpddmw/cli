@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-09-02
-lastReviewedCommit: 8a18ba69f432d2c639517549157ef29545722cff
+lastReviewedCommit: e1eacc2565571ad15a0051246c92fe695ba94e35
 ---
 
 # Repo Validation
@@ -205,6 +205,23 @@ runtime network. It enables Docker's privileged namespace mode solely so the non
 test process can exercise the real nested Bubblewrap capsule instead of skipping
 or mocking it; the isolation assertion still rejects root execution, host HOME,
 global Skills, and global CLI state.
+
+`test/research-project-recovery.test.ts` kills real child processes after
+directory/state/commit writes, then invokes public status, fork, retry and
+native preparation from a fresh process. It verifies private uncommitted
+targets, committed replay, preserved report archives, no false supersession,
+source-change conflicts, linked replacements and secret-free malformed-record
+errors. These fixtures do not execute a model or provider. Existing status
+filtering tests create real committed successors instead of hand-writing
+supersession flags.
+
+`test/research-project-authority.test.ts` verifies lineage identity/cycles and
+bounds successor-map lookups for a long chain across repeated queries. It does
+not use host-dependent timing thresholds. Scientific-execution tests refuse
+uncommitted derived projects before spending a reservation. Publication tests
+retain computational negative controls while allowing consistent qualitative
+metadata through the same remaining gates; acquisition tests reproduce the
+local-PDF forecast/submit discrepancy without weakening submission.
 
 On a Linux test host where
 `/proc/sys/kernel/apparmor_restrict_unprivileged_userns` is `1`, the local gate

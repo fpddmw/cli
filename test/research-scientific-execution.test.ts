@@ -26,6 +26,32 @@ import { scientificDesignInput } from "./helpers/scientific-design.js";
 import { appendJournalEvent, readVerifiedJournal } from "../src/research/workspace/journal.js";
 
 describe("explicit isolated scientific review execution", () => {
+  it("does not execute a reviewer for a derived project without its authority commit", async () => {
+    const fixture = await preparedFixture("execution-uncommitted-target");
+    try {
+      const project = await loadProject(fixture.root, fixture.projectId);
+      project.lineage.kind = "fork";
+      project.lineage.derivedFrom = "source";
+      project.lineage.supersedes = "source";
+      await saveProject(fixture.root, project);
+      let calls = 0;
+      await assert.rejects(
+        executeScientificReview(
+          { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+          async () => {
+            calls += 1;
+            return result(fixture.packet);
+          },
+        ),
+        { code: "RESEARCH_PROJECT_NOT_AUTHORITATIVE" },
+      );
+      assert.equal(calls, 0);
+      assert.deepEqual((await loadProject(fixture.root, fixture.projectId)).usage, project.usage);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("replays only a bounded execution receipt from the exact project namespace", async () => {
     const fixture = await preparedFixture("execution-receipt-size");
     try {
