@@ -126,3 +126,9 @@ test, coverage, and pack checks before publishing.
   the Skills/Research data boundary.
 - Read `docs/agents/data-runtime-implementation-plan.md` before starting or
   sequencing the TypeScript 7 and atomic data migration work packages.
+
+## User Feedback
+
+`CONTRIBUTING.md` implements the shared workspace reporting policy. Keep the
+core form fields aligned with Skills and preserve offline help and packaged
+reporting guidance. User reports do not require a root-cause diagnosis.

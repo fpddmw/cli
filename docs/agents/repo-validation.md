@@ -528,3 +528,14 @@ Broker tests also prove that the configured view ceiling rejects an excess
 request before another provider fetch while retaining a sanitized journal event
 and the already admitted receipt. Project-cache reuse avoids a second provider
 call but still consumes one bounded context-view reservation.
+
+## Reporting Contract
+
+`test/issue-reporting.test.ts` parses the YAML forms, checks stable core field
+IDs and required flags, accepts uncertain ownership, exercises offline help,
+and checks npm's pack file list for the contributor guide. It runs through
+`npm test` and coverage in the normal and clean-container gates. When fields
+change, compare labels/IDs/order/required flags with the Skills forms and its
+installed Markdown templates under the shared workspace reporting policy.
+Check an actual packed artifact before release and audit any changed Skill pin
+only after its source commit is merged.

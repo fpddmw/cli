@@ -28,6 +28,8 @@ ownership:
         include:
           - AGENTS.md
           - README.md
+          - CONTRIBUTING.md
+          - .github/ISSUE_TEMPLATE/**
           - .docpact/config.yaml
           - docs/agents/**
           - .github/workflows/**
@@ -66,6 +68,12 @@ ownership:
 
 routing:
   intents:
+    issue-reporting:
+      paths:
+        - CONTRIBUTING.md
+        - .github/ISSUE_TEMPLATE/**
+        - src/cli.ts
+        - test/issue-reporting.test.ts
     command-surface:
       paths:
         - bin/**
@@ -108,6 +116,8 @@ routing:
 
 coverage:
   include:
+    - CONTRIBUTING.md
+    - .github/ISSUE_TEMPLATE/**
     - AGENTS.md
     - README.md
     - .docpact/config.yaml
@@ -136,6 +146,7 @@ coverage:
 
 docInventory:
   include:
+    - CONTRIBUTING.md
     - AGENTS.md
     - README.md
     - .docpact/config.yaml
@@ -256,3 +267,24 @@ rules:
       - path: docs/agents/data-runtime-implementation-plan.md
         mode: review_or_update
     reason: Atomic data commands, contracts, connectors, and Research adaptation must preserve one CLI-owned machine boundary.
+
+  - id: cli-issue-reporting
+    scope: repo
+    repo: cli
+    triggers:
+      - path: CONTRIBUTING.md
+        kind: contributor-guide
+      - path: .github/ISSUE_TEMPLATE/**
+        kind: user-feedback-form
+      - path: test/issue-reporting.test.ts
+        kind: feedback-contract-test
+    requiredDocs:
+      - path: CONTRIBUTING.md
+        mode: review_or_update
+      - path: README.md
+        mode: review_or_update
+      - path: docs/agents/repo-architecture.md
+        mode: review_or_update
+      - path: docs/agents/repo-validation.md
+        mode: review_or_update
+    reason: Issue forms, CLI help, and packaged reporting guidance must implement the shared intake contract.

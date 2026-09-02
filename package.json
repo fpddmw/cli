@@ -18,6 +18,7 @@
     "bin/",
     "dist/",
     "README.md",
+    "CONTRIBUTING.md",
     "AGENTS.md",
     "LICENSE"
   ],

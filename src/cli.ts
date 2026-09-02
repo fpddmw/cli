@@ -3580,6 +3580,11 @@ Run "tiangong-ai kb --help" for KB options.
 Run "tiangong-ai data --help" for atomic data options.
 Run "tiangong-ai research --help" for research options.
 Run "tiangong-ai education --help" for education options.
+
+Report a problem or suggest a capability:
+  https://github.com/tiangong-ai/cli/issues/new/choose
+Reporting guide:
+  https://github.com/tiangong-ai/cli/blob/main/CONTRIBUTING.md
 `;
 }
 

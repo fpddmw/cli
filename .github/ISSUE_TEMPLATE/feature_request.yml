@@ -1,0 +1,71 @@
+# Reporting contract: v1
+name: Feature request
+description: Suggest a capability / 功能建议
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Chinese and English reports are welcome. Search existing issues and report one problem or capability per issue.
+        支持中文和英文；先搜索已有反馈，一条 Issue 聚焦一个问题或能力。Unknown / Not applicable is accepted with a reason.
+        [Reporting principles](https://github.com/tiangong-ai/workspace/blob/main/_docs/contracts/issue-reporting-policy.md) · [Contribution guide](https://github.com/tiangong-ai/cli/blob/main/CONTRIBUTING.md)
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: |
+        Name the capability you need. 想要什么能力？
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: |
+        Choose the affected surface, or Unsure. 选择组件，或“不确定”。
+      options:
+        - Auto Research Skill
+        - CLI
+        - Integration
+        - Unsure / 不确定
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: |
+        Who needs this and what task are they doing? 谁在什么场景下需要它？
+    validations:
+      required: true
+  - type: textarea
+    id: limitation
+    attributes:
+      label: Current limitation
+      description: |
+        What makes that task difficult today? 当前障碍是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed capability
+      description: |
+        Describe the desired behavior. An implementation design is not required. 描述期望行为，无需设计实现方案。
+    validations:
+      required: true
+  - type: textarea
+    id: success
+    attributes:
+      label: Success criteria
+      description: |
+        Give a user-visible example that would meet the need. 什么可观察结果说明需求已满足？
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: |
+        Optional workarounds or alternatives considered. 可选：现有替代办法。
+    validations:
+      required: false
