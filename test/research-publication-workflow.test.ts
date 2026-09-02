@@ -47,6 +47,81 @@ const REVIEW_ROLES: PublicationReviewRole[] = [
 ];
 
 describe("top-journal publication workflow", () => {
+  it("freezes a qualitative analysis without inventing a computational reproduction", async () => {
+    const fixture = await publicationFixture(
+      "qualitative-publication",
+      {},
+      {
+        mode: "qualitative",
+        status: "not-applicable",
+        implementationSha256s: [],
+        environmentSha256s: [],
+        command: null,
+        randomSeed: null,
+      },
+    );
+    try {
+      const frozen = await freezePublicationManuscript({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        supplementPaths: [],
+        submissionFiles: fixture.submissionFiles,
+        producerAgent: "codex",
+        producerSessionId: "qualitative-producer",
+      });
+      assert.equal(frozen.status, "manuscript-frozen");
+      assert.equal(
+        (await inspectPublicationStatus(fixture.root, fixture.projectId)).reviewState,
+        "not-started",
+      );
+      await assert.rejects(
+        closePublication(fixture.root, fixture.projectId),
+        (error: unknown) => errorCode(error) === "RESEARCH_PUBLICATION_REVIEW_INCOMPLETE",
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects inconsistent computational and qualitative metadata at publication freeze", async () => {
+    for (const run of [
+      { mode: "computational", status: "not-applicable" },
+      { mode: "mixed", status: "not-applicable" },
+      { mode: "qualitative", status: "reproduced" },
+      { mode: "qualitative", status: "not-applicable", command: "invented command" },
+      {
+        mode: "computational",
+        status: "reproduced",
+        command: null,
+        randomSeed: null,
+        implementationSha256s: [],
+        environmentSha256s: [],
+      },
+    ]) {
+      const fixture = await publicationFixture("inconsistent-analysis-run", {}, run);
+      try {
+        await assert.rejects(
+          freezePublicationManuscript({
+            root: fixture.root,
+            projectId: fixture.projectId,
+            manuscriptPath: fixture.manuscript,
+            assessmentPath: fixture.assessment,
+            supplementPaths: [],
+            submissionFiles: fixture.submissionFiles,
+            producerAgent: "codex",
+            producerSessionId: "inconsistent-run-producer",
+          }),
+          (error: unknown) =>
+            errorCode(error) === "RESEARCH_PUBLICATION_SUBMISSION_BINDING_INVALID",
+        );
+      } finally {
+        await rm(fixture.root, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("reports active base research as pending publication rather than invalid", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-publication-pending-"));
     const projectId = "pending-publication";
@@ -593,6 +668,14 @@ describe("top-journal publication workflow", () => {
 async function publicationFixture(
   projectId: string,
   assessmentOverride: Partial<PublicationAssessment> = {},
+  analysisRunOverride: Partial<{
+    mode: string;
+    status: string;
+    implementationSha256s: string[];
+    environmentSha256s: string[];
+    command: string | null;
+    randomSeed: string | null;
+  }> = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "tiangong-publication-workflow-"));
   await initializeResearchWorkspace(root, "Publication workflow");
@@ -822,6 +905,7 @@ async function publicationFixture(
       command: "python analysis.py --seed 42",
       randomSeed: "42",
       limitations: [],
+      ...analysisRunOverride,
     },
     findings: [
       {

@@ -57,6 +57,89 @@ import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("research acquisition and evidence snapshots", () => {
+  it("forecasts a local binary input's missing readable derivative without mutating acquisition", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-input-forecast-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-input-forecast-files-"));
+    const projectId = "binary-input-forecast";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      await initializeProject(root, projectId, "Read an admitted local PDF before inference.");
+      const inputPath = join(staging, "local.pdf");
+      await writeFile(inputPath, await validPdf("Unread binary input"));
+      await addProjectInput(root, projectId, inputPath, "primary");
+      const discover = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const [candidate] = await listEvidenceCandidates(root, projectId);
+      assert.ok(candidate);
+      await recordAdmission(root, projectId, candidate.id, "pdf-source");
+      const discoverPath = join(staging, "discover.json");
+      await writeFile(discoverPath, JSON.stringify(discoveryValue(candidate.id, "pdf-source")));
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: discover.sessionId,
+        outputPath: discoverPath,
+        confirmedModel: discover.expectedModel,
+      });
+      const auditPath = join(staging, "acquisition.json");
+      await writeFile(auditPath, JSON.stringify(acquisitionValue(candidate.id, "pdf-source")));
+      const beforeLedger = await readFile(evidenceLedgerPath(root, projectId));
+      const beforeProject = await loadProject(root, projectId);
+      const forecast = await invokeCli([
+        "research",
+        "project",
+        "evidence",
+        "content",
+        "forecast",
+        projectId,
+        "--input",
+        auditPath,
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(forecast.exitCode, 0, forecast.stderr);
+      const result = JSON.parse(forecast.stdout);
+      assert.deepEqual(
+        result.sourcesNeedingReadableArtifacts.map(
+          (source: { sourceId: string }) => source.sourceId,
+        ),
+        ["pdf-source"],
+      );
+      assert.deepEqual(result.pendingInputArtifactSourceIds, ["pdf-source"]);
+      assert.equal(result.certifiesAcquisitionSubmission, false);
+      assert.deepEqual(await readFile(evidenceLedgerPath(root, projectId)), beforeLedger);
+      assert.deepEqual(await loadProject(root, projectId), beforeProject);
+      const acquire = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      await assert.rejects(
+        submitNativeResearchStage({
+          root,
+          projectId,
+          sessionId: acquire.sessionId,
+          outputPath: auditPath,
+          confirmedModel: acquire.expectedModel,
+        }),
+        (error: unknown) =>
+          error instanceof CliError && error.code === "RESEARCH_INPUT_ATOMIZATION_REQUIRED",
+      );
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("forecasts acquisition read-only and reuses exact artifacts when recovery resumes after discovery", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-acquisition-recovery-"));
     const staging = await mkdtemp(join(tmpdir(), "tiangong-acquisition-recovery-files-"));
