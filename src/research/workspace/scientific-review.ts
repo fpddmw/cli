@@ -7,6 +7,7 @@ import { taskContext } from "./task-contract.js";
 import { sourceTypeRequirementGaps } from "./evidence-role-coverage.js";
 import { appendJournalEvent, verifyJournal } from "./journal.js";
 import { loadProject, nextScientificGate, saveProject } from "./projects.js";
+import { projectWithEffectiveAuthority, readProjectAuthorityIndex } from "./project-authority.js";
 import { assertResearchPolicyBinding } from "./research-policy.js";
 import {
   evaluateScientificDesign,
@@ -887,8 +888,14 @@ export async function assertScientificGateForStage(
 export async function inspectScientificReviewStatus(
   root: string,
   projectId: string,
+  knownProject?: ProjectState,
 ): Promise<ScientificReviewStatus> {
-  const project = await loadProject(root, projectId);
+  const project =
+    knownProject ??
+    projectWithEffectiveAuthority(
+      await loadProject(root, projectId),
+      await readProjectAuthorityIndex(root),
+    );
   if (!project.scientificDesign) {
     return { projectId, reviewState: "not-required", nextGate: null, gates: null };
   }

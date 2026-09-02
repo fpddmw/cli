@@ -524,8 +524,14 @@ function bindContract(
 
 function scopeChanges(previous: TaskRequirement[], next: TaskRequirement[]) {
   const prior = new Map(previous.map((item) => [item.id, item]));
+  const nextById = new Map(next.map((item) => [item.id, item]));
   const nextIds = new Set(next.map((item) => item.id));
   return {
+    details: [...new Set([...prior.keys(), ...nextById.keys()])]
+      .filter(
+        (id) => canonicalJson(prior.get(id) ?? null) !== canonicalJson(nextById.get(id) ?? null),
+      )
+      .map((id) => ({ id, before: prior.get(id) ?? null, after: nextById.get(id) ?? null })),
     addedRequirementIds: next.filter((item) => !prior.has(item.id)).map((item) => item.id),
     changedRequirementIds: next
       .filter(

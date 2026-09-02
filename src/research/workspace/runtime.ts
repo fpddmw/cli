@@ -7,6 +7,7 @@ import { isConsistentAnalysisRunMetadata } from "./analysis-run.js";
 import { taskContext } from "./task-contract.js";
 import {
   compileTaskAcceptanceContext,
+  inspectProjectTask,
   taskAcceptancePrompt,
   validateTaskReview,
   type TaskAcceptanceContext,
@@ -169,6 +170,7 @@ export interface WorkspaceRunResult {
     scientificGate: ReturnType<typeof blockingScientificGate>;
     recommendedAction: string | null;
     usage: ProjectState["usage"];
+    task?: Awaited<ReturnType<typeof inspectProjectTask>>;
   }>;
 }
 
@@ -4898,8 +4900,20 @@ async function summarizeRun(
   projectId?: string,
   authority?: ProjectAuthorityIndex,
 ): Promise<WorkspaceRunResult> {
-  const projects = await projectsForRun(root, projectId, authority);
-  const summaries = projects.map((project) => projectRunSummary(root, project));
+  // One fresh journal view after execution includes newly committed reviewer results.
+  const summaryAuthority = executed.length
+    ? await readProjectAuthorityIndex(root)
+    : (authority ?? (await readProjectAuthorityIndex(root)));
+  const projects = await projectsForRun(root, projectId, summaryAuthority);
+  const summaries = await Promise.all(
+    projects.map(async (project) => {
+      const summary = projectRunSummary(root, project);
+      const events = summaryAuthority.taskEvents.get(project.id);
+      if (!events) return summary;
+      const task = await inspectProjectTask(root, project.id, events);
+      return task.status === "configured" ? { ...summary, task } : summary;
+    }),
+  );
   const unfinished = summaries.filter((project) => project.status !== "complete");
   const waiting = unfinished.filter(
     (project) => project.status === "waiting-user" || project.status === "waiting-external",

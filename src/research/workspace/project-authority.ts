@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { CliError } from "../../errors.js";
 import { readVerifiedJournal } from "./journal.js";
 import { isObject, workspacePaths } from "./storage.js";
-import type { JournalEvent, ProjectState } from "./types.js";
+import type { JournalEvent, ProjectState, ScientificReviewRole } from "./types.js";
 
 export interface ProjectAuthorityIndex {
   forks: Map<string, JournalEvent>;
@@ -152,14 +152,14 @@ export function projectWithEffectiveAuthority(
   index: ProjectAuthorityIndex,
 ): ProjectState {
   const next = index.successors.get(project.id) ?? null;
-  if (project.lineage.supersededBy === next) return project;
-  const result = structuredClone(project);
+  let result = project.lineage.supersededBy === next ? project : structuredClone(project);
   const old = result.lineage.supersededBy;
-  result.lineage.supersededBy = next;
-  if (next) {
+  if (result !== project) result.lineage.supersededBy = next;
+  if (result !== project && next) {
     result.evidenceState.staleReason = "Superseded by committed project " + next + ".";
     if (result.status !== "archived" && result.status !== "abandoned") result.status = "stale";
   } else if (
+    result !== project &&
     old &&
     [
       "Superseded by recovery fork " + old + ".",
@@ -167,6 +167,30 @@ export function projectWithEffectiveAuthority(
     ].includes(result.evidenceState.staleReason ?? "")
   ) {
     result.evidenceState.staleReason = null;
+  }
+  const scope = index.taskEvents
+    .get(project.id)
+    ?.findLast((event) => event.type === "project.task.scope.approved");
+  const invalidated = scope?.payload.invalidatedScientificReviews;
+  if (result.scientificDesign && Array.isArray(invalidated)) {
+    for (const entry of invalidated) {
+      if (
+        !isObject(entry) ||
+        !["research-design", "evidence-construct", "pilot-methods"].includes(String(entry.role)) ||
+        typeof entry.packetSha256 !== "string"
+      )
+        continue;
+      const role = entry.role as ScientificReviewRole;
+      if (result.scientificDesign!.gates[role].packetSha256 !== entry.packetSha256) continue;
+      if (result === project) result = structuredClone(project);
+      result.scientificDesign!.gates[role] = {
+        status: "pending",
+        packetSha256: null,
+        assessmentSha256: null,
+        reviewSha256: null,
+        reviewerSessionSha256: null,
+      };
+    }
   }
   return result;
 }

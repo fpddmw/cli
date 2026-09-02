@@ -2237,7 +2237,7 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
         const evidencePipeline = await inspectEvidencePipelineForStatus(root, current);
         const snapshot = evidencePipeline.acquisition;
         const readyPackage = nextReadyPackage(current)?.id ?? null;
-        const scientificReview = await inspectScientificReviewStatus(root, current.id);
+        const scientificReview = await inspectScientificReviewStatus(root, current.id, current);
         const evidenceAccess = current.scientificDesign
           ? await inspectEvidenceAccessForStatus(root, current.id)
           : null;
