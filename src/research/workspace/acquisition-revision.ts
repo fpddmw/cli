@@ -21,6 +21,7 @@ export async function reviseProjectAcquisition(input: {
   projectId: string;
   expectedSnapshotSha256: string;
   reason: string;
+  includeDiscovery?: boolean;
 }) {
   const reason = input.reason.trim();
   if (
@@ -47,6 +48,7 @@ export async function reviseProjectAcquisition(input: {
         projectId: project.id,
         expectedSnapshotSha256: input.expectedSnapshotSha256,
         reason,
+        includeDiscovery: input.includeDiscovery ?? false,
       }),
     );
     const prior = events.findLast(
@@ -72,6 +74,9 @@ export async function reviseProjectAcquisition(input: {
     if (project.evidenceState.currentSnapshotSha256 !== input.expectedSnapshotSha256)
       throw conflict();
     const acquireIndex = project.packages.findIndex((item) => item.stage === "acquire");
+    const reopenIndex = input.includeDiscovery
+      ? project.packages.findIndex((item) => item.stage === "discover")
+      : acquireIndex;
     const acquire = project.packages[acquireIndex];
     const projectRoot = join(paths.projects, project.id);
     if (
@@ -121,10 +126,9 @@ export async function reviseProjectAcquisition(input: {
     );
     try {
       for (const [index, item] of project.packages.entries()) {
-        if (index < acquireIndex) continue;
-        item.status = index === acquireIndex ? "ready" : "pending";
-        if (index === acquireIndex)
-          item.maxAttempts = Math.max(item.maxAttempts, item.attempts + 1);
+        if (index < reopenIndex) continue;
+        item.status = index === reopenIndex ? "ready" : "pending";
+        if (index <= acquireIndex) item.maxAttempts = Math.max(item.maxAttempts, item.attempts + 1);
         item.startedAt = null;
         item.completedAt = null;
         item.lastError = null;
@@ -155,6 +159,7 @@ export async function reviseProjectAcquisition(input: {
           parentSnapshotSha256: snapshot.snapshotSha256,
           reasonSha256: sha256Text(reason),
           preservedArtifacts: snapshot.artifacts.length,
+          includedDiscovery: input.includeDiscovery ?? false,
           invalidatedScientificRoles: project.scientificDesign
             ? ["evidence-construct", "pilot-methods"]
             : [],
