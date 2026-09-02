@@ -5,6 +5,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { CliError } from "../../errors.js";
 import { appendJournalEvent, verifyJournal } from "./journal.js";
 import { loadProject, nextScientificGate, saveProject } from "./projects.js";
+import { assertResearchPolicyBinding } from "./research-policy.js";
 import {
   evaluateScientificDesign,
   parseScientificDesign,
@@ -32,7 +33,7 @@ import type {
   ScientificReviewRole,
   ScientificGateStatus,
 } from "./types.js";
-import { loadWorkspaceConfig, withWorkspaceLock } from "./workspace.js";
+import { loadWorkspaceConfig, verifyDoctorAttestation, withWorkspaceLock } from "./workspace.js";
 
 const MAX_SCIENTIFIC_REVIEW_BYTES = 2 * 1024 * 1024;
 const SHA256_PATTERN = "^[a-f0-9]{64}$";
@@ -668,42 +669,70 @@ export async function submitScientificReview(input: {
   projectId: string;
   role: ScientificReviewRole;
   reviewPath: string;
+  /** Internal execution recovery: exact matching terminal submissions are read-only replays. */
+  executionBinding?: { packetSha256: string; reviewSha256: string };
 }): Promise<{ status: ScientificGateStatus; reviewSha256: string; issueCodes: string[] }> {
   return withWorkspaceLock(input.root, "research.scientific-review.submit", async () => {
     const paths = workspacePaths(input.root);
     await verifyJournal(paths.journal);
     const project = await loadProject(input.root, input.projectId);
-    const binding = project.scientificDesign;
-    if (!binding) throw scientificGateError("Project does not have a scientific design binding.");
-    const gate = binding.gates[input.role];
+    const gate = project.scientificDesign?.gates[input.role];
+    if (!gate) throw scientificGateError("Project does not have a scientific design binding.");
     if (
-      gate.status !== "prepared" ||
-      !gate.packetSha256 ||
-      !gate.assessmentSha256 ||
-      !gate.reviewerSessionSha256
+      gate.status === "prepared" &&
+      (project.lineage.supersededBy ||
+        ["archived", "abandoned"].includes(project.status) ||
+        project.handoff.state !== "agent-actionable")
     ) {
-      throw new CliError("Scientific review has no prepared packet to submit.", {
-        code: "RESEARCH_SCIENTIFIC_REVIEW_STATE_INVALID",
+      throw new CliError("Only an active authoritative project may submit a scientific review.", {
+        code: "RESEARCH_PROJECT_NOT_AUTHORITATIVE",
         exitCode: 3,
-        details: { role: input.role, status: gate.status },
       });
     }
-    const packet = await loadBoundPacket(input.root, project, input.role, gate.packetSha256);
+    const { packet, assessment } = await loadScientificReviewProof(
+      input.root,
+      project,
+      input.role,
+      Boolean(input.executionBinding),
+    );
     const review = await readReview(input.reviewPath, input.role);
+    const reviewSha256 = exactJsonSha256(review);
     if (
       review.packetSha256 !== packet.packetSha256 ||
       review.reviewerSessionSha256 !== packet.reviewer.sessionSha256 ||
-      review.reviewerSessionSha256 !== gate.reviewerSessionSha256
+      review.reviewerSessionSha256 !== gate.reviewerSessionSha256 ||
+      (input.executionBinding &&
+        (input.executionBinding.packetSha256 !== packet.packetSha256 ||
+          input.executionBinding.reviewSha256 !== reviewSha256)) ||
+      (gate.status !== "prepared" && gate.reviewSha256 !== reviewSha256)
     ) {
       throw new CliError("Scientific review does not match its packet and reviewer binding.", {
         code: "RESEARCH_SCIENTIFIC_REVIEW_BINDING_INVALID",
         exitCode: 3,
       });
     }
-    const reviewSha256 = exactJsonSha256(review);
+    if (gate.status !== "prepared") {
+      return {
+        status: gate.status,
+        reviewSha256,
+        issueCodes: packet.mechanicalAssessment.issueCodes,
+      };
+    }
+    if (input.executionBinding) {
+      const config = await loadWorkspaceConfig(input.root);
+      if (config.mode === "production-research") {
+        await assertResearchPolicyBinding(input.root, project.publicationPolicy!);
+        const doctor = await verifyDoctorAttestation(input.root);
+        if (doctor.status !== "verified") {
+          throw new CliError("Refresh the reviewer attestation before recovered submission.", {
+            code: "RESEARCH_DOCTOR_ATTESTATION_REQUIRED",
+            exitCode: 3,
+          });
+        }
+      }
+    }
     const reviewLocator = `projects/${project.id}/scientific/reviews/${input.role}/${reviewSha256}.json`;
     await writeImmutableJson(join(paths.control, reviewLocator), review);
-    const assessment = await loadBoundAssessment(input.root, project, input.role, packet);
     const mechanicsPass =
       packet.mechanicalAssessment.issueCodes.length === 0 &&
       packet.mechanicalAssessment.canPass &&
@@ -738,17 +767,69 @@ export async function loadPreparedScientificReview(
   role: ScientificReviewRole,
 ) {
   const project = await loadProject(root, projectId);
+  return { project, ...(await loadScientificReviewProof(root, project, role, false)) };
+}
+
+async function loadScientificReviewProof(
+  root: string,
+  project: ProjectState,
+  role: ScientificReviewRole,
+  allowSubmitted: boolean,
+) {
   const gate = project.scientificDesign?.gates[role];
-  if (!gate || gate.status !== "prepared" || !gate.packetSha256) {
+  if (
+    !gate ||
+    (gate.status !== "prepared" &&
+      !(allowSubmitted && ["passed", "stopped", "revision-required"].includes(gate.status))) ||
+    !gate.packetSha256 ||
+    !gate.assessmentSha256 ||
+    !gate.reviewerSessionSha256
+  ) {
     throw new CliError("Scientific review execution requires the current prepared packet.", {
       code: "RESEARCH_SCIENTIFIC_REVIEW_STATE_INVALID",
       exitCode: 3,
       details: { role, status: gate?.status ?? "absent" },
     });
   }
+  await loadBoundScientificDesign(root, project);
   const packet = await loadBoundPacket(root, project, role, gate.packetSha256);
-  await loadBoundAssessment(root, project, role, packet);
-  return { project, packet };
+  const assessment = await loadBoundAssessment(root, project, role, packet);
+  if (
+    packet.design.sha256 !== project.scientificDesign!.designSha256 ||
+    packet.design.objectLocator !== project.scientificDesign!.objectLocator ||
+    packet.assessment.sha256 !== gate.assessmentSha256 ||
+    packet.reviewer.sessionSha256 !== gate.reviewerSessionSha256
+  ) {
+    throw scientificGateError(
+      "Scientific review proof does not match its current gate binding.",
+      role,
+    );
+  }
+  if (gate.status !== "prepared") {
+    if (!gate.reviewSha256)
+      throw scientificGateError("Submitted scientific review is missing its proof.", role);
+    const review = await loadBoundReview(root, project, role, gate.reviewSha256);
+    const expectedStatus =
+      review.decision === "stop" || review.decision === "handoff"
+        ? "stopped"
+        : review.decision === "pass" &&
+            packet.mechanicalAssessment.canPass &&
+            packet.mechanicalAssessment.issueCodes.length === 0 &&
+            assessment.recommendation === "pass"
+          ? "passed"
+          : "revision-required";
+    if (
+      review.packetSha256 !== packet.packetSha256 ||
+      review.reviewerSessionSha256 !== packet.reviewer.sessionSha256 ||
+      gate.status !== expectedStatus
+    ) {
+      throw scientificGateError(
+        "Submitted scientific review does not match its immutable proof.",
+        role,
+      );
+    }
+  }
+  return { packet, assessment };
 }
 
 export { readReview as readScientificReviewOutput };
