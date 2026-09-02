@@ -63,6 +63,7 @@ import {
   refreshProject,
   retryProjectPackage,
   setProjectDisposition,
+  scientificGateRecommendedAction,
 } from "./workspace/projects.js";
 import { evaluateProjectPreflight } from "./workspace/preflight.js";
 import {
@@ -113,7 +114,6 @@ import {
   scientificGateAssessmentSchema,
   scientificReviewSchema,
   submitScientificReview,
-  type ScientificReviewStatus,
 } from "./workspace/scientific-review.js";
 import { isObject, pathExists, sha256Text, workspacePaths } from "./workspace/storage.js";
 import type {
@@ -2056,7 +2056,6 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
                   current,
                   readyPackage,
                   nativeStage,
-                  scientificReview,
                   evidencePipeline,
                   publication,
                 ),
@@ -2270,7 +2269,6 @@ function projectRecommendedAction(
   project: Awaited<ReturnType<typeof loadProject>>,
   readyPackage: string | null,
   nativeStage: Awaited<ReturnType<typeof inspectNativeResearchStage>>,
-  scientificReview: ScientificReviewStatus,
   evidencePipeline: EvidencePipelineStatus,
   publication: PublicationStatus | { generationStatus: "invalid"; code: string } | null,
 ): string {
@@ -2315,16 +2313,8 @@ function projectRecommendedAction(
       return `Inference snapshot is invalid (${evidencePipeline.inference.code ?? "unknown"}); repair its frozen upstream bindings before analysis.`;
     }
   }
-  if (scientificReview.nextGate) {
-    const gate = scientificReview.nextGate;
-    if (gate.status === "stopped") {
-      return `Scientific ${gate.role} review stopped the project; inspect the frozen review and request user or external action instead of continuing.`;
-    }
-    const schema = `scientific-assessment-${gate.role}`;
-    const canaryOption =
-      gate.role === "evidence-construct" ? " --canary-artifacts <absolute-json-array>" : "";
-    return `Use the native producer App to create a bounded ${gate.role} assessment from schema ${schema}, then prepare an independent review: tiangong-ai research project scientific review prepare ${project.id} --role ${gate.role} --assessment <absolute-json>${canaryOption} --reviewer-agent <codex|claude> --reviewer-session <fresh-opaque-id> --workspace ${root}`;
-  }
+  const scientificAction = scientificGateRecommendedAction(root, project);
+  if (scientificAction) return scientificAction;
   if (project.status === "complete") {
     if (project.publicationPolicy) {
       if (publication && "code" in publication) {

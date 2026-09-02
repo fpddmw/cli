@@ -58,6 +58,7 @@ import type {
   VerifiedProjectInputPlan,
 } from "./types.js";
 import { loadWorkspaceConfig, withWorkspaceLock } from "./workspace.js";
+import { isProjectStatus } from "./types.js";
 
 const PROJECT_ID_PATTERN = /^[a-z0-9][a-z0-9-]{2,63}$/;
 
@@ -1137,6 +1138,7 @@ export function refreshProject(project: ProjectState): ProjectState {
   else if (project.packages.some((item) => item.status === "failed")) project.status = "blocked";
   else if (project.packages.every((item) => item.status === "complete"))
     project.status = "complete";
+  else if (blockingScientificGate(project)) project.status = "blocked";
   else if (project.packages.some((item) => item.status === "running")) project.status = "running";
   else project.status = "ready";
   project.updatedAt = new Date().toISOString();
@@ -1148,14 +1150,42 @@ export function nextReadyPackage(project: ProjectState): WorkPackage | undefined
   if (project.handoff.state !== "agent-actionable") return undefined;
   const candidate = project.packages.find((workPackage) => workPackage.status === "ready");
   if (!candidate) return undefined;
-  const gate = nextScientificGate(project);
-  if (gate && gate.status !== "passed") {
-    const packageOrder = ["discover", "acquire", "analyze", "synthesize", "review", "close"];
-    if (packageOrder.indexOf(candidate.id) >= packageOrder.indexOf(gate.blocksPackage)) {
-      return undefined;
-    }
-  }
+  if (blockingScientificGate(project)) return undefined;
   return candidate;
+}
+
+/** A future review obligation does not block the earlier evidence-gathering packages. */
+export function blockingScientificGate(
+  project: ProjectState,
+): ReturnType<typeof nextScientificGate> {
+  const gate = nextScientificGate(project);
+  const unfinished = project.packages.find((workPackage) => workPackage.status !== "complete");
+  if (!gate || !unfinished) return null;
+  const packageOrder = ["discover", "acquire", "analyze", "synthesize", "review", "close"];
+  return packageOrder.indexOf(unfinished.id) >= packageOrder.indexOf(gate.blocksPackage)
+    ? gate
+    : null;
+}
+
+export function scientificGateRecommendedAction(
+  root: string,
+  project: ProjectState,
+  gate = blockingScientificGate(project),
+): string | null {
+  if (!gate) return null;
+  if (gate.status === "stopped") {
+    return `Scientific ${gate.role} review stopped the project; inspect the frozen review and request user or external action instead of continuing.`;
+  }
+  if (gate.status === "prepared") {
+    return `Scientific ${gate.role} review is prepared; complete the independent review of its bound packet, then submit it: tiangong-ai research project scientific review submit ${project.id} --role ${gate.role} --review <absolute-review.json> --workspace ${root}`;
+  }
+  const canaryOption =
+    gate.role === "evidence-construct" ? " --canary-artifacts <absolute-json-array>" : "";
+  const instruction =
+    gate.status === "revision-required"
+      ? `Revise the ${gate.role} assessment in the native producer App without editing frozen evidence, then prepare a fresh independent review`
+      : `Use the native producer App to create a bounded ${gate.role} assessment from schema scientific-assessment-${gate.role}, then prepare an independent review`;
+  return `${instruction}: tiangong-ai research project scientific review prepare ${project.id} --role ${gate.role} --assessment <absolute-json>${canaryOption} --reviewer-agent <codex|claude> --reviewer-session <fresh-opaque-id> --workspace ${root}`;
 }
 
 export function nextScientificGate(project: ProjectState): {
@@ -1274,17 +1304,7 @@ function validateProjectShape(project: ProjectState, expectedId: string): void {
     project.schemaVersion !== 1 ||
     project.id !== expectedId ||
     !PROJECT_ID_PATTERN.test(project.id) ||
-    ![
-      "ready",
-      "running",
-      "blocked",
-      "complete",
-      "stale",
-      "waiting-user",
-      "waiting-external",
-      "archived",
-      "abandoned",
-    ].includes(project.status) ||
+    !isProjectStatus(project.status) ||
     typeof project.question !== "string" ||
     (project.budgetConfirmedAt !== null && typeof project.budgetConfirmedAt !== "string") ||
     !Array.isArray(project.inputs) ||

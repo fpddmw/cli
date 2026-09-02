@@ -40,6 +40,7 @@ import type {
   AgentRuntimeFingerprint,
   WorkspaceDoctorAttestation,
 } from "./types.js";
+import { isProjectStatus } from "./types.js";
 
 const DOCTOR_ATTESTATION_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -1228,7 +1229,7 @@ function isProjectStateShape(value: unknown): value is ProjectState {
     typeof value.id === "string" &&
     typeof value.question === "string" &&
     (value.budgetConfirmedAt === null || typeof value.budgetConfirmedAt === "string") &&
-    ["ready", "running", "blocked", "complete"].includes(String(value.status)) &&
+    isProjectStatus(value.status) &&
     Array.isArray(value.inputs) &&
     isObject(value.evidenceRequirements) &&
     Array.isArray(value.packages) &&

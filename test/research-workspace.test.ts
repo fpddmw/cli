@@ -3085,7 +3085,7 @@ describe("research workspace CLI", () => {
           preflightValue.budget.maxInputContextTokens,
       );
       assert.deepEqual(preflightValue.budget.stageContextTokenReservations, {
-        acquire: 1_024,
+        acquire: 128_000,
         analyze: 128_000,
         synthesize: 128_000,
         review: 256_000,
