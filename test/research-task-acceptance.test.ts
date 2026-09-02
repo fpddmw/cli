@@ -120,6 +120,40 @@ async function fixture() {
 }
 
 describe("lightweight original task and authorized scope", () => {
+  it("refuses to define original requirements retrospectively after a scientific review", async () => {
+    const fx = await fixture();
+    const projectId = "already-reviewed";
+    try {
+      await initializeProject(
+        fx.root,
+        projectId,
+        "Preserve the original scope present when the scientific design was reviewed.",
+        undefined,
+        false,
+        undefined,
+        scientificPolicy(projectId),
+        await scientificDesignInput(fx.root, projectId),
+      );
+      await passResearchDesignGate(fx.root, projectId);
+      const before = await loadProject(fx.root, projectId);
+      const result = await fx.task(["define", "--input", fx.inputPath], projectId);
+      assert.equal(result.exitCode, 3, result.stdout);
+      assert.equal(JSON.parse(result.stderr).error.code, "RESEARCH_TASK_WINDOW_REQUIRED");
+      assert.deepEqual(
+        (await loadProject(fx.root, projectId)).scientificDesign,
+        before.scientificDesign,
+      );
+      assert.equal(
+        (await readVerifiedJournal(workspacePaths(fx.root).journal)).some(
+          (event) => event.scope === projectId && event.type === "project.task.defined",
+        ),
+        false,
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
   it("shows committed scope invalidation read-only after a crash before the state projection", async () => {
     const fx = await fixture();
     try {
