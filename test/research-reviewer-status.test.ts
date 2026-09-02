@@ -5,9 +5,43 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
-import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
+import {
+  initializeResearchWorkspace,
+  loadWorkspaceConfig,
+} from "../src/research/workspace/workspace.js";
+import { workspacePaths, writeJsonAtomic } from "../src/research/workspace/storage.js";
+import { researchPlatformCapabilities } from "../src/research/workspace/platform-capabilities.js";
 
 describe("transport-aware reviewer operator commands", () => {
+  it("does not prescribe an impossible production attestation loop for smoke configuration", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-smoke-review-status-"));
+    try {
+      await initializeResearchWorkspace(root, "Smoke reviewer status");
+      const config = await loadWorkspaceConfig(root);
+      config.reviewer.binary = process.execPath;
+      await writeJsonAtomic(workspacePaths(root).config, config);
+      const result = await invoke([
+        "research",
+        "reviewer",
+        "status",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      const value = JSON.parse(result.stdout);
+      assert.equal(value.readinessScope, "smoke-configuration");
+      assert.equal(value.doctorAttestation.status, "not-required");
+      if (researchPlatformCapabilities().nativeIsolationProvider) {
+        assert.equal(value.status, "ready");
+        assert.equal(result.exitCode, 0);
+        assert.equal(value.minimumAction, null);
+      }
+      assert.equal(value.productionReady, false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("reports native-direct readiness without requiring a bridge connection", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-native-review-status-"));
     try {

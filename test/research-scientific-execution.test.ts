@@ -11,6 +11,7 @@ import {
 } from "../src/research/workspace/workspace.js";
 import {
   prepareScientificReview,
+  submitScientificReview,
   type ScientificReviewPacket,
 } from "../src/research/workspace/scientific-review.js";
 import { executeScientificReview } from "../src/research/workspace/scientific-review-execution.js";
@@ -22,8 +23,109 @@ import {
 } from "../src/research/workspace/storage.js";
 import type { ExecutionResult, ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { scientificDesignInput } from "./helpers/scientific-design.js";
+import { appendJournalEvent, readVerifiedJournal } from "../src/research/workspace/journal.js";
 
 describe("explicit isolated scientific review execution", () => {
+  it("replays only a bounded execution receipt from the exact project namespace", async () => {
+    const fixture = await preparedFixture("execution-receipt-size");
+    try {
+      await executeScientificReview(
+        { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+        async () => result(fixture.packet),
+      );
+      const paths = workspacePaths(fixture.root);
+      const event = (await readVerifiedJournal(paths.journal)).findLast(
+        (item) => item.type === "scientific-review.execution.completed",
+      )!;
+      const original = JSON.parse(
+        await readFile(join(paths.control, String(event.payload.receiptLocator)), "utf8"),
+      );
+      const oversized = JSON.stringify({ ...original, padding: "x".repeat(2 * 1024 * 1024) });
+      const receiptSha256 = sha256Text(oversized);
+      const receiptLocator = `projects/${fixture.projectId}/scientific/execution-receipts/${receiptSha256}.json`;
+      await writeTextAtomic(join(paths.control, receiptLocator), oversized);
+      await appendJournalEvent(paths.journal, event.type, event.scope, {
+        ...event.payload,
+        receiptLocator,
+        receiptSha256,
+      });
+      await assert.rejects(
+        executeScientificReview(
+          { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+          async () => {
+            throw new Error("replay must not invoke");
+          },
+        ),
+        { code: "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_BINDING_INVALID" },
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("atomically accepts only the matching completed submission during execution recovery", async () => {
+    const fixture = await preparedFixture("execution-submit-replay");
+    try {
+      const executed = await executeScientificReview(
+        { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+        async () => result(fixture.packet),
+      );
+      const replay = {
+        root: fixture.root,
+        projectId: fixture.projectId,
+        role: "research-design" as const,
+        reviewPath: join(
+          workspacePaths(fixture.root).projects,
+          fixture.projectId,
+          "scientific/execution-outputs",
+          `${executed.reviewSha256}.json`,
+        ),
+        executionBinding: {
+          packetSha256: fixture.packet.packetSha256,
+          reviewSha256: executed.reviewSha256,
+        },
+      };
+      assert.equal((await submitScientificReview(replay)).status, "passed");
+      const mismatched = {
+        ...replay,
+        executionBinding: { ...replay.executionBinding, reviewSha256: "0".repeat(64) },
+      };
+      await assert.rejects(submitScientificReview(mismatched), {
+        code: "RESEARCH_SCIENTIFIC_REVIEW_BINDING_INVALID",
+      });
+      assert.equal(
+        (await readVerifiedJournal(workspacePaths(fixture.root).journal)).filter(
+          (event) => event.type === "scientific-review.submitted",
+        ).length,
+        1,
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("settles observed wall time after exceptions while retaining unknown token reservations", async () => {
+    const fixture = await preparedFixture("execution-wall-throw");
+    try {
+      await assert.rejects(
+        executeScientificReview(
+          { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+          async () => {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            throw new Error("interrupted call");
+          },
+        ),
+        { code: "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_FAILED" },
+      );
+      const project = await loadProject(fixture.root, fixture.projectId);
+      assert.ok(project.usage.tokens > 0);
+      assert.ok(project.usage.wallSeconds > 0);
+      assert.ok(project.usage.wallSeconds < 60);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("revalidates immutable submitted proof before replaying a completed execution", async () => {
     const fixture = await preparedFixture("execution-replay-drift");
     try {
