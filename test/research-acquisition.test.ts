@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
 import { PDFDocument } from "pdf-lib";
@@ -21,6 +23,7 @@ import { exportProjectAuditBundle } from "../src/research/workspace/audit-bundle
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import {
   freezeEvidenceContentSnapshot,
+  loadDecompositionRecords,
   loadCurrentEvidenceContentSnapshot,
   recordArtifactDecomposition,
   registerEvidenceAtom,
@@ -37,6 +40,7 @@ import {
   registerNativeDiscoveryCandidate,
 } from "../src/research/workspace/evidence-ledger.js";
 import { readAndVerifyProjectInputPlan } from "../src/research/workspace/input-plan.js";
+import { readVerifiedJournal } from "../src/research/workspace/journal.js";
 import {
   addProjectInput,
   createProjectAddendum,
@@ -57,6 +61,283 @@ import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("research acquisition and evidence snapshots", () => {
+  for (const point of ["acquisition-before-commit", "acquisition-committed", "acquisition-state"]) {
+    it(`recovers the exact acquisition revision after process interruption at ${point}`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "tiangong-revision-crash-"));
+      const staging = await mkdtemp(join(tmpdir(), "tiangong-revision-crash-files-"));
+      try {
+        await initializeResearchWorkspace(root, undefined);
+        await lockCapabilities(root);
+        const { snapshot } = await freezeInputOnlyProject(root, staging, "source");
+        const worker = fileURLToPath(
+          new URL("./fixtures/research-recovery/crash-worker.mjs", import.meta.url),
+        );
+        const killed = spawnSync(process.execPath, ["--import", "tsx", worker, root, point], {
+          encoding: "utf8",
+          timeout: 15_000,
+          env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR },
+        });
+        assert.equal(killed.stderr, "");
+        assert.ok(killed.signal || killed.status !== 0);
+        assert.equal(await readFile(join(root, "fault-point.txt"), "utf8"), point);
+        const result = await invokeCli([
+          "research",
+          "project",
+          "evidence",
+          "acquisition",
+          "revise",
+          "source",
+          "--expected-snapshot",
+          snapshot.snapshotSha256,
+          "--reason",
+          "Add readable evidence before analysis.",
+          "--workspace",
+          root,
+          "--json",
+        ]);
+        assert.equal(result.exitCode, 0, result.stderr);
+        assert.equal(
+          (await loadProject(root, "source")).packages.find((item) => item.stage === "acquire")
+            ?.status,
+          "ready",
+        );
+        assert.equal(
+          (await readVerifiedJournal(workspacePaths(root).journal)).filter(
+            (event) => event.type === "project.acquisition.revision.requested",
+          ).length,
+          1,
+        );
+        assert.equal(
+          (await loadCurrentEvidenceSnapshot(root, "source")).snapshotSha256,
+          snapshot.snapshotSha256,
+        );
+      } finally {
+        await Promise.all([
+          rm(root, { recursive: true, force: true }),
+          rm(staging, { recursive: true, force: true }),
+        ]);
+      }
+    });
+  }
+
+  it("supersedes a failed decomposition after acquisition revision without replacing its historical record", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-revision-decomposition-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-revision-decomposition-files-"));
+    const projectId = "revision-decomposition";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      const { snapshot } = await freezeInputOnlyProject(root, staging, projectId);
+      const artifact = snapshot.artifacts[0]!;
+      const oldRecord = await recordArtifactDecomposition({
+        root,
+        projectId,
+        value: {
+          schemaVersion: 1,
+          sourceArtifactId: artifact.artifactId,
+          status: "failed",
+          parser: { id: "fixture-parser", version: "1" },
+          outputArtifactIds: [],
+          contentClasses: ["fulltext"],
+          limitations: ["Extraction failed; retain for recovery."],
+        },
+      });
+      const oldSnapshot = await freezeEvidenceContentSnapshot(root, projectId);
+      assert.equal(oldSnapshot.gate.decision, "stop");
+      const opened = await invokeCli([
+        "research",
+        "project",
+        "evidence",
+        "acquisition",
+        "revise",
+        projectId,
+        "--expected-snapshot",
+        snapshot.snapshotSha256,
+        "--reason",
+        "Provide a successful readable extraction.",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(opened.exitCode, 0, opened.stderr);
+      const session = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      const derivativePath = join(staging, "recovered.txt");
+      await writeFile(derivativePath, "recovered exact content\n");
+      const derivative = await registerEvidenceArtifact({
+        root,
+        projectId,
+        candidateId: artifact.candidateId,
+        path: derivativePath,
+        mediaType: "text/plain",
+        derivedFromArtifactId: artifact.artifactId,
+      });
+      const output = join(staging, "recovered-audit.json");
+      await writeFile(
+        output,
+        JSON.stringify(
+          acquisitionValue(artifact.candidateId, "source-1", [
+            artifact.artifactId,
+            derivative.artifactId,
+          ]),
+        ),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: session.sessionId,
+        outputPath: output,
+        confirmedModel: session.expectedModel,
+      });
+      await assert.rejects(loadCurrentEvidenceContentSnapshot(root, projectId), {
+        code: "RESEARCH_EVIDENCE_CONTENT_SNAPSHOT_STALE",
+      });
+      const replacement = {
+        schemaVersion: 1,
+        sourceArtifactId: artifact.artifactId,
+        status: "complete",
+        parser: { id: "fixture-parser", version: "2" },
+        outputArtifactIds: [derivative.artifactId],
+        contentClasses: ["fulltext"],
+        limitations: [],
+      };
+      const next = await recordArtifactDecomposition({ root, projectId, value: replacement });
+      assert.notEqual(next.decompositionSha256, oldRecord.decompositionSha256);
+      assert.equal(
+        (await loadDecompositionRecords(root, projectId)).find(
+          (record) => record.sourceArtifactId === artifact.artifactId,
+        )?.decompositionSha256,
+        next.decompositionSha256,
+      );
+      assert.deepEqual(
+        await recordArtifactDecomposition({ root, projectId, value: replacement }),
+        next,
+      );
+      await assert.rejects(
+        recordArtifactDecomposition({
+          root,
+          projectId,
+          value: { ...replacement, parser: { id: "fixture-parser", version: "3" } },
+        }),
+        { code: "RESEARCH_DECOMPOSITION_CONFLICT" },
+      );
+      const historical = JSON.parse(
+        await readFile(
+          join(
+            workspacePaths(root).projects,
+            projectId,
+            `evidence/content-snapshots/${oldSnapshot.snapshotSha256}.json`,
+          ),
+          "utf8",
+        ),
+      );
+      assert.equal(historical.decompositions[0].decompositionSha256, oldRecord.decompositionSha256);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("excludes superseded artifact atoms from current coverage while retaining historical content", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-revision-atoms-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-revision-atoms-files-"));
+    const projectId = "revision-atoms";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      const { snapshot } = await freezeInputOnlyProject(root, staging, projectId);
+      const old = snapshot.artifacts[0]!;
+      const atom = await registerEvidenceAtom({
+        root,
+        projectId,
+        value: {
+          schemaVersion: 1,
+          atomId: "old-artifact-atom",
+          sourceId: "source-1",
+          candidateId: old.candidateId,
+          artifactId: old.artifactId,
+          locator: { kind: "line-range", startLine: 1, endLine: 1 },
+          statement: "The original artifact has content.",
+          evidenceRoleIds: [],
+          coverageDimensionIds: ["research-question"],
+          evidenceFunction: "support",
+          scope: "Original artifact only.",
+          limitations: [],
+        },
+      });
+      const priorContent = await freezeEvidenceContentSnapshot(root, projectId);
+      const opened = await invokeCli([
+        "research",
+        "project",
+        "evidence",
+        "acquisition",
+        "revise",
+        projectId,
+        "--expected-snapshot",
+        snapshot.snapshotSha256,
+        "--reason",
+        "Replace an inapplicable selected artifact.",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(opened.exitCode, 0, opened.stderr);
+      const session = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      const replacementPath = join(staging, "replacement.txt");
+      await writeFile(replacementPath, "replacement content\n");
+      const replacement = await registerEvidenceArtifact({
+        root,
+        projectId,
+        candidateId: old.candidateId,
+        path: replacementPath,
+        mediaType: "text/plain",
+        derivedFromArtifactId: old.artifactId,
+      });
+      const output = join(staging, "replacement-audit.json");
+      await writeFile(
+        output,
+        JSON.stringify(acquisitionValue(old.candidateId, "source-1", [replacement.artifactId])),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: session.sessionId,
+        outputPath: output,
+        confirmedModel: session.expectedModel,
+      });
+      const content = await freezeEvidenceContentSnapshot(root, projectId);
+      assert.equal(content.atoms.length, 0);
+      assert.deepEqual(content.gate.sourcesWithoutAtoms, ["source-1"]);
+      assert.equal(content.gate.decision, "stop");
+      const historical = JSON.parse(
+        await readFile(
+          join(
+            workspacePaths(root).projects,
+            projectId,
+            `evidence/content-snapshots/${priorContent.snapshotSha256}.json`,
+          ),
+          "utf8",
+        ),
+      );
+      assert.equal(historical.atoms[0].atomSha256, atom.atomSha256);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
   it("revises acquisition on the same project before analysis without replacing historical evidence", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-acquisition-revision-"));
     const staging = await mkdtemp(join(tmpdir(), "tiangong-acquisition-revision-files-"));
@@ -262,8 +543,10 @@ describe("research acquisition and evidence snapshots", () => {
         root,
         "--json",
       ]);
-      assert.equal(forecast.exitCode, 0, forecast.stderr);
+      assert.equal(forecast.exitCode, 3, forecast.stderr);
       const result = JSON.parse(forecast.stdout);
+      assert.equal(result.submissionGate.decision, "stop");
+      assert.equal(result.submissionGate.blockers[0].code, "RESEARCH_INPUT_ATOMIZATION_REQUIRED");
       assert.deepEqual(
         result.sourcesNeedingReadableArtifacts.map(
           (source: { sourceId: string }) => source.sourceId,
