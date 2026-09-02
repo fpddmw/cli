@@ -526,6 +526,50 @@ describe("top-journal scientific design admission", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("revalidates the source acquisition design before inheriting discovered evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-scientific-source-drift-"));
+    const sourceId = "scientific-source-drift-r1";
+    const targetId = "scientific-source-drift-r2";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const source = await initializeProject(
+        root,
+        sourceId,
+        "Keep original acquisition provenance trustworthy during recovery.",
+        undefined,
+        false,
+        undefined,
+        policy(sourceId),
+        await scientificDesignInput(root, sourceId),
+      );
+      const discover = source.packages.find((item) => item.stage === "discover")!;
+      discover.status = "complete";
+      discover.completedAt = new Date().toISOString();
+      await saveProject(root, source);
+      await writeFile(
+        join(workspacePaths(root).projects, sourceId, "outputs/evidence.json"),
+        "{}\n",
+      );
+      const designPath = join(workspacePaths(root).control, source.scientificDesign!.objectLocator);
+      await writeFile(designPath, `${await readFile(designPath, "utf8")}\n`);
+      await assert.rejects(
+        forkProject(root, sourceId, targetId, "discover", {
+          publicationPolicy: policy(targetId),
+          scientificDesign: await scientificDesignInput(root, targetId),
+        }),
+        (error: unknown) =>
+          (error as { code?: string }).code === "RESEARCH_EVIDENCE_ACCESS_PLAN_INVALID",
+      );
+      assert.equal((await loadProject(root, sourceId)).lineage.supersededBy, null);
+      assert.equal(
+        await lstat(join(workspacePaths(root).projects, targetId)).catch(() => null),
+        null,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 async function projectDesign(
