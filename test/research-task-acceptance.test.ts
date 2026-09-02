@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -7,9 +7,25 @@ import { describe, it } from "node:test";
 import { runCli } from "../src/cli.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import { readVerifiedJournal } from "../src/research/workspace/journal.js";
-import { initializeProject, loadProject } from "../src/research/workspace/projects.js";
-import { workspacePaths } from "../src/research/workspace/storage.js";
+import {
+  addProjectInput,
+  initializeProject,
+  loadProject,
+} from "../src/research/workspace/projects.js";
+import { sha256File, workspacePaths } from "../src/research/workspace/storage.js";
 import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
+import { loadCurrentEvidenceSnapshot } from "../src/research/workspace/acquisition.js";
+import {
+  freezeEvidenceContentSnapshot,
+  registerEvidenceAtom,
+} from "../src/research/workspace/content-evidence.js";
+import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
+import { listEvidenceCandidates } from "../src/research/workspace/evidence-ledger.js";
+import {
+  prepareNativeResearchStage,
+  runResearchWorkspace,
+  submitNativeResearchStage,
+} from "../src/research/workspace/runtime.js";
 
 async function cli(argv: string[]) {
   let stdout = "";
@@ -94,6 +110,198 @@ async function fixture() {
 }
 
 describe("lightweight original task and authorized scope", () => {
+  it("records exact native check results without certifying execution or completing the task", async () => {
+    const fx = await acquiredFixture();
+    try {
+      const resultFile = join(fx.files, "observed-result.json");
+      await writeFile(
+        resultFile,
+        JSON.stringify({
+          difference: 0,
+          interpretation: "A bounded synthetic null-result fixture.",
+        }),
+      );
+      const input = acceptanceInput(fx.rows[0]!, fx.atom.atomId, [resultFile], "negative-result");
+      const recorded = await recordAcceptance(fx, input);
+      assert.equal(recorded.exitCode, 0, recorded.stderr);
+      const receipt = JSON.parse(recorded.stdout);
+      assert.equal(receipt.executionCertified, false);
+      assert.equal(receipt.trust, "native-observation");
+      assert.equal(receipt.results[0].sha256, await sha256File(resultFile));
+      assert.doesNotMatch(recorded.stdout, new RegExp(fx.files));
+      const before = await readFile(workspacePaths(fx.root).journal);
+      const replay = await recordAcceptance(fx, input);
+      assert.equal(replay.exitCode, 0, replay.stderr);
+      assert.equal(JSON.parse(replay.stdout).recordSha256, receipt.recordSha256);
+      assert.deepEqual(await readFile(workspacePaths(fx.root).journal), before);
+      const status = JSON.parse((await fx.task(["status"])).stdout);
+      assert.equal(status.currentScope.status, "incomplete");
+      assert.equal(status.currentScope.requirements[0].status, "recorded");
+      assert.equal(status.currentScope.requirements[0].outcome, "negative-result");
+      const stored = join(
+        workspacePaths(fx.root).projects,
+        "task-project",
+        receipt.results[0].path,
+      );
+      await chmod(stored, 0o600);
+      await writeFile(stored, "modified result\n");
+      const tampered = await fx.task(["status"]);
+      assert.equal(tampered.exitCode, 3);
+      assert.equal(JSON.parse(tampered.stderr).error.code, "RESEARCH_TASK_ARTIFACT_DRIFT");
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("rejects invented execution certification and evidence IDs before recording acceptance", async () => {
+    const fx = await acquiredFixture();
+    try {
+      const before = await readFile(workspacePaths(fx.root).journal);
+      const input = acceptanceInput(fx.rows[0]!, fx.atom.atomId, [], "satisfied");
+      for (const invalidInput of [
+        { ...input, executionCertified: true },
+        { ...input, evidenceAtomIds: ["invented-atom"] },
+        { ...input, requirementSha256: "b".repeat(64) },
+      ]) {
+        const result = await recordAcceptance(fx, invalidInput);
+        assert.equal(result.exitCode, 3);
+        assert.match(result.stderr, /RESEARCH_TASK_/);
+      }
+      assert.deepEqual(await readFile(workspacePaths(fx.root).journal), before);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("uses the existing single independent review to accept valid negative findings and close task coverage", async () => {
+    const fx = await acquiredFixture();
+    try {
+      for (const row of fx.rows) {
+        const recorded = await recordAcceptance(
+          fx,
+          acceptanceInput(row, fx.atom.atomId, [], "negative-result"),
+        );
+        assert.equal(recorded.exitCode, 0, recorded.stderr);
+      }
+      await finishProducer(fx);
+      let reviewCalls = 0;
+      const run = await runResearchWorkspace(
+        fx.root,
+        { maxParallel: 1, maxCycles: 2, dryRun: false, environment: {} },
+        async (request) => {
+          reviewCalls += 1;
+          const packet = JSON.parse(
+            await readFile(join(request.projectRoot, "inputs/review-packet.json"), "utf8"),
+          );
+          assert.equal(packet.taskAcceptance.requirements.length, 2);
+          assert.ok(
+            Array.isArray(request.outputSchema?.required) &&
+              request.outputSchema.required.includes("taskAssessment"),
+          );
+          const review = {
+            schemaVersion: 1,
+            packetSha256: packet.packetSha256,
+            decision: "pass",
+            issues: [],
+            rationale: "Bounded independent fixture review.",
+            taskAssessment: {
+              contextSha256: packet.taskAcceptance.contextSha256,
+              requirements: packet.taskAcceptance.requirements.map(
+                (row: { requirementSha256: string }) => ({
+                  requirementSha256: row.requirementSha256,
+                  decision: "answered",
+                  reason: "The declared null-result criterion is met within the exact fixture.",
+                }),
+              ),
+            },
+          };
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify(review),
+            stderr: "",
+            tokens: 10,
+            inputTokens: 5,
+            cachedInputTokens: 0,
+            outputTokens: 5,
+            costUsd: 0,
+            wallSeconds: 0,
+            model: null,
+            runtime: null,
+          };
+        },
+      );
+      assert.equal(run.status, "complete", JSON.stringify(run));
+      assert.equal(reviewCalls, 1);
+      const status = JSON.parse((await fx.task(["status"])).stdout);
+      assert.equal(status.currentScope.status, "complete");
+      assert.equal(status.originalScope.status, "complete");
+      assert.ok(
+        status.currentScope.requirements.every(
+          (row: { status: string }) => row.status === "reviewed",
+        ),
+      );
+      assert.equal(status.executionCertified, false);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("does not promote an inconclusive check just because the workflow reviewer returns pass", async () => {
+    const fx = await acquiredFixture();
+    try {
+      for (const row of fx.rows) {
+        const recorded = await recordAcceptance(
+          fx,
+          acceptanceInput(row, fx.atom.atomId, [], "inconclusive"),
+        );
+        assert.equal(recorded.exitCode, 0, recorded.stderr);
+      }
+      await finishProducer(fx);
+      const run = await runResearchWorkspace(
+        fx.root,
+        { maxParallel: 1, maxCycles: 1, dryRun: false, environment: {} },
+        async (request) => {
+          const packet = JSON.parse(
+            await readFile(join(request.projectRoot, "inputs/review-packet.json"), "utf8"),
+          );
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              schemaVersion: 1,
+              packetSha256: packet.packetSha256,
+              decision: "pass",
+              issues: [],
+              rationale: "An invalid overclaim fixture.",
+              taskAssessment: {
+                contextSha256: packet.taskAcceptance.contextSha256,
+                requirements: packet.taskAcceptance.requirements.map(
+                  (row: { requirementSha256: string }) => ({
+                    requirementSha256: row.requirementSha256,
+                    decision: "answered",
+                    reason: "Improperly promotes an inconclusive result.",
+                  }),
+                ),
+              },
+            }),
+            stderr: "",
+            tokens: 10,
+            inputTokens: 5,
+            cachedInputTokens: 0,
+            outputTokens: 5,
+            costUsd: 0,
+            wallSeconds: 0,
+            model: null,
+            runtime: null,
+          };
+        },
+      );
+      assert.notEqual(run.status, "complete");
+      const status = JSON.parse((await fx.task(["status"])).stdout);
+      assert.equal(status.currentScope.status, "incomplete");
+    } finally {
+      await fx.cleanup();
+    }
+  });
   it("defines immutable requirements and derives separate original/current completion without a model", async () => {
     const fx = await fixture();
     try {
@@ -309,3 +517,207 @@ describe("lightweight original task and authorized scope", () => {
     }
   });
 });
+
+async function acquiredFixture() {
+  const fx = await fixture();
+  const defined = await fx.task(["define", "--input", fx.inputPath]);
+  assert.equal(defined.exitCode, 0, defined.stderr);
+  const inputPath = join(fx.files, "evidence.txt");
+  await writeFile(
+    inputPath,
+    "Synthetic electricity and water comparison: no measured difference in this fixture.\n",
+  );
+  await addProjectInput(fx.root, "task-project", inputPath, "primary");
+  const discover = await prepareNativeResearchStage({
+    root: fx.root,
+    projectId: "task-project",
+    stage: "discover",
+    hostAgent: "codex",
+  });
+  const [candidate] = await listEvidenceCandidates(fx.root, "task-project");
+  assert.ok(candidate);
+  await recordDiscoveryAssessmentBatch({
+    root: fx.root,
+    projectId: "task-project",
+    value: {
+      schemaVersion: 1,
+      assessments: [
+        {
+          decision: "admit",
+          candidateId: candidate.id,
+          sourceId: "source-1",
+          sourceType: "primary",
+          relevance: "Direct fixture data.",
+          quality: { level: "primary", rationale: "Exact synthetic input." },
+          applicability: "Fixture only.",
+          coverageDimensions: ["research-question"],
+          limitations: [],
+        },
+      ],
+    },
+  });
+  await submitFixtureStage(fx, discover, {
+    schemaVersion: 2,
+    limitations: [],
+    dimensionJudgments: [{ id: "research-question", status: "covered" }],
+    gaps: [],
+  });
+  const acquire = await prepareNativeResearchStage({
+    root: fx.root,
+    projectId: "task-project",
+    stage: "acquire",
+    hostAgent: "codex",
+  });
+  await submitFixtureStage(fx, acquire, {
+    schemaVersion: 1,
+    decisions: [
+      {
+        sourceId: "source-1",
+        candidateId: candidate.id,
+        artifactIds: [],
+        status: "accepted",
+        rationale: "Exact readable input.",
+        limitations: [],
+      },
+    ],
+    limitations: [],
+    gaps: [],
+  });
+  const snapshot = await loadCurrentEvidenceSnapshot(fx.root, "task-project");
+  const artifact = snapshot.artifacts[0]!;
+  const atom = await registerEvidenceAtom({
+    root: fx.root,
+    projectId: "task-project",
+    value: {
+      schemaVersion: 1,
+      atomId: "task-fixture-atom",
+      sourceId: "source-1",
+      candidateId: candidate.id,
+      artifactId: artifact.artifactId,
+      locator: { kind: "line-range", startLine: 1, endLine: 1 },
+      statement: "The fixture records a null comparison.",
+      evidenceRoleIds: [],
+      coverageDimensionIds: ["research-question"],
+      evidenceFunction: "support",
+      scope: "Deterministic protocol fixture only.",
+      limitations: [],
+    },
+  });
+  await freezeEvidenceContentSnapshot(fx.root, "task-project");
+  const rows = JSON.parse((await fx.task(["status"])).stdout).currentScope.requirements as Array<{
+    id: string;
+    requirementSha256: string;
+  }>;
+  return { ...fx, artifact, atom, rows };
+}
+
+function acceptanceInput(
+  row: { id: string; requirementSha256: string },
+  atomId: string,
+  resultFiles: string[],
+  outcome: string,
+) {
+  return {
+    schemaVersion: 1,
+    requirementId: row.id,
+    requirementSha256: row.requirementSha256,
+    previousRecordSha256: null,
+    outcome,
+    summary: "Observed fixture result with explicit limitations, not a CLI-certified execution.",
+    checkKind: "evidence",
+    reportedCommand: null,
+    sourceIds: ["source-1"],
+    evidenceAtomIds: [atomId],
+    analysisFindingIds: [],
+    resultFiles,
+    limitations: ["Synthetic protocol fixture; not a scientific conclusion."],
+  };
+}
+
+async function recordAcceptance(fx: Awaited<ReturnType<typeof fixture>>, value: object) {
+  const path = join(fx.files, "acceptance.json");
+  await writeFile(path, JSON.stringify(value));
+  return cli([
+    "research",
+    "project",
+    "task",
+    "acceptance",
+    "record",
+    "task-project",
+    "--input",
+    path,
+    "--workspace",
+    fx.root,
+    "--json",
+  ]);
+}
+
+async function submitFixtureStage(
+  fx: Awaited<ReturnType<typeof fixture>>,
+  packet: Awaited<ReturnType<typeof prepareNativeResearchStage>>,
+  value: object,
+) {
+  const outputPath = join(fx.files, `${packet.stage}.json`);
+  await writeFile(outputPath, JSON.stringify(value));
+  return submitNativeResearchStage({
+    root: fx.root,
+    projectId: "task-project",
+    sessionId: packet.sessionId,
+    outputPath,
+    confirmedModel: packet.expectedModel,
+  });
+}
+
+async function finishProducer(fx: Awaited<ReturnType<typeof acquiredFixture>>) {
+  const analyze = await prepareNativeResearchStage({
+    root: fx.root,
+    projectId: "task-project",
+    stage: "analyze",
+    hostAgent: "codex",
+  });
+  const inference = JSON.parse(
+    await readFile(
+      join(workspacePaths(fx.root).projects, "task-project", "outputs/inference-snapshot.json"),
+      "utf8",
+    ),
+  );
+  await submitFixtureStage(fx, analyze, {
+    schemaVersion: 2,
+    inferenceSnapshotSha256: inference.snapshotSha256,
+    analysisRun: {
+      id: "native-fixture-observation",
+      mode: "qualitative",
+      status: "not-applicable",
+      implementationSha256s: [],
+      environmentSha256s: [],
+      inputArtifactSha256s: [fx.artifact.sha256],
+      command: null,
+      randomSeed: null,
+      limitations: [],
+    },
+    findings: [
+      {
+        id: "finding-1",
+        statement: "This fixture supplies bounded null-result evidence.",
+        evidence: ["source-1"],
+        evidenceAtomIds: [fx.atom.atomId],
+        claimIds: [],
+        analysisArtifactSha256s: [],
+        uncertainty: "Synthetic fixture only.",
+        applicability: "Protocol verification, not real-world inference.",
+      },
+    ],
+    limitations: [],
+  });
+  const synthesize = await prepareNativeResearchStage({
+    root: fx.root,
+    projectId: "task-project",
+    stage: "synthesize",
+    hostAgent: "codex",
+  });
+  await submitFixtureStage(fx, synthesize, {
+    schemaVersion: 1,
+    reportMarkdown:
+      "# Bounded null result\n\nThe synthetic fixture supplies a null comparison with explicit limitations. This is protocol validation, not a real scientific study.\n",
+  });
+}
