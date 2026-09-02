@@ -1,5 +1,5 @@
 import { Ajv2020 } from "ajv/dist/2020.js";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 import { CliError } from "../../errors.js";
@@ -174,7 +174,7 @@ export async function recordProjectTaskAcceptance(
       );
     }
     if (
-      value.outcome !== "not-run" &&
+      ["satisfied", "negative-result"].includes(String(value.outcome)) &&
       value.checkKind === "computation" &&
       (!value.reportedCommand || !(value.resultFiles as string[]).length)
     )
@@ -192,8 +192,16 @@ export async function recordProjectTaskAcceptance(
     for (const path of value.resultFiles as string[]) {
       if (!isAbsolute(path) || path !== resolve(path))
         throw taskError("Check results require explicit normalized absolute file paths.");
-      const fromControl = relative(workspacePaths(root).control, path);
-      if (!fromControl.startsWith("..") && !isAbsolute(fromControl))
+      const fromControl = relative(
+        await realpath(workspacePaths(root).control),
+        await realpath(path),
+      );
+      if (
+        fromControl !== ".." &&
+        !fromControl.startsWith("../") &&
+        !fromControl.startsWith("..\\") &&
+        !isAbsolute(fromControl)
+      )
         throw taskError(
           "Check results must be explicit external files, not control records or credentials.",
         );
@@ -641,7 +649,7 @@ async function readSafeResult(path: string) {
   const bytes = await readFile(path);
   let content: string;
   try {
-    content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
   } catch {
     throw taskError("Check results must be bounded UTF-8 text, JSON, CSV or logs.");
   }

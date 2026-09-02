@@ -3,6 +3,7 @@ import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
+import { taskContext } from "./task-contract.js";
 import { sourceTypeRequirementGaps } from "./evidence-role-coverage.js";
 import { appendJournalEvent, verifyJournal } from "./journal.js";
 import { loadProject, nextScientificGate, saveProject } from "./projects.js";
@@ -220,6 +221,7 @@ export interface ScientificReviewPacket {
   };
   preparedAt: string;
   stageInputs: ScientificReviewStageInput[];
+  taskContract: Awaited<ReturnType<typeof taskContext>>;
   assessment: {
     sha256: string;
     objectLocator: string;
@@ -599,6 +601,7 @@ export async function prepareScientificReview(input: {
       reviewer: { agent: input.reviewerAgent, sessionSha256: reviewerSessionSha256 },
       preparedAt: new Date().toISOString(),
       stageInputs,
+      taskContract: await taskContext(input.root, project.id),
       assessment: { sha256: assessmentSha256, objectLocator: assessmentLocator },
       mechanicalAssessment: {
         canPass: issues.length === 0 && assessment.recommendation === "pass",
@@ -1842,6 +1845,14 @@ async function loadBoundPacket(
     throw scientificGateError("Scientific review packet failed its immutable hash binding.", role);
   }
   await assertBoundPolicyObject(root, project, value.policy);
+  if (
+    canonicalJson(value.taskContract ?? null) !== canonicalJson(await taskContext(root, project.id))
+  ) {
+    throw scientificGateError(
+      "Scientific review no longer binds the current authorized task scope.",
+      role,
+    );
+  }
   await assertBoundStageInputs(root, value.stageInputs, role);
   return value;
 }

@@ -6,6 +6,12 @@ import { CliError } from "../../errors.js";
 import { loadBoundAcquisitionDesign } from "./acquisition-routes.js";
 import { appendJournalEvent, readVerifiedJournal } from "./journal.js";
 import { assertProjectAuthority, projectAuthorityIndex } from "./project-authority.js";
+import {
+  beginProjectMutation,
+  prepareProjectMutation,
+  projectMutationBinding,
+  settleProjectMutation,
+} from "./project-mutations.js";
 import { loadProject } from "./projects.js";
 import { configuredResearchSecrets, sanitizeResearchValue } from "./sanitization.js";
 import {
@@ -378,16 +384,46 @@ export async function approveProjectTaskScope(
     });
     await writeTaskObject(root, projectId, "contracts", contract.contractSha256, contract);
     const binding = {
+      projectId,
       ...taskBinding(contract, view.original),
       proposalSha256,
       authorizationKind: "operator-confirmation",
     };
-    await appendJournalEvent(
-      workspacePaths(root).journal,
-      "project.task.scope.approved",
-      projectId,
-      binding,
-    );
+    if (project.scientificDesign) {
+      let mutation = await beginProjectMutation(root, "task-scope", project, proposalSha256);
+      try {
+        const invalidatedScientificReviews = Object.entries(project.scientificDesign.gates)
+          .filter(([, gate]) => gate.packetSha256 !== null)
+          .map(([role, gate]) => ({ role, packetSha256: gate.packetSha256 }));
+        for (const role of ["research-design", "evidence-construct", "pilot-methods"] as const) {
+          project.scientificDesign.gates[role] = {
+            status: "pending",
+            packetSha256: null,
+            assessmentSha256: null,
+            reviewSha256: null,
+            reviewerSessionSha256: null,
+          };
+        }
+        project.updatedAt = new Date().toISOString();
+        mutation = await prepareProjectMutation(root, mutation, project);
+        await appendJournalEvent(
+          workspacePaths(root).journal,
+          "project.task.scope.approved",
+          projectId,
+          { ...binding, invalidatedScientificReviews, mutation: projectMutationBinding(mutation) },
+        );
+        await settleProjectMutation(root, mutation);
+      } catch (error) {
+        if (!(await settleProjectMutation(root, mutation))) throw error;
+      }
+    } else {
+      await appendJournalEvent(
+        workspacePaths(root).journal,
+        "project.task.scope.approved",
+        projectId,
+        binding,
+      );
+    }
     return { ...binding, replayed: false };
   });
 }
