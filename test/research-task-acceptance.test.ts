@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -26,6 +26,8 @@ import {
   runResearchWorkspace,
   submitNativeResearchStage,
 } from "../src/research/workspace/runtime.js";
+import { passResearchDesignGate, scientificDesignInput } from "./helpers/scientific-design.js";
+import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 
 async function cli(argv: string[]) {
   let stdout = "";
@@ -110,6 +112,160 @@ async function fixture() {
 }
 
 describe("lightweight original task and authorized scope", () => {
+  it("preserves the exact BOM and CRLF bytes of native result files", async () => {
+    const fx = await acquiredFixture();
+    try {
+      const path = join(fx.files, "result.csv");
+      await writeFile(path, "\uFEFFname,value\r\nnull-result,0\r\n");
+      const result = await recordAcceptance(
+        fx,
+        acceptanceInput(fx.rows[0]!, fx.atom.atomId, [path], "negative-result"),
+      );
+      assert.equal(result.exitCode, 0, result.stderr);
+      const receipt = JSON.parse(result.stdout);
+      assert.equal(receipt.results[0].sha256, await sha256File(path));
+      assert.deepEqual(
+        await readFile(
+          join(workspacePaths(fx.root).projects, "task-project", receipt.results[0].path),
+        ),
+        await readFile(path),
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("retains a failed computation honestly when no result file was produced", async () => {
+    const fx = await acquiredFixture("computation");
+    try {
+      const result = await recordAcceptance(fx, {
+        ...acceptanceInput(fx.rows[0]!, fx.atom.atomId, [], "failed"),
+        checkKind: "computation",
+        reportedCommand: "node missing-check.mjs",
+      });
+      assert.equal(result.exitCode, 0, result.stderr);
+      assert.equal(JSON.parse(result.stdout).executionCertified, false);
+      const status = JSON.parse((await fx.task(["status"])).stdout);
+      assert.equal(status.currentScope.requirements[0].status, "failed");
+      assert.equal(status.currentScope.status, "incomplete");
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("rejects control-store result paths through a parent-directory alias", async () => {
+    const fx = await acquiredFixture();
+    try {
+      await writeFile(
+        join(workspacePaths(fx.root).control, "not-a-native-result.txt"),
+        "Synthetic control bytes are not native execution results.\n",
+      );
+      const alias = join(fx.files, "control-alias");
+      await symlink(
+        workspacePaths(fx.root).control,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const result = await recordAcceptance(
+        fx,
+        acceptanceInput(
+          fx.rows[0]!,
+          fx.atom.atomId,
+          [join(alias, "not-a-native-result.txt")],
+          "satisfied",
+        ),
+      );
+      assert.equal(result.exitCode, 3);
+      assert.match(result.stderr, /RESEARCH_TASK_/);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("binds early scientific review to the task and invalidates its approval after an authorized scope change", async () => {
+    const fx = await fixture();
+    const id = "scientific-task";
+    try {
+      await initializeProject(
+        fx.root,
+        id,
+        "Assess a declared scientific design without changing the original task silently.",
+        undefined,
+        false,
+        undefined,
+        scientificPolicy(id),
+        await scientificDesignInput(fx.root, id),
+      );
+      const defined = await fx.task(["define", "--input", fx.inputPath], id);
+      assert.equal(defined.exitCode, 0, defined.stderr);
+      const originalContract = JSON.parse(defined.stdout).contractSha256;
+      await passResearchDesignGate(fx.root, id);
+      const original = await loadProject(fx.root, id);
+      const packetPath = join(
+        workspacePaths(fx.root).projects,
+        id,
+        "scientific/review-packets/research-design",
+        `${original.scientificDesign!.gates["research-design"].packetSha256}.json`,
+      );
+      const packetBytes = await readFile(packetPath, "utf8");
+      assert.equal(JSON.parse(packetBytes).taskContract.contractSha256, originalContract);
+      const proposalPath = join(fx.files, "science-scope.json");
+      await writeFile(
+        proposalPath,
+        JSON.stringify({
+          schemaVersion: 1,
+          reason:
+            "Owner explicitly withdraws one requirement; scientific design remains unchanged.",
+          requirements: [contractInput().requirements[0]],
+        }),
+      );
+      const proposal = await cli([
+        "research",
+        "project",
+        "task",
+        "scope",
+        "propose",
+        id,
+        "--expected-contract",
+        originalContract,
+        "--input",
+        proposalPath,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(proposal.exitCode, 0, proposal.stderr);
+      const sha = JSON.parse(proposal.stdout).proposalSha256;
+      const approved = await cli([
+        "research",
+        "project",
+        "task",
+        "scope",
+        "approve",
+        id,
+        "--proposal",
+        sha,
+        "--confirm-change",
+        sha,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(approved.exitCode, 0, approved.stderr);
+      const current = await loadProject(fx.root, id);
+      assert.equal(current.scientificDesign!.designSha256, original.scientificDesign!.designSha256);
+      assert.deepEqual(current.publicationPolicy, original.publicationPolicy);
+      assert.ok(
+        Object.values(current.scientificDesign!.gates).every(
+          (gate) => gate.status === "pending" && gate.packetSha256 === null,
+        ),
+      );
+      assert.equal(await readFile(packetPath, "utf8"), packetBytes);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
   it("records exact native check results without certifying execution or completing the task", async () => {
     const fx = await acquiredFixture();
     try {
@@ -176,14 +332,21 @@ describe("lightweight original task and authorized scope", () => {
   it("uses the existing single independent review to accept valid negative findings and close task coverage", async () => {
     const fx = await acquiredFixture();
     try {
+      const sharedResult = join(fx.files, "shared-result.json");
+      await writeFile(sharedResult, JSON.stringify({ fixtureDifference: 0 }));
       for (const row of fx.rows) {
         const recorded = await recordAcceptance(
           fx,
-          acceptanceInput(row, fx.atom.atomId, [], "negative-result"),
+          acceptanceInput(row, fx.atom.atomId, [sharedResult], "negative-result"),
         );
         assert.equal(recorded.exitCode, 0, recorded.stderr);
       }
       await finishProducer(fx);
+      assert.equal(
+        (await readdir(join(workspacePaths(fx.root).projects, "task-project", "task/results")))
+          .length,
+        1,
+      );
       let reviewCalls = 0;
       const run = await runResearchWorkspace(
         fx.root,
@@ -194,6 +357,13 @@ describe("lightweight original task and authorized scope", () => {
             await readFile(join(request.projectRoot, "inputs/review-packet.json"), "utf8"),
           );
           assert.equal(packet.taskAcceptance.requirements.length, 2);
+          assert.equal(packet.taskAcceptance.results.length, 1);
+          assert.equal(
+            request.prompt.split(
+              `UNTRUSTED CHECK RESULT ${packet.taskAcceptance.results[0].sha256}`,
+            ).length - 1,
+            1,
+          );
           assert.ok(
             Array.isArray(request.outputSchema?.required) &&
               request.outputSchema.required.includes("taskAssessment"),
@@ -518,8 +688,11 @@ describe("lightweight original task and authorized scope", () => {
   });
 });
 
-async function acquiredFixture() {
+async function acquiredFixture(checkKind: "evidence" | "computation" = "evidence") {
   const fx = await fixture();
+  const declaration = contractInput();
+  declaration.requirements[0]!.checkKind = checkKind;
+  await writeFile(fx.inputPath, JSON.stringify(declaration));
   const defined = await fx.task(["define", "--input", fx.inputPath]);
   assert.equal(defined.exitCode, 0, defined.stderr);
   const inputPath = join(fx.files, "evidence.txt");
@@ -720,4 +893,24 @@ async function finishProducer(fx: Awaited<ReturnType<typeof acquiredFixture>>) {
     reportMarkdown:
       "# Bounded null result\n\nThe synthetic fixture supplies a null comparison with explicit limitations. This is protocol validation, not a real scientific study.\n",
   });
+}
+
+function scientificPolicy(projectId: string): ResearchPolicyBinding {
+  return {
+    goal: "top-journal",
+    projectId,
+    articleType: "computational-modeling",
+    field: "pavement-engineering",
+    journalClass: "discipline-flagship",
+    targetJournal: "International Journal of Pavement Engineering",
+    resolvedPolicySha256: "a".repeat(64),
+    approvalSha256: "b".repeat(64),
+    verdictCeiling: "target-journal-submission-ready",
+    documents: [],
+    resolvedRules: [],
+    resolvedConstraints: {},
+    requiredReviewers: ["evidence", "methods-reproducibility", "domain-novelty", "journal-editor"],
+    approvedAt: "2026-08-14T00:00:00.000Z",
+    expiresAt: "2027-08-14T00:00:00.000Z",
+  };
 }
