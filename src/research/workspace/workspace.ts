@@ -50,6 +50,7 @@ const DEFAULT_SMOKE_BUDGET = {
   maxWallSeconds: 7 * 24 * 60 * 60,
   maxFilesPerPackage: 20,
   maxBytesPerPackage: 20 * 1024 * 1024,
+  maxBytesPerArtifact: 20 * 1024 * 1024,
   maxAttemptsPerPackage: 3,
   confirmationCostUsd: 10,
   packageMaxTokens: {
@@ -92,6 +93,7 @@ const DEFAULT_PRODUCTION_BUDGET = {
   maxWallSeconds: 30 * 24 * 60 * 60,
   maxFilesPerPackage: 500,
   maxBytesPerPackage: 512 * 1024 * 1024,
+  maxBytesPerArtifact: 512 * 1024 * 1024,
   maxAttemptsPerPackage: 3,
   confirmationCostUsd: 10,
   packageMaxTokens: {
@@ -341,6 +343,15 @@ export async function loadWorkspaceMarker(root: string): Promise<WorkspaceMarker
 
 export async function loadWorkspaceConfig(root: string): Promise<WorkspaceConfig> {
   const config = await readJsonFile<unknown>(workspacePaths(root).config, "Research configuration");
+  // Preserve the reviewed artifact ceiling in existing workspaces. This is an
+  // in-memory default only; explicit invalid values are never repaired.
+  if (
+    isObject(config) &&
+    isObject(config.budget) &&
+    config.budget.maxBytesPerArtifact === undefined
+  ) {
+    config.budget.maxBytesPerArtifact = config.budget.maxBytesPerPackage;
+  }
   if (!isWorkspaceConfig(config)) {
     throw new CliError("Research configuration has an unsupported shape.", {
       code: "RESEARCH_CONFIG_INVALID",
@@ -1126,6 +1137,8 @@ function isWorkspaceConfig(value: unknown): value is WorkspaceConfig {
     positiveInteger(budget.maxWallSeconds) &&
     positiveInteger(budget.maxFilesPerPackage) &&
     positiveInteger(budget.maxBytesPerPackage) &&
+    positiveInteger(budget.maxBytesPerArtifact) &&
+    Number.isSafeInteger(budget.maxBytesPerArtifact) &&
     positiveInteger(budget.maxAttemptsPerPackage) &&
     positiveNumber(budget.confirmationCostUsd) &&
     isObject(budget.packageMaxTokens) &&

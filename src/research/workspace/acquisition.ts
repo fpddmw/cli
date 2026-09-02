@@ -471,6 +471,14 @@ export async function loadCurrentEvidenceSnapshot(
   root: string,
   projectId: string,
 ): Promise<EvidenceSnapshot> {
+  return (await loadVerifiedEvidencePreparationView(root, projectId)).snapshot;
+}
+
+/** Operation-local verified view; callers cannot inject unverified artifact records. */
+export async function loadVerifiedEvidencePreparationView(
+  root: string,
+  projectId: string,
+): Promise<{ snapshot: EvidenceSnapshot; artifacts: EvidenceArtifactRecord[] }> {
   const projectRoot = join(workspacePaths(root).projects, projectId);
   const path = join(projectRoot, "outputs", "evidence-snapshot.json");
   if (!(await pathExists(path))) {
@@ -540,19 +548,15 @@ export async function loadCurrentEvidenceSnapshot(
   ) {
     throw snapshotError("Evidence snapshot is not bound to its ledger freeze event.");
   }
-  const currentArtifacts = new Map(
-    (await loadEvidenceArtifactRecords(root, projectId)).map((record) => [
-      record.artifactId,
-      record,
-    ]),
-  );
+  const artifacts = await loadEvidenceArtifactRecords(root, projectId);
+  const currentArtifacts = new Map(artifacts.map((record) => [record.artifactId, record]));
   for (const artifact of snapshot.artifacts) {
     const current = currentArtifacts.get(artifact.artifactId);
     if (!current || canonicalJson(current) !== canonicalJson(artifact)) {
       throw snapshotError(`Snapshot artifact binding drifted: ${artifact.artifactId}.`);
     }
   }
-  return snapshot;
+  return { snapshot, artifacts };
 }
 
 export async function loadInferenceReadyEvidenceSnapshot(

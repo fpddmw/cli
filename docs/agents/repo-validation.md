@@ -192,6 +192,14 @@ classification. It is not a substitute for the real macOS/Windows matrix; it
 moves known path and capability semantics ahead of that matrix so hosted
 runners discover only genuinely platform-specific defects.
 
+`test/research-evidence-throughput.test.ts` exercises the public batch/preflight
+commands in a synthetic native-host discovery/acquisition flow. It asserts atomic
+rejection, orphan-envelope invisibility and recovery, exact replay/conflict/hash
+behavior, and deterministic verification/read/append work counts instead of
+machine-dependent timing. Artifact preflight tests distinguish per-file and
+aggregate output budgets and preserve existing absent-field limits without
+rewriting configuration; no large real download or network service is needed.
+
 Every runtime container has no host mounts, Docker socket, credentials, or
 runtime network. It enables Docker's privileged namespace mode solely so the non-root
 test process can exercise the real nested Bubblewrap capsule instead of skipping

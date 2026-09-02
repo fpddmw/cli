@@ -8,11 +8,14 @@ import { runCli } from "../src/cli.js";
 import { registerEvidenceArtifact } from "../src/research/workspace/artifacts.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import {
+  freezeEvidenceContentSnapshot,
+  loadCurrentEvidenceContentSnapshot,
   loadDecompositionRecords,
   loadEvidenceAtomRecords,
   registerEvidenceAtom,
 } from "../src/research/workspace/content-evidence.js";
 import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
+import { bindEvidenceDownload } from "../src/research/workspace/downloads.js";
 import {
   evidenceLedgerPath,
   listEvidenceCandidates,
@@ -24,7 +27,10 @@ import {
   submitNativeResearchStage,
 } from "../src/research/workspace/runtime.js";
 import { workspacePaths } from "../src/research/workspace/storage.js";
-import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
+import {
+  initializeResearchWorkspace,
+  loadWorkspaceConfig,
+} from "../src/research/workspace/workspace.js";
 
 describe("bounded evidence throughput", () => {
   it("atomically registers bounded batches with shared verification and exact idempotent replay", async () => {
@@ -59,11 +65,18 @@ describe("bounded evidence throughput", () => {
         ...records,
         { ...records[0], atomId: "bad", artifactId: "absent" },
       ]);
-      assert.equal(bad.exitCode, 2);
+      assert.equal(bad.exitCode, 3);
       assert.match(bad.stderr, /RESEARCH_EVIDENCE_ATOM_SOURCE_INVALID/);
       assert.deepEqual(await loadEvidenceAtomRecords(root, "batch-project"), []);
       assert.equal((await readJournal(evidenceLedgerPath(root, "batch-project"))).length, before);
 
+      const badDecomp = await batch(root, "decomposition", [
+        decomposition,
+        { ...decomposition, sourceArtifactId: "absent" },
+      ]);
+      assert.equal(badDecomp.exitCode, 3);
+      assert.match(badDecomp.stderr, /RESEARCH_DECOMPOSITION_ARTIFACT_INVALID/);
+      assert.deepEqual(await loadDecompositionRecords(root, "batch-project"), []);
       const decomp = await batch(root, "decomposition", [decomposition]);
       assert.equal(decomp.exitCode, 0, decomp.stderr);
       assert.equal((await loadDecompositionRecords(root, "batch-project")).length, 1);
@@ -80,6 +93,21 @@ describe("bounded evidence throughput", () => {
         (await readJournal(evidenceLedgerPath(root, "batch-project"))).length,
         before + 2,
       );
+      // Simulate a crash after immutable envelope persistence and before its
+      // single ledger commit: no record may be visible until a safe replay.
+      const ledgerPath = evidenceLedgerPath(root, "batch-project");
+      const committed = await readJournal(ledgerPath);
+      await writeFile(
+        ledgerPath,
+        `${committed
+          .slice(0, -1)
+          .map((event) => JSON.stringify(event))
+          .join("\n")}\n`,
+      );
+      assert.deepEqual(await loadEvidenceAtomRecords(root, "batch-project"), []);
+      const recovered = await batch(root, "atom", records);
+      assert.equal(recovered.exitCode, 0, recovered.stderr);
+      assert.deepEqual(JSON.parse(recovered.stdout).records, result.records);
       const replay = await batch(root, "atom", records);
       assert.equal(replay.exitCode, 0, replay.stderr);
       assert.equal(JSON.parse(replay.stdout).batchSha256, result.batchSha256);
@@ -97,7 +125,7 @@ describe("bounded evidence throughput", () => {
       const conflict = await batch(root, "atom", [
         { ...records[0], statement: "A conflicting changed statement is never accepted." },
       ]);
-      assert.equal(conflict.exitCode, 2);
+      assert.equal(conflict.exitCode, 3);
       assert.match(conflict.stderr, /RESEARCH_EVIDENCE_ATOM_CONFLICT/);
       assert.equal((await loadEvidenceAtomRecords(root, "batch-project")).length, 40);
       const bound = await batch(
@@ -105,8 +133,14 @@ describe("bounded evidence throughput", () => {
         "atom",
         Array.from({ length: 501 }, () => records[0]!),
       );
-      assert.equal(bound.exitCode, 2);
+      assert.equal(bound.exitCode, 3);
       assert.match(bound.stderr, /RESEARCH_EVIDENCE_BATCH_INVALID/);
+      const frozen = await freezeEvidenceContentSnapshot(root, "batch-project");
+      assert.equal(frozen.gate.decision, "pass");
+      assert.equal(
+        (await loadCurrentEvidenceContentSnapshot(root, "batch-project")).snapshotSha256,
+        frozen.snapshotSha256,
+      );
       const batchPath = join(
         workspacePaths(root).projects,
         "batch-project",
@@ -179,8 +213,34 @@ describe("bounded evidence throughput", () => {
         "--json",
       ]);
       assert.equal(local.exitCode, 0, local.stderr);
-      assert.equal(JSON.parse(local.stdout).knownBytes, 31);
+      assert.equal(
+        JSON.parse(local.stdout).knownBytes,
+        Buffer.byteLength("not read as content by preflight"),
+      );
       assert.equal(local.stdout.includes(source), false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves the existing artifact ceiling when the new explicit field is absent without rewriting owner config", async () => {
+    const root = await mkdtemp(join(tmpdir(), "research-artifact-old-limit-"));
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const path = workspacePaths(root).config;
+      const value = JSON.parse(await readFile(path, "utf8"));
+      delete value.budget.maxBytesPerArtifact;
+      value.budget.maxBytesPerPackage = 12345;
+      const original = JSON.stringify(value);
+      await writeFile(path, original);
+      assert.equal((await loadWorkspaceConfig(root)).budget.maxBytesPerArtifact, 12345);
+      assert.equal(await readFile(path, "utf8"), original);
+      value.budget.maxBytesPerArtifact = 0;
+      await writeFile(path, JSON.stringify(value));
+      await assert.rejects(loadWorkspaceConfig(root), /unsupported shape/);
+      value.budget.maxBytesPerArtifact = Number.MAX_SAFE_INTEGER + 1;
+      await writeFile(path, JSON.stringify(value));
+      await assert.rejects(loadWorkspaceConfig(root), /unsupported shape/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -246,6 +306,35 @@ async function acquired(root: string) {
     stage: "acquire",
     hostAgent: "codex",
   });
+  assert.equal(acquire.limits.maxArtifactBytes, 20 * 1024 * 1024);
+  assert.equal(acquire.limits.maxOutputBytes, 20 * 1024 * 1024);
+  const configPath = workspacePaths(root).config;
+  const originalConfig = await readFile(configPath, "utf8");
+  const config = JSON.parse(originalConfig);
+  config.budget.maxBytesPerPackage = 16;
+  config.budget.maxBytesPerArtifact = 64;
+  await writeFile(configPath, JSON.stringify(config));
+  const download = await bindEvidenceDownload({
+    root,
+    projectId,
+    candidateId: candidate.id,
+    value: {
+      schemaVersion: 1,
+      backend: "native-browser",
+      status: "completed",
+      path,
+      downloadUrl: "https://example.test/exact-source.txt",
+      suggestedFilename: "exact-source.txt",
+      downloadIdentifier: "synthetic-size-binding",
+    },
+  });
+  assert.equal(download.status, "completed");
+  const oversized = join(root, "oversized.txt");
+  await writeFile(oversized, "x".repeat(65));
+  await assert.rejects(
+    registerEvidenceArtifact({ root, projectId, candidateId: candidate.id, path: oversized }),
+    /maxBytesPerArtifact/,
+  );
   const artifact = await registerEvidenceArtifact({
     root,
     projectId,
@@ -261,6 +350,9 @@ async function acquired(root: string) {
     path: derivedPath,
     derivedFromArtifactId: artifact.artifactId,
   });
+  assert.ok(artifact.bytes > config.budget.maxBytesPerPackage);
+  assert.ok(derived.bytes > config.budget.maxBytesPerPackage);
+  await writeFile(configPath, originalConfig);
   await writeFile(
     output,
     JSON.stringify({

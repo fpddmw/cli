@@ -120,6 +120,12 @@ storage writes, queueing, and document status transitions.
   parent/delta evidence snapshots, automatic hash-checked input-backed artifact
   materialization for readable local inputs, exact-lineage artifact decomposition,
   line-range/JSON-Pointer evidence atoms, typed-content coverage snapshots,
+  bounded atomic content-registration batches with one operation-local verified
+  acquisition/artifact view, one parsed artifact retained at a time, and immutable
+  envelopes made visible only by a hash-bound ledger commit; single and batch
+  records share validation and idempotency rules. Artifact intake has a separate
+  per-file byte limit from aggregate stage outputs and an offline metadata-only
+  preflight; large unsupported files stop with provider-subsetting guidance,
   separate inference-stop gates, immutable inference snapshots, schema-v2
   reproducible analysis runs, and mechanically generated Claim-Evidence Graphs,
   addendum supersession, reviewer-driven synthesis revisions with immutable

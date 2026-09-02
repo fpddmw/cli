@@ -81,6 +81,13 @@ export async function verifyJournal(
   return { events: events.length, head: events.at(-1)?.hash ?? GENESIS_HASH };
 }
 
+/** Verify and return the same byte snapshot, without a second unverified read. */
+export async function readVerifiedJournal(journalPath: string): Promise<JournalEvent[]> {
+  const events = await readJournal(journalPath);
+  verifyJournalEvents(events);
+  return events;
+}
+
 function verifyJournalEvents(events: JournalEvent[]): void {
   let previousHash = GENESIS_HASH;
   for (const [index, event] of events.entries()) {

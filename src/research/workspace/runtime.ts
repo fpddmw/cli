@@ -447,6 +447,7 @@ export interface NativeStagePacket {
   discovery: DiscoveryProgress | null;
   limits: {
     maxOutputBytes: number;
+    maxArtifactBytes: number;
     maxOutputTokens: number;
     reservedPackageTokens: number;
     reservedMaxCostUsd: number;
@@ -765,6 +766,7 @@ export async function prepareNativeResearchStage(input: {
         discovery,
         limits: {
           maxOutputBytes: config.budget.maxBytesPerPackage,
+          maxArtifactBytes: config.budget.maxBytesPerArtifact,
           maxOutputTokens: stageOutputTokens,
           reservedPackageTokens,
           reservedMaxCostUsd: reservation.costUsd,

@@ -66,6 +66,7 @@ export interface ResearchBudget {
   maxWallSeconds: number;
   maxFilesPerPackage: number;
   maxBytesPerPackage: number;
+  maxBytesPerArtifact: number;
   maxAttemptsPerPackage: number;
   confirmationCostUsd: number;
   packageMaxTokens: Record<AgentPackageStage, number>;

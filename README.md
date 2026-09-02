@@ -984,6 +984,34 @@ closure remains unchanged, the child snapshot records a mechanical delta, and
 default status hides the superseded project (`research status --all` shows full
 lineage).
 
+For many content records, use `research project evidence decomposition batch
+<project-id> --record <absolute-json>` or `research project evidence atom batch
+<project-id> --record <absolute-json>`, with `--workspace` and `--json` as needed.
+The input is `{"schemaVersion":1,"records":[...]}`; each item has exactly the same
+schema and validation as the corresponding single-record command. A batch is
+bounded to 500 records and 4 MiB of input. The CLI verifies acquisition/artifact
+bindings once per batch, groups atoms by artifact to read and parse each referenced
+document once without retaining all files in memory, and commits one hash-bound
+immutable envelope through one ledger event. A bad item commits nothing; identical
+replay is idempotent and a changed ID is rejected. Uncommitted envelopes are never
+visible and a retry can safely complete their commit. `work` reports deterministic
+verification, read, and append counts; no persistent verification cache is trusted.
+
+Before a potentially large download, use the offline command
+`research project evidence artifact preflight --bytes <known-bytes> --workspace
+<path> --json`, or replace `--bytes` with `--path <exact-local-file>` for a stat-only
+check. `budget.maxBytesPerArtifact` bounds one acquired/downloaded file;
+`budget.maxBytesPerPackage` separately bounds aggregate generated stage outputs.
+Both are exposed in preflight, and native packets expose `maxArtifactBytes` beside
+`maxOutputBytes`. Their defaults remain 20 MiB in smoke mode and 512 MiB in
+production. A missing artifact field in an existing configuration retains its
+existing package limit in memory without rewriting the owner's file; an explicit
+invalid limit is rejected. Preflight exit 3 means stop and request a provider-side
+subset/filter or smaller official export preserving required variables/provenance.
+A size pass is not content acceptance: download binding, format, archive-expansion,
+SHA-256, and snapshot checks still apply. This is not a large-file streaming or
+external-reference bypass.
+
 Accepted local inputs are normalized into immutable input-backed artifacts while
 the acquire package is still active. JSON, CSV, Markdown, and plain-text inputs
 therefore have an atom-capable identity even when the producer omitted an

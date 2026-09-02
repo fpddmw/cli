@@ -28,7 +28,7 @@ import {
 } from "./workspace/external-skills.js";
 import { appendJournalEvent, readJournal } from "./workspace/journal.js";
 import { fetchNativeCandidateSource } from "./workspace/broker.js";
-import { registerEvidenceArtifact } from "./workspace/artifacts.js";
+import { preflightEvidenceArtifact, registerEvidenceArtifact } from "./workspace/artifacts.js";
 import { executeResearchDataCapability } from "./workspace/data-evidence-adapter.js";
 import { exportProjectAuditBundle, verifyProjectAuditBundle } from "./workspace/audit-bundle.js";
 import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
@@ -37,6 +37,7 @@ import {
   loadCurrentEvidenceContentSnapshot,
   recordArtifactDecomposition,
   registerEvidenceAtom,
+  registerEvidenceContentBatch,
 } from "./workspace/content-evidence.js";
 import { inspectDiscoveryProgress } from "./workspace/discovery-status.js";
 import { inspectEvidenceAccessStatus } from "./workspace/evidence-exhaustion.js";
@@ -214,6 +215,9 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project evidence download bind <project-id> --candidate <id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence artifact register <project-id> --candidate <id> --path <absolute-file> [--download-binding <id> | --derived-from-artifact <id>] [--media-type <type>] [--source-url <https-url>] [--license <declared-license>] [--license-url <https-url>] [--host-type <type>] [--article-version <version>] [--workspace <path>] [--json]
   tiangong-ai research project evidence decomposition record <project-id> --record <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence decomposition batch <project-id> --record <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence atom batch <project-id> --record <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence artifact preflight (--bytes <known-bytes> | --path <absolute-file>) [--workspace <path>] [--json]
   tiangong-ai research project evidence atom register <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence content freeze <project-id> [--workspace <path>] [--json]
   tiangong-ai research project evidence content status <project-id> [--workspace <path>] [--json]
@@ -1443,6 +1447,27 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     }
     if (evidenceAction === "artifact") {
       const [artifactAction, ...artifactRest] = evidenceRest;
+      if (artifactAction === "preflight") {
+        const args = parseStrictArgs(
+          artifactRest,
+          { ...WORKSPACE_OPTIONS, bytes: "string", path: "string" },
+          "research project evidence artifact preflight",
+        );
+        if (strictBoolean(args, "help")) return writeHelp(io);
+        if (args.positionals.length)
+          throw unknownAction("research project evidence artifact preflight", args.positionals[0]!);
+        const bytes = strictString(args, "bytes");
+        const path = strictString(args, "path");
+        const result = await preflightEvidenceArtifact({
+          root: await workspaceFromArgs(args),
+          ...(bytes === undefined
+            ? {}
+            : { bytes: /^\d+$/u.test(bytes) ? Number(bytes) : Number.NaN }),
+          ...(path === undefined ? {} : { path }),
+        });
+        writeJson(io, result, args);
+        return result.decision === "pass" ? 0 : 3;
+      }
       if (artifactAction !== "register") {
         throw unknownAction("research project evidence artifact", artifactAction ?? "");
       }
@@ -1512,7 +1537,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     }
     if (evidenceAction === "decomposition") {
       const [decompositionAction, ...decompositionRest] = evidenceRest;
-      if (decompositionAction !== "record") {
+      if (decompositionAction !== "record" && decompositionAction !== "batch") {
         throw unknownAction("research project evidence decomposition", decompositionAction ?? "");
       }
       const args = parseStrictArgs(
@@ -1537,16 +1562,19 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         recordPath,
         "--record",
         "RESEARCH_DECOMPOSITION_INVALID",
+        decompositionAction === "batch" ? 4 * 1024 * 1024 : undefined,
       );
-      const result = await withWorkspaceLock(root, "research.decomposition.record", () =>
-        recordArtifactDecomposition({ root, projectId, value: record }),
+      const result = await withWorkspaceLock(root, "research.decomposition.record", async () =>
+        decompositionAction === "batch"
+          ? registerEvidenceContentBatch({ root, projectId, kind: "decomposition", value: record })
+          : recordArtifactDecomposition({ root, projectId, value: record }),
       );
       writeJson(io, result, args);
       return 0;
     }
     if (evidenceAction === "atom") {
       const [atomAction, ...atomRest] = evidenceRest;
-      if (atomAction !== "register") {
+      if (atomAction !== "register" && atomAction !== "batch") {
         throw unknownAction("research project evidence atom", atomAction ?? "");
       }
       const args = parseStrictArgs(
@@ -1568,9 +1596,12 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         recordPath,
         "--record",
         "RESEARCH_EVIDENCE_ATOM_INVALID",
+        atomAction === "batch" ? 4 * 1024 * 1024 : undefined,
       );
-      const result = await withWorkspaceLock(root, "research.evidence-atom.register", () =>
-        registerEvidenceAtom({ root, projectId, value: record }),
+      const result = await withWorkspaceLock(root, "research.evidence-atom.register", async () =>
+        atomAction === "batch"
+          ? registerEvidenceContentBatch({ root, projectId, kind: "atom", value: record })
+          : registerEvidenceAtom({ root, projectId, value: record }),
       );
       writeJson(io, result, args);
       return 0;
@@ -2492,6 +2523,7 @@ async function readBoundedJsonRecord(
   path: string,
   label: string,
   code: string,
+  maxBytes = 1024 * 1024,
 ): Promise<Record<string, unknown>> {
   if (!isAbsolute(path)) {
     throw new CliError(`${label} must be an absolute JSON file path.`, {
@@ -2501,7 +2533,7 @@ async function readBoundedJsonRecord(
   }
   const selected = resolve(path);
   const info = await lstat(selected).catch(() => undefined);
-  if (!info?.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) {
+  if (!info?.isFile() || info.isSymbolicLink() || info.size > maxBytes) {
     throw new CliError(`${label} must be a bounded regular non-symlink JSON file.`, {
       code,
       exitCode: 2,
