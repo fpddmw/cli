@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { join, resolve } from "node:path";
 
-const [root, point] = process.argv.slice(2);
+const [root, point, proposalSha256] = process.argv.slice(2);
 const targetRoot = join(root, ".tiangong-research", "projects", "target");
 const sourcePath = join(root, ".tiangong-research", "projects", "source", "project.json");
 const journalPath = join(root, ".tiangong-research", "journal.jsonl");
@@ -23,7 +23,8 @@ fs.rename = async (source, destination) => {
   const path = resolve(String(destination));
   if (
     (point === "target-state" && path === resolve(targetRoot, "project.json")) ||
-    (["source-state", "retry-state"].includes(point) && path === resolve(sourcePath))
+    (["source-state", "retry-state", "acquisition-state"].includes(point) &&
+      path === resolve(sourcePath))
   ) {
     await crash();
   }
@@ -41,6 +42,25 @@ fs.mkdir = async (path, options) => {
 
 const appendFile = fs.appendFile;
 fs.appendFile = async (path, data, options) => {
+  if (
+    point === "scope-committed" &&
+    resolve(String(path)) === resolve(journalPath) &&
+    String(data).includes('"type":"project.task.scope.approved"')
+  ) {
+    const result = await appendFile(path, data, options);
+    await crash();
+    return result;
+  }
+  if (
+    point.startsWith("acquisition-") &&
+    resolve(String(path)) === resolve(journalPath) &&
+    String(data).includes('"type":"project.acquisition.revision.requested"')
+  ) {
+    if (point === "acquisition-before-commit") await crash();
+    const result = await appendFile(path, data, options);
+    if (point === "acquisition-committed") await crash();
+    return result;
+  }
   if (
     point === "retry-committed" &&
     resolve(String(path)) === resolve(journalPath) &&
@@ -69,7 +89,21 @@ syncBuiltinESMExports();
 const { forkProject, retryProjectPackage } =
   await import("../../../src/research/workspace/projects.ts");
 try {
-  if (point.startsWith("retry-")) await retryProjectPackage(root, "source", "synthesize");
+  if (point === "scope-committed") {
+    const { approveProjectTaskScope } =
+      await import("../../../src/research/workspace/task-contract.ts");
+    await approveProjectTaskScope(root, "source", proposalSha256, proposalSha256);
+  } else if (point.startsWith("acquisition-")) {
+    const { reviseProjectAcquisition } =
+      await import("../../../src/research/workspace/acquisition-revision.ts");
+    const project = JSON.parse(await fs.readFile(sourcePath, "utf8"));
+    await reviseProjectAcquisition({
+      root,
+      projectId: "source",
+      expectedSnapshotSha256: project.evidenceState.currentSnapshotSha256,
+      reason: "Add readable evidence before analysis.",
+    });
+  } else if (point.startsWith("retry-")) await retryProjectPackage(root, "source", "synthesize");
   else await forkProject(root, "source", "target");
   throw new Error("Expected fork fault was not reached");
 } catch (error) {

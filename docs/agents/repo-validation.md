@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-09-02
-lastReviewedCommit: e1eacc2565571ad15a0051246c92fe695ba94e35
+lastReviewedAt: 2026-09-03
+lastReviewedCommit: 06dadef170ab79c19eef9a35663e86fdee22479b
 ---
 
 # Repo Validation
@@ -222,6 +222,31 @@ uncommitted derived projects before spending a reservation. Publication tests
 retain computational negative controls while allowing consistent qualitative
 metadata through the same remaining gates; acquisition tests reproduce the
 local-PDF forecast/submit discrepancy without weakening submission.
+
+`test/research-acquisition.test.ts` additionally exercises hash-bound same-project
+revision, explicit discovery reopening, immutable historical record bytes, budget
+and artifact reuse, acquisition commit-point crashes, replay, stale/post-analysis
+refusal, decomposition supersession and obsolete-atom exclusion. These cases do
+not contact a provider. Forecast asserts its submit-blocker decision separately
+from potential typed-content coverage.
+
+`test/research-task-acceptance.test.ts` covers closed task/check schemas, original
+intake before execution/scientific review, exact scope consent and before/after
+details, crash-safe approval projections, fork history, source/atom/result binding,
+raw BOM/CRLF preservation, control-store aliases, stale and failed checks, supported
+negative results, and original/current completion separate from workflow status.
+It counts one existing reviewer call and one shared result context instead of
+using timing assertions. Publication regressions bind task context to the existing
+reviewers. Portable audit tests move the bundle, remove the source workspace, and
+reject altered task bindings even with a recomputed manifest digest.
+
+For this boundary, supplement fresh Docker RED/GREEN with a fresh external native
+workspace using the exact locally packed candidate, isolated HOME/npm cache, and
+real public input bytes/native calculations. Label any deterministic reviewer as
+protocol validation, not a scientific review or a published registry runtime.
+Keep native data, prompts, caches and reports outside Git; commit only privacy-safe
+regressions and link sanitized validation evidence from the tracked task. Existing
+paid-review count, native-producer and scientific-gate boundaries must not change.
 
 On a Linux test host where
 `/proc/sys/kernel/apparmor_restrict_unprivileged_userns` is `1`, the local gate

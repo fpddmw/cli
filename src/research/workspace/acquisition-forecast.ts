@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { CliError } from "../../errors.js";
 import {
   computeSnapshotCoverage,
+  inputCanProvideReadableArtifact,
   materializeAcquisitionAudit,
   projectAcquisitionSources,
 } from "./acquisition.js";
 import { loadBoundAcquisitionDesign } from "./acquisition-routes.js";
-import { producerReadableArtifactPath } from "./artifacts.js";
 import { verifyEvidenceLedger } from "./evidence-ledger.js";
 import { computeRoleCoverage, type EvidenceRoleRequirement } from "./evidence-role-coverage.js";
 import { loadProject } from "./projects.js";
@@ -83,11 +83,7 @@ export async function inspectAcquisitionForecast(
     const input = inputsById.get(String(provenance.id));
     inputReadability.set(
       String(source.id),
-      Boolean(
-        input &&
-        (producerReadableArtifactPath(input.path) ||
-          (input.contextPath && producerReadableArtifactPath(input.contextPath))),
-      ),
+      Boolean(input && inputCanProvideReadableArtifact(input)),
     );
   }
   const sources = projectAcquisitionSources(
@@ -103,6 +99,21 @@ export async function inspectAcquisitionForecast(
   const design = project.scientificDesign ? await loadBoundAcquisitionDesign(root, project) : null;
   const roleEligibility = forecastRoleEligibility(design?.evidenceRoles ?? [], sources);
   const acquisitionReasons = [...new Set([...audit.gaps, ...coverage.gaps])];
+  const decisions = new Map(audit.decisions.map((decision) => [decision.sourceId, decision]));
+  const sourceRecords = new Map(
+    (evidence.sources as Array<Record<string, unknown>>).map((source) => [
+      String(source.id),
+      source,
+    ]),
+  );
+  const submissionBlockers = sources
+    .filter(
+      (source) =>
+        decisions.get(String(source.id))?.status === "accepted" &&
+        sourceRecords.get(String(source.id))?.fullTextAvailable === true &&
+        source.fullTextAvailable !== true,
+    )
+    .map((source) => ({ code: "RESEARCH_INPUT_ATOMIZATION_REQUIRED", sourceId: source.id }));
   // A read-only inspection has no lease mutations. Refuse a mixed concurrent view.
   const [latestLedger, latestProject, latestEvidenceHash] = await Promise.all([
     verifyEvidenceLedger(root, projectId),
@@ -130,6 +141,10 @@ export async function inspectAcquisitionForecast(
       ledgerHead: ledger.head,
       certifiesContentGate: false,
       certifiesAcquisitionSubmission: false,
+      submissionGate: {
+        decision: submissionBlockers.length ? "stop" : "potentially-ready",
+        blockers: submissionBlockers,
+      },
       acquisitionGate: {
         decision: acquisitionReasons.length ? "stop" : "pass",
         reasons: acquisitionReasons,
@@ -155,11 +170,12 @@ export async function inspectAcquisitionForecast(
         .map((decision) => decision.sourceId),
       limitations: audit.limitations,
       recovery:
-        "Before submission, repair known deficits or retain an honest stopped audit. After completed acquisition, use project fork --resume-through discover to reuse verified discovery and artifacts; top-journal targets still require their own approved Policy/design.",
+        "Before submission, repair exact submission blockers or retain an honest limited/stopped audit. After completed acquisition and before analysis, use evidence acquisition revise with the exact current snapshot hash; retain the existing fork/new-generation path for changed design or post-analysis work.",
     },
     configuredResearchSecrets(process.env),
   ) as {
     acquisitionGate: { decision: "pass" | "stop" };
+    submissionGate: { decision: "stop" | "potentially-ready" };
     knownRoleDeficits: string[];
   } & Record<string, unknown>;
 }

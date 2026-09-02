@@ -1,0 +1,1248 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { chmod, cp, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, it } from "node:test";
+
+import { runCli } from "../src/cli.js";
+import { lockCapabilities } from "../src/research/workspace/capabilities.js";
+import { readVerifiedJournal } from "../src/research/workspace/journal.js";
+import {
+  addProjectInput,
+  initializeProject,
+  loadProject,
+} from "../src/research/workspace/projects.js";
+import {
+  canonicalJson,
+  sha256File,
+  sha256Text,
+  workspacePaths,
+} from "../src/research/workspace/storage.js";
+import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
+import { loadCurrentEvidenceSnapshot } from "../src/research/workspace/acquisition.js";
+import {
+  freezeEvidenceContentSnapshot,
+  registerEvidenceAtom,
+} from "../src/research/workspace/content-evidence.js";
+import { recordDiscoveryAssessmentBatch } from "../src/research/workspace/discovery.js";
+import { listEvidenceCandidates } from "../src/research/workspace/evidence-ledger.js";
+import {
+  prepareNativeResearchStage,
+  runResearchWorkspace,
+  submitNativeResearchStage,
+} from "../src/research/workspace/runtime.js";
+import { passResearchDesignGate, scientificDesignInput } from "./helpers/scientific-design.js";
+import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
+import { inspectScientificReviewStatus } from "../src/research/workspace/scientific-review.js";
+
+async function cli(argv: string[]) {
+  let stdout = "";
+  let stderr = "";
+  const exitCode = await runCli(argv, {
+    env: {},
+    stdout: {
+      write: (value: string) => {
+        stdout += value;
+      },
+    },
+    stderr: {
+      write: (value: string) => {
+        stderr += value;
+      },
+    },
+  });
+  return { exitCode, stdout, stderr };
+}
+
+function contractInput() {
+  return {
+    schemaVersion: 1,
+    originalRequest:
+      "Compare electricity and water evidence, retaining uncertainty and counterevidence.",
+    requirements: [
+      {
+        id: "electricity",
+        text: "Assess the available electricity evidence.",
+        acceptance: "Provide a traceable comparison and explicit uncertainty.",
+        checkKind: "evidence",
+        designClaimIds: [],
+        coverageDimensionIds: ["research-question"],
+      },
+      {
+        id: "water",
+        text: "Assess water evidence independently from electricity.",
+        acceptance: "Provide water evidence or identify the exact unresolved data requirement.",
+        checkKind: "evidence",
+        designClaimIds: [],
+        coverageDimensionIds: ["research-question"],
+      },
+    ],
+  };
+}
+
+async function fixture() {
+  const root = await mkdtemp(join(tmpdir(), "tiangong-task-contract-"));
+  const files = await mkdtemp(join(tmpdir(), "tiangong-task-contract-files-"));
+  await initializeResearchWorkspace(root, undefined);
+  await lockCapabilities(root);
+  await initializeProject(
+    root,
+    "task-project",
+    "Compare electricity and water evidence without presupposing a result.",
+  );
+  const task = async (args: string[], projectId = "task-project") =>
+    cli([
+      "research",
+      "project",
+      "task",
+      ...args.slice(0, 1),
+      projectId,
+      ...args.slice(1),
+      "--workspace",
+      root,
+      "--json",
+    ]);
+  const inputPath = join(files, "requirements.json");
+  await writeFile(inputPath, JSON.stringify(contractInput()));
+  return {
+    root,
+    files,
+    inputPath,
+    task,
+    cleanup: () =>
+      Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(files, { recursive: true, force: true }),
+      ]),
+  };
+}
+
+describe("lightweight original task and authorized scope", () => {
+  it("does not charge a non-embedded raw input bundle against a later task context", async () => {
+    const fx = await acquiredFixture("evidence", 33_000);
+    try {
+      const prepared = await prepareNativeResearchStage({
+        root: fx.root,
+        projectId: "task-project",
+        stage: "analyze",
+        hostAgent: "codex",
+      });
+      assert.match(prepared.prompt, /Original task and current authorized scope/);
+      assert.match(prepared.prompt, /outputs\/inference-snapshot.json/);
+      assert.doesNotMatch(prepared.prompt, /non-embedded-input-padding/);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("still rejects a genuinely oversized task prompt before spending a native attempt", async () => {
+    const fx = await fixture();
+    try {
+      const input = contractInput();
+      input.originalRequest = "Preserve this detailed original requirement. ".repeat(1_000);
+      await writeFile(fx.inputPath, JSON.stringify(input));
+      assert.equal((await fx.task(["define", "--input", fx.inputPath])).exitCode, 0);
+      await assert.rejects(
+        prepareNativeResearchStage({
+          root: fx.root,
+          projectId: "task-project",
+          stage: "discover",
+          hostAgent: "codex",
+        }),
+        { code: "RESEARCH_TASK_CONTEXT_TOO_LARGE" },
+      );
+      const project = await loadProject(fx.root, "task-project");
+      assert.ok(project.packages.every((item) => item.attempts === 0));
+      assert.equal(project.usage.tokens, 0);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("refuses to define original requirements retrospectively after a scientific review", async () => {
+    const fx = await fixture();
+    const projectId = "already-reviewed";
+    try {
+      await initializeProject(
+        fx.root,
+        projectId,
+        "Preserve the original scope present when the scientific design was reviewed.",
+        undefined,
+        false,
+        undefined,
+        scientificPolicy(projectId),
+        await scientificDesignInput(fx.root, projectId),
+      );
+      await passResearchDesignGate(fx.root, projectId);
+      const before = await loadProject(fx.root, projectId);
+      const result = await fx.task(["define", "--input", fx.inputPath], projectId);
+      assert.equal(result.exitCode, 3, result.stdout);
+      assert.equal(JSON.parse(result.stderr).error.code, "RESEARCH_TASK_WINDOW_REQUIRED");
+      assert.deepEqual(
+        (await loadProject(fx.root, projectId)).scientificDesign,
+        before.scientificDesign,
+      );
+      assert.equal(
+        (await readVerifiedJournal(workspacePaths(fx.root).journal)).some(
+          (event) => event.scope === projectId && event.type === "project.task.defined",
+        ),
+        false,
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("shows committed scope invalidation read-only after a crash before the state projection", async () => {
+    const fx = await fixture();
+    try {
+      await initializeProject(
+        fx.root,
+        "source",
+        "Retain precise task and scientific approval authority after interruption.",
+        undefined,
+        false,
+        undefined,
+        scientificPolicy("source"),
+        await scientificDesignInput(fx.root, "source"),
+      );
+      const defined = await fx.task(["define", "--input", fx.inputPath], "source");
+      assert.equal(defined.exitCode, 0, defined.stderr);
+      await passResearchDesignGate(fx.root, "source");
+      const scopePath = join(fx.files, "crash-scope.json");
+      await writeFile(
+        scopePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          reason: "Explicit operator scope change for a process-crash regression.",
+          requirements: [contractInput().requirements[0]],
+        }),
+      );
+      const proposed = await cli([
+        "research",
+        "project",
+        "task",
+        "scope",
+        "propose",
+        "source",
+        "--input",
+        scopePath,
+        "--expected-contract",
+        JSON.parse(defined.stdout).contractSha256,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(proposed.exitCode, 0, proposed.stderr);
+      const proposalSha = JSON.parse(proposed.stdout).proposalSha256;
+      const worker = fileURLToPath(
+        new URL("./fixtures/research-recovery/crash-worker.mjs", import.meta.url),
+      );
+      const crashed = spawnSync(
+        process.execPath,
+        ["--import", "tsx", worker, fx.root, "scope-committed", proposalSha],
+        {
+          encoding: "utf8",
+          timeout: 15_000,
+          env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR },
+        },
+      );
+      assert.equal(crashed.stderr, "");
+      assert.ok(crashed.signal || crashed.status !== 0);
+      assert.equal(await readFile(join(fx.root, "fault-point.txt"), "utf8"), "scope-committed");
+      const projectPath = join(workspacePaths(fx.root).projects, "source", "project.json");
+      const before = await readFile(projectPath);
+      const status = await inspectScientificReviewStatus(fx.root, "source");
+      assert.equal(status.gates?.["research-design"].status, "pending");
+      assert.deepEqual(await readFile(projectPath), before);
+      const replay = await cli([
+        "research",
+        "project",
+        "task",
+        "scope",
+        "approve",
+        "source",
+        "--proposal",
+        proposalSha,
+        "--confirm-change",
+        proposalSha,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(replay.exitCode, 0, replay.stderr);
+      assert.equal(JSON.parse(replay.stdout).replayed, true);
+      assert.equal(
+        (await loadProject(fx.root, "source")).scientificDesign!.gates["research-design"].status,
+        "pending",
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("reports workflow completion separately when the reviewed task remains inconclusive", async () => {
+    const fx = await acquiredFixture();
+    try {
+      for (const row of fx.rows)
+        assert.equal(
+          (await recordAcceptance(fx, acceptanceInput(row, fx.atom.atomId, [], "inconclusive")))
+            .exitCode,
+          0,
+        );
+      await finishProducer(fx);
+      let calls = 0;
+      const run = await runResearchWorkspace(
+        fx.root,
+        { maxParallel: 1, maxCycles: 2, dryRun: false, environment: {} },
+        async (request) => {
+          calls += 1;
+          const packet = JSON.parse(
+            await readFile(join(request.projectRoot, "inputs/review-packet.json"), "utf8"),
+          );
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              schemaVersion: 1,
+              packetSha256: packet.packetSha256,
+              decision: "pass",
+              issues: [],
+              rationale: "The report accurately states that evidence is inconclusive.",
+              taskAssessment: {
+                contextSha256: packet.taskAcceptance.contextSha256,
+                requirements: packet.taskAcceptance.requirements.map(
+                  (row: { requirementSha256: string }) => ({
+                    requirementSha256: row.requirementSha256,
+                    decision: "not-answered",
+                    reason: "The required evidence is still inconclusive.",
+                  }),
+                ),
+              },
+            }),
+            stderr: "",
+            tokens: 10,
+            inputTokens: 5,
+            cachedInputTokens: 0,
+            outputTokens: 5,
+            costUsd: 0,
+            wallSeconds: 0,
+            model: null,
+            runtime: null,
+          };
+        },
+      );
+      const value = JSON.parse(JSON.stringify(run));
+      assert.equal(value.status, "complete");
+      assert.equal(value.projects[0].task.currentScope.status, "incomplete");
+      assert.equal(value.projects[0].task.originalScope.status, "incomplete");
+      assert.equal(calls, 1);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("exports task relationships and verifies a moved audit without the source workspace", async () => {
+    const fx = await acquiredFixture();
+    try {
+      const recorded = await recordAcceptance(
+        fx,
+        acceptanceInput(fx.rows[0]!, fx.atom.atomId, [], "negative-result"),
+      );
+      assert.equal(recorded.exitCode, 0, recorded.stderr);
+      const destination = join(fx.files, "audit");
+      const exported = await cli([
+        "research",
+        "project",
+        "audit",
+        "export",
+        "task-project",
+        "--output",
+        destination,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(exported.exitCode, 0, exported.stderr);
+      const manifest = JSON.parse(exported.stdout);
+      assert.match(manifest.researchChain.task.contextSha256, /^[a-f0-9]{64}$/);
+      const moved = join(fx.files, "moved-audit");
+      await cp(destination, moved, { recursive: true });
+      await rm(fx.root, { recursive: true });
+      const verified = await cli([
+        "research",
+        "project",
+        "audit",
+        "verify",
+        "--bundle",
+        moved,
+        "--json",
+      ]);
+      assert.equal(verified.exitCode, 0, verified.stderr);
+      assert.equal(
+        JSON.parse(verified.stdout).task.contractSha256,
+        manifest.researchChain.task.contractSha256,
+      );
+      assert.equal(JSON.parse(verified.stdout).task.executionCertified, false);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("rejects audit task-binding changes even when the manifest hash is recomputed", async () => {
+    const fx = await acquiredFixture();
+    try {
+      const destination = join(fx.files, "task-binding-audit");
+      const exported = await cli([
+        "research",
+        "project",
+        "audit",
+        "export",
+        "task-project",
+        "--output",
+        destination,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(exported.exitCode, 0, exported.stderr);
+      const manifestPath = join(destination, "manifest.json");
+      const original = JSON.parse(await readFile(manifestPath, "utf8"));
+      const altered = structuredClone(original);
+      altered.researchChain.task = {
+        contractSha256: "a".repeat(64),
+        originalContractSha256: "b".repeat(64),
+        contextSha256: "c".repeat(64),
+      };
+      const { manifestSha256: _old, ...core } = altered;
+      altered.manifestSha256 = sha256Text(canonicalJson(core));
+      await chmod(manifestPath, 0o600);
+      await writeFile(manifestPath, JSON.stringify(altered, null, 2) + "\n");
+      const invalid = await cli([
+        "research",
+        "project",
+        "audit",
+        "verify",
+        "--bundle",
+        destination,
+        "--json",
+      ]);
+      assert.equal(invalid.exitCode, 3);
+      assert.match(invalid.stderr, /RESEARCH_AUDIT_BUNDLE_INVALID/);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("preserves the exact BOM and CRLF bytes of native result files", async () => {
+    const fx = await acquiredFixture();
+    try {
+      const path = join(fx.files, "result.csv");
+      await writeFile(path, "\uFEFFname,value\r\nnull-result,0\r\n");
+      const result = await recordAcceptance(
+        fx,
+        acceptanceInput(fx.rows[0]!, fx.atom.atomId, [path], "negative-result"),
+      );
+      assert.equal(result.exitCode, 0, result.stderr);
+      const receipt = JSON.parse(result.stdout);
+      assert.equal(receipt.results[0].sha256, await sha256File(path));
+      assert.deepEqual(
+        await readFile(
+          join(workspacePaths(fx.root).projects, "task-project", receipt.results[0].path),
+        ),
+        await readFile(path),
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("retains a failed computation honestly when no result file was produced", async () => {
+    const fx = await acquiredFixture("computation");
+    try {
+      const result = await recordAcceptance(fx, {
+        ...acceptanceInput(fx.rows[0]!, fx.atom.atomId, [], "failed"),
+        checkKind: "computation",
+        reportedCommand: "node missing-check.mjs",
+      });
+      assert.equal(result.exitCode, 0, result.stderr);
+      assert.equal(JSON.parse(result.stdout).executionCertified, false);
+      const status = JSON.parse((await fx.task(["status"])).stdout);
+      assert.equal(status.currentScope.requirements[0].status, "failed");
+      assert.equal(status.currentScope.status, "incomplete");
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("rejects control-store result paths through a parent-directory alias", async () => {
+    const fx = await acquiredFixture();
+    try {
+      await writeFile(
+        join(workspacePaths(fx.root).control, "not-a-native-result.txt"),
+        "Synthetic control bytes are not native execution results.\n",
+      );
+      const alias = join(fx.files, "control-alias");
+      await symlink(
+        workspacePaths(fx.root).control,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const result = await recordAcceptance(
+        fx,
+        acceptanceInput(
+          fx.rows[0]!,
+          fx.atom.atomId,
+          [join(alias, "not-a-native-result.txt")],
+          "satisfied",
+        ),
+      );
+      assert.equal(result.exitCode, 3);
+      assert.match(result.stderr, /RESEARCH_TASK_/);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("binds early scientific review to the task and invalidates its approval after an authorized scope change", async () => {
+    const fx = await fixture();
+    const id = "scientific-task";
+    try {
+      await initializeProject(
+        fx.root,
+        id,
+        "Assess a declared scientific design without changing the original task silently.",
+        undefined,
+        false,
+        undefined,
+        scientificPolicy(id),
+        await scientificDesignInput(fx.root, id),
+      );
+      const defined = await fx.task(["define", "--input", fx.inputPath], id);
+      assert.equal(defined.exitCode, 0, defined.stderr);
+      const originalContract = JSON.parse(defined.stdout).contractSha256;
+      await passResearchDesignGate(fx.root, id);
+      const original = await loadProject(fx.root, id);
+      const packetPath = join(
+        workspacePaths(fx.root).projects,
+        id,
+        "scientific/review-packets/research-design",
+        `${original.scientificDesign!.gates["research-design"].packetSha256}.json`,
+      );
+      const packetBytes = await readFile(packetPath, "utf8");
+      assert.equal(JSON.parse(packetBytes).taskContract.contractSha256, originalContract);
+      const proposalPath = join(fx.files, "science-scope.json");
+      await writeFile(
+        proposalPath,
+        JSON.stringify({
+          schemaVersion: 1,
+          reason:
+            "Owner explicitly withdraws one requirement; scientific design remains unchanged.",
+          requirements: [contractInput().requirements[0]],
+        }),
+      );
+      const proposal = await cli([
+        "research",
+        "project",
+        "task",
+        "scope",
+        "propose",
+        id,
+        "--expected-contract",
+        originalContract,
+        "--input",
+        proposalPath,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(proposal.exitCode, 0, proposal.stderr);
+      const sha = JSON.parse(proposal.stdout).proposalSha256;
+      const approved = await cli([
+        "research",
+        "project",
+        "task",
+        "scope",
+        "approve",
+        id,
+        "--proposal",
+        sha,
+        "--confirm-change",
+        sha,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(approved.exitCode, 0, approved.stderr);
+      const current = await loadProject(fx.root, id);
+      assert.equal(current.scientificDesign!.designSha256, original.scientificDesign!.designSha256);
+      assert.deepEqual(current.publicationPolicy, original.publicationPolicy);
+      assert.ok(
+        Object.values(current.scientificDesign!.gates).every(
+          (gate) => gate.status === "pending" && gate.packetSha256 === null,
+        ),
+      );
+      assert.equal(await readFile(packetPath, "utf8"), packetBytes);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("records exact native check results without certifying execution or completing the task", async () => {
+    const fx = await acquiredFixture();
+    try {
+      const resultFile = join(fx.files, "observed-result.json");
+      await writeFile(
+        resultFile,
+        JSON.stringify({
+          difference: 0,
+          interpretation: "A bounded synthetic null-result fixture.",
+        }),
+      );
+      const input = acceptanceInput(fx.rows[0]!, fx.atom.atomId, [resultFile], "negative-result");
+      const recorded = await recordAcceptance(fx, input);
+      assert.equal(recorded.exitCode, 0, recorded.stderr);
+      const receipt = JSON.parse(recorded.stdout);
+      assert.equal(receipt.executionCertified, false);
+      assert.equal(receipt.trust, "native-observation");
+      assert.equal(receipt.results[0].sha256, await sha256File(resultFile));
+      assert.doesNotMatch(recorded.stdout, new RegExp(fx.files));
+      const before = await readFile(workspacePaths(fx.root).journal);
+      const replay = await recordAcceptance(fx, input);
+      assert.equal(replay.exitCode, 0, replay.stderr);
+      assert.equal(JSON.parse(replay.stdout).recordSha256, receipt.recordSha256);
+      assert.deepEqual(await readFile(workspacePaths(fx.root).journal), before);
+      const status = JSON.parse((await fx.task(["status"])).stdout);
+      assert.equal(status.currentScope.status, "incomplete");
+      assert.equal(status.currentScope.requirements[0].status, "recorded");
+      assert.equal(status.currentScope.requirements[0].outcome, "negative-result");
+      const stored = join(
+        workspacePaths(fx.root).projects,
+        "task-project",
+        receipt.results[0].path,
+      );
+      await chmod(stored, 0o600);
+      await writeFile(stored, "modified result\n");
+      const tampered = await fx.task(["status"]);
+      assert.equal(tampered.exitCode, 3);
+      assert.equal(JSON.parse(tampered.stderr).error.code, "RESEARCH_TASK_ARTIFACT_DRIFT");
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("rejects invented execution certification and evidence IDs before recording acceptance", async () => {
+    const fx = await acquiredFixture();
+    try {
+      const before = await readFile(workspacePaths(fx.root).journal);
+      const input = acceptanceInput(fx.rows[0]!, fx.atom.atomId, [], "satisfied");
+      for (const invalidInput of [
+        { ...input, executionCertified: true },
+        { ...input, evidenceAtomIds: ["invented-atom"] },
+        { ...input, requirementSha256: "b".repeat(64) },
+      ]) {
+        const result = await recordAcceptance(fx, invalidInput);
+        assert.equal(result.exitCode, 3);
+        assert.match(result.stderr, /RESEARCH_TASK_/);
+      }
+      assert.deepEqual(await readFile(workspacePaths(fx.root).journal), before);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("uses the existing single independent review to accept valid negative findings and close task coverage", async () => {
+    const fx = await acquiredFixture();
+    try {
+      const sharedResult = join(fx.files, "shared-result.json");
+      await writeFile(sharedResult, JSON.stringify({ fixtureDifference: 0 }));
+      for (const row of fx.rows) {
+        const recorded = await recordAcceptance(
+          fx,
+          acceptanceInput(row, fx.atom.atomId, [sharedResult], "negative-result"),
+        );
+        assert.equal(recorded.exitCode, 0, recorded.stderr);
+      }
+      await finishProducer(fx);
+      assert.equal(
+        (await readdir(join(workspacePaths(fx.root).projects, "task-project", "task/results")))
+          .length,
+        1,
+      );
+      let reviewCalls = 0;
+      const run = await runResearchWorkspace(
+        fx.root,
+        { maxParallel: 1, maxCycles: 2, dryRun: false, environment: {} },
+        async (request) => {
+          reviewCalls += 1;
+          const packet = JSON.parse(
+            await readFile(join(request.projectRoot, "inputs/review-packet.json"), "utf8"),
+          );
+          assert.equal(packet.taskAcceptance.requirements.length, 2);
+          assert.equal(packet.taskAcceptance.originalRequest, contractInput().originalRequest);
+          assert.equal(packet.taskAcceptance.results.length, 1);
+          assert.equal(
+            request.prompt.split(
+              `UNTRUSTED CHECK RESULT ${packet.taskAcceptance.results[0].sha256}`,
+            ).length - 1,
+            1,
+          );
+          assert.ok(
+            Array.isArray(request.outputSchema?.required) &&
+              request.outputSchema.required.includes("taskAssessment"),
+          );
+          const review = {
+            schemaVersion: 1,
+            packetSha256: packet.packetSha256,
+            decision: "pass",
+            issues: [],
+            rationale: "Bounded independent fixture review.",
+            taskAssessment: {
+              contextSha256: packet.taskAcceptance.contextSha256,
+              requirements: packet.taskAcceptance.requirements.map(
+                (row: { requirementSha256: string }) => ({
+                  requirementSha256: row.requirementSha256,
+                  decision: "answered",
+                  reason: "The declared null-result criterion is met within the exact fixture.",
+                }),
+              ),
+            },
+          };
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify(review),
+            stderr: "",
+            tokens: 10,
+            inputTokens: 5,
+            cachedInputTokens: 0,
+            outputTokens: 5,
+            costUsd: 0,
+            wallSeconds: 0,
+            model: null,
+            runtime: null,
+          };
+        },
+      );
+      assert.equal(run.status, "complete", JSON.stringify(run));
+      assert.equal(reviewCalls, 1);
+      const status = JSON.parse((await fx.task(["status"])).stdout);
+      assert.equal(status.currentScope.status, "complete");
+      assert.equal(status.originalScope.status, "complete");
+      assert.ok(
+        status.currentScope.requirements.every(
+          (row: { status: string }) => row.status === "reviewed",
+        ),
+      );
+      assert.equal(status.executionCertified, false);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("does not promote an inconclusive check just because the workflow reviewer returns pass", async () => {
+    const fx = await acquiredFixture();
+    try {
+      for (const row of fx.rows) {
+        const recorded = await recordAcceptance(
+          fx,
+          acceptanceInput(row, fx.atom.atomId, [], "inconclusive"),
+        );
+        assert.equal(recorded.exitCode, 0, recorded.stderr);
+      }
+      await finishProducer(fx);
+      const run = await runResearchWorkspace(
+        fx.root,
+        { maxParallel: 1, maxCycles: 1, dryRun: false, environment: {} },
+        async (request) => {
+          const packet = JSON.parse(
+            await readFile(join(request.projectRoot, "inputs/review-packet.json"), "utf8"),
+          );
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              schemaVersion: 1,
+              packetSha256: packet.packetSha256,
+              decision: "pass",
+              issues: [],
+              rationale: "An invalid overclaim fixture.",
+              taskAssessment: {
+                contextSha256: packet.taskAcceptance.contextSha256,
+                requirements: packet.taskAcceptance.requirements.map(
+                  (row: { requirementSha256: string }) => ({
+                    requirementSha256: row.requirementSha256,
+                    decision: "answered",
+                    reason: "Improperly promotes an inconclusive result.",
+                  }),
+                ),
+              },
+            }),
+            stderr: "",
+            tokens: 10,
+            inputTokens: 5,
+            cachedInputTokens: 0,
+            outputTokens: 5,
+            costUsd: 0,
+            wallSeconds: 0,
+            model: null,
+            runtime: null,
+          };
+        },
+      );
+      assert.notEqual(run.status, "complete");
+      const status = JSON.parse((await fx.task(["status"])).stdout);
+      assert.equal(status.currentScope.status, "incomplete");
+    } finally {
+      await fx.cleanup();
+    }
+  });
+  it("defines immutable requirements and derives separate original/current completion without a model", async () => {
+    const fx = await fixture();
+    try {
+      const unassessed = await fx.task(["status"]);
+      assert.equal(unassessed.exitCode, 0, unassessed.stderr);
+      assert.equal(JSON.parse(unassessed.stdout).status, "not-configured");
+      const defined = await fx.task(["define", "--input", fx.inputPath]);
+      assert.equal(defined.exitCode, 0, defined.stderr);
+      const binding = JSON.parse(defined.stdout);
+      assert.match(binding.contractSha256, /^[a-f0-9]{64}$/);
+      const before = await readFile(workspacePaths(fx.root).journal);
+      const repeated = await fx.task(["define", "--input", fx.inputPath]);
+      assert.equal(repeated.exitCode, 0, repeated.stderr);
+      assert.equal(JSON.parse(repeated.stdout).contractSha256, binding.contractSha256);
+      assert.deepEqual(await readFile(workspacePaths(fx.root).journal), before);
+      const status = JSON.parse((await fx.task(["status"])).stdout);
+      assert.equal(status.originalScope.status, "incomplete");
+      assert.equal(status.currentScope.status, "incomplete");
+      assert.deepEqual(
+        status.currentScope.requirements.map((entry: { id: string }) => entry.id),
+        ["electricity", "water"],
+      );
+      assert.ok(
+        status.currentScope.requirements.every(
+          (entry: { status: string }) => entry.status === "unanswered",
+        ),
+      );
+      assert.equal(status.executionCertified, false);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("requires exact separate scope authorization and keeps withdrawn original requirements visible", async () => {
+    const fx = await fixture();
+    try {
+      const defined = await fx.task(["define", "--input", fx.inputPath]);
+      assert.equal(defined.exitCode, 0, defined.stderr);
+      const original = JSON.parse(defined.stdout).contractSha256;
+      const input = join(fx.files, "scope.json");
+      await writeFile(
+        input,
+        JSON.stringify({
+          schemaVersion: 1,
+          reason: "Owner proposes postponing the unavailable water dataset.",
+          requirements: [contractInput().requirements[0]],
+        }),
+      );
+      const proposed = await cli([
+        "research",
+        "project",
+        "task",
+        "scope",
+        "propose",
+        "task-project",
+        "--input",
+        input,
+        "--expected-contract",
+        original,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(proposed.exitCode, 0, proposed.stderr);
+      const proposal = JSON.parse(proposed.stdout);
+      assert.deepEqual(proposal.changes.withdrawnRequirementIds, ["water"]);
+      assert.deepEqual(
+        proposal.changes.details.find((item: { id: string }) => item.id === "water").before,
+        contractInput().requirements[1],
+      );
+      assert.equal(JSON.parse((await fx.task(["status"])).stdout).contractSha256, original);
+      const approve = (confirmation?: string) =>
+        cli([
+          "research",
+          "project",
+          "task",
+          "scope",
+          "approve",
+          "task-project",
+          "--proposal",
+          proposal.proposalSha256,
+          ...(confirmation ? ["--confirm-change", confirmation] : []),
+          "--workspace",
+          fx.root,
+          "--json",
+        ]);
+      const missing = await approve();
+      assert.equal(missing.exitCode, 3);
+      assert.equal(JSON.parse(missing.stderr).error.code, "RESEARCH_TASK_SCOPE_APPROVAL_REQUIRED");
+      const mismatched = await approve("a".repeat(64));
+      assert.equal(mismatched.exitCode, 3);
+      const accepted = await approve(proposal.proposalSha256);
+      assert.equal(accepted.exitCode, 0, accepted.stderr);
+      const status = JSON.parse((await fx.task(["status"])).stdout);
+      assert.notEqual(status.contractSha256, original);
+      assert.equal(status.originalContractSha256, original);
+      assert.deepEqual(
+        status.currentScope.requirements.map((entry: { id: string }) => entry.id),
+        ["electricity"],
+      );
+      assert.equal(
+        status.originalScope.requirements.find((entry: { id: string }) => entry.id === "water")
+          .status,
+        "withdrawn",
+      );
+      assert.equal(status.originalScope.status, "incomplete");
+      assert.equal(status.scopeAuthorization.kind, "operator-confirmation");
+      const events = await readVerifiedJournal(workspacePaths(fx.root).journal);
+      assert.equal(
+        events.filter((event) => event.type === "project.task.scope.approved").length,
+        1,
+      );
+      const replay = await approve(proposal.proposalSha256);
+      assert.equal(replay.exitCode, 0, replay.stderr);
+      assert.deepEqual(await readVerifiedJournal(workspacePaths(fx.root).journal), events);
+      assert.equal(
+        (await loadProject(fx.root, "task-project")).question,
+        "Compare electricity and water evidence without presupposing a result.",
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("rejects producer approval flags, duplicate IDs and sensitive content before committing a task", async () => {
+    const fx = await fixture();
+    try {
+      const before = await readFile(workspacePaths(fx.root).journal);
+      for (const value of [
+        { ...contractInput(), approved: true },
+        {
+          ...contractInput(),
+          requirements: [contractInput().requirements[0], contractInput().requirements[0]],
+        },
+        {
+          ...contractInput(),
+          originalRequest: "Authorization: Bearer private-test-token-123456789",
+        },
+      ]) {
+        await writeFile(fx.inputPath, JSON.stringify(value));
+        const result = await fx.task(["define", "--input", fx.inputPath]);
+        assert.equal(result.exitCode, 3);
+        assert.equal(JSON.parse(result.stderr).error.code, "RESEARCH_TASK_INVALID");
+        assert.doesNotMatch(result.stdout + result.stderr, /private-test-token/);
+      }
+      assert.deepEqual(await readFile(workspacePaths(fx.root).journal), before);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("preserves original requirements through a fork without inheriting completion", async () => {
+    const fx = await fixture();
+    try {
+      const defined = await fx.task(["define", "--input", fx.inputPath]);
+      assert.equal(defined.exitCode, 0, defined.stderr);
+      const forked = await cli([
+        "research",
+        "project",
+        "fork",
+        "task-project",
+        "--to",
+        "task-successor",
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(forked.exitCode, 0, forked.stderr);
+      const status = await fx.task(["status"], "task-successor");
+      assert.equal(status.exitCode, 0, status.stderr);
+      const result = JSON.parse(status.stdout);
+      assert.equal(result.originalContractSha256, JSON.parse(defined.stdout).contractSha256);
+      assert.deepEqual(
+        result.originalScope.requirements.map((entry: { id: string }) => entry.id),
+        ["electricity", "water"],
+      );
+      assert.equal(result.currentScope.status, "incomplete");
+      assert.equal(result.origin.projectId, "task-project");
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("exposes task schemas offline and puts the bound task in the native stage packet", async () => {
+    const schema = await cli(["research", "schema", "show", "task-contract", "--json"]);
+    assert.equal(schema.exitCode, 0, schema.stderr);
+    assert.equal(JSON.parse(schema.stdout).additionalProperties, false);
+    const fx = await fixture();
+    try {
+      const defined = await fx.task(["define", "--input", fx.inputPath]);
+      assert.equal(defined.exitCode, 0, defined.stderr);
+      const prepared = await cli([
+        "research",
+        "project",
+        "stage",
+        "prepare",
+        "task-project",
+        "--stage",
+        "discover",
+        "--host-agent",
+        "codex",
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(prepared.exitCode, 0, prepared.stderr);
+      const packet = JSON.parse(prepared.stdout);
+      assert.equal(packet.taskContract.contractSha256, JSON.parse(defined.stdout).contractSha256);
+      assert.deepEqual(
+        packet.taskContract.requirements.map((entry: { id: string }) => entry.id),
+        ["electricity", "water"],
+      );
+      const late = await fx.task(["define", "--input", fx.inputPath]);
+      assert.equal(late.exitCode, 0, late.stderr); // An exact read-only acknowledgement is harmless.
+    } finally {
+      await fx.cleanup();
+    }
+  });
+});
+
+async function acquiredFixture(
+  checkKind: "evidence" | "computation" = "evidence",
+  inputPaddingBytes = 0,
+) {
+  const fx = await fixture();
+  const declaration = contractInput();
+  declaration.requirements[0]!.checkKind = checkKind;
+  await writeFile(fx.inputPath, JSON.stringify(declaration));
+  const defined = await fx.task(["define", "--input", fx.inputPath]);
+  assert.equal(defined.exitCode, 0, defined.stderr);
+  const inputPath = join(fx.files, "evidence.txt");
+  await writeFile(
+    inputPath,
+    "Synthetic electricity and water comparison: no measured difference in this fixture.\n" +
+      "non-embedded-input-padding\n".repeat(Math.ceil(inputPaddingBytes / 27)),
+  );
+  await addProjectInput(fx.root, "task-project", inputPath, "primary");
+  const discover = await prepareNativeResearchStage({
+    root: fx.root,
+    projectId: "task-project",
+    stage: "discover",
+    hostAgent: "codex",
+  });
+  const [candidate] = await listEvidenceCandidates(fx.root, "task-project");
+  assert.ok(candidate);
+  await recordDiscoveryAssessmentBatch({
+    root: fx.root,
+    projectId: "task-project",
+    value: {
+      schemaVersion: 1,
+      assessments: [
+        {
+          decision: "admit",
+          candidateId: candidate.id,
+          sourceId: "source-1",
+          sourceType: "primary",
+          relevance: "Direct fixture data.",
+          quality: { level: "primary", rationale: "Exact synthetic input." },
+          applicability: "Fixture only.",
+          coverageDimensions: ["research-question"],
+          limitations: [],
+        },
+      ],
+    },
+  });
+  await submitFixtureStage(fx, discover, {
+    schemaVersion: 2,
+    limitations: [],
+    dimensionJudgments: [{ id: "research-question", status: "covered" }],
+    gaps: [],
+  });
+  const acquire = await prepareNativeResearchStage({
+    root: fx.root,
+    projectId: "task-project",
+    stage: "acquire",
+    hostAgent: "codex",
+  });
+  await submitFixtureStage(fx, acquire, {
+    schemaVersion: 1,
+    decisions: [
+      {
+        sourceId: "source-1",
+        candidateId: candidate.id,
+        artifactIds: [],
+        status: "accepted",
+        rationale: "Exact readable input.",
+        limitations: [],
+      },
+    ],
+    limitations: [],
+    gaps: [],
+  });
+  const snapshot = await loadCurrentEvidenceSnapshot(fx.root, "task-project");
+  const artifact = snapshot.artifacts[0]!;
+  const atom = await registerEvidenceAtom({
+    root: fx.root,
+    projectId: "task-project",
+    value: {
+      schemaVersion: 1,
+      atomId: "task-fixture-atom",
+      sourceId: "source-1",
+      candidateId: candidate.id,
+      artifactId: artifact.artifactId,
+      locator: { kind: "line-range", startLine: 1, endLine: 1 },
+      statement: "The fixture records a null comparison.",
+      evidenceRoleIds: [],
+      coverageDimensionIds: ["research-question"],
+      evidenceFunction: "support",
+      scope: "Deterministic protocol fixture only.",
+      limitations: [],
+    },
+  });
+  await freezeEvidenceContentSnapshot(fx.root, "task-project");
+  const rows = JSON.parse((await fx.task(["status"])).stdout).currentScope.requirements as Array<{
+    id: string;
+    requirementSha256: string;
+  }>;
+  return { ...fx, artifact, atom, rows };
+}
+
+function acceptanceInput(
+  row: { id: string; requirementSha256: string },
+  atomId: string,
+  resultFiles: string[],
+  outcome: string,
+) {
+  return {
+    schemaVersion: 1,
+    requirementId: row.id,
+    requirementSha256: row.requirementSha256,
+    previousRecordSha256: null,
+    outcome,
+    summary: "Observed fixture result with explicit limitations, not a CLI-certified execution.",
+    checkKind: "evidence",
+    reportedCommand: null,
+    sourceIds: ["source-1"],
+    evidenceAtomIds: [atomId],
+    analysisFindingIds: [],
+    resultFiles,
+    limitations: ["Synthetic protocol fixture; not a scientific conclusion."],
+  };
+}
+
+async function recordAcceptance(fx: Awaited<ReturnType<typeof fixture>>, value: object) {
+  const path = join(fx.files, "acceptance.json");
+  await writeFile(path, JSON.stringify(value));
+  return cli([
+    "research",
+    "project",
+    "task",
+    "acceptance",
+    "record",
+    "task-project",
+    "--input",
+    path,
+    "--workspace",
+    fx.root,
+    "--json",
+  ]);
+}
+
+async function submitFixtureStage(
+  fx: Awaited<ReturnType<typeof fixture>>,
+  packet: Awaited<ReturnType<typeof prepareNativeResearchStage>>,
+  value: object,
+) {
+  const outputPath = join(fx.files, `${packet.stage}.json`);
+  await writeFile(outputPath, JSON.stringify(value));
+  return submitNativeResearchStage({
+    root: fx.root,
+    projectId: "task-project",
+    sessionId: packet.sessionId,
+    outputPath,
+    confirmedModel: packet.expectedModel,
+  });
+}
+
+async function finishProducer(fx: Awaited<ReturnType<typeof acquiredFixture>>) {
+  const analyze = await prepareNativeResearchStage({
+    root: fx.root,
+    projectId: "task-project",
+    stage: "analyze",
+    hostAgent: "codex",
+  });
+  const inference = JSON.parse(
+    await readFile(
+      join(workspacePaths(fx.root).projects, "task-project", "outputs/inference-snapshot.json"),
+      "utf8",
+    ),
+  );
+  await submitFixtureStage(fx, analyze, {
+    schemaVersion: 2,
+    inferenceSnapshotSha256: inference.snapshotSha256,
+    analysisRun: {
+      id: "native-fixture-observation",
+      mode: "qualitative",
+      status: "not-applicable",
+      implementationSha256s: [],
+      environmentSha256s: [],
+      inputArtifactSha256s: [fx.artifact.sha256],
+      command: null,
+      randomSeed: null,
+      limitations: [],
+    },
+    findings: [
+      {
+        id: "finding-1",
+        statement: "This fixture supplies bounded null-result evidence.",
+        evidence: ["source-1"],
+        evidenceAtomIds: [fx.atom.atomId],
+        claimIds: [],
+        analysisArtifactSha256s: [],
+        uncertainty: "Synthetic fixture only.",
+        applicability: "Protocol verification, not real-world inference.",
+      },
+    ],
+    limitations: [],
+  });
+  const synthesize = await prepareNativeResearchStage({
+    root: fx.root,
+    projectId: "task-project",
+    stage: "synthesize",
+    hostAgent: "codex",
+  });
+  await submitFixtureStage(fx, synthesize, {
+    schemaVersion: 1,
+    reportMarkdown:
+      "# Bounded null result\n\nThe synthetic fixture supplies a null comparison with explicit limitations. This is protocol validation, not a real scientific study.\n",
+  });
+}
+
+function scientificPolicy(projectId: string): ResearchPolicyBinding {
+  return {
+    goal: "top-journal",
+    projectId,
+    articleType: "computational-modeling",
+    field: "pavement-engineering",
+    journalClass: "discipline-flagship",
+    targetJournal: "International Journal of Pavement Engineering",
+    resolvedPolicySha256: "a".repeat(64),
+    approvalSha256: "b".repeat(64),
+    verdictCeiling: "target-journal-submission-ready",
+    documents: [],
+    resolvedRules: [],
+    resolvedConstraints: {},
+    requiredReviewers: ["evidence", "methods-reproducibility", "domain-novelty", "journal-editor"],
+    approvedAt: "2026-08-14T00:00:00.000Z",
+    expiresAt: "2027-08-14T00:00:00.000Z",
+  };
+}

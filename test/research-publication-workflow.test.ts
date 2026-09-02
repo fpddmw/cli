@@ -31,6 +31,7 @@ import {
 } from "../src/research/workspace/storage.js";
 import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
+import { defineProjectTask } from "../src/research/workspace/task-contract.js";
 import {
   passEvidenceConstructGate,
   passPilotMethodsGate,
@@ -47,6 +48,40 @@ const REVIEW_ROLES: PublicationReviewRole[] = [
 ];
 
 describe("top-journal publication workflow", () => {
+  it("carries the original task and current check matrix into the existing publication review", async () => {
+    const fixture = await publicationFixture("task-bound-publication", {}, {}, true);
+    try {
+      await freezePublicationManuscript({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        manuscriptPath: fixture.manuscript,
+        assessmentPath: fixture.assessment,
+        supplementPaths: [],
+        submissionFiles: fixture.submissionFiles,
+        producerAgent: "codex",
+        producerSessionId: "task-manuscript-producer",
+      });
+      const packet = JSON.parse(
+        JSON.stringify(
+          await preparePublicationReview({
+            root: fixture.root,
+            projectId: fixture.projectId,
+            role: "evidence",
+            reviewerAgent: "claude",
+            reviewerSessionId: "task-final-evidence-reviewer",
+          }),
+        ),
+      );
+      assert.equal(
+        packet.taskAcceptance.originalRequest,
+        "Evaluate the declared central outcome without presupposing a positive result.",
+      );
+      assert.equal(packet.taskAcceptance.requirements[0].id, "central-outcome");
+      assert.equal(packet.taskAcceptance.requirements[0].status, "unanswered");
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
   it("freezes a qualitative analysis without inventing a computational reproduction", async () => {
     const fixture = await publicationFixture(
       "qualitative-publication",
@@ -676,6 +711,7 @@ async function publicationFixture(
     command: string | null;
     randomSeed: string | null;
   }> = {},
+  withTask = false,
 ) {
   const root = await mkdtemp(join(tmpdir(), "tiangong-publication-workflow-"));
   await initializeResearchWorkspace(root, "Publication workflow");
@@ -694,6 +730,23 @@ async function publicationFixture(
     policy,
     designInput,
   );
+  if (withTask) {
+    await defineProjectTask(root, projectId, {
+      schemaVersion: 1,
+      originalRequest:
+        "Evaluate the declared central outcome without presupposing a positive result.",
+      requirements: [
+        {
+          id: "central-outcome",
+          text: "Evaluate the actual observed central outcome.",
+          acceptance: "Report traceable evidence, alternatives and uncertainty.",
+          checkKind: "evidence",
+          designClaimIds: [],
+          coverageDimensionIds: ["research-question"],
+        },
+      ],
+    });
+  }
   await passResearchDesignGate(root, projectId);
   let project = await loadProject(root, projectId);
   const outputRoot = join(workspacePaths(root).projects, projectId, "outputs");

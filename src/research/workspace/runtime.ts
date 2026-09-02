@@ -4,6 +4,14 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 
 import { CliError } from "../../errors.js";
 import { isConsistentAnalysisRunMetadata } from "./analysis-run.js";
+import { taskContext } from "./task-contract.js";
+import {
+  compileTaskAcceptanceContext,
+  inspectProjectTask,
+  taskAcceptancePrompt,
+  validateTaskReview,
+  type TaskAcceptanceContext,
+} from "./task-acceptance.js";
 import {
   assertProjectAuthority,
   projectAuthority,
@@ -162,6 +170,7 @@ export interface WorkspaceRunResult {
     scientificGate: ReturnType<typeof blockingScientificGate>;
     recommendedAction: string | null;
     usage: ProjectState["usage"];
+    task?: Awaited<ReturnType<typeof inspectProjectTask>>;
   }>;
 }
 
@@ -453,6 +462,7 @@ export interface NativeStagePacket {
   prompt: string;
   outputSchema: Record<string, unknown>;
   publicationPolicy: StagedPublicationPolicy | null;
+  taskContract: Awaited<ReturnType<typeof taskContext>>;
   discovery: DiscoveryProgress | null;
   limits: {
     maxOutputBytes: number;
@@ -734,9 +744,34 @@ export async function prepareNativeResearchStage(input: {
         discovery,
         await listEvidenceCandidates(input.root, project.id),
       );
+      const taskContract = await taskContext(
+        input.root,
+        project.id,
+        authority.taskEvents.get(project.id) ?? [],
+      );
+      const taskPrompt = taskContract
+        ? "Original task and current authorized scope (a workflow finish is not task completion):\n" +
+          JSON.stringify(taskContract)
+        : "";
+      if (
+        taskContract &&
+        Buffer.byteLength(
+          taskPrompt +
+            (input.stage === "discover" ? capsule.contextBundleContent : "") +
+            stageContextContent,
+          "utf8",
+        ) >
+          config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN
+      ) {
+        throw new CliError(
+          "The complete task and evidence context exceeds the reviewed input allowance. Condense representation without dropping requirements or explicitly review a larger context budget.",
+          { code: "RESEARCH_TASK_CONTEXT_TOO_LARGE", exitCode: 3 },
+        );
+      }
       const prompt = [
         "Perform this producer stage in the current interactive host session. Do not launch codex exec, claude -p, or any other nested reasoning agent.",
         capsule.publicationPolicyDocumentation,
+        taskPrompt,
         input.stage === "discover" && (hasBrokeredEvidence || hasDataEvidence)
           ? [
               hasBrokeredEvidence
@@ -777,6 +812,7 @@ export async function prepareNativeResearchStage(input: {
             : {},
         ),
         publicationPolicy: capsule.publicationPolicy,
+        taskContract,
         discovery,
         limits: {
           maxOutputBytes: config.budget.maxBytesPerPackage,
@@ -1813,7 +1849,22 @@ async function executeWorkPackage(
         config,
         discovery?.plan.reservedDiscoverTokens,
       );
-      const capsule = await createCapsule(root, project, workPackage, runId, config);
+      const taskAcceptance =
+        workPackage.stage === "review" ? await compileTaskAcceptanceContext(root, project) : null;
+      if (taskAcceptance?.requirements.some((row) => row.current && row.status === "unanswered")) {
+        throw new CliError(
+          "Record an actual check or an honest not-run/inconclusive disposition for each current requirement before spending review budget.",
+          { code: "RESEARCH_TASK_ACCEPTANCE_REQUIRED", exitCode: 3 },
+        );
+      }
+      const capsule = await createCapsule(
+        root,
+        project,
+        workPackage,
+        runId,
+        config,
+        taskAcceptance,
+      );
       capsuleRoot = capsule.capsuleRoot;
       capsuleDisposition = capsuleDispositionForHost(config.producer.agent);
       retainedCapsuleId =
@@ -1876,7 +1927,8 @@ async function executeWorkPackage(
           ) +
           (capsule.publicationPolicyDocumentation
             ? `\n\n${capsule.publicationPolicyDocumentation}`
-            : ""),
+            : "") +
+          (capsule.taskAcceptancePrompt ? `\n\n${capsule.taskAcceptancePrompt}` : ""),
         brokerUrl: primaryBrokerUrl,
         inputOnlyProvenance,
         maxOutputTokens: Math.min(stageOutputTokens, reservation.tokens),
@@ -2198,6 +2250,8 @@ interface Capsule {
   publicationPolicyDocumentation: string;
   reviewPacketSha256: string | null;
   reviewPacketRecord: OutputRecord | null;
+  taskAcceptance: TaskAcceptanceContext | null;
+  taskAcceptancePrompt: string;
 }
 
 interface CapsuleInputRecord {
@@ -2270,6 +2324,7 @@ async function createCapsule(
   workPackage: WorkPackage,
   runId: string,
   config: WorkspaceConfig,
+  taskAcceptance: TaskAcceptanceContext | null = null,
 ): Promise<Capsule> {
   const paths = workspacePaths(root);
   const capsuleRoot = join(paths.runtime, runId);
@@ -2434,6 +2489,7 @@ async function createCapsule(
         evidenceReceipts,
         evidenceArtifacts,
         reviewEvidenceContext.persistent,
+        taskAcceptance,
       )
     : null;
   return {
@@ -2448,6 +2504,8 @@ async function createCapsule(
     publicationPolicyDocumentation,
     reviewPacketSha256: reviewPacket?.sha256 ?? null,
     reviewPacketRecord: reviewPacket?.record ?? null,
+    taskAcceptance,
+    taskAcceptancePrompt: await taskAcceptancePrompt(root, taskAcceptance),
   };
 }
 
@@ -2514,6 +2572,7 @@ async function writeReviewPacket(
   evidenceReceipts: Awaited<ReturnType<typeof loadProjectEvidenceReceipts>>,
   evidenceArtifacts: Awaited<ReturnType<typeof stageEvidenceArtifacts>>,
   reviewEvidenceContext: OutputRecord,
+  taskAcceptance: TaskAcceptanceContext | null,
 ): Promise<{ sha256: string; record: OutputRecord }> {
   const snapshot = await loadCurrentEvidenceSnapshot(root, project.id);
   const immutableSnapshots = await loadImmutableEvidenceSnapshotChain(
@@ -2586,6 +2645,7 @@ async function writeReviewPacket(
       parentSnapshotSha256: snapshot.parentSnapshotSha256,
     },
     snapshotChain,
+    taskAcceptance,
     inputs: inputManifest,
     reviewEvidenceContext,
     inputFiles: [...inputFiles.values()].sort((left, right) => left.path.localeCompare(right.path)),
@@ -2987,7 +3047,7 @@ async function persistReviewPacket(
   return fileRecord(path, logicalPath);
 }
 
-async function loadVerifiedReviewPacket(
+export async function loadVerifiedReviewPacket(
   root: string,
   projectId: string,
   packetSha256: string,
@@ -3199,9 +3259,21 @@ function agentRequest(input: {
     outputSchema: schemaForStage(
       input.workPackage.stage as AgentPackageStage,
       input.capsule.reviewPacketSha256,
-      input.inputOnlyProvenance
-        ? { inputOnlyProvenanceIds: input.capsule.inputManifest.map((record) => record.id) }
-        : {},
+      {
+        ...(input.inputOnlyProvenance
+          ? { inputOnlyProvenanceIds: input.capsule.inputManifest.map((record) => record.id) }
+          : {}),
+        ...(input.capsule.taskAcceptance
+          ? {
+              taskAcceptance: {
+                contextSha256: input.capsule.taskAcceptance.contextSha256,
+                requirementSha256s: input.capsule.taskAcceptance.requirements.map(
+                  (row) => row.requirementSha256,
+                ),
+              },
+            }
+          : {}),
+      },
     ),
     requestId: input.requestId,
     purpose: input.purpose,
@@ -3356,6 +3428,7 @@ async function validateOutputShape(
     await validateAnalysis(path, value);
   }
   if (workPackage.stage === "review") {
+    validateTaskReview(value, await compileTaskAcceptanceContext(root, project));
     if (value.decision !== "pass") {
       throw new CliError("Independent review requested revision.", {
         code: "RESEARCH_REVIEW_REVISION_REQUIRED",
@@ -3930,6 +4003,7 @@ async function closeProjectMechanically(
     throw deterministicError("Project review does not bind a valid review packet hash.");
   }
   const reviewPacket = await loadVerifiedReviewPacket(root, project.id, review.packetSha256);
+  validateTaskReview(review, await compileTaskAcceptanceContext(root, project));
   await verifyReviewLedgerBinding(root, project.id, snapshot.snapshotId, review.packetSha256);
   const evidenceReceipts = await loadProjectEvidenceReceipts(root, project.id);
   const journal = await verifyJournal(workspacePaths(root).journal);
@@ -4831,8 +4905,20 @@ async function summarizeRun(
   projectId?: string,
   authority?: ProjectAuthorityIndex,
 ): Promise<WorkspaceRunResult> {
-  const projects = await projectsForRun(root, projectId, authority);
-  const summaries = projects.map((project) => projectRunSummary(root, project));
+  // One fresh journal view after execution includes newly committed reviewer results.
+  const summaryAuthority = executed.length
+    ? await readProjectAuthorityIndex(root)
+    : (authority ?? (await readProjectAuthorityIndex(root)));
+  const projects = await projectsForRun(root, projectId, summaryAuthority);
+  const summaries = await Promise.all(
+    projects.map(async (project) => {
+      const summary = projectRunSummary(root, project);
+      const events = summaryAuthority.taskEvents.get(project.id);
+      if (!events) return summary;
+      const task = await inspectProjectTask(root, project.id, events);
+      return task.status === "configured" ? { ...summary, task } : summary;
+    }),
+  );
   const unfinished = summaries.filter((project) => project.status !== "complete");
   const waiting = unfinished.filter(
     (project) => project.status === "waiting-user" || project.status === "waiting-external",
@@ -5028,6 +5114,7 @@ async function nativeStageBinding(
     canonicalJson({
       projectId: project.id,
       questionSha256: sha256Text(project.question),
+      taskContractSha256: (await taskContext(root, project.id))?.contractSha256 ?? null,
       evidenceRequirements: project.evidenceRequirements,
       inputs: project.inputs.map((record) => ({
         id: record.id,

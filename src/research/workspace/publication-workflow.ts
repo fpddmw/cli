@@ -14,6 +14,8 @@ import {
 import { loadProject } from "./projects.js";
 import { assertResearchPolicyBinding } from "./research-policy.js";
 import { assertScientificGateForStage } from "./scientific-review.js";
+import { compileTaskAcceptanceContext, type TaskAcceptanceContext } from "./task-acceptance.js";
+import { validateTaskObject } from "./task-contract.js";
 import {
   canonicalJson,
   ensureDirectory,
@@ -139,6 +141,7 @@ interface PublicationGeneration {
   submissionPackage: PublicationSubmissionPackage;
   assessmentResult: TopJournalAssessmentResult;
   requiredReviewRoles: PublicationReviewRole[];
+  taskAcceptanceSha256?: string | null;
 }
 
 interface PublicationCurrentPointer {
@@ -188,6 +191,7 @@ export interface PublicationReviewPacket {
   supplements: FrozenFile[];
   submissionPackage: PublicationSubmissionPackage;
   mechanicalAssessment: TopJournalAssessmentResult;
+  taskAcceptance: TaskAcceptanceContext | null;
   instructions: string[];
   packetSha256: string;
 }
@@ -671,6 +675,8 @@ export async function freezePublicationManuscript(input: {
       submissionPackage,
       assessmentResult,
       requiredReviewRoles: requiredReviewRoles(project.publicationPolicy!),
+      taskAcceptanceSha256:
+        (await compileTaskAcceptanceContext(input.root, project))?.contextSha256 ?? null,
     };
     const generationSha256 = sha256Text(canonicalJson(generationCore));
     const generation: PublicationGeneration = { ...generationCore, generationSha256 };
@@ -801,6 +807,7 @@ export async function preparePublicationReview(input: {
       supplements: generation.supplements,
       submissionPackage: generation.submissionPackage,
       mechanicalAssessment: generation.assessmentResult,
+      taskAcceptance: await compileTaskAcceptanceContext(input.root, project),
       instructions: reviewInstructions(input.role),
     };
     const packet: PublicationReviewPacket = {
@@ -1545,6 +1552,13 @@ async function loadCurrentGeneration(
     generation.submissionPackage.claimEvidenceGraph,
     generation.submissionPackage.reproducibilityManifest,
   ]);
+  const currentTask = await compileTaskAcceptanceContext(root, await loadProject(root, projectId));
+  if ((generation.taskAcceptanceSha256 ?? null) !== (currentTask?.contextSha256 ?? null)) {
+    throw publicationError(
+      "RESEARCH_PUBLICATION_TASK_BINDING_INVALID",
+      "The frozen publication generation no longer binds the current task checks.",
+    );
+  }
   return generation;
 }
 
@@ -1644,13 +1658,16 @@ async function loadReviewPacket(
     !["codex", "claude"].includes(String(packet.reviewer.agent)) ||
     typeof packet.reviewer.sessionSha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(packet.reviewer.sessionSha256) ||
-    sha256Text(canonicalJson(withoutHash)) !== packetSha256
+    sha256Text(canonicalJson(withoutHash)) !== packetSha256 ||
+    (packet.taskAcceptance?.contextSha256 ?? null) !== (generation.taskAcceptanceSha256 ?? null)
   ) {
     throw publicationError(
       "RESEARCH_PUBLICATION_REVIEW_BINDING_INVALID",
       "The publication review packet failed its content hash binding.",
     );
   }
+  if (packet.taskAcceptance)
+    validateTaskObject(packet.taskAcceptance, generation.taskAcceptanceSha256!, "contextSha256");
   return packet;
 }
 

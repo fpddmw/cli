@@ -5,6 +5,7 @@ import { CliError } from "../../errors.js";
 import {
   loadEvidenceArtifactRecords,
   producerVisibleMediaType,
+  producerReadableArtifactPath,
   registerEvidenceArtifact,
   type EvidenceArtifactRecord,
 } from "./artifacts.js";
@@ -218,21 +219,7 @@ export async function materializeAcquisitionAudit(
       !(options.readOnly && provenance.kind === "input") &&
       !boundArtifacts.some((artifact) => producerVisibleMediaType(artifact.mediaType))
     ) {
-      throw new CliError(
-        `Accepted full-text input ${decision.sourceId} requires a producer-readable artifact before acquisition can close.`,
-        {
-          code: "RESEARCH_INPUT_ATOMIZATION_REQUIRED",
-          exitCode: 3,
-          details: {
-            sourceId: decision.sourceId,
-            candidateId: decision.candidateId,
-            artifactIds: normalizedArtifactIds,
-            acceptedMediaTypes: ["application/json", "text/csv", "text/markdown", "text/plain"],
-            recovery:
-              "Register the exact local input or a readable derivative during the active acquire stage, then include its artifact ID in this decision.",
-          },
-        },
-      );
+      throw inputAtomizationError(decision.sourceId, decision.candidateId, normalizedArtifactIds);
     }
     decisions.push({ ...decision, artifactIds: normalizedArtifactIds, artifacts: boundArtifacts });
   }
@@ -242,6 +229,35 @@ export async function materializeAcquisitionAudit(
     limitations: parsed.limitations,
     gaps: parsed.gaps,
   };
+}
+
+export function inputCanProvideReadableArtifact(input: ProjectState["inputs"][number]): boolean {
+  return (
+    producerReadableArtifactPath(input.path) ||
+    Boolean(input.contextPath && producerReadableArtifactPath(input.contextPath))
+  );
+}
+
+function inputAtomizationError(
+  sourceId: string,
+  candidateId: string,
+  artifactIds: string[],
+): CliError {
+  return new CliError(
+    `Accepted full-text input ${sourceId} requires a producer-readable artifact before acquisition can close.`,
+    {
+      code: "RESEARCH_INPUT_ATOMIZATION_REQUIRED",
+      exitCode: 3,
+      details: {
+        sourceId,
+        candidateId,
+        artifactIds,
+        acceptedMediaTypes: ["application/json", "text/csv", "text/markdown", "text/plain"],
+        recovery:
+          "Register the exact local input or a readable derivative during the active acquire stage, then include its artifact ID in this decision.",
+      },
+    },
+  );
 }
 
 function artifactHasDownloadProvenance(
@@ -292,10 +308,12 @@ export async function freezeEvidenceSnapshot(
   const projectRoot = join(workspacePaths(root).projects, project.id);
   const evidencePath = join(projectRoot, "outputs", "evidence.json");
   const acquisitionPath = join(projectRoot, "outputs", "acquisition.json");
-  const evidence = parseEvidenceRecord(await readFile(evidencePath, "utf8"));
-  const audit = parseMaterializedAcquisitionAudit(
-    JSON.parse(await readFile(acquisitionPath, "utf8")),
-  );
+  const evidenceBytes = await readFile(evidencePath, "utf8");
+  const acquisitionBytes = await readFile(acquisitionPath, "utf8");
+  const evidence = parseEvidenceRecord(evidenceBytes);
+  const audit = parseMaterializedAcquisitionAudit(JSON.parse(acquisitionBytes));
+  const evidenceRecord = await persistSnapshotRecord(projectRoot, evidenceBytes);
+  const acquisitionRecord = await persistSnapshotRecord(projectRoot, acquisitionBytes);
   const includedSources = projectAcquisitionSources(
     evidence.sources as Array<Record<string, unknown>>,
     audit,
@@ -354,14 +372,8 @@ export async function freezeEvidenceSnapshot(
     questionSha256: sha256Text(project.question),
     createdAt: new Date().toISOString(),
     ledgerHead: ledger.head,
-    evidenceRecord: {
-      path: "outputs/evidence.json",
-      sha256: await sha256File(evidencePath),
-    },
-    acquisitionRecord: {
-      path: "outputs/acquisition.json",
-      sha256: await sha256File(acquisitionPath),
-    },
+    evidenceRecord,
+    acquisitionRecord,
     receipts: receipts.map((receipt) => ({
       attemptId: receipt.attemptId,
       capabilityId: receipt.capabilityId,
@@ -436,6 +448,20 @@ export async function freezeEvidenceSnapshot(
   return snapshot;
 }
 
+async function persistSnapshotRecord(projectRoot: string, bytes: string) {
+  const sha256 = sha256Text(bytes);
+  const logicalPath = `evidence/records/${sha256}.json`;
+  const destination = resolveContained(projectRoot, logicalPath);
+  if (await pathExists(destination)) {
+    if ((await sha256File(destination)) !== sha256)
+      throw snapshotError("Immutable snapshot record drifted.");
+  } else {
+    await ensureDirectory(dirname(destination));
+    await writeTextAtomic(destination, bytes, 0o444);
+  }
+  return { path: logicalPath, sha256 };
+}
+
 export function projectAcquisitionSources(
   sources: Array<Record<string, unknown>>,
   audit: MaterializedAcquisitionAudit,
@@ -487,7 +513,11 @@ export async function loadCurrentEvidenceSnapshot(
 export async function loadVerifiedEvidencePreparationView(
   root: string,
   projectId: string,
-): Promise<{ snapshot: EvidenceSnapshot; artifacts: EvidenceArtifactRecord[] }> {
+): Promise<{
+  snapshot: EvidenceSnapshot;
+  artifacts: EvidenceArtifactRecord[];
+  ancestorSnapshotSha256s: string[];
+}> {
   const projectRoot = join(workspacePaths(root).projects, projectId);
   const path = join(projectRoot, "outputs", "evidence-snapshot.json");
   if (!(await pathExists(path))) {
@@ -512,9 +542,22 @@ export async function loadVerifiedEvidencePreparationView(
   if (canonicalJson(chain[0]) !== canonicalJson(snapshot)) {
     throw snapshotError("Current evidence snapshot does not match the immutable chain leaf.");
   }
-  for (const record of [snapshot.evidenceRecord, snapshot.acquisitionRecord]) {
-    if ((await sha256File(resolveContained(projectRoot, record.path))) !== record.sha256) {
-      throw snapshotError(`Snapshot-bound output drifted: ${record.path}.`);
+  const verifiedRecords = new Set<string>();
+  for (const historical of chain) {
+    for (const record of [historical.evidenceRecord, historical.acquisitionRecord]) {
+      if (verifiedRecords.has(record.path + record.sha256)) continue;
+      if ((await sha256File(resolveContained(projectRoot, record.path))) !== record.sha256) {
+        throw snapshotError(`Snapshot-bound record drifted: ${record.path}.`);
+      }
+      verifiedRecords.add(record.path + record.sha256);
+    }
+  }
+  for (const [name, record] of [
+    ["evidence.json", snapshot.evidenceRecord],
+    ["acquisition.json", snapshot.acquisitionRecord],
+  ] as const) {
+    if ((await sha256File(join(projectRoot, "outputs", name))) !== record.sha256) {
+      throw snapshotError(`Current snapshot output drifted: ${name}.`);
     }
   }
   const receipts = await loadProjectEvidenceReceipts(root, projectId);
@@ -565,7 +608,11 @@ export async function loadVerifiedEvidencePreparationView(
       throw snapshotError(`Snapshot artifact binding drifted: ${artifact.artifactId}.`);
     }
   }
-  return { snapshot, artifacts };
+  return {
+    snapshot,
+    artifacts,
+    ancestorSnapshotSha256s: chain.slice(1).map((item) => item.snapshotSha256),
+  };
 }
 
 export async function loadInferenceReadyEvidenceSnapshot(
@@ -801,7 +848,7 @@ function isActivitySummary(value: unknown): boolean {
 function isSnapshotOutputRecord(value: unknown, path: string): boolean {
   return (
     isObject(value) &&
-    value.path === path &&
+    (value.path === path || value.path === `evidence/records/${value.sha256}.json`) &&
     typeof value.sha256 === "string" &&
     /^[0-9a-f]{64}$/.test(value.sha256)
   );

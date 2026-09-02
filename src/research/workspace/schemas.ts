@@ -3,6 +3,7 @@ import { Ajv2020, type ErrorObject, type ValidateFunction } from "ajv/dist/2020.
 import { CliError } from "../../errors.js";
 import { sanitizeResearchValue } from "./sanitization.js";
 import { canonicalJson, isObject } from "./storage.js";
+import { taskReviewAssessmentSchema } from "./task-acceptance.js";
 import type { AgentPackageStage } from "./types.js";
 
 export type StructuredStage = AgentPackageStage | "doctor";
@@ -10,6 +11,9 @@ export type JsonSchema = Record<string, unknown>;
 
 export interface StageSchemaContext {
   inputOnlyProvenanceIds?: string[];
+  taskAcceptance?: { contextSha256: string; requirementSha256s: string[] };
+  /** Structural parsing only; admission still checks the authoritative task context. */
+  taskAssessmentShape?: boolean;
 }
 
 const IDENTIFIER = "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$";
@@ -448,7 +452,14 @@ export function schemaForStage(
   const schema: JsonSchema = {
     type: "object",
     additionalProperties: false,
-    required: ["schemaVersion", "packetSha256", "decision", "issues", "rationale"],
+    required: [
+      "schemaVersion",
+      "packetSha256",
+      "decision",
+      "issues",
+      "rationale",
+      ...(context.taskAcceptance || context.taskAssessmentShape ? ["taskAssessment"] : []),
+    ],
     properties: {
       schemaVersion: { type: "integer", const: 1 },
       packetSha256: reviewPacketSha256
@@ -457,6 +468,9 @@ export function schemaForStage(
       decision: { type: "string", enum: ["pass", "revise"] },
       issues: { type: "array", items: reviewIssueSchema },
       rationale: nonEmptyString,
+      ...(context.taskAcceptance || context.taskAssessmentShape
+        ? { taskAssessment: taskReviewAssessmentSchema(context.taskAcceptance) }
+        : {}),
     },
   };
   return schema;
@@ -520,7 +534,11 @@ export function parseStructuredStageOutput(
   if (!isObject(value)) {
     throw new StructuredOutputError(`${stage} output must be a JSON object.`);
   }
-  const schema = schemaForStage(stage, reviewPacketSha256);
+  const schema = schemaForStage(
+    stage,
+    reviewPacketSha256,
+    stage === "review" && isObject(value.taskAssessment) ? { taskAssessmentShape: true } : {},
+  );
   const key = canonicalJson(schema);
   const validate = validators.get(key) ?? compileValidator(key, schema);
   if (!validate(value)) {

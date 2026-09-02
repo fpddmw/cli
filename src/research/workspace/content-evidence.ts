@@ -46,6 +46,7 @@ const MAX_BATCH_INPUT_BYTES = EVIDENCE_CONTENT_LIMITS.maxBatchInputBytes;
 
 interface ContentPreparationView {
   acquisition: Awaited<ReturnType<typeof loadCurrentEvidenceSnapshot>>;
+  acquisitionAncestors: Set<string>;
   artifacts: Map<string, EvidenceArtifactRecord>;
   roleIds: Set<string> | null;
   texts: Map<string, { text: string; lines?: string[]; json?: unknown }>;
@@ -65,6 +66,8 @@ export interface ArtifactDecompositionRecord {
   candidateId: string;
   sourceArtifactId: string;
   sourceArtifactSha256: string;
+  acquisitionSnapshotSha256?: string;
+  supersedesSha256?: string | null;
   status: "complete" | "limited" | "failed";
   parser: { id: string; version: string };
   outputArtifactIds: string[];
@@ -142,20 +145,26 @@ export async function recordArtifactDecomposition(input: {
   value: Record<string, unknown>;
 }): Promise<ArtifactDecompositionRecord> {
   const view = await loadContentPreparationView(input.root, input.projectId);
-  const record = prepareDecompositionRecord(input, view);
+  let record = prepareDecompositionRecord(input, view);
   const existing = (await loadDecompositionRecords(input.root, input.projectId)).find(
     (item) => item.sourceArtifactId === record.sourceArtifactId,
   );
-  if (existing) {
+  record = selectDecompositionRevision(record, existing, view);
+  if (record === existing) return existing;
+  const destination = decompositionRecordPath(
+    input.root,
+    input.projectId,
+    existing ? record.decompositionSha256 : record.sourceArtifactId,
+  );
+  if (await pathExists(destination)) {
+    const staged = await readDecompositionFile(destination);
     assertSameContentRecord(
-      existing.decompositionSha256,
+      staged.decompositionSha256,
       record.decompositionSha256,
       "decomposition",
     );
-    return existing;
-  }
-  const destination = decompositionRecordPath(input.root, input.projectId, record.sourceArtifactId);
-  await writeJsonAtomic(destination, record, 0o444);
+    record = staged;
+  } else await writeJsonAtomic(destination, record, 0o444);
   await chmod(destination, 0o444).catch(() => undefined);
   await appendEvidenceLedgerEvent(input.root, input.projectId, "decomposition.recorded", {
     decompositionId: record.decompositionId,
@@ -167,6 +176,8 @@ export async function recordArtifactDecomposition(input: {
     outputArtifactIds: record.outputArtifactIds,
     outputArtifactSha256s: record.outputArtifactSha256s,
     contentClasses: record.contentClasses,
+    acquisitionSnapshotSha256: record.acquisitionSnapshotSha256,
+    supersedesSha256: record.supersedesSha256,
   });
   return record;
 }
@@ -213,6 +224,8 @@ function prepareDecompositionRecord(
     candidateId: source.candidateId,
     sourceArtifactId: source.artifactId,
     sourceArtifactSha256: source.sha256,
+    acquisitionSnapshotSha256: acquisition.snapshotSha256,
+    supersedesSha256: null,
     status: value.status,
     parser: value.parser,
     outputArtifactIds: outputs.map((artifact) => artifact.artifactId),
@@ -228,6 +241,46 @@ function prepareDecompositionRecord(
     recordedAt: new Date().toISOString(),
   };
   return record;
+}
+
+function selectDecompositionRevision(
+  prepared: ArtifactDecompositionRecord,
+  previous: ArtifactDecompositionRecord | undefined,
+  view: ContentPreparationView,
+): ArtifactDecompositionRecord {
+  if (!previous) return prepared;
+  const semantic = (record: ArtifactDecompositionRecord) => {
+    const value: Record<string, unknown> = { ...record };
+    for (const key of [
+      "decompositionId",
+      "decompositionSha256",
+      "recordedAt",
+      "acquisitionSnapshotSha256",
+      "supersedesSha256",
+    ])
+      delete value[key];
+    return canonicalJson(value);
+  };
+  if (semantic(prepared) === semantic(previous)) return previous;
+  if (
+    !previous.acquisitionSnapshotSha256 ||
+    !view.acquisitionAncestors.has(previous.acquisitionSnapshotSha256)
+  ) {
+    assertSameContentRecord(
+      previous.decompositionSha256,
+      prepared.decompositionSha256,
+      "decomposition",
+    );
+  }
+  const { decompositionId: _id, decompositionSha256: _sha, recordedAt, ...stable } = prepared;
+  const revised = { ...stable, supersedesSha256: previous.decompositionSha256 };
+  const decompositionSha256 = sha256Text(canonicalJson(revised));
+  return {
+    ...revised,
+    decompositionId: `decomposition-${decompositionSha256.slice(0, 24)}`,
+    decompositionSha256,
+    recordedAt,
+  };
 }
 
 export async function registerEvidenceAtom(input: {
@@ -396,7 +449,7 @@ export async function registerEvidenceContentBatch(input: {
       view.texts.clear();
       currentArtifact = value.artifactId;
     }
-    const prepared =
+    let prepared =
       input.kind === "atom"
         ? await prepareEvidenceAtom({ ...input, value: value as Record<string, unknown> }, view)
         : prepareDecompositionRecord({ ...input, value: value as Record<string, unknown> }, view);
@@ -409,14 +462,21 @@ export async function registerEvidenceContentBatch(input: {
     }
     seen.add(id);
     const previous = existing.get(id);
-    if (previous)
+    if (input.kind === "decomposition") {
+      prepared = selectDecompositionRevision(
+        prepared as ArtifactDecompositionRecord,
+        previous as ArtifactDecompositionRecord | undefined,
+        view,
+      );
+      if (prepared !== previous) added += 1;
+    } else if (previous)
       assertSameContentRecord(
         contentRecordSha256(previous),
         contentRecordSha256(prepared),
         input.kind,
       );
     else added += 1;
-    records[index] = previous ?? prepared;
+    records[index] = input.kind === "decomposition" ? prepared : (previous ?? prepared);
   }
   const stable = {
     schemaVersion: 1 as const,
@@ -473,6 +533,7 @@ async function loadContentPreparationView(
     : null;
   return {
     acquisition: verified.snapshot,
+    acquisitionAncestors: new Set(verified.ancestorSnapshotSha256s),
     artifacts: new Map(verified.artifacts.map((artifact) => [artifact.artifactId, artifact])),
     roleIds,
     texts: new Map(),
@@ -576,9 +637,10 @@ async function loadCommittedContentBatchRecords(
   root: string,
   projectId: string,
   kind: ContentBatchKind,
+  verifiedEvents?: Awaited<ReturnType<typeof readVerifiedJournal>>,
 ): Promise<ContentRecord[]> {
   const ledger = evidenceLedgerPath(root, projectId);
-  const events = await readVerifiedJournal(ledger);
+  const events = verifiedEvents ?? (await readVerifiedJournal(ledger));
   const records: ContentRecord[] = [];
   const seen = new Set<string>();
   for (const event of events) {
@@ -635,15 +697,18 @@ export async function freezeEvidenceContentSnapshot(
   projectId: string,
 ): Promise<EvidenceContentSnapshot> {
   await assertContentPreparationWindow(root, projectId);
-  const [project, acquisition, artifacts, decompositions, atoms, ledgerEvents] = await Promise.all([
-    loadProject(root, projectId),
-    loadCurrentEvidenceSnapshot(root, projectId),
-    loadEvidenceArtifactRecords(root, projectId),
-    loadDecompositionRecords(root, projectId),
-    loadEvidenceAtomRecords(root, projectId),
-    readJournal(evidenceLedgerPath(root, projectId)),
-  ]);
+  const [project, acquisition, artifacts, decompositions, recordedAtoms, ledgerEvents] =
+    await Promise.all([
+      loadProject(root, projectId),
+      loadCurrentEvidenceSnapshot(root, projectId),
+      loadEvidenceArtifactRecords(root, projectId),
+      loadDecompositionRecords(root, projectId),
+      loadEvidenceAtomRecords(root, projectId),
+      readJournal(evidenceLedgerPath(root, projectId)),
+    ]);
   const selectedArtifactIds = new Set(acquisition.artifacts.map((artifact) => artifact.artifactId));
+  const activeAtom = currentAcquisitionAtomPredicate(acquisition);
+  const atoms = recordedAtoms.filter(activeAtom);
   const selectedArtifacts = artifacts.filter((artifact) =>
     selectedArtifactIds.has(artifact.artifactId),
   );
@@ -836,8 +901,9 @@ export async function loadCurrentEvidenceContentSnapshot(
   const atoms = new Map(
     (await loadEvidenceAtomRecords(root, projectId)).map((record) => [record.atomId, record]),
   );
+  const activeAtom = currentAcquisitionAtomPredicate(acquisition);
   for (const record of snapshot.atoms) {
-    if (canonicalJson(atoms.get(record.atomId)) !== canonicalJson(record)) {
+    if (!activeAtom(record) || canonicalJson(atoms.get(record.atomId)) !== canonicalJson(record)) {
       throw contentError(
         `Evidence atom binding drifted: ${record.atomId}.`,
         "RESEARCH_EVIDENCE_CONTENT_SNAPSHOT_INVALID",
@@ -845,6 +911,29 @@ export async function loadCurrentEvidenceContentSnapshot(
     }
   }
   return snapshot;
+}
+
+function currentAcquisitionAtomPredicate(
+  acquisition: Awaited<ReturnType<typeof loadCurrentEvidenceSnapshot>>,
+) {
+  const artifacts = new Map(
+    acquisition.artifacts.map((artifact) => [artifact.artifactId, artifact]),
+  );
+  const sourceArtifacts = new Map(
+    acquisition.sources.map((source) => [
+      String(source.id),
+      new Set(Array.isArray(source.artifactIds) ? (source.artifactIds as string[]) : []),
+    ]),
+  );
+  return (atom: EvidenceAtomRecord) => {
+    const artifact = artifacts.get(atom.artifactId);
+    return Boolean(
+      artifact &&
+      sourceArtifacts.get(atom.sourceId)?.has(atom.artifactId) &&
+      artifact.sha256 === atom.artifactSha256 &&
+      artifact.candidateId === atom.candidateId,
+    );
+  };
 }
 
 export async function loadDecompositionRecords(
@@ -855,16 +944,27 @@ export async function loadDecompositionRecords(
     workspacePaths(root).projects,
     `${projectId}/evidence/decompositions`,
   );
-  const entries = (await pathExists(directory))
-    ? await readdir(directory, { withFileTypes: true })
-    : [];
+  const events = await readVerifiedJournal(evidenceLedgerPath(root, projectId));
   const records: ArtifactDecompositionRecord[] = [];
-  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-    if (!entry.isFile() || entry.isSymbolicLink() || !entry.name.endsWith(".json")) continue;
-    const record = parseDecompositionRecord(
-      JSON.parse(await readFile(resolve(directory, entry.name), "utf8")),
+  for (const event of events) {
+    if (event.type !== "decomposition.recorded") continue;
+    const hash = event.payload.decompositionSha256;
+    const artifactId = event.payload.sourceArtifactId;
+    if (typeof hash !== "string" || !SHA256.test(hash) || !identifierValue(artifactId)) {
+      throw contentError(
+        "Decomposition commit identity is invalid.",
+        "RESEARCH_DECOMPOSITION_STORE_INVALID",
+      );
+    }
+    const versionPath = resolve(directory, `${hash}.json`);
+    const record = await readDecompositionFile(
+      (await pathExists(versionPath)) ? versionPath : resolve(directory, `${artifactId}.json`),
     );
-    if (entry.name !== `${record.sourceArtifactId}.json` || record.projectId !== projectId) {
+    if (
+      record.projectId !== projectId ||
+      record.sourceArtifactId !== artifactId ||
+      record.decompositionSha256 !== hash
+    ) {
       throw contentError(
         "Evidence decomposition identity does not match its path.",
         "RESEARCH_DECOMPOSITION_STORE_INVALID",
@@ -872,11 +972,76 @@ export async function loadDecompositionRecords(
     }
     records.push(record);
   }
-  const batched = await loadCommittedContentBatchRecords(root, projectId, "decomposition");
-  return mergeContentRecords(
-    [...records, ...(batched as ArtifactDecompositionRecord[])],
-    "decomposition",
-  );
+  const batched = await loadCommittedContentBatchRecords(root, projectId, "decomposition", events);
+  return effectiveDecompositions([...records, ...(batched as ArtifactDecompositionRecord[])]);
+}
+
+async function readDecompositionFile(path: string): Promise<ArtifactDecompositionRecord> {
+  const info = await lstat(path).catch(() => undefined);
+  if (!info?.isFile() || info.isSymbolicLink() || info.size > MAX_BATCH_INPUT_BYTES) {
+    throw contentError(
+      "Committed decomposition is not a bounded regular file.",
+      "RESEARCH_DECOMPOSITION_STORE_INVALID",
+    );
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    throw contentError(
+      "Committed decomposition JSON is invalid.",
+      "RESEARCH_DECOMPOSITION_STORE_INVALID",
+    );
+  }
+  return parseDecompositionRecord(value);
+}
+
+function effectiveDecompositions(
+  records: ArtifactDecompositionRecord[],
+): ArtifactDecompositionRecord[] {
+  const groups = new Map<string, Map<string, ArtifactDecompositionRecord>>();
+  for (const record of records) {
+    const group =
+      groups.get(record.sourceArtifactId) ?? new Map<string, ArtifactDecompositionRecord>();
+    if (!group.has(record.decompositionSha256)) group.set(record.decompositionSha256, record);
+    groups.set(record.sourceArtifactId, group);
+  }
+  const result: ArtifactDecompositionRecord[] = [];
+  for (const group of groups.values()) {
+    const parents = new Set<string>();
+    for (const record of group.values()) {
+      if (!record.supersedesSha256) continue;
+      const parent = group.get(record.supersedesSha256);
+      if (
+        !parent ||
+        !record.acquisitionSnapshotSha256 ||
+        record.acquisitionSnapshotSha256 === parent.acquisitionSnapshotSha256 ||
+        record.projectId !== parent.projectId ||
+        record.sourceArtifactSha256 !== parent.sourceArtifactSha256
+      ) {
+        throw contentError(
+          "Decomposition revision lineage is invalid.",
+          "RESEARCH_DECOMPOSITION_STORE_INVALID",
+        );
+      }
+      parents.add(record.supersedesSha256);
+    }
+    const heads = [...group.values()].filter((record) => !parents.has(record.decompositionSha256));
+    const seen = new Set<string>();
+    let cursor = heads[0];
+    while (cursor && !seen.has(cursor.decompositionSha256)) {
+      seen.add(cursor.decompositionSha256);
+      cursor = cursor.supersedesSha256 ? group.get(cursor.supersedesSha256) : undefined;
+    }
+    if (heads.length !== 1 || seen.size !== group.size || cursor) {
+      throw contentError(
+        "Decomposition has conflicting or cyclic revisions.",
+        "RESEARCH_DECOMPOSITION_CONFLICT",
+      );
+    }
+    result.push(heads[0]!);
+  }
+  return result.sort((a, b) => a.sourceArtifactId.localeCompare(b.sourceArtifactId));
 }
 
 export async function loadEvidenceAtomRecords(
@@ -1151,6 +1316,12 @@ function parseDecompositionRecord(value: unknown): ArtifactDecompositionRecord {
     !identifierValue(value.sourceArtifactId) ||
     typeof value.sourceArtifactSha256 !== "string" ||
     !SHA256.test(value.sourceArtifactSha256) ||
+    (value.acquisitionSnapshotSha256 !== undefined &&
+      (typeof value.acquisitionSnapshotSha256 !== "string" ||
+        !SHA256.test(value.acquisitionSnapshotSha256))) ||
+    (value.supersedesSha256 !== undefined &&
+      value.supersedesSha256 !== null &&
+      (typeof value.supersedesSha256 !== "string" || !SHA256.test(value.supersedesSha256))) ||
     !["complete", "limited", "failed"].includes(String(value.status)) ||
     !isObject(value.parser) ||
     !identifierValue(value.parser.id) ||
