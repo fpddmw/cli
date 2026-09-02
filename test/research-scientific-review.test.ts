@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
+import { declaredSourceTypes } from "../src/research/workspace/evidence-role-coverage.js";
 import type { CliIO } from "../src/io.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import { exportProjectAuditBundle } from "../src/research/workspace/audit-bundle.js";
@@ -1199,7 +1200,9 @@ describe("top-journal early scientific reviews", () => {
       const project = await loadProject(fixture.root, fixture.projectId);
       project.evidenceRequirements = {
         dimensions: fixture.design.evidenceRoles.flatMap((role) => role.coverageDimensionIds),
-        sourceTypes: fixture.design.evidenceRoles.flatMap((role) => role.sourceTypeRequirements),
+        sourceTypes: fixture.design.evidenceRoles.flatMap((role) =>
+          declaredSourceTypes(role.sourceTypeRequirements),
+        ),
         minSources: 20,
         minFullTextSources: 10,
         minDatedSources: 12,
@@ -1211,7 +1214,11 @@ describe("top-journal early scientific reviews", () => {
       const sharedFullText = sharedIndependent.slice(0, 6);
       const sharedDated = sharedIndependent.slice(0, 4);
       const sourceTypes = [
-        ...new Set(fixture.design.evidenceRoles.flatMap((role) => role.sourceTypeRequirements)),
+        ...new Set(
+          fixture.design.evidenceRoles.flatMap((role) =>
+            declaredSourceTypes(role.sourceTypeRequirements),
+          ),
+        ),
       ];
       const dimensions = [
         ...new Set(fixture.design.evidenceRoles.flatMap((role) => role.coverageDimensionIds)),
@@ -1786,7 +1793,9 @@ function evidenceSnapshotSources(design: Awaited<ReturnType<typeof projectFixtur
     Array.from({ length: role.minimumIndependentSources }, (_, index) => ({
       id: `source-${roleIndex}-${index}`,
       sourceType:
-        role.sourceTypeRequirements[index % role.sourceTypeRequirements.length] ?? "academic-paper",
+        declaredSourceTypes(role.sourceTypeRequirements)[
+          index % declaredSourceTypes(role.sourceTypeRequirements).length
+        ] ?? "academic-paper",
       publicationDate: "2025-01-01",
       fullTextAvailable: true,
       coverageDimensions: [...role.coverageDimensionIds],
@@ -1955,7 +1964,7 @@ function evidenceAssessment(
             )
           : [],
       dimensionIds: valid ? role.coverageDimensionIds : [],
-      sourceTypes: valid ? role.sourceTypeRequirements : [],
+      sourceTypes: valid ? declaredSourceTypes(role.sourceTypeRequirements) : [],
     })),
     closestWorkDispositionComplete: valid,
     centralEvidenceFitsContext: valid,

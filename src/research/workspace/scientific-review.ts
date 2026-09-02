@@ -3,6 +3,7 @@ import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
+import { sourceTypeRequirementGaps } from "./evidence-role-coverage.js";
 import { appendJournalEvent, verifyJournal } from "./journal.js";
 import { loadProject, nextScientificGate, saveProject } from "./projects.js";
 import { assertResearchPolicyBinding } from "./research-policy.js";
@@ -172,8 +173,9 @@ interface ScientificFutureGateObligation {
   code:
     | "UNCERTAINTY_STATE_VALUES_NOT_FROZEN"
     | "MODEL_IMPLEMENTATION_NOT_FROZEN"
-    | "MODEL_ENVIRONMENT_LOCK_NOT_FROZEN";
-  dueGate: "evidence-construct" | "pilot-methods";
+    | "MODEL_ENVIRONMENT_LOCK_NOT_FROZEN"
+    | "POLICY_RULE_DUE_UNRESOLVED";
+  dueGate: "evidence-construct" | "pilot-methods" | "publication-freeze";
   objectIds: string[];
   policyRuleIds: string[];
 }
@@ -1189,10 +1191,10 @@ function evaluateAssessment(
           [required.id],
         );
       }
-      if (required.sourceTypeRequirements.some((sourceType) => !sourceTypes.has(sourceType))) {
+      if (sourceTypeRequirementGaps(required.sourceTypeRequirements, sourceTypes).length) {
         add(
           "EVIDENCE_ROLE_SOURCE_TYPE_UNCOVERED",
-          "A required evidence role did not demonstrate every declared source type.",
+          "A required evidence role did not satisfy its declared source-type constraint groups.",
           [required.id],
         );
       }
@@ -2155,8 +2157,11 @@ function isScientificReviewPacket(
           "UNCERTAINTY_STATE_VALUES_NOT_FROZEN",
           "MODEL_IMPLEMENTATION_NOT_FROZEN",
           "MODEL_ENVIRONMENT_LOCK_NOT_FROZEN",
+          "POLICY_RULE_DUE_UNRESOLVED",
         ].includes(String(obligation.code)) &&
-        ["evidence-construct", "pilot-methods"].includes(String(obligation.dueGate)) &&
+        ["evidence-construct", "pilot-methods", "publication-freeze"].includes(
+          String(obligation.dueGate),
+        ) &&
         Array.isArray(obligation.objectIds) &&
         obligation.objectIds.every((id) => typeof id === "string" && id.length > 0) &&
         Array.isArray(obligation.policyRuleIds) &&
@@ -2261,7 +2266,7 @@ function reviewInstructions(role: ScientificReviewRole): string[] {
     "Do not infer field validation, causality, independence, or quantity scope beyond the design.",
     "Interpret this gate within the declared lifecycle: three early scientific reviews precede four final publication reviews of the frozen manuscript.",
     "A material post-review change must create a new authoritative generation and consume the declared revision reserve.",
-    "mechanicalAssessment.futureGateObligations names source-derived values, model implementations, and environment locks that are allowed to remain pending now but will become blocking mechanical errors at their exact due gate unless a new authoritative design generation freezes them.",
+    "mechanicalAssessment.futureGateObligations names every planned Policy disposition, including pending source values, models, and environment locks. Early-review obligations become blocking at their exact due gate unless a new authoritative design generation satisfies them; publication-freeze obligations remain subject to publication assessment.",
   ];
 }
 
@@ -2269,10 +2274,11 @@ function scientificFutureGateObligations(
   design: ScientificDesignContract,
   role: ScientificReviewRole,
 ): ScientificFutureGateObligation[] {
-  const gateRank: Record<ScientificReviewRole, number> = {
+  const gateRank: Record<ScientificReviewRole | "publication-freeze", number> = {
     "research-design": 0,
     "evidence-construct": 1,
     "pilot-methods": 2,
+    "publication-freeze": 3,
   };
   const grouped = new Map<string, { objectIds: string[]; policyRuleIds: Set<string> }>();
   const addObligation = (
@@ -2350,10 +2356,31 @@ function scientificFutureGateObligations(
       );
     }
   }
+  const coveredRules = new Set([...grouped.values()].flatMap((item) => [...item.policyRuleIds]));
+  for (const disposition of design.policyRuleDispositions) {
+    if (
+      disposition.status !== "planned" ||
+      disposition.dueGate === "research-design" ||
+      coveredRules.has(disposition.ruleId)
+    )
+      continue;
+    for (const objectId of [
+      ...disposition.claimIds,
+      ...disposition.evidenceRoleIds,
+      ...disposition.validationPlanIds,
+      ...disposition.knownGapIds,
+      ...disposition.uncertaintyParameterIds,
+      ...disposition.modelStructureIds,
+    ]) {
+      addObligation("POLICY_RULE_DUE_UNRESOLVED", disposition.dueGate, objectId, [
+        disposition.ruleId,
+      ]);
+    }
+  }
   return [...grouped.entries()].map(([key, obligation]) => ({
     code: key.slice(0, key.indexOf(":")) as ScientificFutureGateObligation["code"],
     dueGate: key.slice(key.indexOf(":") + 1) as ScientificFutureGateObligation["dueGate"],
-    objectIds: obligation.objectIds,
+    objectIds: [...new Set(obligation.objectIds)],
     policyRuleIds: [...obligation.policyRuleIds],
   }));
 }

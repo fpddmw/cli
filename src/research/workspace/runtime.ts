@@ -466,6 +466,7 @@ export interface NativeStagePacket {
     recordAssessment: { argv: string[]; recordSchema: Record<string, unknown> } | null;
     bindDownload: { argv: string[]; recordSchema: Record<string, unknown> } | null;
     inspectAccess: { argv: string[] } | null;
+    forecastAcquisition: { argv: string[] } | null;
     requestHandoff: { argv: string[]; recordSchema: Record<string, unknown> };
     registerArtifact: {
       argv: string[];
@@ -872,6 +873,25 @@ export async function prepareNativeResearchStage(input: {
                     unknown
                   >,
                   catalog: dataCapabilities,
+                }
+              : null,
+          forecastAcquisition:
+            input.stage === "acquire"
+              ? {
+                  argv: [
+                    "tiangong-ai",
+                    "research",
+                    "project",
+                    "evidence",
+                    "content",
+                    "forecast",
+                    project.id,
+                    "--input",
+                    "<absolute-acquisition-audit.json>",
+                    "--workspace",
+                    input.root,
+                    "--json",
+                  ],
                 }
               : null,
           registerArtifact:

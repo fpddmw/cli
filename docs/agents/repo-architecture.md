@@ -116,8 +116,11 @@ storage writes, queueing, and document status transitions.
   closeout, native Web/Browser activity receipts whose sensitive inputs are
   retained only by hash, exact download-event binding, and explicit exact-file
   artifact registration with PDF/ZIP/OpenXML validation,
-  acquisition audits that freeze both success and honest gaps, immutable
-  parent/delta evidence snapshots, automatic hash-checked input-backed artifact
+  acquisition audits that freeze both success and honest gaps,
+  read-only pre-acquisition forecasts using the indexed typed-content role
+  evaluator and source-type constraints shared with scientific review, explicit
+  all-of/any-of/distinct-at-least groups without a recursive expression language,
+  immutable parent/delta evidence snapshots, automatic hash-checked input-backed artifact
   materialization for readable local inputs, exact-lineage artifact decomposition,
   line-range/JSON-Pointer evidence atoms, typed-content coverage snapshots,
   bounded atomic content-registration batches with one operation-local verified

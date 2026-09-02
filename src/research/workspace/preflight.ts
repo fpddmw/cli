@@ -2,6 +2,7 @@ import { loadCapabilityDeclarations, verifyCapabilities } from "./capabilities.j
 import { projectResearchDataCapabilities } from "./data-evidence-adapter.js";
 import { hasPublicInternetCapability } from "./external-skills.js";
 import { deriveDiscoveryPlan } from "./discovery-planning.js";
+import { declaredSourceTypes } from "./evidence-role-coverage.js";
 import {
   evaluateScientificDesign,
   scientificDesignPolicyGaps,
@@ -799,7 +800,9 @@ function appendScientificDesignContractGaps(
       }
     }
     const mappedDimensions = new Set(requiredRoles.flatMap((role) => role.coverageDimensionIds));
-    const mappedSourceTypes = new Set(requiredRoles.flatMap((role) => role.sourceTypeRequirements));
+    const mappedSourceTypes = new Set(
+      requiredRoles.flatMap((role) => declaredSourceTypes(role.sourceTypeRequirements)),
+    );
     for (const dimension of requirements.dimensions) {
       if (!mappedDimensions.has(dimension)) {
         gaps.push(`${prefix}evidence-dimension-uncovered:${dimension}`);

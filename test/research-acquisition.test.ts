@@ -109,12 +109,36 @@ describe("research acquisition and evidence snapshots", () => {
       assert.equal(result.acquisitionGate.decision, "pass");
       assert.equal(result.certifiesContentGate, false);
       assert.deepEqual(await readFile(evidenceLedgerPath(root, target.id)), before);
+      const emptyArtifactsPath = join(staging, "forecast-unmaterialized-input.json");
+      await writeFile(
+        emptyArtifactsPath,
+        JSON.stringify(acquisitionValue(candidate.id, "source-1", [])),
+      );
+      const unmaterialized = await invokeCli([
+        "research",
+        "project",
+        "evidence",
+        "content",
+        "forecast",
+        target.id,
+        "--input",
+        emptyArtifactsPath,
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(unmaterialized.exitCode, 0, unmaterialized.stderr);
+      assert.deepEqual(JSON.parse(unmaterialized.stdout).pendingInputArtifactSourceIds, [
+        "source-1",
+      ]);
+      assert.deepEqual(await readFile(evidenceLedgerPath(root, target.id)), before);
       const acquire = await prepareNativeResearchStage({
         root,
         projectId: target.id,
         stage: "acquire",
         hostAgent: "codex",
       });
+      assert.ok(acquire.commands.forecastAcquisition?.argv.includes("forecast"));
       await submitNativeResearchStage({
         root,
         projectId: target.id,

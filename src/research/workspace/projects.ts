@@ -652,7 +652,7 @@ export async function forkProject(
         await cloneProjectEvidenceReceipts(root, sourceProjectId, targetProjectId);
         await cloneEvidenceLedger(root, sourceProjectId, targetProjectId);
       }
-      if (inheritedStages.includes("acquire")) {
+      if (inheritedStages.includes("discover")) {
         await cloneProjectArtifactRecords(root, sourceProjectId, targetProjectId);
       }
       refreshProject(project);

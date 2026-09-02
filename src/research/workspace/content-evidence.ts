@@ -6,6 +6,7 @@ import { loadCurrentEvidenceSnapshot, loadVerifiedEvidencePreparationView } from
 import { loadEvidenceArtifactRecords, type EvidenceArtifactRecord } from "./artifacts.js";
 import { loadBoundAcquisitionDesign } from "./acquisition-routes.js";
 import { appendEvidenceLedgerEvent, evidenceLedgerPath } from "./evidence-ledger.js";
+import { computeRoleCoverage } from "./evidence-role-coverage.js";
 import { readJournal, readVerifiedJournal } from "./journal.js";
 import { loadProject } from "./projects.js";
 import { configuredResearchSecrets, sanitizeResearchText } from "./sanitization.js";
@@ -1123,81 +1124,6 @@ function extractAtomExcerptFromDocument(
     );
   }
   return excerpt;
-}
-
-function computeRoleCoverage(
-  roles: Array<{
-    id: string;
-    required: boolean;
-    minimumFullText: number;
-    minimumIndependentSources: number;
-    minimumDatedSources: number;
-    coverageDimensionIds: string[];
-    sourceTypeRequirements: string[];
-  }>,
-  sources: Array<Record<string, unknown>>,
-  atoms: EvidenceAtomRecord[],
-): EvidenceContentSnapshot["roleCoverage"] {
-  const sourcesById = new Map(sources.map((source) => [String(source.id), source]));
-  return roles
-    .filter((role) => role.required)
-    .map((role) => {
-      const roleAtoms = atoms.filter((atom) => atom.evidenceRoleIds.includes(role.id));
-      const sourceIds = sortedUnique(roleAtoms.map((atom) => atom.sourceId)).filter((sourceId) =>
-        sourcesById.has(sourceId),
-      );
-      const fullTextSourceIds = sourceIds.filter(
-        (sourceId) => sourcesById.get(sourceId)?.fullTextAvailable === true,
-      );
-      const datedSourceIds = sourceIds.filter(
-        (sourceId) => typeof sourcesById.get(sourceId)?.publicationDate === "string",
-      );
-      const coverageDimensionIds = sortedUnique(
-        roleAtoms.flatMap((atom) => atom.coverageDimensionIds),
-      );
-      const sourceTypes = sortedUnique(
-        sourceIds.flatMap((sourceId) => {
-          const sourceType = sourcesById.get(sourceId)?.sourceType;
-          return typeof sourceType === "string" ? [sourceType] : [];
-        }),
-      );
-      const gaps: string[] = [];
-      if (sourceIds.length < role.minimumIndependentSources) {
-        gaps.push(
-          `evidence role ${role.id} requires ${role.minimumIndependentSources} independent source(s), found ${sourceIds.length}`,
-        );
-      }
-      if (fullTextSourceIds.length < role.minimumFullText) {
-        gaps.push(
-          `evidence role ${role.id} requires ${role.minimumFullText} full-text source(s), found ${fullTextSourceIds.length}`,
-        );
-      }
-      if (datedSourceIds.length < role.minimumDatedSources) {
-        gaps.push(
-          `evidence role ${role.id} requires ${role.minimumDatedSources} dated source(s), found ${datedSourceIds.length}`,
-        );
-      }
-      for (const dimension of role.coverageDimensionIds) {
-        if (!coverageDimensionIds.includes(dimension)) {
-          gaps.push(`evidence role ${role.id} lacks atom coverage for dimension ${dimension}`);
-        }
-      }
-      for (const sourceType of role.sourceTypeRequirements) {
-        if (!sourceTypes.includes(sourceType)) {
-          gaps.push(`evidence role ${role.id} lacks source type ${sourceType}`);
-        }
-      }
-      return {
-        roleId: role.id,
-        sourceIds,
-        fullTextSourceIds,
-        datedSourceIds,
-        coverageDimensionIds,
-        sourceTypes,
-        decision: (gaps.length ? "insufficient" : "pass") as "pass" | "insufficient",
-        gaps,
-      };
-    });
 }
 
 function artifactDescendsFrom(

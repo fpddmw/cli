@@ -99,6 +99,7 @@ export async function materializeAcquisitionAudit(
   root: string,
   project: ProjectState,
   value: Record<string, unknown>,
+  options: { readOnly?: boolean } = {},
 ): Promise<MaterializedAcquisitionAudit> {
   const parsed = parseAcquisitionValue(value);
   const evidencePath = join(workspacePaths(root).projects, project.id, "outputs", "evidence.json");
@@ -107,12 +108,11 @@ export async function materializeAcquisitionAudit(
   const sourceIds = new Set(sources.map((source) => String(source.id)));
   const sourceById = new Map(sources.map((source) => [String(source.id), source]));
   const sourceCandidates = await admittedSourceCandidateMap(root, project.id);
+  const decisionSourceIds = new Set(parsed.decisions.map((decision) => decision.sourceId));
   if (
     parsed.decisions.length !== sourceIds.size ||
-    parsed.decisions.some((decision) => !sourceIds.has(decision.sourceId)) ||
-    [...sourceIds].some(
-      (sourceId) => !parsed.decisions.some((decision) => decision.sourceId === sourceId),
-    )
+    decisionSourceIds.size !== sourceIds.size ||
+    [...decisionSourceIds].some((sourceId) => !sourceIds.has(sourceId))
   ) {
     throw acquisitionOutputError(
       "Acquisition decisions must assess every provisionally admitted source exactly once.",
@@ -172,32 +172,34 @@ export async function materializeAcquisitionAudit(
           },
         );
       }
-      const inputArtifact = await registerEvidenceArtifact({
-        root,
-        projectId: project.id,
-        candidateId: decision.candidateId,
-        path: projectInput.path,
-      });
-      artifacts.set(inputArtifact.artifactId, inputArtifact);
-      if (!normalizedArtifactIds.includes(inputArtifact.artifactId)) {
-        normalizedArtifactIds.push(inputArtifact.artifactId);
-        boundArtifacts.push(inputArtifact);
-      }
-      if (
-        !boundArtifacts.some((artifact) => producerVisibleMediaType(artifact.mediaType)) &&
-        projectInput.contextPath
-      ) {
-        const contextArtifact = await registerEvidenceArtifact({
+      if (!options.readOnly) {
+        const inputArtifact = await registerEvidenceArtifact({
           root,
           projectId: project.id,
           candidateId: decision.candidateId,
-          path: projectInput.contextPath,
-          derivedFromArtifactId: inputArtifact.artifactId,
+          path: projectInput.path,
         });
-        artifacts.set(contextArtifact.artifactId, contextArtifact);
-        if (!normalizedArtifactIds.includes(contextArtifact.artifactId)) {
-          normalizedArtifactIds.push(contextArtifact.artifactId);
-          boundArtifacts.push(contextArtifact);
+        artifacts.set(inputArtifact.artifactId, inputArtifact);
+        if (!normalizedArtifactIds.includes(inputArtifact.artifactId)) {
+          normalizedArtifactIds.push(inputArtifact.artifactId);
+          boundArtifacts.push(inputArtifact);
+        }
+        if (
+          !boundArtifacts.some((artifact) => producerVisibleMediaType(artifact.mediaType)) &&
+          projectInput.contextPath
+        ) {
+          const contextArtifact = await registerEvidenceArtifact({
+            root,
+            projectId: project.id,
+            candidateId: decision.candidateId,
+            path: projectInput.contextPath,
+            derivedFromArtifactId: inputArtifact.artifactId,
+          });
+          artifacts.set(contextArtifact.artifactId, contextArtifact);
+          if (!normalizedArtifactIds.includes(contextArtifact.artifactId)) {
+            normalizedArtifactIds.push(contextArtifact.artifactId);
+            boundArtifacts.push(contextArtifact);
+          }
         }
       }
     }
@@ -212,6 +214,7 @@ export async function materializeAcquisitionAudit(
     if (
       decision.status === "accepted" &&
       source?.fullTextAvailable === true &&
+      !(options.readOnly && provenance.kind === "input") &&
       !boundArtifacts.some((artifact) => producerVisibleMediaType(artifact.mediaType))
     ) {
       throw new CliError(
@@ -292,38 +295,10 @@ export async function freezeEvidenceSnapshot(
   const audit = parseMaterializedAcquisitionAudit(
     JSON.parse(await readFile(acquisitionPath, "utf8")),
   );
-  const decisions = new Map(audit.decisions.map((decision) => [decision.sourceId, decision]));
-  const includedSources = (evidence.sources as Array<Record<string, unknown>>).flatMap((source) => {
-    const sourceId = String(source.id);
-    const decision = decisions.get(sourceId);
-    if (!decision || decision.status === "rejected") return [];
-    const artifactIds = decision.artifacts.map((artifact) => artifact.artifactId);
-    const producerVisibleArtifactIds = decision.artifacts
-      .filter((artifact) => producerVisibleMediaType(artifact.mediaType))
-      .map((artifact) => artifact.artifactId);
-    const registeredInputFullText = source.fullTextAvailable === true;
-    const producerContextLevel = registeredInputFullText
-      ? "full-input"
-      : producerVisibleArtifactIds.length
-        ? "bounded-text-artifact"
-        : "metadata-only";
-    return [
-      {
-        ...source,
-        fullTextAvailable: producerContextLevel !== "metadata-only",
-        registeredFullFile: registeredInputFullText || artifactIds.length > 0,
-        producerContextLevel,
-        producerVisibleArtifactIds,
-        reviewerBoundFullFile: registeredInputFullText || artifactIds.length > 0,
-        locallyAcquired: artifactIds.length > 0,
-        visuallyVerified: false,
-        acquisitionStatus: decision.status,
-        acquisitionRationale: decision.rationale,
-        acquisitionLimitations: decision.limitations,
-        artifactIds,
-      },
-    ];
-  });
+  const includedSources = projectAcquisitionSources(
+    evidence.sources as Array<Record<string, unknown>>,
+    audit,
+  );
   const coverage = computeSnapshotCoverage(
     project,
     includedSources,
@@ -458,6 +433,44 @@ export async function freezeEvidenceSnapshot(
   project.evidenceState.currentSnapshotId = snapshot.snapshotId;
   project.evidenceState.currentSnapshotSha256 = snapshot.snapshotSha256;
   return snapshot;
+}
+
+export function projectAcquisitionSources(
+  sources: Array<Record<string, unknown>>,
+  audit: MaterializedAcquisitionAudit,
+): Array<Record<string, unknown>> {
+  const decisions = new Map(audit.decisions.map((decision) => [decision.sourceId, decision]));
+  return sources.flatMap((source) => {
+    const sourceId = String(source.id);
+    const decision = decisions.get(sourceId);
+    if (!decision || decision.status === "rejected") return [];
+    const artifactIds = decision.artifacts.map((artifact) => artifact.artifactId);
+    const producerVisibleArtifactIds = decision.artifacts
+      .filter((artifact) => producerVisibleMediaType(artifact.mediaType))
+      .map((artifact) => artifact.artifactId);
+    const registeredInputFullText = source.fullTextAvailable === true;
+    const producerContextLevel = registeredInputFullText
+      ? "full-input"
+      : producerVisibleArtifactIds.length
+        ? "bounded-text-artifact"
+        : "metadata-only";
+    return [
+      {
+        ...source,
+        fullTextAvailable: producerContextLevel !== "metadata-only",
+        registeredFullFile: registeredInputFullText || artifactIds.length > 0,
+        producerContextLevel,
+        producerVisibleArtifactIds,
+        reviewerBoundFullFile: registeredInputFullText || artifactIds.length > 0,
+        locallyAcquired: artifactIds.length > 0,
+        visuallyVerified: false,
+        acquisitionStatus: decision.status,
+        acquisitionRationale: decision.rationale,
+        acquisitionLimitations: decision.limitations,
+        artifactIds,
+      },
+    ];
+  });
 }
 
 function producerVisibleMediaType(mediaType: string): boolean {
@@ -845,7 +858,7 @@ async function admittedSourceCandidateMap(
   return result;
 }
 
-function computeSnapshotCoverage(
+export function computeSnapshotCoverage(
   project: ProjectState,
   sources: Array<Record<string, unknown>>,
   priorCoverage: Record<string, unknown>,

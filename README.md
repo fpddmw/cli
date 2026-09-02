@@ -966,6 +966,25 @@ resume criteria. Research then stops; it does not spend more budget on
 low-yield substitutes. If no lawful remaining route exists, the user must narrow
 or abandon the unsupported scope before a new reviewed generation can resume.
 
+Before submitting an acquisition audit, inspect its exact current eligibility:
+
+```bash
+tiangong-ai research project evidence content forecast PROJECT \
+  --input /absolute/path/acquisition-audit.json --workspace /absolute/workspace --json
+```
+
+This read-only check uses the freeze path's source projection and coverage
+rules, checks registered artifact bytes and provenance, and forecasts required
+roles from potentially assignable source dimensions. Exit `3` identifies known
+deficits; exit `0` means only potential eligibility, never successful atom
+registration, content freeze, independence certification, or review. Pending
+input materialization, decomposition, and exact atom assignments remain
+explicit. Re-run after material acquisition changes, not after every atom.
+Flat `sourceTypeRequirements` arrays mean **all-of**. A design may instead use
+`{"allOf":["academic-paper"],"anyOf":["government","industry"],"atLeast":{"count":2,"from":["academic-paper","government","industry"]}}`;
+every present group applies, and counts use distinct types. Forecast, typed
+content, and scientific review use the same source-type evaluator.
+
 Acquisition freezes an immutable evidence snapshot even when lawful retrieval
 ends with explicit gaps. Before inference, decompose every acquired PDF,
 spreadsheet, archive, or structured file into exact lineage-bound producer-
@@ -1011,6 +1030,12 @@ subset/filter or smaller official export preserving required variables/provenanc
 A size pass is not content acceptance: download binding, format, archive-expansion,
 SHA-256, and snapshot checks still apply. This is not a large-file streaming or
 external-reference bypass.
+
+Use acquisition `gaps` only for unresolved blocking evidence deficiencies;
+`limitations` holds non-blocking scope constraints and intentionally sealed
+outcomes. Future Policy obligations stay in the scientific design and appear
+in `futureGateObligations`, including ordinary planned rules without pending
+model/uncertainty objects. Their declared gate remains authoritative.
 
 Accepted local inputs are normalized into immutable input-backed artifacts while
 the acquire package is still active. JSON, CSV, Markdown, and plain-text inputs
@@ -1306,6 +1331,17 @@ target-specific scientific design must complete fresh evidence-construct and
 pilot-methods reviews before analysis. `research status --all` marks any legacy
 fork directory without a `project.forked` commit marker as
 `authority.state = "invalid"` rather than authoritative.
+
+To repair completed acquisition before analysis, use
+`research project fork SOURCE --to TARGET --resume-through discover`. This
+preserves the original frozen audit, inherits verified discovery/receipts and
+exact acquired artifacts, and opens TARGET's acquire stage. Reuse the returned
+artifact IDs, run `project evidence content forecast TARGET --input AUDIT`,
+then prepare/submit TARGET's acquire stage and rebuild typed content. There is
+no need to repeat paid searches or download unchanged files. Top-journal
+recovery additionally requires a Policy approved for TARGET and `--design`,
+`--design-producer-agent`, and `--design-producer-session`; new generation
+reviews cannot inherit the source generation's scientific approval.
 
 ## Research Search
 

@@ -280,8 +280,18 @@ const acquisitionAuditSchema: JsonSchema = {
         },
       },
     },
-    limitations: { type: "array", items: { type: "string" } },
-    gaps: { type: "array", items: { type: "string" } },
+    limitations: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Non-blocking scope limits or intentional outcome blinding. Sealed result values are not missing evidence; future Policy obligations belong in the scientific design.",
+    },
+    gaps: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Unresolved blocking acquisition or coverage deficiencies. Every non-empty entry stops inference but does not prevent preserving an honest immutable acquisition audit.",
+    },
   },
 };
 

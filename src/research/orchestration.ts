@@ -32,6 +32,7 @@ import { preflightEvidenceArtifact, registerEvidenceArtifact } from "./workspace
 import { executeResearchDataCapability } from "./workspace/data-evidence-adapter.js";
 import { exportProjectAuditBundle, verifyProjectAuditBundle } from "./workspace/audit-bundle.js";
 import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
+import { inspectAcquisitionForecast } from "./workspace/acquisition-forecast.js";
 import {
   freezeEvidenceContentSnapshot,
   loadCurrentEvidenceContentSnapshot,
@@ -220,6 +221,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project evidence artifact preflight (--bytes <known-bytes> | --path <absolute-file>) [--workspace <path>] [--json]
   tiangong-ai research project evidence atom register <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence content freeze <project-id> [--workspace <path>] [--json]
+  tiangong-ai research project evidence content forecast <project-id> --input <absolute-acquisition-audit.json> [--workspace <path>] [--json]
   tiangong-ai research project evidence content status <project-id> [--workspace <path>] [--json]
   tiangong-ai research schema show <discover|acquire|analyze|synthesize|review|doctor|scientific-design|scientific-assessment-research-design|scientific-assessment-evidence-construct|scientific-assessment-pilot-methods|scientific-review-research-design|scientific-review-evidence-construct|scientific-review-pilot-methods|publication-assessment|publication-review-evidence|publication-review-methods-reproducibility|publication-review-domain-novelty|publication-review-journal-editor> [--compatibility claude-code] [--json]
   tiangong-ai research status [--project <project-id>] [--all] [--workspace <absolute-path>] [--json]
@@ -1608,6 +1610,35 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     }
     if (evidenceAction === "content") {
       const [contentAction, ...contentRest] = evidenceRest;
+      if (contentAction === "forecast") {
+        const args = parseStrictArgs(
+          contentRest,
+          { ...WORKSPACE_OPTIONS, input: "string" },
+          "research project evidence content forecast",
+        );
+        if (strictBoolean(args, "help")) return writeHelp(io);
+        const projectId = onePositional(
+          args.positionals,
+          "research project evidence content forecast",
+        );
+        const inputPath = strictString(args, "input");
+        if (!inputPath)
+          throw new CliError(
+            "content forecast requires --input with a proposed acquisition audit.",
+            { code: "RESEARCH_ACQUISITION_FORECAST_INVALID", exitCode: 2 },
+          );
+        const root = await workspaceFromArgs(args);
+        const value = await readBoundedJsonRecord(
+          inputPath,
+          "--input",
+          "RESEARCH_ACQUISITION_FORECAST_INVALID",
+        );
+        const result = await inspectAcquisitionForecast(root, projectId, value);
+        writeJson(io, result, args);
+        return result.acquisitionGate.decision === "pass" && !result.knownRoleDeficits.length
+          ? 0
+          : 3;
+      }
       if (contentAction !== "freeze" && contentAction !== "status") {
         throw unknownAction("research project evidence content", contentAction ?? "");
       }

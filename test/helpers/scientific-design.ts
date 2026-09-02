@@ -2,6 +2,10 @@ import { readFile, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 
 import { readAndVerifyScientificDesign } from "../../src/research/workspace/scientific-design.js";
+import {
+  declaredSourceTypes,
+  type SourceTypeRequirements,
+} from "../../src/research/workspace/evidence-role-coverage.js";
 import { registerScientificObject } from "../../src/research/workspace/scientific-objects.js";
 import { loadProject } from "../../src/research/workspace/projects.js";
 import {
@@ -488,14 +492,16 @@ export function scientificEvidenceSnapshotSources(design: {
   evidenceRoles: Array<{
     minimumIndependentSources: number;
     coverageDimensionIds: string[];
-    sourceTypeRequirements: string[];
+    sourceTypeRequirements: SourceTypeRequirements;
   }>;
 }) {
   return design.evidenceRoles.flatMap((role, roleIndex) =>
     Array.from({ length: role.minimumIndependentSources }, (_, index) => ({
       id: `source-${roleIndex}-${index}`,
       sourceType:
-        role.sourceTypeRequirements[index % role.sourceTypeRequirements.length] ?? "academic-paper",
+        declaredSourceTypes(role.sourceTypeRequirements)[
+          index % declaredSourceTypes(role.sourceTypeRequirements).length
+        ] ?? "academic-paper",
       publicationDate: "2025-01-01",
       fullTextAvailable: true,
       coverageDimensions: [...role.coverageDimensionIds],
