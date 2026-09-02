@@ -28,18 +28,23 @@ export function forecastRoleEligibility(
       dimensionRoles.set(dimension, ids);
     }
   }
-  const potentialAtoms = sources.map((source) => {
-    const dimensions = Array.isArray(source.coverageDimensions)
-      ? source.coverageDimensions.filter((item): item is string => typeof item === "string")
-      : [];
-    return {
-      sourceId: String(source.id),
-      coverageDimensionIds: dimensions,
-      evidenceRoleIds: [
-        ...new Set(dimensions.flatMap((dimension) => [...(dimensionRoles.get(dimension) ?? [])])),
-      ],
-    };
-  });
+  // Projection derives this from verified readable artifacts or a hash-verified
+  // full-input source that will be materialized at submit. Metadata-only and
+  // unparsed binary files cannot supply atoms merely by sharing a dimension.
+  const potentialAtoms = sources
+    .filter((source) => source.fullTextAvailable === true)
+    .map((source) => {
+      const dimensions = Array.isArray(source.coverageDimensions)
+        ? source.coverageDimensions.filter((item): item is string => typeof item === "string")
+        : [];
+      return {
+        sourceId: String(source.id),
+        coverageDimensionIds: dimensions,
+        evidenceRoleIds: [
+          ...new Set(dimensions.flatMap((dimension) => [...(dimensionRoles.get(dimension) ?? [])])),
+        ],
+      };
+    });
   return computeRoleCoverage(roles, sources, potentialAtoms).map(({ decision, ...coverage }) => ({
     ...coverage,
     eligibility:
@@ -113,6 +118,14 @@ export async function inspectAcquisitionForecast(
       coverage,
       roleEligibility,
       knownRoleDeficits: roleEligibility.flatMap((role) => role.gaps),
+      sourcesNeedingReadableArtifacts: sources
+        .filter((source) => source.fullTextAvailable !== true)
+        .map((source) => ({
+          sourceId: source.id,
+          sourceType: source.sourceType,
+          artifactIds: source.artifactIds,
+          producerContextLevel: source.producerContextLevel,
+        })),
       pendingChecks: [
         "Register or materialize exact readable artifacts before acquisition commits.",
         "Decompose acquired containers, assign exact evidence atoms to roles, and freeze typed content after acquisition.",
