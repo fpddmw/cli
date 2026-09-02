@@ -62,6 +62,7 @@ async function privateDirectory(
     );
     if (!existing) return null;
   }
+  await requireDirectory(path);
   for (const part of ["lineage", ...parts]) {
     path = join(path, part);
     let info = await lstat(path).catch((error: NodeJS.ErrnoException) => {
@@ -78,6 +79,15 @@ async function privateDirectory(
     }
   }
   return path;
+}
+
+async function requireDirectory(path: string): Promise<void> {
+  const info = await lstat(path).catch(() => undefined);
+  if (!info?.isDirectory() || info.isSymbolicLink()) {
+    throw failure(
+      "Project recovery directories must be regular and cannot redirect through symlinks.",
+    );
+  }
 }
 
 function filename(record: ProjectMutation): string {
@@ -142,7 +152,10 @@ async function readRecord(path: string): Promise<ProjectMutation> {
 }
 
 async function projectState(root: string, projectId: string): Promise<ProjectState> {
-  const path = join(workspacePaths(root).projects, projectId, "project.json");
+  const projects = workspacePaths(root).projects;
+  await requireDirectory(projects);
+  await requireDirectory(join(projects, projectId));
+  const path = join(projects, projectId, "project.json");
   const info = await lstat(path).catch(() => undefined);
   if (!info?.isFile() || info.isSymbolicLink() || info.size > MAX_RECORD_BYTES) {
     throw failure("Project recovery requires a bounded regular project state.");
@@ -259,6 +272,7 @@ async function settleMutation(
   events: JournalEvent[],
 ): Promise<boolean> {
   const paths = workspacePaths(root);
+  await requireDirectory(paths.projects);
   const identity = record.identity;
   const started = events.find(
     (event) =>
