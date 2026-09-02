@@ -38,6 +38,7 @@ import { executeResearchDataCapability } from "./workspace/data-evidence-adapter
 import { exportProjectAuditBundle, verifyProjectAuditBundle } from "./workspace/audit-bundle.js";
 import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
 import { inspectAcquisitionForecast } from "./workspace/acquisition-forecast.js";
+import { reviseProjectAcquisition } from "./workspace/acquisition-revision.js";
 import {
   freezeEvidenceContentSnapshot,
   loadCurrentEvidenceContentSnapshot,
@@ -233,6 +234,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project evidence atom register <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence content freeze <project-id> [--workspace <path>] [--json]
   tiangong-ai research project evidence content forecast <project-id> --input <absolute-acquisition-audit.json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence acquisition revise <project-id> --expected-snapshot <sha256> --reason <text> [--workspace <path>] [--json]
   tiangong-ai research project evidence content status <project-id> [--workspace <path>] [--json]
   tiangong-ai research schema show <discover|acquire|analyze|synthesize|review|doctor|scientific-design|scientific-assessment-research-design|scientific-assessment-evidence-construct|scientific-assessment-pilot-methods|scientific-review-research-design|scientific-review-evidence-construct|scientific-review-pilot-methods|publication-assessment|publication-review-evidence|publication-review-methods-reproducibility|publication-review-domain-novelty|publication-review-journal-editor> [--compatibility claude-code] [--json]
   tiangong-ai research status [--project <project-id>] [--all] [--workspace <absolute-path>] [--json]
@@ -1291,6 +1293,33 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   }
   if (action === "evidence") {
     const [evidenceAction, ...evidenceRest] = rest;
+    if (evidenceAction === "acquisition") {
+      const [revisionAction, ...revisionRest] = evidenceRest;
+      if (revisionAction !== "revise")
+        throw unknownAction("research project evidence acquisition", revisionAction ?? "");
+      const args = parseStrictArgs(
+        revisionRest,
+        {
+          ...WORKSPACE_OPTIONS,
+          "expected-snapshot": "string",
+          reason: "string",
+        },
+        "research project evidence acquisition revise",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(
+        args.positionals,
+        "research project evidence acquisition revise",
+      );
+      const result = await reviseProjectAcquisition({
+        root: await workspaceFromArgs(args),
+        projectId,
+        expectedSnapshotSha256: strictString(args, "expected-snapshot") ?? "",
+        reason: strictString(args, "reason") ?? "",
+      });
+      writeJson(io, result, args);
+      return 0;
+    }
     if (evidenceAction === "data") {
       const [dataAction, ...dataRest] = evidenceRest;
       if (dataAction !== "run") {

@@ -1137,6 +1137,20 @@ export async function createProjectAddendum(
       snapshot.snapshotSha256,
     );
     for (const chainSnapshot of snapshotChain) {
+      for (const record of [chainSnapshot.evidenceRecord, chainSnapshot.acquisitionRecord]) {
+        const targetRecord = join(targetRoot, record.path);
+        if (!(await pathExists(targetRecord))) {
+          await ensureDirectory(dirname(targetRecord));
+          await cp(
+            join(workspacePaths(root).projects, sourceProjectId, record.path),
+            targetRecord,
+            {
+              errorOnExist: true,
+              force: false,
+            },
+          );
+        }
+      }
       await cp(
         join(
           workspacePaths(root).projects,

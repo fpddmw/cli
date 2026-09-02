@@ -15,7 +15,7 @@ const MAX_RECORD_BYTES = 16 * 1024 * 1024;
 
 interface MutationIdentity {
   schemaVersion: 1;
-  kind: "fork" | "retry";
+  kind: "fork" | "retry" | "acquisition-revision";
   operationId: string;
   sourceProjectId: string;
   targetProjectId: string | null;
@@ -114,7 +114,7 @@ async function readRecord(path: string): Promise<ProjectMutation> {
   const identity = value.identity;
   if (
     identity.schemaVersion !== 1 ||
-    !["fork", "retry"].includes(String(identity.kind)) ||
+    !["fork", "retry", "acquisition-revision"].includes(String(identity.kind)) ||
     typeof identity.operationId !== "string" ||
     !UUID.test(identity.operationId) ||
     typeof identity.sourceProjectId !== "string" ||
@@ -259,7 +259,11 @@ function committedEvent(events: JournalEvent[], record: ProjectMutation): Journa
   return events.find(
     (event) =>
       event.type ===
-        (record.identity.kind === "fork" ? "project.forked" : "project.retry.requested") &&
+        (record.identity.kind === "fork"
+          ? "project.forked"
+          : record.identity.kind === "retry"
+            ? "project.retry.requested"
+            : "project.acquisition.revision.requested") &&
       isObject(event.payload.mutation) &&
       event.payload.mutation.operationId === record.identity.operationId,
   );
@@ -412,7 +416,7 @@ export async function recoverProjectMutations(root: string): Promise<void> {
   const directory = await privateDirectory(root, ["pending-project-mutations"], false);
   if (!directory) return;
   const files = (await readdir(directory)).filter((name) =>
-    /^(?:fork|retry)-[a-z0-9][a-z0-9-]{2,63}\.json$/.test(name),
+    /^(?:fork|retry|acquisition-revision)-[a-z0-9][a-z0-9-]{2,63}\.json$/.test(name),
   );
   if (!files.length) return;
   const events = await readVerifiedJournal(workspacePaths(root).journal);
