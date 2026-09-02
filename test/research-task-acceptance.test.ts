@@ -120,6 +120,47 @@ async function fixture() {
 }
 
 describe("lightweight original task and authorized scope", () => {
+  it("does not charge a non-embedded raw input bundle against a later task context", async () => {
+    const fx = await acquiredFixture("evidence", 33_000);
+    try {
+      const prepared = await prepareNativeResearchStage({
+        root: fx.root,
+        projectId: "task-project",
+        stage: "analyze",
+        hostAgent: "codex",
+      });
+      assert.match(prepared.prompt, /Original task and current authorized scope/);
+      assert.match(prepared.prompt, /outputs\/inference-snapshot.json/);
+      assert.doesNotMatch(prepared.prompt, /non-embedded-input-padding/);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("still rejects a genuinely oversized task prompt before spending a native attempt", async () => {
+    const fx = await fixture();
+    try {
+      const input = contractInput();
+      input.originalRequest = "Preserve this detailed original requirement. ".repeat(1_000);
+      await writeFile(fx.inputPath, JSON.stringify(input));
+      assert.equal((await fx.task(["define", "--input", fx.inputPath])).exitCode, 0);
+      await assert.rejects(
+        prepareNativeResearchStage({
+          root: fx.root,
+          projectId: "task-project",
+          stage: "discover",
+          hostAgent: "codex",
+        }),
+        { code: "RESEARCH_TASK_CONTEXT_TOO_LARGE" },
+      );
+      const project = await loadProject(fx.root, "task-project");
+      assert.ok(project.packages.every((item) => item.attempts === 0));
+      assert.equal(project.usage.tokens, 0);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
   it("refuses to define original requirements retrospectively after a scientific review", async () => {
     const fx = await fixture();
     const projectId = "already-reviewed";
@@ -975,7 +1016,10 @@ describe("lightweight original task and authorized scope", () => {
   });
 });
 
-async function acquiredFixture(checkKind: "evidence" | "computation" = "evidence") {
+async function acquiredFixture(
+  checkKind: "evidence" | "computation" = "evidence",
+  inputPaddingBytes = 0,
+) {
   const fx = await fixture();
   const declaration = contractInput();
   declaration.requirements[0]!.checkKind = checkKind;
@@ -985,7 +1029,8 @@ async function acquiredFixture(checkKind: "evidence" | "computation" = "evidence
   const inputPath = join(fx.files, "evidence.txt");
   await writeFile(
     inputPath,
-    "Synthetic electricity and water comparison: no measured difference in this fixture.\n",
+    "Synthetic electricity and water comparison: no measured difference in this fixture.\n" +
+      "non-embedded-input-padding\n".repeat(Math.ceil(inputPaddingBytes / 27)),
   );
   await addProjectInput(fx.root, "task-project", inputPath, "primary");
   const discover = await prepareNativeResearchStage({
