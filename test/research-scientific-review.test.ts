@@ -51,6 +51,111 @@ import { initializeResearchWorkspace } from "../src/research/workspace/workspace
 import { scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("top-journal early scientific reviews", () => {
+  for (const gateStatus of ["pending", "prepared", "revision-required", "stopped"] as const) {
+    it(`reports a ${gateStatus} due scientific gate consistently without inviting a native stage`, async () => {
+      const fixture = await projectFixture(`scientific-run-${gateStatus}`);
+      try {
+        if (gateStatus !== "pending") {
+          const assessmentPath = join(fixture.root, "assessment.json");
+          await writeJsonAtomic(assessmentPath, researchDesignAssessment(fixture.designSha256));
+          const packet = await prepareScientificReview({
+            root: fixture.root,
+            projectId: fixture.projectId,
+            role: "research-design",
+            assessmentPath,
+            reviewerAgent: "claude",
+            reviewerSessionId: `${gateStatus}-independent-session`,
+          });
+          if (gateStatus !== "prepared") {
+            const reviewPath = join(fixture.root, "review.json");
+            await writeJsonAtomic(reviewPath, {
+              ...passingReview(packet, `${gateStatus}-independent-session`),
+              decision: gateStatus === "stopped" ? "stop" : "revise",
+            });
+            await submitScientificReview({
+              root: fixture.root,
+              projectId: fixture.projectId,
+              role: "research-design",
+              reviewPath,
+            });
+          }
+        }
+        const running = await invokeCli([
+          "research",
+          "run",
+          "--project",
+          fixture.projectId,
+          "--workspace",
+          fixture.root,
+          "--json",
+        ]);
+        assert.equal(running.exitCode, 3, running.stderr);
+        const result = JSON.parse(running.stdout) as {
+          status: string;
+          stopReason: string;
+          executed: unknown[];
+          projects: Array<{
+            status: string;
+            readyPackage: string | null;
+            scientificGate: { role: string; status: string };
+            recommendedAction: string;
+          }>;
+        };
+        assert.equal(result.status, "blocked");
+        assert.equal(
+          result.stopReason,
+          gateStatus === "stopped"
+            ? "scientific-stopped"
+            : gateStatus === "revision-required"
+              ? "scientific-revision-required"
+              : "scientific-review-required",
+        );
+        assert.deepEqual(result.executed, []);
+        assert.equal(result.projects[0]?.status, "blocked");
+        assert.equal(result.projects[0]?.readyPackage, null);
+        assert.equal(result.projects[0]?.scientificGate.role, "research-design");
+        assert.equal(result.projects[0]?.scientificGate.status, gateStatus);
+        assert.doesNotMatch(result.projects[0]?.recommendedAction ?? "", /stage prepare/);
+        if (gateStatus === "prepared")
+          assert.match(result.projects[0]?.recommendedAction ?? "", /prepared|submit/i);
+        if (gateStatus === "revision-required")
+          assert.match(result.projects[0]?.recommendedAction ?? "", /revise|revision/i);
+        if (gateStatus === "stopped")
+          assert.match(result.projects[0]?.recommendedAction ?? "", /stopped|user|external/i);
+        const inspection = await invokeCli([
+          "research",
+          "status",
+          "--project",
+          fixture.projectId,
+          "--workspace",
+          fixture.root,
+          "--json",
+        ]);
+        assert.equal(inspection.exitCode, 0, inspection.stderr);
+        const inspected = JSON.parse(inspection.stdout) as {
+          projects: Array<{
+            status: string;
+            readyPackage: string | null;
+            recommendedAction: string;
+          }>;
+        };
+        assert.equal(inspected.projects[0]?.status, "blocked");
+        assert.equal(inspected.projects[0]?.readyPackage, null);
+        assert.equal(
+          inspected.projects[0]?.recommendedAction,
+          result.projects[0]?.recommendedAction,
+        );
+        assert.ok(
+          (await loadProject(fixture.root, fixture.projectId)).packages.every(
+            (item) => item.attempts === 0,
+          ),
+        );
+      } finally {
+        await rm(fixture.root, { recursive: true, force: true });
+      }
+    });
+  }
+
   it("revalidates frozen gate objects before entering the native producer stage", async () => {
     const fixture = await projectFixture("scientific-runtime-gate");
     try {
@@ -1367,7 +1472,21 @@ describe("top-journal early scientific reviews", () => {
       };
       assert.equal(status.projects[0]?.scientificReview.reviewState, "awaiting-review");
       assert.equal(status.projects[0]?.scientificReview.nextGate.role, "evidence-construct");
-      assert.match(status.projects[0]?.recommendedAction ?? "", /evidence-construct/);
+      assert.match(status.projects[0]?.recommendedAction ?? "", /Prepare native discover/);
+      const running = await invokeCli([
+        "research",
+        "run",
+        "--project",
+        fixture.projectId,
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(running.exitCode, 0, running.stderr);
+      assert.equal(
+        (JSON.parse(running.stdout) as { stopReason: string }).stopReason,
+        "native-stage-required",
+      );
 
       for (const role of [
         "research-design",
