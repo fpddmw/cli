@@ -117,6 +117,7 @@ export interface TaskAcceptanceContext {
   projectId: string;
   contractSha256: string;
   originalContractSha256: string;
+  originalRequest: string;
   requirements: Array<
     TaskRequirement & {
       requirementSha256: string;
@@ -317,6 +318,7 @@ export async function compileTaskAcceptanceContext(
     projectId: project.id,
     contractSha256: view.current.contractSha256,
     originalContractSha256: view.original.contractSha256,
+    originalRequest: view.original.originalRequest,
     requirements: [...rows.values()],
     results: [...results.values()].sort((a, b) => a.sha256.localeCompare(b.sha256)),
   };

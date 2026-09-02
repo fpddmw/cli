@@ -115,6 +115,7 @@ export async function verifyTaskAudit(
     context.projectId !== projectId ||
     context.contractSha256 !== binding.contractSha256 ||
     context.originalContractSha256 !== binding.originalContractSha256 ||
+    context.originalRequest !== history.original.originalRequest ||
     !Array.isArray(context.requirements) ||
     !Array.isArray(context.results)
   )
