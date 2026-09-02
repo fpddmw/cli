@@ -552,7 +552,9 @@ describe("top-journal scientific design admission", () => {
         "{}\n",
       );
       const designPath = join(workspacePaths(root).control, source.scientificDesign!.objectLocator);
-      await writeFile(designPath, `${await readFile(designPath, "utf8")}\n`);
+      const changedDesign = JSON.parse(await readFile(designPath, "utf8"));
+      changedDesign.workingTitle += " changed after approval";
+      await writeFile(designPath, JSON.stringify(changedDesign));
       await assert.rejects(
         forkProject(root, sourceId, targetId, "discover", {
           publicationPolicy: policy(targetId),
