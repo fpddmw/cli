@@ -8,6 +8,8 @@ import { packageVersion, RESEARCH_PACKAGE_NAME, RESEARCH_PROTOCOL_VERSION } from
 import { inspectResearchContext, isWorkspaceMarker } from "./context.js";
 import { inspectCapabilityCredentialEnvironment } from "./credentials.js";
 import { appendJournalEvent, verifyJournal } from "./journal.js";
+import { readProjectAuthorityIndex, visibleProjectIds } from "./project-authority.js";
+import { recoverProjectMutations } from "./project-mutations.js";
 import { loadProjectEvidenceReceipts } from "./evidence.js";
 import { executeAgent, fingerprintAgentRoute, type AgentExecutionRequest } from "./executor.js";
 import { doctorExternalCapabilities, hasPublicInternetCapability } from "./external-skills.js";
@@ -1058,6 +1060,7 @@ export async function withWorkspaceLock<T>(
         recoveryOperation: operation,
       });
     }
+    await recoverProjectMutations(root);
     return await callback();
   } finally {
     await release();
@@ -1094,16 +1097,17 @@ export async function requireCurrentRuntimeLock(
 }
 
 async function readProjectStates(projectsPath: string): Promise<ProjectState[]> {
-  const entries = await readdir(projectsPath, { withFileTypes: true });
+  const root = resolve(projectsPath, "..", "..");
+  const authority = await readProjectAuthorityIndex(root);
+  const ids = await visibleProjectIds(root, authority);
   const states: ProjectState[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+  for (const id of ids) {
     const state = await readJsonFile<unknown>(
-      join(projectsPath, entry.name, "project.json"),
-      `Project ${entry.name}`,
+      join(projectsPath, id, "project.json"),
+      "Project " + id,
     );
-    if (!isProjectStateShape(state) || state.id !== entry.name) {
-      throw new Error(`project ${entry.name} has an unsupported state shape`);
+    if (!isProjectStateShape(state) || state.id !== id) {
+      throw new Error("project " + id + " has an unsupported state shape");
     }
     states.push(state);
   }

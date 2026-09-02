@@ -23,7 +23,7 @@ fs.rename = async (source, destination) => {
   const path = resolve(String(destination));
   if (
     (point === "target-state" && path === resolve(targetRoot, "project.json")) ||
-    (point === "source-state" && path === resolve(sourcePath))
+    (["source-state", "retry-state"].includes(point) && path === resolve(sourcePath))
   ) {
     await crash();
   }
@@ -42,6 +42,15 @@ fs.mkdir = async (path, options) => {
 const appendFile = fs.appendFile;
 fs.appendFile = async (path, data, options) => {
   if (
+    point === "retry-committed" &&
+    resolve(String(path)) === resolve(journalPath) &&
+    String(data).includes('"type":"project.retry.requested"')
+  ) {
+    const result = await appendFile(path, data, options);
+    await crash();
+    return result;
+  }
+  if (
     resolve(String(path)) === resolve(journalPath) &&
     String(data).includes('"type":"project.forked"')
   ) {
@@ -57,9 +66,11 @@ fs.appendFile = async (path, data, options) => {
 };
 
 syncBuiltinESMExports();
-const { forkProject } = await import("../../../src/research/workspace/projects.ts");
+const { forkProject, retryProjectPackage } =
+  await import("../../../src/research/workspace/projects.ts");
 try {
-  await forkProject(root, "source", "target");
+  if (point.startsWith("retry-")) await retryProjectPackage(root, "source", "synthesize");
+  else await forkProject(root, "source", "target");
   throw new Error("Expected fork fault was not reached");
 } catch (error) {
   if (point !== "before-commit" || error.message !== "Synthetic fork commit failure") throw error;

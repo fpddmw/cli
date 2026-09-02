@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,13 @@ import { CliError } from "../src/errors.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import { evidenceLedgerPath } from "../src/research/workspace/evidence-ledger.js";
 import { readJournal } from "../src/research/workspace/journal.js";
-import { forkProject, initializeProject, loadProject } from "../src/research/workspace/projects.js";
+import {
+  forkProject,
+  initializeProject,
+  loadProject,
+  retryProjectPackage,
+  saveProject,
+} from "../src/research/workspace/projects.js";
 import { prepareNativeResearchStage } from "../src/research/workspace/runtime.js";
 import { pathExists, workspacePaths } from "../src/research/workspace/storage.js";
 import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
@@ -52,6 +58,51 @@ function killFork(root: string, point: string) {
 }
 
 describe("committed research project authority and crash recovery", () => {
+  for (const point of ["retry-state", "retry-committed"]) {
+    it("recovers a report revision and acknowledges its lost response at " + point, async () => {
+      const root = await fixture();
+      try {
+        const source = await loadProject(root, "source");
+        for (const item of source.packages) {
+          if (["discover", "acquire", "analyze", "synthesize"].includes(item.stage)) {
+            item.status = "complete";
+            item.completedAt = "2026-09-02T00:00:00.000Z";
+          }
+          if (item.stage === "review") {
+            item.status = "failed";
+            item.lastError = "Independent review requested revision.";
+            item.lastFailureKind = "configuration";
+          }
+        }
+        await saveProject(root, source);
+        const report = join(workspacePaths(root).projects, "source", "outputs", "report.md");
+        await writeFile(report, "# Preserved report\n");
+        const child = killFork(root, point);
+        assert.equal(child.stderr, "");
+        assert.equal(await readFile(join(root, "fault-point.txt"), "utf8"), point);
+        const recovered = await retryProjectPackage(root, "source", "synthesize");
+        assert.equal(
+          recovered.packages.find((item) => item.stage === "synthesize")?.status,
+          "ready",
+        );
+        assert.deepEqual(await retryProjectPackage(root, "source", "synthesize"), recovered);
+        assert.equal(
+          (await readJournal(workspacePaths(root).journal)).filter(
+            (event) => event.type === "project.retry.requested",
+          ).length,
+          1,
+        );
+        assert.equal(await readFile(report, "utf8"), "# Preserved report\n");
+        const archives = await readdir(
+          join(workspacePaths(root).projects, "source", "outputs", "revisions", "synthesize"),
+        );
+        assert.equal(archives.length, 1);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+
   for (const point of ["target-directory", "target-state", "source-state"]) {
     it(`keeps one consistent authority after a fork crash at ${point}`, async () => {
       const root = await fixture();
