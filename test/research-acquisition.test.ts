@@ -57,6 +57,165 @@ import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("research acquisition and evidence snapshots", () => {
+  it("revises acquisition on the same project before analysis without replacing historical evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-acquisition-revision-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-acquisition-revision-files-"));
+    const projectId = "same-project-revision";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      const { snapshot } = await freezeInputOnlyProject(root, staging, projectId, true);
+      const projectRoot = join(workspacePaths(root).projects, projectId);
+      const previousAudit = await readFile(join(projectRoot, snapshot.acquisitionRecord.path));
+      const previousSnapshot = await readFile(
+        join(projectRoot, `evidence/snapshots/${snapshot.snapshotSha256}.json`),
+      );
+      const previousArtifacts = await loadEvidenceArtifactRecords(root, projectId);
+      const argv = [
+        "research",
+        "project",
+        "evidence",
+        "acquisition",
+        "revise",
+        projectId,
+        "--expected-snapshot",
+        snapshot.snapshotSha256,
+        "--reason",
+        "Add a readable derivative before any analysis.",
+        "--workspace",
+        root,
+        "--json",
+      ];
+      const opened = await invokeCli(argv);
+      assert.equal(opened.exitCode, 0, opened.stderr);
+      assert.equal(JSON.parse(opened.stdout).projectId, projectId);
+      const reopened = await loadProject(root, projectId);
+      assert.equal(reopened.packages.find((item) => item.stage === "acquire")?.status, "ready");
+      assert.equal(reopened.packages.find((item) => item.stage === "discover")?.status, "complete");
+      assert.equal(reopened.lineage.supersededBy, null);
+      const beforeReplay = await readFile(workspacePaths(root).journal);
+      const replay = await invokeCli(argv);
+      assert.equal(replay.exitCode, 0, replay.stderr);
+      assert.equal(JSON.parse(replay.stdout).replayed, true);
+      assert.deepEqual(await readFile(workspacePaths(root).journal), beforeReplay);
+      const acquire = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      const [candidate] = await listEvidenceCandidates(root, projectId);
+      assert.ok(candidate);
+      const derivativePath = join(staging, "additional-readable.txt");
+      await writeFile(derivativePath, "An additional verified line for the existing source.\n");
+      const derivative = await registerEvidenceArtifact({
+        root,
+        projectId,
+        candidateId: candidate.id,
+        path: derivativePath,
+        mediaType: "text/plain",
+        derivedFromArtifactId: previousArtifacts[0]!.artifactId,
+      });
+      const auditPath = join(staging, "revised-audit.json");
+      await writeFile(
+        auditPath,
+        JSON.stringify(
+          acquisitionValue(candidate.id, "source-1", [
+            ...previousArtifacts.map((artifact) => artifact.artifactId),
+            derivative.artifactId,
+          ]),
+        ),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: acquire.sessionId,
+        outputPath: auditPath,
+        confirmedModel: acquire.expectedModel,
+      });
+      const current = await loadCurrentEvidenceSnapshot(root, projectId);
+      assert.notEqual(current.snapshotSha256, snapshot.snapshotSha256);
+      assert.equal(current.parentSnapshotSha256, snapshot.snapshotSha256);
+      assert.deepEqual(
+        await readFile(join(projectRoot, snapshot.acquisitionRecord.path)),
+        previousAudit,
+      );
+      assert.deepEqual(
+        await readFile(join(projectRoot, `evidence/snapshots/${snapshot.snapshotSha256}.json`)),
+        previousSnapshot,
+      );
+      assert.equal(
+        (await loadImmutableEvidenceSnapshotChain(root, projectId, current.snapshotSha256)).length,
+        2,
+      );
+      assert.ok(current.artifacts.some((item) => item.artifactId === derivative.artifactId));
+      for (const artifact of previousArtifacts) {
+        assert.deepEqual(
+          current.artifacts.find((item) => item.artifactId === artifact.artifactId),
+          artifact,
+        );
+      }
+      const afterCommit = await loadProject(root, projectId);
+      const lateReplay = await invokeCli(argv);
+      assert.equal(lateReplay.exitCode, 0, lateReplay.stderr);
+      assert.equal(JSON.parse(lateReplay.stdout).replayed, true);
+      assert.deepEqual(await loadProject(root, projectId), afterCommit);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("rejects stale or post-analysis acquisition revisions without modifying state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-acquisition-revision-reject-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-acquisition-revision-reject-files-"));
+    const projectId = "revision-must-be-early";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      const { snapshot } = await freezeInputOnlyProject(root, staging, projectId);
+      const command = (hash: string) =>
+        invokeCli([
+          "research",
+          "project",
+          "evidence",
+          "acquisition",
+          "revise",
+          projectId,
+          "--expected-snapshot",
+          hash,
+          "--reason",
+          "Correct acquisition before analysis.",
+          "--workspace",
+          root,
+          "--json",
+        ]);
+      const before = await loadProject(root, projectId);
+      const stale = await command("a".repeat(64));
+      assert.equal(stale.exitCode, 3);
+      assert.equal(JSON.parse(stale.stderr).error.code, "RESEARCH_ACQUISITION_REVISION_CONFLICT");
+      assert.deepEqual(await loadProject(root, projectId), before);
+      const analysis = before.packages.find((item) => item.stage === "analyze")!;
+      analysis.attempts = 1;
+      analysis.status = "failed";
+      await saveProject(root, before);
+      const started = await command(snapshot.snapshotSha256);
+      assert.equal(started.exitCode, 3);
+      assert.equal(
+        JSON.parse(started.stderr).error.code,
+        "RESEARCH_ACQUISITION_REVISION_UNAVAILABLE",
+      );
+      assert.deepEqual(await loadProject(root, projectId), before);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("forecasts a local binary input's missing readable derivative without mutating acquisition", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-input-forecast-"));
     const staging = await mkdtemp(join(tmpdir(), "tiangong-input-forecast-files-"));
