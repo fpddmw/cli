@@ -17,6 +17,24 @@ const fixtureRoot = resolve(
 );
 
 describe("top-journal scientific design contract", () => {
+  it("accepts explicit conjunctive source-type groups without changing flat-array all-of semantics", async () => {
+    const value = JSON.parse(
+      await readFile(join(fixtureRoot, "ev-r9-narrowed-valid.json"), "utf8"),
+    );
+    value.evidenceRoles[0].sourceTypeRequirements = {
+      allOf: ["academic-paper"],
+      anyOf: ["government", "industry"],
+      atLeast: { count: 2, from: ["academic-paper", "government", "industry"] },
+    };
+    assert.doesNotThrow(() => parseScientificDesign(value));
+    value.evidenceRoles[0].sourceTypeRequirements = {
+      atLeast: { count: 3, from: ["academic-paper"] },
+    };
+    assert.throws(() => parseScientificDesign(value));
+    value.evidenceRoles[0].sourceTypeRequirements = { anyOf: [] };
+    assert.throws(() => parseScientificDesign(value));
+  });
+
   it("rejects the EV R9 route before discovery for the actual scientific reasons", async () => {
     const design = await fixture("ev-r9-invalid.json");
     const result = evaluateScientificDesign(design);

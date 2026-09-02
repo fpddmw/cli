@@ -162,6 +162,32 @@ describe("top-journal early scientific reviews", () => {
       }
     });
   }
+  it("exposes generic planned policy obligations even without pending model or uncertainty objects", async () => {
+    const fixture = await projectFixture("scientific-generic-obligation", { genericPolicy: true });
+    try {
+      const assessmentPath = join(fixture.root, "generic-assessment.json");
+      await writeJsonAtomic(assessmentPath, researchDesignAssessment(fixture.designSha256));
+      const packet = await prepareScientificReview({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        role: "research-design",
+        assessmentPath,
+        reviewerAgent: "claude",
+        reviewerSessionId: "generic-policy-reviewer",
+      });
+      assert.deepEqual(packet.mechanicalAssessment.futureGateObligations, [
+        {
+          code: "POLICY_RULE_DUE_UNRESOLVED",
+          dueGate: "publication-freeze",
+          objectIds: ["claim-discrepancy", "role-central-model", "validation-cross-model"],
+          policyRuleIds: ["data-access-plan"],
+        },
+      ]);
+      assert.equal(packet.mechanicalAssessment.canPass, true);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
 
   it("revalidates frozen gate objects before entering the native producer stage", async () => {
     const fixture = await projectFixture("scientific-runtime-gate");
@@ -1529,11 +1555,13 @@ async function projectFixture(
     pendingModels?: boolean;
     optionalLicensedRoute?: boolean;
     runtimePolicy?: boolean;
+    genericPolicy?: boolean;
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "tiangong-scientific-review-"));
   await initializeResearchWorkspace(root, "Scientific review workflow");
   const policyRules = [
+    ...(options.genericPolicy ? ["data-access-plan"] : []),
     ...(options.pendingUncertainty ? ["uncertainty-propagated"] : []),
     ...(options.pendingModels ? ["model-calibrated-or-justified"] : []),
   ];
