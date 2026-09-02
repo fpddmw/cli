@@ -58,6 +58,28 @@ function killFork(root: string, point: string) {
 }
 
 describe("committed research project authority and crash recovery", () => {
+  it("refuses a linked source directory even when its external state has the expected hash", async () => {
+    const root = await fixture();
+    const outside = await mkdtemp(join(tmpdir(), "tiangong-recovery-source-owner-"));
+    try {
+      killFork(root, "committed");
+      const sourceDirectory = join(workspacePaths(root).projects, "source");
+      const before = await readFile(join(sourceDirectory, "project.json"));
+      await rename(sourceDirectory, join(root, "saved-source"));
+      await writeFile(join(outside, "project.json"), before);
+      await symlink(outside, sourceDirectory, process.platform === "win32" ? "junction" : "dir");
+      await assert.rejects(forkProject(root, "source", "target"), {
+        code: "RESEARCH_PROJECT_RECOVERY_REQUIRED",
+      });
+      assert.deepEqual(await readFile(join(outside, "project.json")), before);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(outside, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("does not overwrite a concurrently changed source after a committed response is lost", async () => {
     const root = await fixture();
     try {
