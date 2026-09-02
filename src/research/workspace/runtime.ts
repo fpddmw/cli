@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 
 import { CliError } from "../../errors.js";
 import { isConsistentAnalysisRunMetadata } from "./analysis-run.js";
+import { taskContext } from "./task-contract.js";
 import {
   assertProjectAuthority,
   projectAuthority,
@@ -453,6 +454,7 @@ export interface NativeStagePacket {
   prompt: string;
   outputSchema: Record<string, unknown>;
   publicationPolicy: StagedPublicationPolicy | null;
+  taskContract: Awaited<ReturnType<typeof taskContext>>;
   discovery: DiscoveryProgress | null;
   limits: {
     maxOutputBytes: number;
@@ -734,9 +736,29 @@ export async function prepareNativeResearchStage(input: {
         discovery,
         await listEvidenceCandidates(input.root, project.id),
       );
+      const taskContract = await taskContext(
+        input.root,
+        project.id,
+        authority.taskEvents.get(project.id) ?? [],
+      );
+      const taskPrompt = taskContract
+        ? "Original task and current authorized scope (a workflow finish is not task completion):\n" +
+          JSON.stringify(taskContract)
+        : "";
+      if (
+        taskContract &&
+        Buffer.byteLength(taskPrompt + capsule.contextBundleContent + stageContextContent, "utf8") >
+          config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN
+      ) {
+        throw new CliError(
+          "The complete task and evidence context exceeds the reviewed input allowance. Condense representation without dropping requirements or explicitly review a larger context budget.",
+          { code: "RESEARCH_TASK_CONTEXT_TOO_LARGE", exitCode: 3 },
+        );
+      }
       const prompt = [
         "Perform this producer stage in the current interactive host session. Do not launch codex exec, claude -p, or any other nested reasoning agent.",
         capsule.publicationPolicyDocumentation,
+        taskPrompt,
         input.stage === "discover" && (hasBrokeredEvidence || hasDataEvidence)
           ? [
               hasBrokeredEvidence
@@ -777,6 +799,7 @@ export async function prepareNativeResearchStage(input: {
             : {},
         ),
         publicationPolicy: capsule.publicationPolicy,
+        taskContract,
         discovery,
         limits: {
           maxOutputBytes: config.budget.maxBytesPerPackage,
@@ -5028,6 +5051,7 @@ async function nativeStageBinding(
     canonicalJson({
       projectId: project.id,
       questionSha256: sha256Text(project.question),
+      taskContractSha256: (await taskContext(root, project.id))?.contractSha256 ?? null,
       evidenceRequirements: project.evidenceRequirements,
       inputs: project.inputs.map((record) => ({
         id: record.id,

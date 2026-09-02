@@ -13,6 +13,7 @@ export interface ProjectAuthorityIndex {
   pendingTargets: Set<string>;
   registered: Set<string>;
   resolvedSuccessors: Map<string, string | null>;
+  taskEvents: Map<string, JournalEvent[]>;
 }
 
 /** One verified journal view per inspection/admission, never a per-project artifact scan. */
@@ -28,9 +29,19 @@ export function projectAuthorityIndex(events: JournalEvent[]): ProjectAuthorityI
     pendingTargets: new Set(),
     registered: new Set(),
     resolvedSuccessors: new Map(),
+    taskEvents: new Map(),
   };
   const pending = new Map<string, string>();
   for (const event of events) {
+    if (
+      event.type.startsWith("project.task.") ||
+      (["project.forked", "project.addendum.created"].includes(event.type) &&
+        isObject(event.payload.taskContract))
+    ) {
+      const entries = result.taskEvents.get(event.scope) ?? [];
+      entries.push(event);
+      result.taskEvents.set(event.scope, entries);
+    }
     if (event.type === "project.initialized") result.registered.add(event.scope);
     if (
       event.type === "project.mutation.started" &&

@@ -73,6 +73,7 @@ import type {
   VerifiedProjectInputPlan,
 } from "./types.js";
 import { loadWorkspaceConfig, withWorkspaceLock } from "./workspace.js";
+import { inheritProjectTask } from "./task-contract.js";
 import { isProjectStatus } from "./types.js";
 
 const PROJECT_ID_PATTERN = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -853,6 +854,7 @@ export async function forkProject(
       source.evidenceState.staleReason = `Superseded by recovery fork ${targetProjectId}.`;
       refreshProject(source);
       // All target bytes and metadata precede the single journal commit point.
+      const taskContract = await inheritProjectTask(root, source, project);
       await saveProject(root, project);
       mutation = await prepareProjectMutation(root, mutation, source);
       await appendJournalEvent(workspacePaths(root).journal, "project.forked", targetProjectId, {
@@ -863,6 +865,7 @@ export async function forkProject(
         inheritedUsage: false,
         sourceSuperseded: true,
         mutation: projectMutationBinding(mutation),
+        taskContract,
         publicationPolicySha256: targetPolicy?.resolvedPolicySha256 ?? null,
         scientificDesignSha256: targetScientificDesign?.designSha256 ?? null,
         scientificDesignProducerSessionSha256:
@@ -1181,6 +1184,7 @@ export async function createProjectAddendum(
     });
     await writeJsonAtomic(join(targetRoot, "project.json"), target);
 
+    const taskContract = await inheritProjectTask(root, source, target);
     source.lineage.supersededBy = targetProjectId;
     source.evidenceState.staleReason = `Superseded by evidence addendum ${targetProjectId}.`;
     refreshProject(source);
@@ -1202,6 +1206,7 @@ export async function createProjectAddendum(
         baseSnapshotSha256: snapshot.snapshotSha256,
         inheritedOutputs,
         originalClosurePreserved: true,
+        taskContract,
         publicationPolicySha256: targetPolicy?.resolvedPolicySha256 ?? null,
         scientificDesignSha256: targetScientificDesign?.designSha256 ?? null,
         scientificDesignProducerSessionSha256:

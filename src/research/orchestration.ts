@@ -40,6 +40,14 @@ import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
 import { inspectAcquisitionForecast } from "./workspace/acquisition-forecast.js";
 import { reviseProjectAcquisition } from "./workspace/acquisition-revision.js";
 import {
+  approveProjectTaskScope,
+  defineProjectTask,
+  inspectProjectTask,
+  isTaskSchemaName,
+  proposeProjectTaskScope,
+  taskInputSchema,
+} from "./workspace/task-contract.js";
+import {
   freezeEvidenceContentSnapshot,
   loadCurrentEvidenceContentSnapshot,
   recordArtifactDecomposition,
@@ -204,6 +212,10 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id> --design <absolute-json>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--trust-status verified-owner-input|unverified-owner-input|reference-only|replication-candidate] [--independently-reproduced] [--workspace <path>] [--json]
   tiangong-ai research project retry <project-id> [--package <package-id>] [--workspace <path>] [--json]
+  tiangong-ai research project task define <project-id> --input <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project task status <project-id> [--workspace <path>] [--json]
+  tiangong-ai research project task scope propose <project-id> --input <absolute-json> --expected-contract <sha256> [--workspace <path>] [--json]
+  tiangong-ai research project task scope approve <project-id> --proposal <sha256> --confirm-change <sha256> [--workspace <path>] [--json]
   tiangong-ai research project fork <source-project-id> --to <target-project-id> [--resume-through discover|acquire|analyze|synthesize] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--workspace <path>] [--json]
   tiangong-ai research project addendum <closed-project-id> --to <target-project-id> [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--workspace <path>] [--json]
   tiangong-ai research project archive <project-id> --reason <text> [--workspace <path>] [--json]
@@ -682,7 +694,9 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
   if (strictBoolean(args, "help")) return writeHelp(io);
   const stage = onePositional(args.positionals, "research schema show");
   let schema: Record<string, unknown>;
-  if (isEvidenceContentSchemaName(stage)) {
+  if (isTaskSchemaName(stage)) {
+    schema = taskInputSchema(stage);
+  } else if (isEvidenceContentSchemaName(stage)) {
     schema = evidenceContentInputSchema(stage);
   } else if (stage === "scientific-design") {
     schema = scientificDesignSchema();
@@ -1290,6 +1304,75 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       return 0;
     }
     throw unknownAction("research project stage", stageAction ?? "");
+  }
+  if (action === "task") {
+    const [taskAction, ...taskRest] = rest;
+    if (taskAction === "scope") {
+      const [scopeAction, ...scopeRest] = taskRest;
+      if (!["propose", "approve"].includes(scopeAction ?? ""))
+        throw unknownAction("research project task scope", scopeAction ?? "");
+      const args = parseStrictArgs(
+        scopeRest,
+        {
+          ...WORKSPACE_OPTIONS,
+          input: "string",
+          "expected-contract": "string",
+          proposal: "string",
+          "confirm-change": "string",
+        },
+        `research project task scope ${scopeAction}`,
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(
+        args.positionals,
+        `research project task scope ${scopeAction}`,
+      );
+      const root = await workspaceFromArgs(args);
+      const result =
+        scopeAction === "approve"
+          ? await approveProjectTaskScope(
+              root,
+              projectId,
+              strictString(args, "proposal") ?? "",
+              strictString(args, "confirm-change"),
+            )
+          : await proposeProjectTaskScope(
+              root,
+              projectId,
+              strictString(args, "expected-contract") ?? "",
+              await readBoundedJsonRecord(
+                strictString(args, "input") ?? "",
+                "--input",
+                "RESEARCH_TASK_INVALID",
+              ),
+            );
+      writeJson(io, result, args);
+      return 0;
+    }
+    if (taskAction !== "define" && taskAction !== "status")
+      throw unknownAction("research project task", taskAction ?? "");
+    const args = parseStrictArgs(
+      taskRest,
+      { ...WORKSPACE_OPTIONS, input: "string" },
+      `research project task ${taskAction}`,
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(args.positionals, `research project task ${taskAction}`);
+    const root = await workspaceFromArgs(args);
+    const result =
+      taskAction === "status"
+        ? await inspectProjectTask(root, projectId)
+        : await defineProjectTask(
+            root,
+            projectId,
+            await readBoundedJsonRecord(
+              strictString(args, "input") ?? "",
+              "--input",
+              "RESEARCH_TASK_INVALID",
+            ),
+          );
+    writeJson(io, result, args);
+    return 0;
   }
   if (action === "evidence") {
     const [evidenceAction, ...evidenceRest] = rest;
@@ -2143,6 +2226,11 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
           evidencePipeline,
           nativeStage,
           scientificReview,
+          task: await inspectProjectTask(
+            root,
+            current.id,
+            authorityIndex.taskEvents.get(current.id) ?? [],
+          ),
           evidenceAccess,
           publication,
           readyPackage,
