@@ -731,6 +731,28 @@ export async function submitScientificReview(input: {
   });
 }
 
+/** Revalidate the immutable prepared packet before an explicit isolated execution. */
+export async function loadPreparedScientificReview(
+  root: string,
+  projectId: string,
+  role: ScientificReviewRole,
+) {
+  const project = await loadProject(root, projectId);
+  const gate = project.scientificDesign?.gates[role];
+  if (!gate || gate.status !== "prepared" || !gate.packetSha256) {
+    throw new CliError("Scientific review execution requires the current prepared packet.", {
+      code: "RESEARCH_SCIENTIFIC_REVIEW_STATE_INVALID",
+      exitCode: 3,
+      details: { role, status: gate?.status ?? "absent" },
+    });
+  }
+  const packet = await loadBoundPacket(root, project, role, gate.packetSha256);
+  await loadBoundAssessment(root, project, role, packet);
+  return { project, packet };
+}
+
+export { readReview as readScientificReviewOutput };
+
 export async function assertScientificGateForStage(
   root: string,
   project: ProjectState,

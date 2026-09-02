@@ -44,11 +44,9 @@ import { recordDiscoveryAssessmentBatch } from "./workspace/discovery.js";
 import { bindEvidenceDownload } from "./workspace/downloads.js";
 import { registerNativeDiscoveryCandidate } from "./workspace/evidence-ledger.js";
 import { recordNativeResearchActivity } from "./workspace/native-activity.js";
-import {
-  inspectReviewerBridgeStatus,
-  startReviewerBridgeSidecar,
-} from "./workspace/review-executor.js";
+import { inspectReviewerStatus, startReviewerBridgeSidecar } from "./workspace/review-executor.js";
 import { readAndVerifyProjectInputPlan } from "./workspace/input-plan.js";
+import { executeScientificReview } from "./workspace/scientific-review-execution.js";
 import {
   loadCurrentClaimEvidenceGraph,
   loadCurrentInferenceSnapshot,
@@ -201,6 +199,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project access status <project-id> [--workspace <path>] [--json]
   tiangong-ai research project scientific review prepare <project-id> --role research-design|evidence-construct|pilot-methods --assessment <absolute-json> [--canary-artifacts <absolute-json-array>] --reviewer-agent codex|claude --reviewer-session <opaque-id> [--workspace <path>] [--json]
   tiangong-ai research project scientific review submit <project-id> --role research-design|evidence-construct|pilot-methods --review <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project scientific review execute <project-id> --role research-design|evidence-construct|pilot-methods --confirm-review-cost [--retry] [--workspace <path>] [--json]
   tiangong-ai research project scientific status <project-id> [--workspace <path>] [--json]
   tiangong-ai research project audit export <project-id> --output <absolute-new-directory> [--workspace <path>] [--json]
   tiangong-ai research project audit verify --bundle <absolute-directory> [--json]
@@ -319,8 +318,9 @@ async function runReviewer(argv: string[], io: CliIO): Promise<number> {
     if (args.positionals.length)
       throw unknownAction("research reviewer status", args.positionals[0]!);
     const root = await workspaceFromArgs(args);
-    writeJson(io, await inspectReviewerBridgeStatus(root), args);
-    return 0;
+    const result = await inspectReviewerStatus(root, io.env);
+    writeJson(io, result, args);
+    return isObject(result) && result.status === "ready" ? 0 : 3;
   }
   if (action === "doctor") {
     const args = parseStrictArgs(
@@ -1082,6 +1082,34 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       throw unknownAction("research project scientific", scientificAction ?? "");
     }
     const [reviewAction, ...reviewRest] = scientificRest;
+    if (reviewAction === "execute") {
+      const args = parseStrictArgs(
+        reviewRest,
+        {
+          ...WORKSPACE_OPTIONS,
+          role: "string",
+          "confirm-review-cost": "boolean",
+          retry: "boolean",
+        },
+        "research project scientific review execute",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(
+        args.positionals,
+        "research project scientific review execute",
+      );
+      const root = await workspaceFromArgs(args);
+      const result = await executeScientificReview({
+        root,
+        projectId,
+        role: scientificReviewRole(strictString(args, "role")),
+        confirmCost: strictBoolean(args, "confirm-review-cost"),
+        retry: strictBoolean(args, "retry"),
+        environment: io.env,
+      });
+      writeJson(io, result, args);
+      return result.status === "passed" ? 0 : 3;
+    }
     if (reviewAction === "prepare") {
       const args = parseStrictArgs(
         reviewRest,

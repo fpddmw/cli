@@ -198,6 +198,7 @@ async function preparedFixture(projectId: string, passing = true) {
   await lockCapabilities(root);
   const config = await loadWorkspaceConfig(root);
   config.budget.earlyScientificReviewMaxTokens = 200000;
+  config.budget.maxInputContextTokens = 128000;
   config.budget.maxTokens = 2000000;
   await writeJsonAtomic(workspacePaths(root).config, config);
   const policy: ResearchPolicyBinding = {
