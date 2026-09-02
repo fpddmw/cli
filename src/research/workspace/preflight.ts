@@ -2,6 +2,7 @@ import { loadCapabilityDeclarations, verifyCapabilities } from "./capabilities.j
 import { projectResearchDataCapabilities } from "./data-evidence-adapter.js";
 import { hasPublicInternetCapability } from "./external-skills.js";
 import { deriveDiscoveryPlan } from "./discovery-planning.js";
+import { declaredSourceTypes } from "./evidence-role-coverage.js";
 import {
   evaluateScientificDesign,
   scientificDesignPolicyGaps,
@@ -315,10 +316,10 @@ export async function evaluateProjectPreflight(
     }
   }
   const stageContextTokenReservations = {
-    acquire: discoverOutputTokens,
-    analyze: config.budget.maxInputContextTokens,
-    synthesize: config.budget.maxInputContextTokens,
-    review: config.budget.maxInputContextTokens + config.budget.maxOutputTokens * 4,
+    acquire: researchStageContextTokenLimit(config, "acquire"),
+    analyze: researchStageContextTokenLimit(config, "analyze"),
+    synthesize: researchStageContextTokenLimit(config, "synthesize"),
+    review: researchStageContextTokenLimit(config, "review"),
   };
   const producerStructuredOutputMaxTurns = researchStructuredOutputMaxTurns(config.producer);
   const reviewerStructuredOutputMaxTurns = researchStructuredOutputMaxTurns(config.reviewer);
@@ -568,6 +569,18 @@ export function researchStructuredOutputMaxTurns(route: Pick<AgentRoute, "agent"
     : RESEARCH_CODEX_STRUCTURED_OUTPUT_MAX_TURNS;
 }
 
+/** Stage inputs are distinct from generated output, including incremental discovery metadata. */
+export function researchStageContextTokenLimit(
+  config: Pick<WorkspaceConfig, "budget">,
+  stage: AgentPackageStage | "close",
+  addendum = false,
+): number {
+  if (stage === "review")
+    return config.budget.maxInputContextTokens + config.budget.maxOutputTokens * 4;
+  if (stage === "close" || (stage === "discover" && !addendum)) return 0;
+  return config.budget.maxInputContextTokens;
+}
+
 function estimatedStageTokenReservation(
   route: AgentRoute,
   embeddedContextTokens: number,
@@ -787,7 +800,9 @@ function appendScientificDesignContractGaps(
       }
     }
     const mappedDimensions = new Set(requiredRoles.flatMap((role) => role.coverageDimensionIds));
-    const mappedSourceTypes = new Set(requiredRoles.flatMap((role) => role.sourceTypeRequirements));
+    const mappedSourceTypes = new Set(
+      requiredRoles.flatMap((role) => declaredSourceTypes(role.sourceTypeRequirements)),
+    );
     for (const dimension of requirements.dimensions) {
       if (!mappedDimensions.has(dimension)) {
         gaps.push(`${prefix}evidence-dimension-uncovered:${dimension}`);

@@ -63,6 +63,58 @@ export interface EvidenceArtifactRecord {
   };
 }
 
+/** Read-only metadata preflight; performs no download, content read, or registration. */
+export async function preflightEvidenceArtifact(input: {
+  root: string;
+  bytes?: number;
+  path?: string;
+}) {
+  if ((input.bytes === undefined) === (input.path === undefined)) {
+    throw artifactError(
+      "Artifact preflight requires exactly one of --bytes or --path.",
+      "RESEARCH_ARTIFACT_SIZE_INVALID",
+    );
+  }
+  let bytes = input.bytes;
+  if (input.path !== undefined) {
+    const path = requireExactAbsolutePath(input.path);
+    const info = await lstat(path).catch(() => undefined);
+    if (!info?.isFile() || info.isSymbolicLink()) {
+      throw artifactError(
+        "Artifact preflight path must be one explicit regular non-symlink file.",
+        "RESEARCH_ARTIFACT_PATH_INVALID",
+      );
+    }
+    bytes = info.size;
+  }
+  if (!Number.isSafeInteger(bytes) || bytes! < 1) {
+    throw artifactError(
+      "Known artifact bytes must be a positive safe integer.",
+      "RESEARCH_ARTIFACT_SIZE_INVALID",
+    );
+  }
+  const { budget } = await loadWorkspaceConfig(input.root);
+  const allowed = bytes! <= budget.maxBytesPerArtifact;
+  return {
+    schemaVersion: 1,
+    kind: "tiangong-artifact-preflight",
+    decision: allowed ? "pass" : "stop",
+    knownBytes: bytes!,
+    limits: {
+      maxBytesPerArtifact: budget.maxBytesPerArtifact,
+      maxBytesPerPackage: budget.maxBytesPerPackage,
+    },
+    checksPerformed: [
+      input.path === undefined ? "caller-declared-byte-count" : "regular-file-stat",
+      "single-artifact-byte-limit",
+    ],
+    contentValidated: false,
+    recommendedAction: allowed
+      ? "Size is admissible only; exact download binding, format, hash, and acquisition checks remain required. maxBytesPerPackage limits aggregate generated package outputs separately."
+      : "Stop before download. Request a provider-side subset/filter or a smaller official export preserving required variables and provenance. If unavailable, record the acquisition limitation and request a scope/access decision; do not register unverified references or blindly raise memory limits.",
+  };
+}
+
 export async function registerEvidenceArtifact(input: {
   root: string;
   projectId: string;
@@ -121,9 +173,9 @@ export async function registerEvidenceArtifact(input: {
       "RESEARCH_ARTIFACT_CANDIDATE_INVALID",
     );
   }
-  if (info.size < 1 || info.size > config.budget.maxBytesPerPackage) {
+  if (info.size < 1 || info.size > config.budget.maxBytesPerArtifact) {
     throw artifactError(
-      `Artifact size must be 1-${config.budget.maxBytesPerPackage} bytes.`,
+      `Artifact size must be 1-${config.budget.maxBytesPerArtifact} bytes (maxBytesPerArtifact); request a provider-side subset/filter before download for larger files.`,
       "RESEARCH_ARTIFACT_SIZE_INVALID",
     );
   }

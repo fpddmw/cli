@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-09-01
-lastReviewedCommit: ca716c2fea59d0a8085aa32dbd8f65a686b3353e
+lastReviewedAt: 2026-09-02
+lastReviewedCommit: 8a18ba69f432d2c639517549157ef29545722cff
 ---
 
 # Repo Validation
@@ -192,6 +192,14 @@ classification. It is not a substitute for the real macOS/Windows matrix; it
 moves known path and capability semantics ahead of that matrix so hosted
 runners discover only genuinely platform-specific defects.
 
+`test/research-evidence-throughput.test.ts` exercises the public batch/preflight
+commands in a synthetic native-host discovery/acquisition flow. It asserts atomic
+rejection, orphan-envelope invisibility and recovery, exact replay/conflict/hash
+behavior, and deterministic verification/read/append work counts instead of
+machine-dependent timing. Artifact preflight tests distinguish per-file and
+aggregate output budgets and preserve existing absent-field limits without
+rewriting configuration; no large real download or network service is needed.
+
 Every runtime container has no host mounts, Docker socket, credentials, or
 runtime network. It enables Docker's privileged namespace mode solely so the non-root
 test process can exercise the real nested Bubblewrap capsule instead of skipping
@@ -275,6 +283,22 @@ already published, runs the local gates, performs a package dry run, and then
 executes `npm publish --access public --provenance`.
 
 ## Coverage Policy
+
+`research-reviewer-status.test.ts` and `research-scientific-execution.test.ts`
+cover transport-aware read-only status, smoke versus production readiness,
+explicit cost consent, exact prepared reviewer execution, immutable proof replay,
+project-authority checks on recovered submission, concurrent idempotent replay,
+unknown-usage and wall-time reservations, Policy Markdown inclusion, and secret
+non-persistence. These tests do not call a real model. The external native
+canary runs the packaged CLI and a clearly synthetic reviewer through the real
+platform capsule, without credentials or provider requests.
+
+The integrated role forecast regression specifically includes a same-dimension
+metadata-only patent and a binary-only patent: neither may fill an atom-level
+source-type slot even when global acquisition coverage passes. Runtime tests
+also exercise expanded discovery input between the output and input caps,
+true input overflow, valid historical/wait states through Doctor, and each due
+scientific-gate status through public run/status.
 
 The coverage gate uses `c8` and fails when coverage drops below the thresholds
 encoded in `scripts/run-test-coverage.cjs`. Coverage ignore pragmas are
@@ -387,6 +411,13 @@ evidence atoms, typed-content snapshots, target-bound content reconstruction on
 recovery fork, inference snapshots, generated Claim-Evidence
 Graphs, operator-visible `evidencePipeline` status, semantic audit-chain export,
 safe journal-proof derivatives, and pre-export tamper rejection.
+The recovery/forecast regressions additionally require read-only acquisition
+forecasting, no atom-pass inference from source metadata, non-blocking sealed
+outcomes in `limitations`, and exact Download binding reuse across repeated
+discovery-resuming forks. Source scientific-design drift still rejects and
+rolls back inheritance. `test/research-role-coverage.test.ts` checks shared
+role deficits, flat-array all-of, combined allOf/anyOf/distinct-atLeast groups,
+and exclusion of unrelated dimensions and duplicate source counts.
 `test/research-scientific-design.test.ts` uses the EV pavement-model R9 failure
 as a fixed regression for truth-role confusion, non-independent validation,
 effective-sample inflation, quantity/threshold overclaim, closest-work

@@ -13,7 +13,10 @@ import {
   loadCurrentEvidenceSnapshot,
   loadImmutableEvidenceSnapshotChain,
 } from "../src/research/workspace/acquisition.js";
-import { registerEvidenceArtifact } from "../src/research/workspace/artifacts.js";
+import {
+  loadEvidenceArtifactRecords,
+  registerEvidenceArtifact,
+} from "../src/research/workspace/artifacts.js";
 import { exportProjectAuditBundle } from "../src/research/workspace/audit-bundle.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import {
@@ -54,6 +57,127 @@ import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("research acquisition and evidence snapshots", () => {
+  it("forecasts acquisition read-only and reuses exact artifacts when recovery resumes after discovery", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-acquisition-recovery-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-acquisition-recovery-files-"));
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      const { snapshot } = await freezeInputOnlyProject(root, staging, "recovery-source", true);
+      const sourceSnapshotBytes = await readFile(
+        join(workspacePaths(root).projects, "recovery-source", "outputs/evidence-snapshot.json"),
+      );
+      const target = await forkProject(root, "recovery-source", "recovery-target", "discover");
+      assert.equal(target.packages.find((item) => item.stage === "discover")?.status, "complete");
+      assert.notEqual(target.packages.find((item) => item.stage === "acquire")?.status, "complete");
+      const artifacts = await loadEvidenceArtifactRecords(root, target.id);
+      assert.equal(artifacts[0]?.downloadBinding?.projectId, "recovery-source");
+      assert.equal(
+        artifacts[0]?.downloadBinding?.bindingSha256,
+        snapshot.artifacts[0]?.downloadBinding?.bindingSha256,
+      );
+      assert.deepEqual(
+        artifacts.map((item) => item.artifactId),
+        snapshot.artifacts.map((item) => item.artifactId),
+      );
+      const [candidate] = await listEvidenceCandidates(root, target.id);
+      assert.ok(candidate);
+      const auditPath = join(staging, "recovery-audit.json");
+      await writeFile(
+        auditPath,
+        JSON.stringify({
+          ...acquisitionValue(
+            candidate.id,
+            "source-1",
+            artifacts.map((item) => item.artifactId),
+          ),
+          limitations: ["Outcome values remain sealed until inference."],
+        }),
+      );
+      const before = await readFile(evidenceLedgerPath(root, target.id));
+      const forecast = await invokeCli([
+        "research",
+        "project",
+        "evidence",
+        "content",
+        "forecast",
+        target.id,
+        "--input",
+        auditPath,
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(forecast.exitCode, 0, forecast.stderr);
+      const result = JSON.parse(forecast.stdout);
+      assert.equal(result.kind, "tiangong-acquisition-forecast");
+      assert.equal(result.acquisitionGate.decision, "pass");
+      assert.equal(result.certifiesContentGate, false);
+      assert.deepEqual(await readFile(evidenceLedgerPath(root, target.id)), before);
+      const emptyArtifactsPath = join(staging, "forecast-unmaterialized-input.json");
+      await writeFile(
+        emptyArtifactsPath,
+        JSON.stringify(acquisitionValue(candidate.id, "source-1", [])),
+      );
+      const unmaterialized = await invokeCli([
+        "research",
+        "project",
+        "evidence",
+        "content",
+        "forecast",
+        target.id,
+        "--input",
+        emptyArtifactsPath,
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(unmaterialized.exitCode, 0, unmaterialized.stderr);
+      assert.deepEqual(JSON.parse(unmaterialized.stdout).pendingInputArtifactSourceIds, [
+        "source-1",
+      ]);
+      assert.deepEqual(await readFile(evidenceLedgerPath(root, target.id)), before);
+      const acquire = await prepareNativeResearchStage({
+        root,
+        projectId: target.id,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      assert.ok(acquire.commands.forecastAcquisition?.argv.includes("forecast"));
+      await submitNativeResearchStage({
+        root,
+        projectId: target.id,
+        sessionId: acquire.sessionId,
+        outputPath: auditPath,
+        confirmedModel: acquire.expectedModel,
+      });
+      const recovered = await loadCurrentEvidenceSnapshot(root, target.id);
+      assert.equal(recovered.inferenceGate.decision, "pass");
+      assert.deepEqual(
+        recovered.artifacts.map((item) => item.artifactId),
+        artifacts.map((item) => item.artifactId),
+      );
+      assert.deepEqual(
+        await readFile(
+          join(workspacePaths(root).projects, "recovery-source", "outputs/evidence-snapshot.json"),
+        ),
+        sourceSnapshotBytes,
+      );
+      await forkProject(root, target.id, "recovery-target-again", "discover");
+      const repeated = await loadEvidenceArtifactRecords(root, "recovery-target-again");
+      assert.equal(repeated[0]?.downloadBinding?.projectId, "recovery-source");
+      assert.deepEqual(
+        repeated.map((item) => item.artifactId),
+        artifacts.map((item) => item.artifactId),
+      );
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("registers one exact artifact, ignores concurrent files, and freezes a verified snapshot", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-acquisition-test-"));
     const staging = await mkdtemp(join(tmpdir(), "tiangong-acquisition-files-"));
@@ -1620,6 +1744,7 @@ async function freezeInputOnlyProject(
   root: string,
   staging: string,
   projectId: string,
+  withDownload = false,
 ): Promise<{ snapshot: Awaited<ReturnType<typeof loadCurrentEvidenceSnapshot>> }> {
   await initializeProject(root, projectId, "Evaluate an immutable input evidence source.");
   const input = join(staging, `${projectId}.txt`);
@@ -1649,11 +1774,21 @@ async function freezeInputOnlyProject(
     stage: "acquire",
     hostAgent: "codex",
   });
+  const download = withDownload
+    ? await completedDownload(
+        root,
+        projectId,
+        candidate.id,
+        input,
+        "https://example.test/unchanged-source.txt",
+      )
+    : null;
   const artifact = await registerEvidenceArtifact({
     root,
     projectId,
     candidateId: candidate.id,
     path: input,
+    ...(download ? { downloadBindingId: download.binding.bindingId } : {}),
     mediaType: "text/plain",
   });
   const acquireOutput = join(staging, `${projectId}-acquire.json`);

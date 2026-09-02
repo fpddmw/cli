@@ -3,6 +3,7 @@ import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 
 import { CliError } from "../../errors.js";
+import { declaredSourceTypes, type SourceTypeRequirements } from "./evidence-role-coverage.js";
 import { sanitizeResearchValue } from "./sanitization.js";
 import { sha256Text } from "./storage.js";
 
@@ -298,7 +299,7 @@ export interface ScientificDesignContract {
       | "background";
     claimIds: string[];
     coverageDimensionIds: string[];
-    sourceTypeRequirements: string[];
+    sourceTypeRequirements: SourceTypeRequirements;
     peerReviewedRequired: boolean;
     required: boolean;
     minimumFullText: number;
@@ -1238,7 +1239,31 @@ export function scientificDesignSchema(): Record<string, unknown> {
             },
             claimIds: identifierArray,
             coverageDimensionIds: identifierArray,
-            sourceTypeRequirements: identifierArray,
+            sourceTypeRequirements: {
+              description:
+                "A flat array means all-of. In an object every present allOf, anyOf, and atLeast group must be satisfied; no recursive expressions.",
+              anyOf: [
+                identifierArray,
+                {
+                  type: "object",
+                  additionalProperties: false,
+                  minProperties: 1,
+                  properties: {
+                    allOf: { ...identifierArray, minItems: 1 },
+                    anyOf: { ...identifierArray, minItems: 1 },
+                    atLeast: {
+                      type: "object",
+                      additionalProperties: false,
+                      required: ["count", "from"],
+                      properties: {
+                        count: { type: "integer", minimum: 1, maximum: 100 },
+                        from: { ...identifierArray, minItems: 1 },
+                      },
+                    },
+                  },
+                },
+              ],
+            },
             peerReviewedRequired: { type: "boolean" },
             required: { type: "boolean" },
             minimumFullText: { type: "integer", minimum: 0 },
@@ -1647,6 +1672,20 @@ export function parseScientificDesign(value: unknown): ScientificDesignContract 
     });
   }
   const design = value as ScientificDesignContract;
+  for (const role of design.evidenceRoles) {
+    const requirements = role.sourceTypeRequirements;
+    if (
+      !Array.isArray(requirements) &&
+      requirements.atLeast &&
+      requirements.atLeast.count > new Set(requirements.atLeast.from).size
+    ) {
+      throw new CliError("Source-type atLeast count exceeds the distinct declared choices.", {
+        code: "RESEARCH_SCIENTIFIC_DESIGN_INVALID",
+        exitCode: 2,
+        details: { roleId: role.id },
+      });
+    }
+  }
   assertUniqueIds(design);
   assertReferences(design);
   return design;
@@ -2469,7 +2508,8 @@ export function evaluateScientificDesign(
   const incompleteEvidenceRoles = design.evidenceRoles.filter(
     (role) =>
       role.required &&
-      (role.coverageDimensionIds.length === 0 || role.sourceTypeRequirements.length === 0),
+      (role.coverageDimensionIds.length === 0 ||
+        declaredSourceTypes(role.sourceTypeRequirements).length === 0),
   );
   if (incompleteEvidenceRoles.length) {
     add(

@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-09-01
-lastReviewedCommit: ca716c2fea59d0a8085aa32dbd8f65a686b3353e
+lastReviewedAt: 2026-09-02
+lastReviewedCommit: 8a18ba69f432d2c639517549157ef29545722cff
 ---
 
 # Repo Architecture
@@ -116,10 +116,19 @@ storage writes, queueing, and document status transitions.
   closeout, native Web/Browser activity receipts whose sensitive inputs are
   retained only by hash, exact download-event binding, and explicit exact-file
   artifact registration with PDF/ZIP/OpenXML validation,
-  acquisition audits that freeze both success and honest gaps, immutable
-  parent/delta evidence snapshots, automatic hash-checked input-backed artifact
+  acquisition audits that freeze both success and honest gaps,
+  read-only pre-acquisition forecasts using the indexed typed-content role
+  evaluator and source-type constraints shared with scientific review, explicit
+  all-of/any-of/distinct-at-least groups without a recursive expression language,
+  immutable parent/delta evidence snapshots, automatic hash-checked input-backed artifact
   materialization for readable local inputs, exact-lineage artifact decomposition,
   line-range/JSON-Pointer evidence atoms, typed-content coverage snapshots,
+  bounded atomic content-registration batches with one operation-local verified
+  acquisition/artifact view, one parsed artifact retained at a time, and immutable
+  envelopes made visible only by a hash-bound ledger commit; single and batch
+  records share validation and idempotency rules. Artifact intake has a separate
+  per-file byte limit from aggregate stage outputs and an offline metadata-only
+  preflight; large unsupported files stop with provider-subsetting guidance,
   separate inference-stop gates, immutable inference snapshots, schema-v2
   reproducible analysis runs, and mechanically generated Claim-Evidence Graphs,
   addendum supersession, reviewer-driven synthesis revisions with immutable
@@ -432,6 +441,14 @@ reviews. Once mutation starts, every failure rolls back source state and removes
 the target. Status requires the append-only `project.forked` marker before a fork
 can be authoritative, so legacy half-written targets are reported as invalid.
 
+`scientific-review-execution.ts` executes an already prepared early review
+through the same reviewer abstraction. It reserves finite token/cost/wall
+budgets before invocation, stages exact packet and Policy prose, and records an
+immutable output/receipt before atomic idempotent submission. Receipt replay
+revalidates canonical upstream and review bytes without another model call;
+pending recovered submission also rechecks project authority and production
+Policy/readiness. Missing provider usage does not erase a consumed reservation.
+
 Reviewer transport is separate from producer host and reviewer model identity.
 `native-direct` invokes the platform capsule in-process. `sandbox-bridge` uses
 an owner-only local connection record and short Unix socket to an exact-version
@@ -444,6 +461,12 @@ or arbitrary commands, runs filesystem negative probes before READY, and does
 not fall back between transports. WorkBuddy/CodeBuddy may be recorded as native
 producer hosts, but remain forbidden child executors; the reviewer stays Codex
 or Claude.
+
+Reviewer status selects the configured transport without running a paid smoke.
+Native smoke configuration readiness is labeled separately from production
+attestation readiness. Project loaders and Doctor share one closed project
+status enum; run/status use one due scientific-gate projection so later gates
+do not stop earlier stages and stopped gates never invite a producer call.
 
 Capsule release is host-aware. Codex/Claude stages and work packages normally
 remove their capsules after the immutable output and journal event commit. A

@@ -1,15 +1,22 @@
 export type ContextRole = "workspace" | "setup" | "unmanaged" | "invalid";
 
-export type ProjectStatus =
-  | "ready"
-  | "running"
-  | "blocked"
-  | "complete"
-  | "stale"
-  | "waiting-user"
-  | "waiting-external"
-  | "archived"
-  | "abandoned";
+export const PROJECT_STATUSES = [
+  "ready",
+  "running",
+  "blocked",
+  "complete",
+  "stale",
+  "waiting-user",
+  "waiting-external",
+  "archived",
+  "abandoned",
+] as const;
+
+export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
+
+export function isProjectStatus(value: unknown): value is ProjectStatus {
+  return typeof value === "string" && PROJECT_STATUSES.some((status) => status === value);
+}
 
 export type PackageStatus = "pending" | "ready" | "running" | "retry" | "failed" | "complete";
 
@@ -59,6 +66,7 @@ export interface ResearchBudget {
   maxWallSeconds: number;
   maxFilesPerPackage: number;
   maxBytesPerPackage: number;
+  maxBytesPerArtifact: number;
   maxAttemptsPerPackage: number;
   confirmationCostUsd: number;
   packageMaxTokens: Record<AgentPackageStage, number>;

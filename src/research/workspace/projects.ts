@@ -18,6 +18,7 @@ import {
   registerProjectInputCandidates,
 } from "./evidence-ledger.js";
 import { cloneProjectArtifactRecords } from "./artifacts.js";
+import { loadBoundAcquisitionDesign } from "./acquisition-routes.js";
 import {
   freezeEvidenceSnapshot,
   loadCurrentEvidenceSnapshot,
@@ -58,6 +59,7 @@ import type {
   VerifiedProjectInputPlan,
 } from "./types.js";
 import { loadWorkspaceConfig, withWorkspaceLock } from "./workspace.js";
+import { isProjectStatus } from "./types.js";
 
 const PROJECT_ID_PATTERN = /^[a-z0-9][a-z0-9-]{2,63}$/;
 
@@ -651,8 +653,51 @@ export async function forkProject(
         await cloneProjectEvidenceReceipts(root, sourceProjectId, targetProjectId);
         await cloneEvidenceLedger(root, sourceProjectId, targetProjectId);
       }
-      if (inheritedStages.includes("acquire")) {
-        await cloneProjectArtifactRecords(root, sourceProjectId, targetProjectId);
+      if (inheritedStages.includes("discover")) {
+        const sourceDesign = source.scientificDesign
+          ? await loadBoundAcquisitionDesign(root, source)
+          : null;
+        const inheritedArtifacts = await cloneProjectArtifactRecords(
+          root,
+          sourceProjectId,
+          targetProjectId,
+        );
+        // Retain the original signed Download binding as historical provenance;
+        // never pretend a recovery generation made a fresh network request.
+        const provenanceDesigns = new Map([[source.id, sourceDesign]]);
+        for (const artifact of inheritedArtifacts) {
+          const binding = artifact.downloadBinding;
+          if (!binding) continue;
+          // A second recovery may retain an earlier ancestor's receipt. Validate
+          // the plan that actually authorized that download, not a later plan.
+          if (!provenanceDesigns.has(binding.projectId)) {
+            const origin = await loadProject(root, binding.projectId);
+            provenanceDesigns.set(
+              origin.id,
+              origin.scientificDesign ? await loadBoundAcquisitionDesign(root, origin) : null,
+            );
+          }
+          const originDesign = provenanceDesigns.get(binding.projectId);
+          if (!originDesign && binding.acquisitionRouteId === null) continue;
+          const route = originDesign?.acquisitionPlan.routes.find(
+            (item) => item.id === binding.acquisitionRouteId,
+          );
+          if (
+            !route ||
+            route.executor !== "agent" ||
+            !["open-access-download", "authorized-browser"].includes(route.routeClass) ||
+            !route.downloadBackends.includes(binding.backend)
+          ) {
+            throw new CliError(
+              "Inherited artifact no longer binds its original acquisition route and download backend.",
+              {
+                code: "RESEARCH_PROJECT_FORK_ARTIFACT_ROUTE_INVALID",
+                exitCode: 3,
+                details: { artifactId: artifact.artifactId },
+              },
+            );
+          }
+        }
       }
       refreshProject(project);
       await writeJsonAtomic(join(targetRoot, "project.json"), project);
@@ -1137,6 +1182,7 @@ export function refreshProject(project: ProjectState): ProjectState {
   else if (project.packages.some((item) => item.status === "failed")) project.status = "blocked";
   else if (project.packages.every((item) => item.status === "complete"))
     project.status = "complete";
+  else if (blockingScientificGate(project)) project.status = "blocked";
   else if (project.packages.some((item) => item.status === "running")) project.status = "running";
   else project.status = "ready";
   project.updatedAt = new Date().toISOString();
@@ -1148,14 +1194,42 @@ export function nextReadyPackage(project: ProjectState): WorkPackage | undefined
   if (project.handoff.state !== "agent-actionable") return undefined;
   const candidate = project.packages.find((workPackage) => workPackage.status === "ready");
   if (!candidate) return undefined;
-  const gate = nextScientificGate(project);
-  if (gate && gate.status !== "passed") {
-    const packageOrder = ["discover", "acquire", "analyze", "synthesize", "review", "close"];
-    if (packageOrder.indexOf(candidate.id) >= packageOrder.indexOf(gate.blocksPackage)) {
-      return undefined;
-    }
-  }
+  if (blockingScientificGate(project)) return undefined;
   return candidate;
+}
+
+/** A future review obligation does not block the earlier evidence-gathering packages. */
+export function blockingScientificGate(
+  project: ProjectState,
+): ReturnType<typeof nextScientificGate> {
+  const gate = nextScientificGate(project);
+  const unfinished = project.packages.find((workPackage) => workPackage.status !== "complete");
+  if (!gate || !unfinished) return null;
+  const packageOrder = ["discover", "acquire", "analyze", "synthesize", "review", "close"];
+  return packageOrder.indexOf(unfinished.id) >= packageOrder.indexOf(gate.blocksPackage)
+    ? gate
+    : null;
+}
+
+export function scientificGateRecommendedAction(
+  root: string,
+  project: ProjectState,
+  gate = blockingScientificGate(project),
+): string | null {
+  if (!gate) return null;
+  if (gate.status === "stopped") {
+    return `Scientific ${gate.role} review stopped the project; inspect the frozen review and request user or external action instead of continuing.`;
+  }
+  if (gate.status === "prepared") {
+    return `Scientific ${gate.role} review is prepared. After approving its bounded review cost, explicitly execute the configured independent reviewer: tiangong-ai research project scientific review execute ${project.id} --role ${gate.role} --confirm-review-cost --workspace ${root}. Manual submission of an independently produced bound review remains available through scientific review submit; research run never launches this early review automatically.`;
+  }
+  const canaryOption =
+    gate.role === "evidence-construct" ? " --canary-artifacts <absolute-json-array>" : "";
+  const instruction =
+    gate.status === "revision-required"
+      ? `Revise the ${gate.role} assessment in the native producer App without editing frozen evidence, then prepare a fresh independent review`
+      : `Use the native producer App to create a bounded ${gate.role} assessment from schema scientific-assessment-${gate.role}, then prepare an independent review`;
+  return `${instruction}: tiangong-ai research project scientific review prepare ${project.id} --role ${gate.role} --assessment <absolute-json>${canaryOption} --reviewer-agent <codex|claude> --reviewer-session <fresh-opaque-id> --workspace ${root}`;
 }
 
 export function nextScientificGate(project: ProjectState): {
@@ -1274,17 +1348,7 @@ function validateProjectShape(project: ProjectState, expectedId: string): void {
     project.schemaVersion !== 1 ||
     project.id !== expectedId ||
     !PROJECT_ID_PATTERN.test(project.id) ||
-    ![
-      "ready",
-      "running",
-      "blocked",
-      "complete",
-      "stale",
-      "waiting-user",
-      "waiting-external",
-      "archived",
-      "abandoned",
-    ].includes(project.status) ||
+    !isProjectStatus(project.status) ||
     typeof project.question !== "string" ||
     (project.budgetConfirmedAt !== null && typeof project.budgetConfirmedAt !== "string") ||
     !Array.isArray(project.inputs) ||

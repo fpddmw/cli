@@ -2,11 +2,19 @@ import { chmod, lstat, readFile, readdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import { CliError } from "../../errors.js";
-import { loadCurrentEvidenceSnapshot } from "./acquisition.js";
+import { loadCurrentEvidenceSnapshot, loadVerifiedEvidencePreparationView } from "./acquisition.js";
 import { loadEvidenceArtifactRecords, type EvidenceArtifactRecord } from "./artifacts.js";
 import { loadBoundAcquisitionDesign } from "./acquisition-routes.js";
+import {
+  EVIDENCE_CONTENT_CLASSES,
+  EVIDENCE_CONTENT_FUNCTIONS,
+  EVIDENCE_CONTENT_IDENTIFIER,
+  EVIDENCE_CONTENT_LIMITS,
+  isEvidenceContentInputShape,
+} from "./evidence-content-schema.js";
 import { appendEvidenceLedgerEvent, evidenceLedgerPath } from "./evidence-ledger.js";
-import { readJournal } from "./journal.js";
+import { computeRoleCoverage } from "./evidence-role-coverage.js";
+import { readJournal, readVerifiedJournal } from "./journal.js";
 import { loadProject } from "./projects.js";
 import { configuredResearchSecrets, sanitizeResearchText } from "./sanitization.js";
 import {
@@ -22,33 +30,32 @@ import {
   writeTextAtomic,
 } from "./storage.js";
 
-const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const IDENTIFIER = new RegExp(EVIDENCE_CONTENT_IDENTIFIER);
 const SHA256 = /^[a-f0-9]{64}$/;
-const CONTENT_CLASSES = new Set([
-  "fulltext",
-  "table-data",
-  "supplementary-data",
-  "structured-data",
-  "metadata",
-  "figure-text",
-  "code",
-  "container-index",
-]);
-const EVIDENCE_FUNCTIONS = new Set([
-  "support",
-  "counterevidence",
-  "definition",
-  "method",
-  "limitation",
-  "context",
-]);
+const CONTENT_CLASSES = new Set<string>(EVIDENCE_CONTENT_CLASSES);
+const EVIDENCE_FUNCTIONS = new Set<string>(EVIDENCE_CONTENT_FUNCTIONS);
 const PRODUCER_VISIBLE_MEDIA_TYPES = new Set([
   "application/json",
   "text/plain",
   "text/markdown",
   "text/csv",
 ]);
-const MAX_EXCERPT_BYTES = 8_000;
+const MAX_EXCERPT_BYTES = EVIDENCE_CONTENT_LIMITS.maxExcerptBytes;
+const MAX_BATCH_RECORDS = EVIDENCE_CONTENT_LIMITS.maxBatchRecords;
+const MAX_BATCH_INPUT_BYTES = EVIDENCE_CONTENT_LIMITS.maxBatchInputBytes;
+
+interface ContentPreparationView {
+  acquisition: Awaited<ReturnType<typeof loadCurrentEvidenceSnapshot>>;
+  artifacts: Map<string, EvidenceArtifactRecord>;
+  roleIds: Set<string> | null;
+  texts: Map<string, { text: string; lines?: string[]; json?: unknown }>;
+  work: {
+    acquisitionVerifications: number;
+    artifactStoreScans: number;
+    excerptFileReads: number;
+    ledgerAppends: number;
+  };
+}
 
 export interface ArtifactDecompositionRecord {
   schemaVersion: 1;
@@ -134,15 +141,42 @@ export async function recordArtifactDecomposition(input: {
   projectId: string;
   value: Record<string, unknown>;
 }): Promise<ArtifactDecompositionRecord> {
-  await assertContentPreparationWindow(input.root, input.projectId);
-  const value = parseDecompositionInput(input.value);
-  const acquisition = await loadCurrentEvidenceSnapshot(input.root, input.projectId);
-  const artifacts = new Map(
-    (await loadEvidenceArtifactRecords(input.root, input.projectId)).map((artifact) => [
-      artifact.artifactId,
-      artifact,
-    ]),
+  const view = await loadContentPreparationView(input.root, input.projectId);
+  const record = prepareDecompositionRecord(input, view);
+  const existing = (await loadDecompositionRecords(input.root, input.projectId)).find(
+    (item) => item.sourceArtifactId === record.sourceArtifactId,
   );
+  if (existing) {
+    assertSameContentRecord(
+      existing.decompositionSha256,
+      record.decompositionSha256,
+      "decomposition",
+    );
+    return existing;
+  }
+  const destination = decompositionRecordPath(input.root, input.projectId, record.sourceArtifactId);
+  await writeJsonAtomic(destination, record, 0o444);
+  await chmod(destination, 0o444).catch(() => undefined);
+  await appendEvidenceLedgerEvent(input.root, input.projectId, "decomposition.recorded", {
+    decompositionId: record.decompositionId,
+    decompositionSha256: record.decompositionSha256,
+    sourceArtifactId: record.sourceArtifactId,
+    sourceArtifactSha256: record.sourceArtifactSha256,
+    candidateId: record.candidateId,
+    status: record.status,
+    outputArtifactIds: record.outputArtifactIds,
+    outputArtifactSha256s: record.outputArtifactSha256s,
+    contentClasses: record.contentClasses,
+  });
+  return record;
+}
+
+function prepareDecompositionRecord(
+  input: { projectId: string; value: Record<string, unknown> },
+  view: ContentPreparationView,
+): ArtifactDecompositionRecord {
+  const value = parseDecompositionInput(input.value);
+  const { acquisition, artifacts } = view;
   const source = artifacts.get(value.sourceArtifactId);
   if (
     !source ||
@@ -193,30 +227,6 @@ export async function recordArtifactDecomposition(input: {
     decompositionSha256,
     recordedAt: new Date().toISOString(),
   };
-  const destination = decompositionRecordPath(input.root, input.projectId, source.artifactId);
-  if (await pathExists(destination)) {
-    const existing = parseDecompositionRecord(JSON.parse(await readFile(destination, "utf8")));
-    if (existing.decompositionSha256 !== decompositionSha256) {
-      throw contentError(
-        "This source artifact already has a different decomposition disposition.",
-        "RESEARCH_DECOMPOSITION_CONFLICT",
-      );
-    }
-    return existing;
-  }
-  await writeJsonAtomic(destination, record, 0o444);
-  await chmod(destination, 0o444).catch(() => undefined);
-  await appendEvidenceLedgerEvent(input.root, input.projectId, "decomposition.recorded", {
-    decompositionId: record.decompositionId,
-    decompositionSha256,
-    sourceArtifactId: source.artifactId,
-    sourceArtifactSha256: source.sha256,
-    candidateId: source.candidateId,
-    status: record.status,
-    outputArtifactIds: record.outputArtifactIds,
-    outputArtifactSha256s: record.outputArtifactSha256s,
-    contentClasses: record.contentClasses,
-  });
   return record;
 }
 
@@ -225,9 +235,39 @@ export async function registerEvidenceAtom(input: {
   projectId: string;
   value: Record<string, unknown>;
 }): Promise<EvidenceAtomRecord> {
-  await assertContentPreparationWindow(input.root, input.projectId);
+  const view = await loadContentPreparationView(input.root, input.projectId);
+  const record = await prepareEvidenceAtom(input, view);
+  const existing = (await loadEvidenceAtomRecords(input.root, input.projectId)).find(
+    (item) => item.atomId === record.atomId,
+  );
+  if (existing) {
+    assertSameContentRecord(existing.atomSha256, record.atomSha256, "atom");
+    return existing;
+  }
+  const destination = atomRecordPath(input.root, input.projectId, record.atomId);
+  await writeJsonAtomic(destination, record, 0o444);
+  await chmod(destination, 0o444).catch(() => undefined);
+  await appendEvidenceLedgerEvent(input.root, input.projectId, "atom.registered", {
+    atomId: record.atomId,
+    atomSha256: record.atomSha256,
+    sourceId: record.sourceId,
+    candidateId: record.candidateId,
+    artifactId: record.artifactId,
+    artifactSha256: record.artifactSha256,
+    excerptSha256: record.excerptSha256,
+    evidenceRoleIds: record.evidenceRoleIds,
+    coverageDimensionIds: record.coverageDimensionIds,
+    evidenceFunction: record.evidenceFunction,
+  });
+  return record;
+}
+
+async function prepareEvidenceAtom(
+  input: { root: string; projectId: string; value: Record<string, unknown> },
+  view: ContentPreparationView,
+): Promise<EvidenceAtomRecord> {
   const value = parseAtomInput(input.value);
-  const acquisition = await loadCurrentEvidenceSnapshot(input.root, input.projectId);
+  const { acquisition } = view;
   const source = acquisition.sources.find((candidate) => candidate.id === value.sourceId);
   if (
     !source ||
@@ -239,9 +279,7 @@ export async function registerEvidenceAtom(input: {
       "RESEARCH_EVIDENCE_ATOM_SOURCE_INVALID",
     );
   }
-  const artifact = (await loadEvidenceArtifactRecords(input.root, input.projectId)).find(
-    (candidate) => candidate.artifactId === value.artifactId,
-  );
+  const artifact = view.artifacts.get(value.artifactId);
   if (
     !artifact ||
     artifact.candidateId !== value.candidateId ||
@@ -252,9 +290,22 @@ export async function registerEvidenceAtom(input: {
       "RESEARCH_EVIDENCE_ATOM_ARTIFACT_INVALID",
     );
   }
-  await validateAtomTaxonomy(input.root, input.projectId, source, value);
+  validateAtomTaxonomy(source, value, view.roleIds);
   const artifactPath = resolveContained(workspacePaths(input.root).control, artifact.locator);
-  const excerpt = await extractAtomExcerpt(artifactPath, artifact.mediaType, value.locator);
+  let document = view.texts.get(artifact.artifactId);
+  if (document === undefined) {
+    const text = await readFile(artifactPath, "utf8");
+    if (sha256Text(text) !== artifact.sha256) {
+      throw contentError(
+        "Evidence atom artifact changed during preparation.",
+        "RESEARCH_ARTIFACT_DRIFT",
+      );
+    }
+    view.work.excerptFileReads += 1;
+    document = { text };
+    view.texts.set(artifact.artifactId, document);
+  }
+  const excerpt = extractAtomExcerptFromDocument(document, artifact.mediaType, value.locator);
   assertSafeContent(excerpt, "Evidence atom excerpt contains sensitive material.");
   const stable = {
     schemaVersion: 1 as const,
@@ -280,32 +331,303 @@ export async function registerEvidenceAtom(input: {
     atomSha256,
     registeredAt: new Date().toISOString(),
   };
-  const destination = atomRecordPath(input.root, input.projectId, value.atomId);
-  if (await pathExists(destination)) {
-    const existing = parseAtomRecord(JSON.parse(await readFile(destination, "utf8")));
-    if (existing.atomSha256 !== atomSha256) {
+  return record;
+}
+
+type ContentRecord = ArtifactDecompositionRecord | EvidenceAtomRecord;
+type ContentBatchKind = "decomposition" | "atom";
+
+interface ContentBatch {
+  schemaVersion: 1;
+  projectId: string;
+  kind: ContentBatchKind;
+  batchSha256: string;
+  records: ContentRecord[];
+}
+
+/** Caller holds one workspace mutation lock for the whole operation. */
+export async function registerEvidenceContentBatch(input: {
+  root: string;
+  projectId: string;
+  kind: ContentBatchKind;
+  value: Record<string, unknown>;
+}): Promise<ContentBatch & { work: ContentPreparationView["work"] }> {
+  const values = input.value.records;
+  if (
+    input.value.schemaVersion !== 1 ||
+    Object.keys(input.value).some((key) => !["schemaVersion", "records"].includes(key)) ||
+    !Array.isArray(values) ||
+    values.length < 1 ||
+    values.length > MAX_BATCH_RECORDS ||
+    values.some((value) => !isObject(value)) ||
+    Buffer.byteLength(canonicalJson(input.value)) > MAX_BATCH_INPUT_BYTES ||
+    !isEvidenceContentInputShape(
+      input.kind === "atom" ? "evidence-atom-batch" : "artifact-decomposition-batch",
+      input.value,
+    )
+  ) {
+    throw contentError(
+      `Evidence batch requires 1-${MAX_BATCH_RECORDS} records within ${MAX_BATCH_INPUT_BYTES} bytes.`,
+      "RESEARCH_EVIDENCE_BATCH_INVALID",
+    );
+  }
+  const view = await loadContentPreparationView(input.root, input.projectId);
+  const existingRecords =
+    input.kind === "atom"
+      ? await loadEvidenceAtomRecords(input.root, input.projectId)
+      : await loadDecompositionRecords(input.root, input.projectId);
+  const existing = new Map(existingRecords.map((record) => [contentRecordId(record), record]));
+  const seen = new Set<string>();
+  const records: ContentRecord[] = [];
+  let added = 0;
+  // Group extraction by artifact, then restore caller order. At most one parsed
+  // document stays live, and each referenced artifact is read/parsed once.
+  const ordered = values.map((value, index) => ({
+    value: value as Record<string, unknown>,
+    index,
+  }));
+  if (input.kind === "atom")
+    ordered.sort((left, right) =>
+      String(left.value.artifactId).localeCompare(String(right.value.artifactId)),
+    );
+  let currentArtifact: unknown;
+  for (const { value, index } of ordered) {
+    if (value.artifactId !== currentArtifact) {
+      view.texts.clear();
+      currentArtifact = value.artifactId;
+    }
+    const prepared =
+      input.kind === "atom"
+        ? await prepareEvidenceAtom({ ...input, value: value as Record<string, unknown> }, view)
+        : prepareDecompositionRecord({ ...input, value: value as Record<string, unknown> }, view);
+    const id = contentRecordId(prepared);
+    if (seen.has(id)) {
       throw contentError(
-        "Evidence atom ID already exists with different content.",
-        "RESEARCH_EVIDENCE_ATOM_CONFLICT",
+        "Evidence batch contains duplicate record identities.",
+        "RESEARCH_EVIDENCE_BATCH_INVALID",
       );
     }
-    return existing;
+    seen.add(id);
+    const previous = existing.get(id);
+    if (previous)
+      assertSameContentRecord(
+        contentRecordSha256(previous),
+        contentRecordSha256(prepared),
+        input.kind,
+      );
+    else added += 1;
+    records[index] = previous ?? prepared;
   }
-  await writeJsonAtomic(destination, record, 0o444);
-  await chmod(destination, 0o444).catch(() => undefined);
-  await appendEvidenceLedgerEvent(input.root, input.projectId, "atom.registered", {
-    atomId: record.atomId,
-    atomSha256,
-    sourceId: record.sourceId,
-    candidateId: record.candidateId,
-    artifactId: record.artifactId,
-    artifactSha256: record.artifactSha256,
-    excerptSha256: record.excerptSha256,
-    evidenceRoleIds: record.evidenceRoleIds,
-    coverageDimensionIds: record.coverageDimensionIds,
-    evidenceFunction: record.evidenceFunction,
-  });
-  return record;
+  const stable = {
+    schemaVersion: 1 as const,
+    projectId: input.projectId,
+    kind: input.kind,
+    records,
+  };
+  const batchSha256 = contentBatchHash(stable);
+  let batch: ContentBatch = { ...stable, batchSha256 };
+  const committed =
+    added === 0 &&
+    (await readVerifiedJournal(evidenceLedgerPath(input.root, input.projectId))).some(
+      (event) =>
+        event.type === "content.batch.registered" && event.payload.batchSha256 === batchSha256,
+    );
+  if (!committed) {
+    const path = contentBatchPath(input.root, input.projectId, batchSha256);
+    if (await pathExists(path)) {
+      // A crash before the commit event can leave a complete invisible envelope.
+      // Reuse only its verified bytes, preserving the original timestamps.
+      batch = await readContentBatch(path, input.projectId, batchSha256, input.kind);
+    } else {
+      await writeJsonAtomic(path, batch, 0o444);
+    }
+    await appendEvidenceLedgerEvent(input.root, input.projectId, "content.batch.registered", {
+      batchSha256,
+      envelopeSha256: sha256Text(canonicalJson(batch)),
+      kind: input.kind,
+      recordCount: records.length,
+    });
+    view.work.ledgerAppends += 1;
+  }
+  return { ...batch, work: view.work };
+}
+
+async function loadContentPreparationView(
+  root: string,
+  projectId: string,
+): Promise<ContentPreparationView> {
+  const project = await assertContentPreparationWindow(root, projectId);
+  const work = {
+    acquisitionVerifications: 0,
+    artifactStoreScans: 0,
+    excerptFileReads: 0,
+    ledgerAppends: 0,
+  };
+  const verified = await loadVerifiedEvidencePreparationView(root, projectId);
+  work.acquisitionVerifications += 1;
+  work.artifactStoreScans += 1;
+  const roleIds = project.scientificDesign
+    ? new Set(
+        (await loadBoundAcquisitionDesign(root, project)).evidenceRoles.map((role) => role.id),
+      )
+    : null;
+  return {
+    acquisition: verified.snapshot,
+    artifacts: new Map(verified.artifacts.map((artifact) => [artifact.artifactId, artifact])),
+    roleIds,
+    texts: new Map(),
+    work,
+  };
+}
+
+function contentRecordId(record: ContentRecord): string {
+  return "atomId" in record ? record.atomId : record.sourceArtifactId;
+}
+
+function contentRecordSha256(record: ContentRecord): string {
+  return "atomSha256" in record ? record.atomSha256 : record.decompositionSha256;
+}
+
+function assertSameContentRecord(previous: string, next: string, kind: ContentBatchKind): void {
+  if (previous !== next) {
+    throw contentError(
+      `Evidence ${kind} identity already exists with different content.`,
+      kind === "atom" ? "RESEARCH_EVIDENCE_ATOM_CONFLICT" : "RESEARCH_DECOMPOSITION_CONFLICT",
+    );
+  }
+}
+
+function contentBatchHash(batch: Omit<ContentBatch, "batchSha256">): string {
+  return sha256Text(
+    canonicalJson({
+      schemaVersion: batch.schemaVersion,
+      projectId: batch.projectId,
+      kind: batch.kind,
+      records: batch.records.map((record) => ({
+        id: contentRecordId(record),
+        sha256: contentRecordSha256(record),
+      })),
+    }),
+  );
+}
+
+function contentBatchPath(root: string, projectId: string, sha256: string): string {
+  return resolveContained(
+    workspacePaths(root).projects,
+    `${projectId}/evidence/content-batches/${sha256}.json`,
+  );
+}
+
+async function readContentBatch(
+  path: string,
+  projectId: string,
+  sha256: string,
+  kind: ContentBatchKind,
+): Promise<ContentBatch> {
+  const info = await lstat(path).catch(() => undefined);
+  if (!info?.isFile() || info.isSymbolicLink() || info.size > 16 * 1024 * 1024) {
+    throw contentError(
+      "Committed evidence batch file is absent or invalid.",
+      "RESEARCH_EVIDENCE_BATCH_INVALID",
+    );
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    throw contentError(
+      "Stored evidence batch is not valid JSON.",
+      "RESEARCH_EVIDENCE_BATCH_INVALID",
+    );
+  }
+  if (
+    !isObject(value) ||
+    value.schemaVersion !== 1 ||
+    value.projectId !== projectId ||
+    value.kind !== kind ||
+    value.batchSha256 !== sha256 ||
+    !Array.isArray(value.records) ||
+    value.records.length < 1 ||
+    value.records.length > MAX_BATCH_RECORDS
+  ) {
+    throw contentError(
+      "Stored evidence batch identity is invalid.",
+      "RESEARCH_EVIDENCE_BATCH_INVALID",
+    );
+  }
+  const records = value.records.map((record) =>
+    kind === "atom" ? parseAtomRecord(record) : parseDecompositionRecord(record),
+  );
+  const batch = { schemaVersion: 1 as const, projectId, kind, batchSha256: sha256, records };
+  if (
+    records.some((record) => record.projectId !== projectId) ||
+    new Set(records.map(contentRecordId)).size !== records.length ||
+    contentBatchHash(batch) !== sha256
+  ) {
+    throw contentError(
+      "Stored evidence batch hash binding is invalid.",
+      "RESEARCH_EVIDENCE_BATCH_INVALID",
+    );
+  }
+  return batch;
+}
+
+async function loadCommittedContentBatchRecords(
+  root: string,
+  projectId: string,
+  kind: ContentBatchKind,
+): Promise<ContentRecord[]> {
+  const ledger = evidenceLedgerPath(root, projectId);
+  const events = await readVerifiedJournal(ledger);
+  const records: ContentRecord[] = [];
+  const seen = new Set<string>();
+  for (const event of events) {
+    if (event.type !== "content.batch.registered" || event.payload.kind !== kind) continue;
+    const hash = event.payload.batchSha256;
+    if (
+      event.scope !== projectId ||
+      typeof hash !== "string" ||
+      !SHA256.test(hash) ||
+      seen.has(hash)
+    ) {
+      throw contentError(
+        "Evidence batch commit event is invalid.",
+        "RESEARCH_EVIDENCE_BATCH_INVALID",
+      );
+    }
+    seen.add(hash);
+    const batch = await readContentBatch(
+      contentBatchPath(root, projectId, hash),
+      projectId,
+      hash,
+      kind,
+    );
+    if (
+      event.payload.recordCount !== batch.records.length ||
+      event.payload.envelopeSha256 !== sha256Text(canonicalJson(batch))
+    ) {
+      throw contentError(
+        "Evidence batch commit count is invalid.",
+        "RESEARCH_EVIDENCE_BATCH_INVALID",
+      );
+    }
+    records.push(...batch.records);
+  }
+  return records;
+}
+
+function mergeContentRecords<T extends ContentRecord>(records: T[], kind: ContentBatchKind): T[] {
+  const merged = new Map<string, T>();
+  for (const record of records) {
+    const id = contentRecordId(record);
+    const previous = merged.get(id);
+    if (previous)
+      assertSameContentRecord(contentRecordSha256(previous), contentRecordSha256(record), kind);
+    else merged.set(id, record);
+  }
+  return [...merged.values()].sort((left, right) =>
+    contentRecordId(left).localeCompare(contentRecordId(right)),
+  );
 }
 
 export async function freezeEvidenceContentSnapshot(
@@ -533,8 +855,9 @@ export async function loadDecompositionRecords(
     workspacePaths(root).projects,
     `${projectId}/evidence/decompositions`,
   );
-  if (!(await pathExists(directory))) return [];
-  const entries = await readdir(directory, { withFileTypes: true });
+  const entries = (await pathExists(directory))
+    ? await readdir(directory, { withFileTypes: true })
+    : [];
   const records: ArtifactDecompositionRecord[] = [];
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     if (!entry.isFile() || entry.isSymbolicLink() || !entry.name.endsWith(".json")) continue;
@@ -549,7 +872,11 @@ export async function loadDecompositionRecords(
     }
     records.push(record);
   }
-  return records;
+  const batched = await loadCommittedContentBatchRecords(root, projectId, "decomposition");
+  return mergeContentRecords(
+    [...records, ...(batched as ArtifactDecompositionRecord[])],
+    "decomposition",
+  );
 }
 
 export async function loadEvidenceAtomRecords(
@@ -557,8 +884,9 @@ export async function loadEvidenceAtomRecords(
   projectId: string,
 ): Promise<EvidenceAtomRecord[]> {
   const directory = resolveContained(workspacePaths(root).projects, `${projectId}/evidence/atoms`);
-  if (!(await pathExists(directory))) return [];
-  const entries = await readdir(directory, { withFileTypes: true });
+  const entries = (await pathExists(directory))
+    ? await readdir(directory, { withFileTypes: true })
+    : [];
   const records: EvidenceAtomRecord[] = [];
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     if (!entry.isFile() || entry.isSymbolicLink() || !entry.name.endsWith(".json")) continue;
@@ -573,10 +901,11 @@ export async function loadEvidenceAtomRecords(
     }
     records.push(record);
   }
-  return records;
+  const batched = await loadCommittedContentBatchRecords(root, projectId, "atom");
+  return mergeContentRecords([...records, ...(batched as EvidenceAtomRecord[])], "atom");
 }
 
-async function assertContentPreparationWindow(root: string, projectId: string): Promise<void> {
+async function assertContentPreparationWindow(root: string, projectId: string) {
   const project = await loadProject(root, projectId);
   const acquire = project.packages.find((workPackage) => workPackage.stage === "acquire");
   const analyze = project.packages.find((workPackage) => workPackage.stage === "analyze");
@@ -591,6 +920,7 @@ async function assertContentPreparationWindow(root: string, projectId: string): 
       "RESEARCH_EVIDENCE_CONTENT_STAGE_REQUIRED",
     );
   }
+  return project;
 }
 
 function parseDecompositionInput(value: Record<string, unknown>): {
@@ -611,6 +941,7 @@ function parseDecompositionInput(value: Record<string, unknown>): {
     "limitations",
   ]);
   if (
+    !isEvidenceContentInputShape("artifact-decomposition", value) ||
     Object.keys(value).some((key) => !allowed.has(key)) ||
     value.schemaVersion !== 1 ||
     typeof value.sourceArtifactId !== "string" ||
@@ -676,6 +1007,7 @@ function parseAtomInput(value: Record<string, unknown>): {
     "limitations",
   ]);
   if (
+    !isEvidenceContentInputShape("evidence-atom", value) ||
     Object.keys(value).some((key) => !allowed.has(key)) ||
     value.schemaVersion !== 1 ||
     !identifierValue(value.atomId) ||
@@ -699,12 +1031,11 @@ function parseAtomInput(value: Record<string, unknown>): {
   return value as unknown as ReturnType<typeof parseAtomInput>;
 }
 
-async function validateAtomTaxonomy(
-  root: string,
-  projectId: string,
+function validateAtomTaxonomy(
   source: Record<string, unknown>,
   value: ReturnType<typeof parseAtomInput>,
-): Promise<void> {
+  knownRoleIds: Set<string> | null,
+): void {
   const sourceDimensions = new Set(
     Array.isArray(source.coverageDimensions)
       ? source.coverageDimensions.filter((item): item is string => typeof item === "string")
@@ -716,8 +1047,7 @@ async function validateAtomTaxonomy(
       "RESEARCH_EVIDENCE_ATOM_TAXONOMY_INVALID",
     );
   }
-  const project = await loadProject(root, projectId);
-  if (!project.scientificDesign) {
+  if (!knownRoleIds) {
     if (value.evidenceRoleIds.length) {
       throw contentError(
         "A project without a scientific design cannot declare evidence-role IDs.",
@@ -726,8 +1056,6 @@ async function validateAtomTaxonomy(
     }
     return;
   }
-  const design = await loadBoundAcquisitionDesign(root, project);
-  const knownRoleIds = new Set(design.evidenceRoles.map((role) => role.id));
   if (
     value.evidenceRoleIds.length < 1 ||
     value.evidenceRoleIds.some((roleId) => !knownRoleIds.has(roleId))
@@ -739,12 +1067,11 @@ async function validateAtomTaxonomy(
   }
 }
 
-async function extractAtomExcerpt(
-  path: string,
+function extractAtomExcerptFromDocument(
+  document: { text: string; lines?: string[]; json?: unknown },
   mediaType: string,
   locator: EvidenceAtomRecord["locator"],
-): Promise<string> {
-  const text = await readFile(path, "utf8");
+): string {
   let excerpt: string;
   if (locator.kind === "line-range") {
     if (!["text/plain", "text/markdown", "text/csv"].includes(mediaType)) {
@@ -753,7 +1080,7 @@ async function extractAtomExcerpt(
         "RESEARCH_EVIDENCE_ATOM_LOCATOR_INVALID",
       );
     }
-    const lines = text.split(/\r\n|\n|\r/u);
+    const lines = (document.lines ??= document.text.split(/\r\n|\n|\r/u));
     if (locator.endLine > lines.length) {
       throw contentError(
         "Evidence atom line range exceeds the artifact.",
@@ -768,7 +1095,8 @@ async function extractAtomExcerpt(
         "RESEARCH_EVIDENCE_ATOM_LOCATOR_INVALID",
       );
     }
-    let selected: unknown = JSON.parse(text);
+    if (!("json" in document)) document.json = JSON.parse(document.text);
+    let selected: unknown = document.json;
     for (const segment of locator.pointer
       .slice(1)
       .split("/")
@@ -793,81 +1121,6 @@ async function extractAtomExcerpt(
     );
   }
   return excerpt;
-}
-
-function computeRoleCoverage(
-  roles: Array<{
-    id: string;
-    required: boolean;
-    minimumFullText: number;
-    minimumIndependentSources: number;
-    minimumDatedSources: number;
-    coverageDimensionIds: string[];
-    sourceTypeRequirements: string[];
-  }>,
-  sources: Array<Record<string, unknown>>,
-  atoms: EvidenceAtomRecord[],
-): EvidenceContentSnapshot["roleCoverage"] {
-  const sourcesById = new Map(sources.map((source) => [String(source.id), source]));
-  return roles
-    .filter((role) => role.required)
-    .map((role) => {
-      const roleAtoms = atoms.filter((atom) => atom.evidenceRoleIds.includes(role.id));
-      const sourceIds = sortedUnique(roleAtoms.map((atom) => atom.sourceId)).filter((sourceId) =>
-        sourcesById.has(sourceId),
-      );
-      const fullTextSourceIds = sourceIds.filter(
-        (sourceId) => sourcesById.get(sourceId)?.fullTextAvailable === true,
-      );
-      const datedSourceIds = sourceIds.filter(
-        (sourceId) => typeof sourcesById.get(sourceId)?.publicationDate === "string",
-      );
-      const coverageDimensionIds = sortedUnique(
-        roleAtoms.flatMap((atom) => atom.coverageDimensionIds),
-      );
-      const sourceTypes = sortedUnique(
-        sourceIds.flatMap((sourceId) => {
-          const sourceType = sourcesById.get(sourceId)?.sourceType;
-          return typeof sourceType === "string" ? [sourceType] : [];
-        }),
-      );
-      const gaps: string[] = [];
-      if (sourceIds.length < role.minimumIndependentSources) {
-        gaps.push(
-          `evidence role ${role.id} requires ${role.minimumIndependentSources} independent source(s), found ${sourceIds.length}`,
-        );
-      }
-      if (fullTextSourceIds.length < role.minimumFullText) {
-        gaps.push(
-          `evidence role ${role.id} requires ${role.minimumFullText} full-text source(s), found ${fullTextSourceIds.length}`,
-        );
-      }
-      if (datedSourceIds.length < role.minimumDatedSources) {
-        gaps.push(
-          `evidence role ${role.id} requires ${role.minimumDatedSources} dated source(s), found ${datedSourceIds.length}`,
-        );
-      }
-      for (const dimension of role.coverageDimensionIds) {
-        if (!coverageDimensionIds.includes(dimension)) {
-          gaps.push(`evidence role ${role.id} lacks atom coverage for dimension ${dimension}`);
-        }
-      }
-      for (const sourceType of role.sourceTypeRequirements) {
-        if (!sourceTypes.includes(sourceType)) {
-          gaps.push(`evidence role ${role.id} lacks source type ${sourceType}`);
-        }
-      }
-      return {
-        roleId: role.id,
-        sourceIds,
-        fullTextSourceIds,
-        datedSourceIds,
-        coverageDimensionIds,
-        sourceTypes,
-        decision: (gaps.length ? "insufficient" : "pass") as "pass" | "insufficient",
-        gaps,
-      };
-    });
 }
 
 function artifactDescendsFrom(

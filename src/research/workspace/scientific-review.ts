@@ -3,8 +3,10 @@ import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
+import { sourceTypeRequirementGaps } from "./evidence-role-coverage.js";
 import { appendJournalEvent, verifyJournal } from "./journal.js";
 import { loadProject, nextScientificGate, saveProject } from "./projects.js";
+import { assertResearchPolicyBinding } from "./research-policy.js";
 import {
   evaluateScientificDesign,
   parseScientificDesign,
@@ -32,7 +34,7 @@ import type {
   ScientificReviewRole,
   ScientificGateStatus,
 } from "./types.js";
-import { loadWorkspaceConfig, withWorkspaceLock } from "./workspace.js";
+import { loadWorkspaceConfig, verifyDoctorAttestation, withWorkspaceLock } from "./workspace.js";
 
 const MAX_SCIENTIFIC_REVIEW_BYTES = 2 * 1024 * 1024;
 const SHA256_PATTERN = "^[a-f0-9]{64}$";
@@ -171,8 +173,9 @@ interface ScientificFutureGateObligation {
   code:
     | "UNCERTAINTY_STATE_VALUES_NOT_FROZEN"
     | "MODEL_IMPLEMENTATION_NOT_FROZEN"
-    | "MODEL_ENVIRONMENT_LOCK_NOT_FROZEN";
-  dueGate: "evidence-construct" | "pilot-methods";
+    | "MODEL_ENVIRONMENT_LOCK_NOT_FROZEN"
+    | "POLICY_RULE_DUE_UNRESOLVED";
+  dueGate: "evidence-construct" | "pilot-methods" | "publication-freeze";
   objectIds: string[];
   policyRuleIds: string[];
 }
@@ -668,42 +671,70 @@ export async function submitScientificReview(input: {
   projectId: string;
   role: ScientificReviewRole;
   reviewPath: string;
+  /** Internal execution recovery: exact matching terminal submissions are read-only replays. */
+  executionBinding?: { packetSha256: string; reviewSha256: string };
 }): Promise<{ status: ScientificGateStatus; reviewSha256: string; issueCodes: string[] }> {
   return withWorkspaceLock(input.root, "research.scientific-review.submit", async () => {
     const paths = workspacePaths(input.root);
     await verifyJournal(paths.journal);
     const project = await loadProject(input.root, input.projectId);
-    const binding = project.scientificDesign;
-    if (!binding) throw scientificGateError("Project does not have a scientific design binding.");
-    const gate = binding.gates[input.role];
+    const gate = project.scientificDesign?.gates[input.role];
+    if (!gate) throw scientificGateError("Project does not have a scientific design binding.");
     if (
-      gate.status !== "prepared" ||
-      !gate.packetSha256 ||
-      !gate.assessmentSha256 ||
-      !gate.reviewerSessionSha256
+      gate.status === "prepared" &&
+      (project.lineage.supersededBy ||
+        ["archived", "abandoned"].includes(project.status) ||
+        project.handoff.state !== "agent-actionable")
     ) {
-      throw new CliError("Scientific review has no prepared packet to submit.", {
-        code: "RESEARCH_SCIENTIFIC_REVIEW_STATE_INVALID",
+      throw new CliError("Only an active authoritative project may submit a scientific review.", {
+        code: "RESEARCH_PROJECT_NOT_AUTHORITATIVE",
         exitCode: 3,
-        details: { role: input.role, status: gate.status },
       });
     }
-    const packet = await loadBoundPacket(input.root, project, input.role, gate.packetSha256);
+    const { packet, assessment } = await loadScientificReviewProof(
+      input.root,
+      project,
+      input.role,
+      Boolean(input.executionBinding),
+    );
     const review = await readReview(input.reviewPath, input.role);
+    const reviewSha256 = exactJsonSha256(review);
     if (
       review.packetSha256 !== packet.packetSha256 ||
       review.reviewerSessionSha256 !== packet.reviewer.sessionSha256 ||
-      review.reviewerSessionSha256 !== gate.reviewerSessionSha256
+      review.reviewerSessionSha256 !== gate.reviewerSessionSha256 ||
+      (input.executionBinding &&
+        (input.executionBinding.packetSha256 !== packet.packetSha256 ||
+          input.executionBinding.reviewSha256 !== reviewSha256)) ||
+      (gate.status !== "prepared" && gate.reviewSha256 !== reviewSha256)
     ) {
       throw new CliError("Scientific review does not match its packet and reviewer binding.", {
         code: "RESEARCH_SCIENTIFIC_REVIEW_BINDING_INVALID",
         exitCode: 3,
       });
     }
-    const reviewSha256 = exactJsonSha256(review);
+    if (gate.status !== "prepared") {
+      return {
+        status: gate.status,
+        reviewSha256,
+        issueCodes: packet.mechanicalAssessment.issueCodes,
+      };
+    }
+    if (input.executionBinding) {
+      const config = await loadWorkspaceConfig(input.root);
+      if (config.mode === "production-research") {
+        await assertResearchPolicyBinding(input.root, project.publicationPolicy!);
+        const doctor = await verifyDoctorAttestation(input.root);
+        if (doctor.status !== "verified") {
+          throw new CliError("Refresh the reviewer attestation before recovered submission.", {
+            code: "RESEARCH_DOCTOR_ATTESTATION_REQUIRED",
+            exitCode: 3,
+          });
+        }
+      }
+    }
     const reviewLocator = `projects/${project.id}/scientific/reviews/${input.role}/${reviewSha256}.json`;
     await writeImmutableJson(join(paths.control, reviewLocator), review);
-    const assessment = await loadBoundAssessment(input.root, project, input.role, packet);
     const mechanicsPass =
       packet.mechanicalAssessment.issueCodes.length === 0 &&
       packet.mechanicalAssessment.canPass &&
@@ -730,6 +761,80 @@ export async function submitScientificReview(input: {
     return { status, reviewSha256, issueCodes: packet.mechanicalAssessment.issueCodes };
   });
 }
+
+/** Revalidate the immutable prepared packet before an explicit isolated execution. */
+export async function loadPreparedScientificReview(
+  root: string,
+  projectId: string,
+  role: ScientificReviewRole,
+) {
+  const project = await loadProject(root, projectId);
+  return { project, ...(await loadScientificReviewProof(root, project, role, false)) };
+}
+
+async function loadScientificReviewProof(
+  root: string,
+  project: ProjectState,
+  role: ScientificReviewRole,
+  allowSubmitted: boolean,
+) {
+  const gate = project.scientificDesign?.gates[role];
+  if (
+    !gate ||
+    (gate.status !== "prepared" &&
+      !(allowSubmitted && ["passed", "stopped", "revision-required"].includes(gate.status))) ||
+    !gate.packetSha256 ||
+    !gate.assessmentSha256 ||
+    !gate.reviewerSessionSha256
+  ) {
+    throw new CliError("Scientific review execution requires the current prepared packet.", {
+      code: "RESEARCH_SCIENTIFIC_REVIEW_STATE_INVALID",
+      exitCode: 3,
+      details: { role, status: gate?.status ?? "absent" },
+    });
+  }
+  await loadBoundScientificDesign(root, project);
+  const packet = await loadBoundPacket(root, project, role, gate.packetSha256);
+  const assessment = await loadBoundAssessment(root, project, role, packet);
+  if (
+    packet.design.sha256 !== project.scientificDesign!.designSha256 ||
+    packet.design.objectLocator !== project.scientificDesign!.objectLocator ||
+    packet.assessment.sha256 !== gate.assessmentSha256 ||
+    packet.reviewer.sessionSha256 !== gate.reviewerSessionSha256
+  ) {
+    throw scientificGateError(
+      "Scientific review proof does not match its current gate binding.",
+      role,
+    );
+  }
+  if (gate.status !== "prepared") {
+    if (!gate.reviewSha256)
+      throw scientificGateError("Submitted scientific review is missing its proof.", role);
+    const review = await loadBoundReview(root, project, role, gate.reviewSha256);
+    const expectedStatus =
+      review.decision === "stop" || review.decision === "handoff"
+        ? "stopped"
+        : review.decision === "pass" &&
+            packet.mechanicalAssessment.canPass &&
+            packet.mechanicalAssessment.issueCodes.length === 0 &&
+            assessment.recommendation === "pass"
+          ? "passed"
+          : "revision-required";
+    if (
+      review.packetSha256 !== packet.packetSha256 ||
+      review.reviewerSessionSha256 !== packet.reviewer.sessionSha256 ||
+      gate.status !== expectedStatus
+    ) {
+      throw scientificGateError(
+        "Submitted scientific review does not match its immutable proof.",
+        role,
+      );
+    }
+  }
+  return { packet, assessment };
+}
+
+export { readReview as readScientificReviewOutput };
 
 export async function assertScientificGateForStage(
   root: string,
@@ -1086,10 +1191,10 @@ function evaluateAssessment(
           [required.id],
         );
       }
-      if (required.sourceTypeRequirements.some((sourceType) => !sourceTypes.has(sourceType))) {
+      if (sourceTypeRequirementGaps(required.sourceTypeRequirements, sourceTypes).length) {
         add(
           "EVIDENCE_ROLE_SOURCE_TYPE_UNCOVERED",
-          "A required evidence role did not demonstrate every declared source type.",
+          "A required evidence role did not satisfy its declared source-type constraint groups.",
           [required.id],
         );
       }
@@ -2052,8 +2157,11 @@ function isScientificReviewPacket(
           "UNCERTAINTY_STATE_VALUES_NOT_FROZEN",
           "MODEL_IMPLEMENTATION_NOT_FROZEN",
           "MODEL_ENVIRONMENT_LOCK_NOT_FROZEN",
+          "POLICY_RULE_DUE_UNRESOLVED",
         ].includes(String(obligation.code)) &&
-        ["evidence-construct", "pilot-methods"].includes(String(obligation.dueGate)) &&
+        ["evidence-construct", "pilot-methods", "publication-freeze"].includes(
+          String(obligation.dueGate),
+        ) &&
         Array.isArray(obligation.objectIds) &&
         obligation.objectIds.every((id) => typeof id === "string" && id.length > 0) &&
         Array.isArray(obligation.policyRuleIds) &&
@@ -2158,7 +2266,7 @@ function reviewInstructions(role: ScientificReviewRole): string[] {
     "Do not infer field validation, causality, independence, or quantity scope beyond the design.",
     "Interpret this gate within the declared lifecycle: three early scientific reviews precede four final publication reviews of the frozen manuscript.",
     "A material post-review change must create a new authoritative generation and consume the declared revision reserve.",
-    "mechanicalAssessment.futureGateObligations names source-derived values, model implementations, and environment locks that are allowed to remain pending now but will become blocking mechanical errors at their exact due gate unless a new authoritative design generation freezes them.",
+    "mechanicalAssessment.futureGateObligations names every planned Policy disposition, including pending source values, models, and environment locks. Early-review obligations become blocking at their exact due gate unless a new authoritative design generation satisfies them; publication-freeze obligations remain subject to publication assessment.",
   ];
 }
 
@@ -2166,10 +2274,11 @@ function scientificFutureGateObligations(
   design: ScientificDesignContract,
   role: ScientificReviewRole,
 ): ScientificFutureGateObligation[] {
-  const gateRank: Record<ScientificReviewRole, number> = {
+  const gateRank: Record<ScientificReviewRole | "publication-freeze", number> = {
     "research-design": 0,
     "evidence-construct": 1,
     "pilot-methods": 2,
+    "publication-freeze": 3,
   };
   const grouped = new Map<string, { objectIds: string[]; policyRuleIds: Set<string> }>();
   const addObligation = (
@@ -2247,10 +2356,31 @@ function scientificFutureGateObligations(
       );
     }
   }
+  const coveredRules = new Set([...grouped.values()].flatMap((item) => [...item.policyRuleIds]));
+  for (const disposition of design.policyRuleDispositions) {
+    if (
+      disposition.status !== "planned" ||
+      disposition.dueGate === "research-design" ||
+      coveredRules.has(disposition.ruleId)
+    )
+      continue;
+    for (const objectId of [
+      ...disposition.claimIds,
+      ...disposition.evidenceRoleIds,
+      ...disposition.validationPlanIds,
+      ...disposition.knownGapIds,
+      ...disposition.uncertaintyParameterIds,
+      ...disposition.modelStructureIds,
+    ]) {
+      addObligation("POLICY_RULE_DUE_UNRESOLVED", disposition.dueGate, objectId, [
+        disposition.ruleId,
+      ]);
+    }
+  }
   return [...grouped.entries()].map(([key, obligation]) => ({
     code: key.slice(0, key.indexOf(":")) as ScientificFutureGateObligation["code"],
     dueGate: key.slice(key.indexOf(":") + 1) as ScientificFutureGateObligation["dueGate"],
-    objectIds: obligation.objectIds,
+    objectIds: [...new Set(obligation.objectIds)],
     policyRuleIds: [...obligation.policyRuleIds],
   }));
 }

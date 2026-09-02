@@ -52,6 +52,7 @@ import {
   loadWorkspaceConfig,
   loadWorkspaceMarker,
   requireCurrentRuntimeLock,
+  verifyDoctorAttestation,
 } from "./workspace.js";
 
 const REVIEW_BRIDGE_PROTOCOL_VERSION = 1 as const;
@@ -240,6 +241,84 @@ export async function inspectReviewerBridgeStatus(root: string): Promise<Reviewe
     );
   }
   return result as unknown as ReviewerBridgeStatus;
+}
+
+/** Read-only operator status: never starts a paid smoke or copies authentication. */
+export async function inspectReviewerStatus(
+  root: string,
+  environment: NodeJS.ProcessEnv = process.env,
+) {
+  const config = await loadWorkspaceConfig(root);
+  if (config.reviewerExecution.transport === "sandbox-bridge") {
+    return { ...(await inspectReviewerBridgeStatus(root)), transport: "sandbox-bridge" as const };
+  }
+  const marker = await loadWorkspaceMarker(root);
+  await requireCurrentRuntimeLock(root, marker);
+  const platform = researchPlatformCapabilities();
+  const production = config.mode === "production-research";
+  const doctor = production
+    ? await verifyDoctorAttestation(root)
+    : {
+        status: "not-required" as const,
+        attestation: null,
+        errors: [] as string[],
+      };
+  const errors: Array<{ code: string; message: string }> = [];
+  let runtime: AgentRuntimeFingerprint | null = null;
+  try {
+    runtime = await fingerprintAgentRoute(config.reviewer, environment);
+  } catch (error) {
+    errors.push({
+      code: error instanceof CliError ? error.code : "RESEARCH_EXECUTOR_UNAVAILABLE",
+      message:
+        "The configured native reviewer executable could not be fingerprinted; install or configure that exact reviewer route and rerun workspace doctor.",
+    });
+  }
+  if (!platform.nativeIsolationProvider) {
+    errors.push({
+      code: "RESEARCH_SANDBOX_UNAVAILABLE",
+      message: "This platform has no supported native reviewer capsule provider.",
+    });
+  }
+  const expected = doctor.attestation?.runtimes[0];
+  const runtimeMatches = Boolean(
+    runtime && expected && canonicalJson(runtime) === canonicalJson(expected),
+  );
+  if (doctor.status === "verified" && !runtimeMatches) {
+    errors.push({
+      code: "RESEARCH_EXECUTOR_DRIFT",
+      message:
+        "The reviewer runtime differs from its doctor attestation; rerun the explicit reviewer smoke.",
+    });
+  }
+  return sanitizeResearchValue(
+    {
+      status: errors.length
+        ? "blocked"
+        : !production || doctor.status === "verified"
+          ? "ready"
+          : "incomplete",
+      readinessScope: production ? "production-attestation" : "smoke-configuration",
+      productionReady: production && errors.length === 0 && doctor.status === "verified",
+      transport: "native-direct" as const,
+      workspaceId: marker.workspaceId,
+      packageVersion: packageVersion(),
+      platformCapsule: { provider: platform.nativeIsolationProvider },
+      runtime,
+      doctorAttestation: {
+        status: doctor.status,
+        expiresAt: doctor.attestation?.expiresAt ?? null,
+        errors: doctor.errors,
+      },
+      errors,
+      minimumAction: errors.length
+        ? "Check the configured native reviewer executable and supported platform capsule. Status does not run a paid smoke."
+        : production && doctor.status !== "verified"
+          ? "Explicitly run research workspace doctor --agent-smoke --capability-smoke to refresh the production attestation. Status does not run paid checks."
+          : null,
+    },
+    configuredResearchSecrets(environment),
+  );
 }
 
 export async function startReviewerBridgeSidecar(input: {

@@ -28,27 +28,33 @@ import {
 } from "./workspace/external-skills.js";
 import { appendJournalEvent, readJournal } from "./workspace/journal.js";
 import { fetchNativeCandidateSource } from "./workspace/broker.js";
-import { registerEvidenceArtifact } from "./workspace/artifacts.js";
+import { preflightEvidenceArtifact, registerEvidenceArtifact } from "./workspace/artifacts.js";
 import { executeResearchDataCapability } from "./workspace/data-evidence-adapter.js";
 import { exportProjectAuditBundle, verifyProjectAuditBundle } from "./workspace/audit-bundle.js";
 import { loadCurrentEvidenceSnapshot } from "./workspace/acquisition.js";
+import { inspectAcquisitionForecast } from "./workspace/acquisition-forecast.js";
 import {
   freezeEvidenceContentSnapshot,
   loadCurrentEvidenceContentSnapshot,
   recordArtifactDecomposition,
   registerEvidenceAtom,
+  registerEvidenceContentBatch,
 } from "./workspace/content-evidence.js";
 import { inspectDiscoveryProgress } from "./workspace/discovery-status.js";
+import {
+  EVIDENCE_CONTENT_LIMITS,
+  EVIDENCE_CONTENT_SCHEMA_NAMES,
+  evidenceContentInputSchema,
+  isEvidenceContentSchemaName,
+} from "./workspace/evidence-content-schema.js";
 import { inspectEvidenceAccessStatus } from "./workspace/evidence-exhaustion.js";
 import { recordDiscoveryAssessmentBatch } from "./workspace/discovery.js";
 import { bindEvidenceDownload } from "./workspace/downloads.js";
 import { registerNativeDiscoveryCandidate } from "./workspace/evidence-ledger.js";
 import { recordNativeResearchActivity } from "./workspace/native-activity.js";
-import {
-  inspectReviewerBridgeStatus,
-  startReviewerBridgeSidecar,
-} from "./workspace/review-executor.js";
+import { inspectReviewerStatus, startReviewerBridgeSidecar } from "./workspace/review-executor.js";
 import { readAndVerifyProjectInputPlan } from "./workspace/input-plan.js";
+import { executeScientificReview } from "./workspace/scientific-review-execution.js";
 import {
   loadCurrentClaimEvidenceGraph,
   loadCurrentInferenceSnapshot,
@@ -65,6 +71,7 @@ import {
   refreshProject,
   retryProjectPackage,
   setProjectDisposition,
+  scientificGateRecommendedAction,
 } from "./workspace/projects.js";
 import { evaluateProjectPreflight } from "./workspace/preflight.js";
 import {
@@ -115,7 +122,6 @@ import {
   scientificGateAssessmentSchema,
   scientificReviewSchema,
   submitScientificReview,
-  type ScientificReviewStatus,
 } from "./workspace/scientific-review.js";
 import { isObject, pathExists, sha256Text, workspacePaths } from "./workspace/storage.js";
 import type {
@@ -201,6 +207,7 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project access status <project-id> [--workspace <path>] [--json]
   tiangong-ai research project scientific review prepare <project-id> --role research-design|evidence-construct|pilot-methods --assessment <absolute-json> [--canary-artifacts <absolute-json-array>] --reviewer-agent codex|claude --reviewer-session <opaque-id> [--workspace <path>] [--json]
   tiangong-ai research project scientific review submit <project-id> --role research-design|evidence-construct|pilot-methods --review <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project scientific review execute <project-id> --role research-design|evidence-construct|pilot-methods --confirm-review-cost [--retry] [--workspace <path>] [--json]
   tiangong-ai research project scientific status <project-id> [--workspace <path>] [--json]
   tiangong-ai research project audit export <project-id> --output <absolute-new-directory> [--workspace <path>] [--json]
   tiangong-ai research project audit verify --bundle <absolute-directory> [--json]
@@ -215,12 +222,20 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project evidence download bind <project-id> --candidate <id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence artifact register <project-id> --candidate <id> --path <absolute-file> [--download-binding <id> | --derived-from-artifact <id>] [--media-type <type>] [--source-url <https-url>] [--license <declared-license>] [--license-url <https-url>] [--host-type <type>] [--article-version <version>] [--workspace <path>] [--json]
   tiangong-ai research project evidence decomposition record <project-id> --record <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence decomposition batch <project-id> --record <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence atom batch <project-id> --record <absolute-json> [--workspace <path>] [--json]
+  tiangong-ai research project evidence artifact preflight (--bytes <known-bytes> | --path <absolute-file>) [--workspace <path>] [--json]
   tiangong-ai research project evidence atom register <project-id> --record <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence content freeze <project-id> [--workspace <path>] [--json]
+  tiangong-ai research project evidence content forecast <project-id> --input <absolute-acquisition-audit.json> [--workspace <path>] [--json]
   tiangong-ai research project evidence content status <project-id> [--workspace <path>] [--json]
   tiangong-ai research schema show <discover|acquire|analyze|synthesize|review|doctor|scientific-design|scientific-assessment-research-design|scientific-assessment-evidence-construct|scientific-assessment-pilot-methods|scientific-review-research-design|scientific-review-evidence-construct|scientific-review-pilot-methods|publication-assessment|publication-review-evidence|publication-review-methods-reproducibility|publication-review-domain-novelty|publication-review-journal-editor> [--compatibility claude-code] [--json]
   tiangong-ai research status [--project <project-id>] [--all] [--workspace <absolute-path>] [--json]
   tiangong-ai research run [--project <project-id>] [--max-parallel <1-8>] [--max-cycles <1-100>] [--dry-run] [--progress-jsonl] [--workspace <absolute-path>] [--json]
+
+Evidence input schemas: ${EVIDENCE_CONTENT_SCHEMA_NAMES.join(", ")}.
+Evidence batches: at most ${EVIDENCE_CONTENT_LIMITS.maxBatchRecords} records and ${EVIDENCE_CONTENT_LIMITS.maxBatchInputBytes} bytes (${EVIDENCE_CONTENT_LIMITS.maxBatchInputBytes / (1024 * 1024)} MiB) of UTF-8 input.
+Use research schema show <name> --json; schemas validate shape only, not exact artifact/lineage/locator semantics.
 
 ${researchSetupHelp()}
 `;
@@ -319,8 +334,9 @@ async function runReviewer(argv: string[], io: CliIO): Promise<number> {
     if (args.positionals.length)
       throw unknownAction("research reviewer status", args.positionals[0]!);
     const root = await workspaceFromArgs(args);
-    writeJson(io, await inspectReviewerBridgeStatus(root), args);
-    return 0;
+    const result = await inspectReviewerStatus(root, io.env);
+    writeJson(io, result, args);
+    return isObject(result) && result.status === "ready" ? 0 : 3;
   }
   if (action === "doctor") {
     const args = parseStrictArgs(
@@ -659,7 +675,9 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
   if (strictBoolean(args, "help")) return writeHelp(io);
   const stage = onePositional(args.positionals, "research schema show");
   let schema: Record<string, unknown>;
-  if (stage === "scientific-design") {
+  if (isEvidenceContentSchemaName(stage)) {
+    schema = evidenceContentInputSchema(stage);
+  } else if (stage === "scientific-design") {
     schema = scientificDesignSchema();
   } else if (stage.startsWith("scientific-assessment-")) {
     const role = scientificReviewRole(stage.slice("scientific-assessment-".length));
@@ -1082,6 +1100,34 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
       throw unknownAction("research project scientific", scientificAction ?? "");
     }
     const [reviewAction, ...reviewRest] = scientificRest;
+    if (reviewAction === "execute") {
+      const args = parseStrictArgs(
+        reviewRest,
+        {
+          ...WORKSPACE_OPTIONS,
+          role: "string",
+          "confirm-review-cost": "boolean",
+          retry: "boolean",
+        },
+        "research project scientific review execute",
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(
+        args.positionals,
+        "research project scientific review execute",
+      );
+      const root = await workspaceFromArgs(args);
+      const result = await executeScientificReview({
+        root,
+        projectId,
+        role: scientificReviewRole(strictString(args, "role")),
+        confirmCost: strictBoolean(args, "confirm-review-cost"),
+        retry: strictBoolean(args, "retry"),
+        environment: io.env,
+      });
+      writeJson(io, result, args);
+      return result.status === "passed" ? 0 : 3;
+    }
     if (reviewAction === "prepare") {
       const args = parseStrictArgs(
         reviewRest,
@@ -1415,6 +1461,27 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     }
     if (evidenceAction === "artifact") {
       const [artifactAction, ...artifactRest] = evidenceRest;
+      if (artifactAction === "preflight") {
+        const args = parseStrictArgs(
+          artifactRest,
+          { ...WORKSPACE_OPTIONS, bytes: "string", path: "string" },
+          "research project evidence artifact preflight",
+        );
+        if (strictBoolean(args, "help")) return writeHelp(io);
+        if (args.positionals.length)
+          throw unknownAction("research project evidence artifact preflight", args.positionals[0]!);
+        const bytes = strictString(args, "bytes");
+        const path = strictString(args, "path");
+        const result = await preflightEvidenceArtifact({
+          root: await workspaceFromArgs(args),
+          ...(bytes === undefined
+            ? {}
+            : { bytes: /^\d+$/u.test(bytes) ? Number(bytes) : Number.NaN }),
+          ...(path === undefined ? {} : { path }),
+        });
+        writeJson(io, result, args);
+        return result.decision === "pass" ? 0 : 3;
+      }
       if (artifactAction !== "register") {
         throw unknownAction("research project evidence artifact", artifactAction ?? "");
       }
@@ -1484,7 +1551,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
     }
     if (evidenceAction === "decomposition") {
       const [decompositionAction, ...decompositionRest] = evidenceRest;
-      if (decompositionAction !== "record") {
+      if (decompositionAction !== "record" && decompositionAction !== "batch") {
         throw unknownAction("research project evidence decomposition", decompositionAction ?? "");
       }
       const args = parseStrictArgs(
@@ -1509,16 +1576,19 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         recordPath,
         "--record",
         "RESEARCH_DECOMPOSITION_INVALID",
+        decompositionAction === "batch" ? EVIDENCE_CONTENT_LIMITS.maxBatchInputBytes : undefined,
       );
-      const result = await withWorkspaceLock(root, "research.decomposition.record", () =>
-        recordArtifactDecomposition({ root, projectId, value: record }),
+      const result = await withWorkspaceLock(root, "research.decomposition.record", async () =>
+        decompositionAction === "batch"
+          ? registerEvidenceContentBatch({ root, projectId, kind: "decomposition", value: record })
+          : recordArtifactDecomposition({ root, projectId, value: record }),
       );
       writeJson(io, result, args);
       return 0;
     }
     if (evidenceAction === "atom") {
       const [atomAction, ...atomRest] = evidenceRest;
-      if (atomAction !== "register") {
+      if (atomAction !== "register" && atomAction !== "batch") {
         throw unknownAction("research project evidence atom", atomAction ?? "");
       }
       const args = parseStrictArgs(
@@ -1540,15 +1610,47 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         recordPath,
         "--record",
         "RESEARCH_EVIDENCE_ATOM_INVALID",
+        atomAction === "batch" ? EVIDENCE_CONTENT_LIMITS.maxBatchInputBytes : undefined,
       );
-      const result = await withWorkspaceLock(root, "research.evidence-atom.register", () =>
-        registerEvidenceAtom({ root, projectId, value: record }),
+      const result = await withWorkspaceLock(root, "research.evidence-atom.register", async () =>
+        atomAction === "batch"
+          ? registerEvidenceContentBatch({ root, projectId, kind: "atom", value: record })
+          : registerEvidenceAtom({ root, projectId, value: record }),
       );
       writeJson(io, result, args);
       return 0;
     }
     if (evidenceAction === "content") {
       const [contentAction, ...contentRest] = evidenceRest;
+      if (contentAction === "forecast") {
+        const args = parseStrictArgs(
+          contentRest,
+          { ...WORKSPACE_OPTIONS, input: "string" },
+          "research project evidence content forecast",
+        );
+        if (strictBoolean(args, "help")) return writeHelp(io);
+        const projectId = onePositional(
+          args.positionals,
+          "research project evidence content forecast",
+        );
+        const inputPath = strictString(args, "input");
+        if (!inputPath)
+          throw new CliError(
+            "content forecast requires --input with a proposed acquisition audit.",
+            { code: "RESEARCH_ACQUISITION_FORECAST_INVALID", exitCode: 2 },
+          );
+        const root = await workspaceFromArgs(args);
+        const value = await readBoundedJsonRecord(
+          inputPath,
+          "--input",
+          "RESEARCH_ACQUISITION_FORECAST_INVALID",
+        );
+        const result = await inspectAcquisitionForecast(root, projectId, value);
+        writeJson(io, result, args);
+        return result.acquisitionGate.decision === "pass" && !result.knownRoleDeficits.length
+          ? 0
+          : 3;
+      }
       if (contentAction !== "freeze" && contentAction !== "status") {
         throw unknownAction("research project evidence content", contentAction ?? "");
       }
@@ -2028,7 +2130,6 @@ async function runStatus(argv: string[], io: CliIO): Promise<number> {
                   current,
                   readyPackage,
                   nativeStage,
-                  scientificReview,
                   evidencePipeline,
                   publication,
                 ),
@@ -2242,7 +2343,6 @@ function projectRecommendedAction(
   project: Awaited<ReturnType<typeof loadProject>>,
   readyPackage: string | null,
   nativeStage: Awaited<ReturnType<typeof inspectNativeResearchStage>>,
-  scientificReview: ScientificReviewStatus,
   evidencePipeline: EvidencePipelineStatus,
   publication: PublicationStatus | { generationStatus: "invalid"; code: string } | null,
 ): string {
@@ -2287,16 +2387,8 @@ function projectRecommendedAction(
       return `Inference snapshot is invalid (${evidencePipeline.inference.code ?? "unknown"}); repair its frozen upstream bindings before analysis.`;
     }
   }
-  if (scientificReview.nextGate) {
-    const gate = scientificReview.nextGate;
-    if (gate.status === "stopped") {
-      return `Scientific ${gate.role} review stopped the project; inspect the frozen review and request user or external action instead of continuing.`;
-    }
-    const schema = `scientific-assessment-${gate.role}`;
-    const canaryOption =
-      gate.role === "evidence-construct" ? " --canary-artifacts <absolute-json-array>" : "";
-    return `Use the native producer App to create a bounded ${gate.role} assessment from schema ${schema}, then prepare an independent review: tiangong-ai research project scientific review prepare ${project.id} --role ${gate.role} --assessment <absolute-json>${canaryOption} --reviewer-agent <codex|claude> --reviewer-session <fresh-opaque-id> --workspace ${root}`;
-  }
+  const scientificAction = scientificGateRecommendedAction(root, project);
+  if (scientificAction) return scientificAction;
   if (project.status === "complete") {
     if (project.publicationPolicy) {
       if (publication && "code" in publication) {
@@ -2474,6 +2566,7 @@ async function readBoundedJsonRecord(
   path: string,
   label: string,
   code: string,
+  maxBytes = 1024 * 1024,
 ): Promise<Record<string, unknown>> {
   if (!isAbsolute(path)) {
     throw new CliError(`${label} must be an absolute JSON file path.`, {
@@ -2483,7 +2576,7 @@ async function readBoundedJsonRecord(
   }
   const selected = resolve(path);
   const info = await lstat(selected).catch(() => undefined);
-  if (!info?.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) {
+  if (!info?.isFile() || info.isSymbolicLink() || info.size > maxBytes) {
     throw new CliError(`${label} must be a bounded regular non-symlink JSON file.`, {
       code,
       exitCode: 2,

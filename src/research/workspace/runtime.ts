@@ -55,16 +55,19 @@ import {
   RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
   RESEARCH_MAX_REPAIR_SOURCE_BYTES,
   RESEARCH_REPAIR_MAX_TURNS,
+  researchStageContextTokenLimit,
   researchStructuredOutputMaxTurns,
   reservedAgentPackageCost,
 } from "./preflight.js";
 import {
+  blockingScientificGate,
   listProjects,
   loadProject,
   nextReadyPackage,
   packageById,
   refreshProject,
   saveProject,
+  scientificGateRecommendedAction,
 } from "./projects.js";
 import { assertResearchPolicyBinding } from "./research-policy.js";
 import { assertScientificGateForStage } from "./scientific-review.js";
@@ -136,6 +139,9 @@ export interface WorkspaceRunResult {
     | "project-blocked"
     | "handoff-required"
     | "native-stage-required"
+    | "scientific-review-required"
+    | "scientific-revision-required"
+    | "scientific-stopped"
     | "cycle-limit"
     | "no-ready-work"
     | "no-projects";
@@ -145,6 +151,8 @@ export interface WorkspaceRunResult {
     id: string;
     status: ProjectState["status"];
     readyPackage: string | null;
+    scientificGate: ReturnType<typeof blockingScientificGate>;
+    recommendedAction: string | null;
     usage: ProjectState["usage"];
   }>;
 }
@@ -439,6 +447,7 @@ export interface NativeStagePacket {
   discovery: DiscoveryProgress | null;
   limits: {
     maxOutputBytes: number;
+    maxArtifactBytes: number;
     maxOutputTokens: number;
     reservedPackageTokens: number;
     reservedMaxCostUsd: number;
@@ -457,6 +466,7 @@ export interface NativeStagePacket {
     recordAssessment: { argv: string[]; recordSchema: Record<string, unknown> } | null;
     bindDownload: { argv: string[]; recordSchema: Record<string, unknown> } | null;
     inspectAccess: { argv: string[] } | null;
+    forecastAcquisition: { argv: string[] } | null;
     requestHandoff: { argv: string[]; recordSchema: Record<string, unknown> };
     registerArtifact: {
       argv: string[];
@@ -757,6 +767,7 @@ export async function prepareNativeResearchStage(input: {
         discovery,
         limits: {
           maxOutputBytes: config.budget.maxBytesPerPackage,
+          maxArtifactBytes: config.budget.maxBytesPerArtifact,
           maxOutputTokens: stageOutputTokens,
           reservedPackageTokens,
           reservedMaxCostUsd: reservation.costUsd,
@@ -862,6 +873,25 @@ export async function prepareNativeResearchStage(input: {
                     unknown
                   >,
                   catalog: dataCapabilities,
+                }
+              : null,
+          forecastAcquisition:
+            input.stage === "acquire"
+              ? {
+                  argv: [
+                    "tiangong-ai",
+                    "research",
+                    "project",
+                    "evidence",
+                    "content",
+                    "forecast",
+                    project.id,
+                    "--input",
+                    "<absolute-acquisition-audit.json>",
+                    "--workspace",
+                    input.root,
+                    "--json",
+                  ],
                 }
               : null,
           registerArtifact:
@@ -4160,18 +4190,11 @@ async function stageContextForPackage(
   const estimatedTokens = Math.ceil(
     Buffer.byteLength(bundled, "utf8") / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
   );
-  const maxStageContextTokens =
-    workPackage.stage === "discover" && project.lineage.kind === "addendum"
-      ? config.budget.maxInputContextTokens
-      : workPackage.stage === "review"
-        ? config.budget.maxInputContextTokens + config.budget.maxOutputTokens * 4
-        : workPackage.stage === "synthesize"
-          ? config.budget.maxInputContextTokens
-          : workPackage.stage === "analyze"
-            ? config.budget.maxInputContextTokens
-            : workPackage.stage === "acquire"
-              ? config.budget.maxOutputTokens
-              : 0;
+  const maxStageContextTokens = researchStageContextTokenLimit(
+    config,
+    workPackage.stage,
+    project.lineage.kind === "addendum",
+  );
   if (estimatedTokens > maxStageContextTokens) {
     throw new CliError(
       `Admitted stage context exceeds the configured input context limit for ${workPackage.id}.`,
@@ -4182,6 +4205,10 @@ async function stageContextForPackage(
           packageId: workPackage.id,
           estimatedTokens,
           maxStageContextTokens,
+          limitField: "budget.maxInputContextTokens",
+          contextPaths: logicalPaths,
+          recommendedAction:
+            "Keep frozen evidence unchanged. Use research project fork to regenerate a bounded context with concise metadata, or explicitly review budget.maxInputContextTokens in .tiangong-research/config.json and rerun project preflight plus workspace doctor before preparing this stage again. Do not raise output limits to accommodate input context.",
         },
       },
     );
@@ -4776,12 +4803,23 @@ async function dryRunResult(
     stopReason: "dry-run",
     cycles: 0,
     executed: [],
-    projects: projects.map((project) => ({
-      id: project.id,
-      status: refreshProject(project).status,
-      readyPackage: nextReadyPackage(project)?.id ?? null,
-      usage: project.usage,
-    })),
+    projects: projects.map((project) => projectRunSummary(root, project)),
+  };
+}
+
+function projectRunSummary(
+  root: string,
+  project: ProjectState,
+): WorkspaceRunResult["projects"][number] {
+  const readyPackage = nextReadyPackage(project)?.id ?? null;
+  const scientificGate = blockingScientificGate(project);
+  return {
+    id: project.id,
+    status: project.status,
+    readyPackage,
+    scientificGate,
+    recommendedAction: scientificGateRecommendedAction(root, project, scientificGate),
+    usage: project.usage,
   };
 }
 
@@ -4794,24 +4832,21 @@ async function summarizeRun(
   projectId?: string,
 ): Promise<WorkspaceRunResult> {
   const projects = await projectsForRun(root, projectId);
-  const summaries = projects.map((project) => ({
-    id: project.id,
-    status: refreshProject(project).status,
-    readyPackage: nextReadyPackage(project)?.id ?? null,
-    usage: project.usage,
-  }));
+  const summaries = projects.map((project) => projectRunSummary(root, project));
   const unfinished = summaries.filter((project) => project.status !== "complete");
   const waiting = unfinished.filter(
     (project) => project.status === "waiting-user" || project.status === "waiting-external",
   );
   const hasReadyPackage = summaries.some((project) => project.readyPackage !== null);
-  const nativeStageRequired = projects.some((project) =>
-    project.packages.some(
+  const nativeStageRequired = projects.some((project, index) => {
+    const summary = summaries[index]!;
+    if (summary.scientificGate || !["ready", "running"].includes(summary.status)) return false;
+    return project.packages.some(
       (workPackage) =>
         workPackage.executor === "producer" &&
-        (workPackage.status === "ready" || workPackage.status === "running"),
-    ),
-  );
+        (workPackage.id === summary.readyPackage || workPackage.status === "running"),
+    );
+  });
   const status =
     summaries.length > 0 && summaries.every((project) => project.status === "complete")
       ? "complete"
@@ -4826,6 +4861,14 @@ async function summarizeRun(
         : unfinished.length > 0 && unfinished.every((project) => project.status === "blocked")
           ? "blocked"
           : "ready";
+  const scientificStop =
+    unfinished.length > 0 && unfinished.every((project) => project.scientificGate)
+      ? unfinished.some((project) => project.scientificGate?.status === "stopped")
+        ? "scientific-stopped"
+        : unfinished.some((project) => project.scientificGate?.status === "revision-required")
+          ? "scientific-revision-required"
+          : "scientific-review-required"
+      : null;
   const stopReason =
     summaries.length === 0
       ? "no-projects"
@@ -4838,7 +4881,7 @@ async function summarizeRun(
             : nativeStageRequired
               ? "native-stage-required"
               : status === "blocked"
-                ? "project-blocked"
+                ? (scientificStop ?? "project-blocked")
                 : "no-ready-work";
   return {
     workspace: root,

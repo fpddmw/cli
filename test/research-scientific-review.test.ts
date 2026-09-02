@@ -5,7 +5,9 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
+import { declaredSourceTypes } from "../src/research/workspace/evidence-role-coverage.js";
 import type { CliIO } from "../src/io.js";
+import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import { exportProjectAuditBundle } from "../src/research/workspace/audit-bundle.js";
 import {
   appendEvidenceLedgerEvent,
@@ -21,6 +23,12 @@ import {
   nextScientificGate,
   saveProject,
 } from "../src/research/workspace/projects.js";
+import {
+  approveResearchPolicy,
+  completeResearchPublicationBrief,
+  initializeResearchPolicy,
+  loadApprovedResearchPolicy,
+} from "../src/research/workspace/research-policy.js";
 import {
   assertScientificGateForStage,
   inspectScientificReviewStatus,
@@ -51,6 +59,140 @@ import { initializeResearchWorkspace } from "../src/research/workspace/workspace
 import { scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("top-journal early scientific reviews", () => {
+  for (const gateStatus of ["pending", "prepared", "revision-required", "stopped"] as const) {
+    it(`reports a ${gateStatus} due scientific gate consistently without inviting a native stage`, async () => {
+      const fixture = await projectFixture(`scientific-run-${gateStatus}`, { runtimePolicy: true });
+      try {
+        if (gateStatus !== "pending") {
+          const assessmentPath = join(fixture.root, "assessment.json");
+          await writeJsonAtomic(assessmentPath, researchDesignAssessment(fixture.designSha256));
+          const packet = await prepareScientificReview({
+            root: fixture.root,
+            projectId: fixture.projectId,
+            role: "research-design",
+            assessmentPath,
+            reviewerAgent: "claude",
+            reviewerSessionId: `${gateStatus}-independent-session`,
+          });
+          if (gateStatus !== "prepared") {
+            const reviewPath = join(fixture.root, "review.json");
+            await writeJsonAtomic(reviewPath, {
+              ...passingReview(packet, `${gateStatus}-independent-session`),
+              decision: gateStatus === "stopped" ? "stop" : "revise",
+            });
+            await submitScientificReview({
+              root: fixture.root,
+              projectId: fixture.projectId,
+              role: "research-design",
+              reviewPath,
+            });
+          }
+        }
+        const running = await invokeCli([
+          "research",
+          "run",
+          "--project",
+          fixture.projectId,
+          "--workspace",
+          fixture.root,
+          "--json",
+        ]);
+        assert.equal(running.exitCode, 3, running.stderr);
+        const result = JSON.parse(running.stdout) as {
+          status: string;
+          stopReason: string;
+          executed: unknown[];
+          projects: Array<{
+            status: string;
+            readyPackage: string | null;
+            scientificGate: { role: string; status: string };
+            recommendedAction: string;
+          }>;
+        };
+        assert.equal(result.status, "blocked");
+        assert.equal(
+          result.stopReason,
+          gateStatus === "stopped"
+            ? "scientific-stopped"
+            : gateStatus === "revision-required"
+              ? "scientific-revision-required"
+              : "scientific-review-required",
+        );
+        assert.deepEqual(result.executed, []);
+        assert.equal(result.projects[0]?.status, "blocked");
+        assert.equal(result.projects[0]?.readyPackage, null);
+        assert.equal(result.projects[0]?.scientificGate.role, "research-design");
+        assert.equal(result.projects[0]?.scientificGate.status, gateStatus);
+        assert.doesNotMatch(result.projects[0]?.recommendedAction ?? "", /stage prepare/);
+        if (gateStatus === "prepared")
+          assert.match(
+            result.projects[0]?.recommendedAction ?? "",
+            /scientific review execute .*--confirm-review-cost/,
+          );
+        if (gateStatus === "revision-required")
+          assert.match(result.projects[0]?.recommendedAction ?? "", /revise|revision/i);
+        if (gateStatus === "stopped")
+          assert.match(result.projects[0]?.recommendedAction ?? "", /stopped|user|external/i);
+        const inspection = await invokeCli([
+          "research",
+          "status",
+          "--project",
+          fixture.projectId,
+          "--workspace",
+          fixture.root,
+          "--json",
+        ]);
+        assert.equal(inspection.exitCode, 0, inspection.stderr);
+        const inspected = JSON.parse(inspection.stdout) as {
+          projects: Array<{
+            status: string;
+            readyPackage: string | null;
+            recommendedAction: string;
+          }>;
+        };
+        assert.equal(inspected.projects[0]?.status, "blocked");
+        assert.equal(inspected.projects[0]?.readyPackage, null);
+        assert.equal(
+          inspected.projects[0]?.recommendedAction,
+          result.projects[0]?.recommendedAction,
+        );
+        assert.ok(
+          (await loadProject(fixture.root, fixture.projectId)).packages.every(
+            (item) => item.attempts === 0,
+          ),
+        );
+      } finally {
+        await rm(fixture.root, { recursive: true, force: true });
+      }
+    });
+  }
+  it("exposes generic planned policy obligations even without pending model or uncertainty objects", async () => {
+    const fixture = await projectFixture("scientific-generic-obligation", { genericPolicy: true });
+    try {
+      const assessmentPath = join(fixture.root, "generic-assessment.json");
+      await writeJsonAtomic(assessmentPath, researchDesignAssessment(fixture.designSha256));
+      const packet = await prepareScientificReview({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        role: "research-design",
+        assessmentPath,
+        reviewerAgent: "claude",
+        reviewerSessionId: "generic-policy-reviewer",
+      });
+      assert.deepEqual(packet.mechanicalAssessment.futureGateObligations, [
+        {
+          code: "POLICY_RULE_DUE_UNRESOLVED",
+          dueGate: "publication-freeze",
+          objectIds: ["claim-discrepancy", "role-central-model", "validation-cross-model"],
+          policyRuleIds: ["data-access-plan"],
+        },
+      ]);
+      assert.equal(packet.mechanicalAssessment.canPass, true);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("revalidates frozen gate objects before entering the native producer stage", async () => {
     const fixture = await projectFixture("scientific-runtime-gate");
     try {
@@ -1061,7 +1203,9 @@ describe("top-journal early scientific reviews", () => {
       const project = await loadProject(fixture.root, fixture.projectId);
       project.evidenceRequirements = {
         dimensions: fixture.design.evidenceRoles.flatMap((role) => role.coverageDimensionIds),
-        sourceTypes: fixture.design.evidenceRoles.flatMap((role) => role.sourceTypeRequirements),
+        sourceTypes: fixture.design.evidenceRoles.flatMap((role) =>
+          declaredSourceTypes(role.sourceTypeRequirements),
+        ),
         minSources: 20,
         minFullTextSources: 10,
         minDatedSources: 12,
@@ -1073,7 +1217,11 @@ describe("top-journal early scientific reviews", () => {
       const sharedFullText = sharedIndependent.slice(0, 6);
       const sharedDated = sharedIndependent.slice(0, 4);
       const sourceTypes = [
-        ...new Set(fixture.design.evidenceRoles.flatMap((role) => role.sourceTypeRequirements)),
+        ...new Set(
+          fixture.design.evidenceRoles.flatMap((role) =>
+            declaredSourceTypes(role.sourceTypeRequirements),
+          ),
+        ),
       ];
       const dimensions = [
         ...new Set(fixture.design.evidenceRoles.flatMap((role) => role.coverageDimensionIds)),
@@ -1305,7 +1453,7 @@ describe("top-journal early scientific reviews", () => {
   });
 
   it("exposes review prepare, submit, schemas, status, and the next safe action through the CLI", async () => {
-    const fixture = await projectFixture("scientific-review-cli");
+    const fixture = await projectFixture("scientific-review-cli", { runtimePolicy: true });
     try {
       const assessmentPath = join(fixture.root, "cli-design-assessment.json");
       await writeJsonAtomic(assessmentPath, researchDesignAssessment(fixture.designSha256));
@@ -1367,7 +1515,21 @@ describe("top-journal early scientific reviews", () => {
       };
       assert.equal(status.projects[0]?.scientificReview.reviewState, "awaiting-review");
       assert.equal(status.projects[0]?.scientificReview.nextGate.role, "evidence-construct");
-      assert.match(status.projects[0]?.recommendedAction ?? "", /evidence-construct/);
+      assert.match(status.projects[0]?.recommendedAction ?? "", /Prepare native discover/);
+      const running = await invokeCli([
+        "research",
+        "run",
+        "--project",
+        fixture.projectId,
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(running.exitCode, 0, running.stderr);
+      assert.equal(
+        (JSON.parse(running.stdout) as { stopReason: string }).stopReason,
+        "native-stage-required",
+      );
 
       for (const role of [
         "research-design",
@@ -1402,17 +1564,24 @@ async function projectFixture(
     pendingUncertainty?: boolean;
     pendingModels?: boolean;
     optionalLicensedRoute?: boolean;
+    runtimePolicy?: boolean;
+    genericPolicy?: boolean;
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "tiangong-scientific-review-"));
   await initializeResearchWorkspace(root, "Scientific review workflow");
   const policyRules = [
+    ...(options.genericPolicy ? ["data-access-plan"] : []),
     ...(options.pendingUncertainty ? ["uncertainty-propagated"] : []),
     ...(options.pendingModels ? ["model-calibrated-or-justified"] : []),
   ];
-  const policy = policyBinding(projectId, policyRules);
+  const policy = options.runtimePolicy
+    ? await approvedGatePolicy(root, projectId)
+    : policyBinding(projectId, policyRules);
+  if (options.runtimePolicy) await lockCapabilities(root);
   const designInput = await scientificDesignInput(root, projectId, {
     targetJournal: policy.targetJournal,
+    ...(policy.targetJournal === null ? { approvalStatus: "candidate-only" } : {}),
     policyRules,
     ...(options.pendingUncertainty === undefined
       ? {}
@@ -1438,6 +1607,76 @@ async function projectFixture(
     designSha256: project.scientificDesign!.designSha256,
     design: designInput.design.contract,
   };
+}
+
+async function approvedGatePolicy(root: string, projectId: string): Promise<ResearchPolicyBinding> {
+  const sourceRoot = join(root, "gate-policy-source");
+  const documents = [
+    ["baseline/top-journal.md", "baseline", "bundled-default"],
+    ["article-types/computational-modeling.md", "article-type", "bundled-default"],
+    ["fields/pavement-engineering.md", "field", "bundled-default"],
+    ["journal-classes/discipline-flagship.md", "journal-class", "bundled-default"],
+    ...["evidence", "methods-reproducibility", "domain-novelty", "journal-editor"].map((role) => [
+      `reviewer-rubrics/${role}.md`,
+      "reviewer-rubric",
+      "bundled-default",
+    ]),
+    ["project/publication-brief.md", "publication-brief", "project-template"],
+    ["journals/exact-journal-template.md", "exact-journal", "exact-journal-template"],
+  ];
+  for (const [relative, kind, templateClass] of documents) {
+    const path = join(sourceRoot, "assets", "research-policy", "defaults", relative!);
+    await ensureDirectory(dirname(path));
+    const metadata = {
+      schemaVersion: 1,
+      id: `gate.${relative!.replaceAll("/", ".").replace(/\.md$/, "")}`,
+      kind,
+      templateClass,
+      policyVersion: 1,
+      targetTier: "top",
+      articleType: "computational-modeling",
+      field: "pavement-engineering",
+      journalClass: "discipline-flagship",
+      targetJournal: "none",
+      centralQuestion: "How can model discrepancy be bounded without inventing field validation?",
+      centralClaim: "Cross-model discrepancy is bounded within declared assumptions.",
+      centralOutcome: "Bounded model discrepancy",
+      contributionType: "cross-model-comparison",
+      rules: [],
+      constraints: {
+        requireScientificDesignContract: true,
+        requireEarlyScientificReviews: true,
+        requireRealRecordConstructCanary: true,
+      },
+      requiredReviewers: [
+        "evidence",
+        "methods-reproducibility",
+        "domain-novelty",
+        "journal-editor",
+      ],
+      reviewAfterDays: 365,
+    };
+    await writeTextAtomic(
+      path,
+      `---\n${JSON.stringify(metadata)}\n---\n\n# Synthetic gate policy\n\nReviewed deterministic scientific gate fixture.\n`,
+    );
+  }
+  await initializeResearchPolicy({
+    root,
+    projectId,
+    sourceRoot,
+    articleType: "computational-modeling",
+    field: "pavement-engineering",
+    journalClass: "discipline-flagship",
+  });
+  await completeResearchPublicationBrief(root, projectId, {
+    centralQuestion: "How can model discrepancy be bounded without inventing field validation?",
+    centralClaim: "Cross-model discrepancy is bounded within declared assumptions.",
+    centralOutcome: "Bounded model discrepancy",
+    contributionType: "cross-model-comparison",
+  });
+  await approveResearchPolicy(root, projectId, { confirm: true, acknowledgeDefaults: true });
+  return loadApprovedResearchPolicy(root, projectId);
 }
 
 async function passResearchDesign(fixture: Awaited<ReturnType<typeof projectFixture>>) {
@@ -1557,7 +1796,9 @@ function evidenceSnapshotSources(design: Awaited<ReturnType<typeof projectFixtur
     Array.from({ length: role.minimumIndependentSources }, (_, index) => ({
       id: `source-${roleIndex}-${index}`,
       sourceType:
-        role.sourceTypeRequirements[index % role.sourceTypeRequirements.length] ?? "academic-paper",
+        declaredSourceTypes(role.sourceTypeRequirements)[
+          index % declaredSourceTypes(role.sourceTypeRequirements).length
+        ] ?? "academic-paper",
       publicationDate: "2025-01-01",
       fullTextAvailable: true,
       coverageDimensions: [...role.coverageDimensionIds],
@@ -1726,7 +1967,7 @@ function evidenceAssessment(
             )
           : [],
       dimensionIds: valid ? role.coverageDimensionIds : [],
-      sourceTypes: valid ? role.sourceTypeRequirements : [],
+      sourceTypes: valid ? declaredSourceTypes(role.sourceTypeRequirements) : [],
     })),
     closestWorkDispositionComplete: valid,
     centralEvidenceFitsContext: valid,

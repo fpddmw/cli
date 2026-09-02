@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-09-01
-lastReviewedCommit: ca716c2fea59d0a8085aa32dbd8f65a686b3353e
+lastReviewedAt: 2026-09-02
+lastReviewedCommit: 8a18ba69f432d2c639517549157ef29545722cff
 ---
 
 # Tiangong AI CLI
@@ -650,7 +650,33 @@ tiangong-ai research project scientific review submit top-journal-paper \
   --workspace /absolute/path/to/workspace --json
 ```
 
-Repeat the same prepare/submit route for `evidence-construct`, adding an
+For a prepared packet, use explicit isolated execution instead of writing a
+custom reviewer runner:
+
+```bash
+tiangong-ai research reviewer status --workspace /absolute/path/to/workspace --json
+tiangong-ai research project scientific review execute top-journal-paper \
+  --role research-design --confirm-review-cost \
+  --workspace /absolute/path/to/workspace --json
+```
+
+Confirm the bounded cost before execution. The command uses the configured
+`native-direct` or `sandbox-bridge` reviewer, copies exact hash-verified packet
+inputs and human Policy documents into its capsule, and submits only a
+schema-valid, packet/session-bound review. A saved successful execution is
+replayed without another model call after revalidating its immutable proof.
+Failures require explicit `--retry` and remain bounded by the attempt budget;
+unreported usage and interrupted wall time retain conservative reservations.
+A nonpassing mechanical packet can receive an independent stop verdict, never
+an override. The existing manual submit command remains available for an exact
+independent review.
+
+Reviewer status is read-only and transport-aware. Native-direct does not
+require a bridge connection. Smoke configuration readiness is explicitly not
+production readiness and does not demand an attestation that smoke mode never
+writes. Production still requires its current reviewer doctor attestation.
+
+Repeat the same prepare/execute route for `evidence-construct`, adding an
 owner-reviewed JSON array of absolute canonical canary paths with
 `--canary-artifacts /absolute/path/to/canary-paths.json`, and then for
 `pilot-methods` at its stage boundary. A top-journal fork or addendum is a
@@ -966,6 +992,25 @@ resume criteria. Research then stops; it does not spend more budget on
 low-yield substitutes. If no lawful remaining route exists, the user must narrow
 or abandon the unsupported scope before a new reviewed generation can resume.
 
+Before submitting an acquisition audit, inspect its exact current eligibility:
+
+```bash
+tiangong-ai research project evidence content forecast PROJECT \
+  --input /absolute/path/acquisition-audit.json --workspace /absolute/workspace --json
+```
+
+This read-only check uses the freeze path's source projection and coverage
+rules, checks registered artifact bytes and provenance, and forecasts required
+roles from potentially assignable source dimensions. Exit `3` identifies known
+deficits; exit `0` means only potential eligibility, never successful atom
+registration, content freeze, independence certification, or review. Pending
+input materialization, decomposition, and exact atom assignments remain
+explicit. Re-run after material acquisition changes, not after every atom.
+Flat `sourceTypeRequirements` arrays mean **all-of**. A design may instead use
+`{"allOf":["academic-paper"],"anyOf":["government","industry"],"atLeast":{"count":2,"from":["academic-paper","government","industry"]}}`;
+every present group applies, and counts use distinct types. Forecast, typed
+content, and scientific review use the same source-type evaluator.
+
 Acquisition freezes an immutable evidence snapshot even when lawful retrieval
 ends with explicit gaps. Before inference, decompose every acquired PDF,
 spreadsheet, archive, or structured file into exact lineage-bound producer-
@@ -984,6 +1029,46 @@ closure remains unchanged, the child snapshot records a mechanical delta, and
 default status hides the superseded project (`research status --all` shows full
 lineage).
 
+For many content records, use `research project evidence decomposition batch
+<project-id> --record <absolute-json>` or `research project evidence atom batch
+<project-id> --record <absolute-json>`, with `--workspace` and `--json` as needed.
+The input is `{"schemaVersion":1,"records":[...]}`; each item has exactly the same
+schema and validation as the corresponding single-record command. A batch is
+bounded to 500 records and 4 MiB of input. The CLI verifies acquisition/artifact
+bindings once per batch, groups atoms by artifact to read and parse each referenced
+document once without retaining all files in memory, and commits one hash-bound
+immutable envelope through one ledger event. A bad item commits nothing; identical
+replay is idempotent and a changed ID is rejected. Uncommitted envelopes are never
+visible and a retry can safely complete their commit. `work` reports deterministic
+verification, read, and append counts; no persistent verification cache is trusted.
+
+Retrieve these CLI-owned input schemas with `research schema show evidence-atom`,
+`artifact-decomposition`, `evidence-atom-batch`, or `artifact-decomposition-batch`
+and `--json`. Help and command intake share the batch-limit constants. Schemas
+validate structure; execution still checks exact artifact/lineage bindings,
+locator semantics, stage, and sensitive content. A schema pass is not admission.
+
+Before a potentially large download, use the offline command
+`research project evidence artifact preflight --bytes <known-bytes> --workspace
+<path> --json`, or replace `--bytes` with `--path <exact-local-file>` for a stat-only
+check. `budget.maxBytesPerArtifact` bounds one acquired/downloaded file;
+`budget.maxBytesPerPackage` separately bounds aggregate generated stage outputs.
+Both are exposed in preflight, and native packets expose `maxArtifactBytes` beside
+`maxOutputBytes`. Their defaults remain 20 MiB in smoke mode and 512 MiB in
+production. A missing artifact field in an existing configuration retains its
+existing package limit in memory without rewriting the owner's file; an explicit
+invalid limit is rejected. Preflight exit 3 means stop and request a provider-side
+subset/filter or smaller official export preserving required variables/provenance.
+A size pass is not content acceptance: download binding, format, archive-expansion,
+SHA-256, and snapshot checks still apply. This is not a large-file streaming or
+external-reference bypass.
+
+Use acquisition `gaps` only for unresolved blocking evidence deficiencies;
+`limitations` holds non-blocking scope constraints and intentionally sealed
+outcomes. Future Policy obligations stay in the scientific design and appear
+in `futureGateObligations`, including ordinary planned rules without pending
+model/uncertainty objects. Their declared gate remains authoritative.
+
 Accepted local inputs are normalized into immutable input-backed artifacts while
 the acquire package is still active. JSON, CSV, Markdown, and plain-text inputs
 therefore have an atom-capable identity even when the producer omitted an
@@ -1000,6 +1085,12 @@ that project is checked, scheduled, summarized, and bound to the top-level
 JSON/JSONL `projectId`, so historical blocked siblings do not alter its exit
 status. Omit `--project` and use `--max-parallel` only for an intentional
 workspace-wide run.
+
+Run/status share the same due scientific-gate decision: pending/prepared review,
+revision-required, and stopped are distinct from a runnable native stage.
+Future gates do not prevent earlier discovery or acquisition. Legitimate
+historical and user/external-wait project states remain doctor-readable;
+unknown states and broken evidence bindings still block readiness.
 
 Inputs are admitted by SHA-256. Native producer preparation creates an
 ephemeral, hash-bound packet directory but does not copy agent authentication
@@ -1278,6 +1369,18 @@ target-specific scientific design must complete fresh evidence-construct and
 pilot-methods reviews before analysis. `research status --all` marks any legacy
 fork directory without a `project.forked` commit marker as
 `authority.state = "invalid"` rather than authoritative.
+
+To repair completed acquisition before analysis, use
+`research project fork SOURCE --to TARGET --resume-through discover`. This
+preserves the original frozen audit, inherits verified discovery/receipts and
+exact acquired artifacts, and opens TARGET's acquire stage. Reuse the returned
+artifact IDs from the source acquisition audit, run
+`project evidence content forecast TARGET --input AUDIT`,
+then prepare/submit TARGET's acquire stage and rebuild typed content. There is
+no need to repeat paid searches or download unchanged files. Top-journal
+recovery additionally requires a Policy approved for TARGET and `--design`,
+`--design-producer-agent`, and `--design-producer-session`; new generation
+reviews cannot inherit the source generation's scientific approval.
 
 ## Research Search
 

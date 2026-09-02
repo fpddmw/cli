@@ -1307,6 +1307,92 @@ describe("research project execution", () => {
     }
   });
 
+  it("admits incremental discovery context above the output ceiling but below the input ceiling", async () => {
+    const fixture = await nativeDiscoveryContextFixture(24_000);
+    try {
+      const config = await loadWorkspaceConfig(fixture.root);
+      assert.ok(fixture.contextTokens > config.budget.maxOutputTokens);
+      assert.ok(fixture.contextTokens < config.budget.maxInputContextTokens);
+      const packet = await prepareNativeResearchStage({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      assert.match(packet.prompt, /### outputs\/evidence\.json/);
+      assert.equal(packet.limits.maxOutputTokens, config.budget.maxOutputTokens);
+      assert.equal(await sha256File(fixture.evidencePath), fixture.evidenceSha256);
+      await abortNativeResearchStage({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        sessionId: packet.sessionId,
+      });
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("reserves the same acquire input ceiling at preflight without enlarging the output ceiling", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const config = await loadWorkspaceConfig(root);
+      const preflight = await evaluateProjectPreflight(
+        root,
+        "Bound acquire stage inputs.",
+        null,
+        null,
+      );
+      assert.equal(
+        preflight.budget.stageContextTokenReservations.acquire,
+        config.budget.maxInputContextTokens,
+      );
+      assert.equal(preflight.budget.maxOutputTokens, config.budget.maxOutputTokens);
+      assert.ok(
+        preflight.budget.preCallTokenReservations.acquire <= config.budget.packageMaxTokens.acquire,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects real acquire input overflow before spending an attempt and preserves frozen evidence", async () => {
+    const fixture = await nativeDiscoveryContextFixture(40_000);
+    try {
+      const config = await loadWorkspaceConfig(fixture.root);
+      assert.ok(fixture.contextTokens > config.budget.maxInputContextTokens);
+      await assert.rejects(
+        prepareNativeResearchStage({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          stage: "acquire",
+          hostAgent: "codex",
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof CliError);
+          assert.equal(error.code, "RESEARCH_INPUT_CONTEXT_BUDGET_EXCEEDED");
+          const details = error.details as Record<string, unknown>;
+          assert.equal(details.maxStageContextTokens, config.budget.maxInputContextTokens);
+          assert.equal(details.limitField, "budget.maxInputContextTokens");
+          assert.match(String(details.recommendedAction), /fork|bounded/i);
+          assert.match(String(details.recommendedAction), /immutable|frozen/i);
+          return true;
+        },
+      );
+      const project = await loadProject(fixture.root, fixture.projectId);
+      assert.equal(project.packages.find((item) => item.id === "acquire")?.attempts, 0);
+      assert.equal(await sha256File(fixture.evidencePath), fixture.evidenceSha256);
+      assert.equal(
+        await lstat(
+          join(workspacePaths(fixture.root).projects, fixture.projectId, "native", "active.json"),
+        ).catch(() => null),
+        null,
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("records a WorkBuddy native stage without allowing a child producer executor", async () => {
     const root = await temporaryDirectory();
     try {
@@ -2144,6 +2230,9 @@ describe("research workspace CLI", () => {
       assert.equal(finalStatus.hiddenArchivedProjects, 1);
       assert.equal(finalStatus.hiddenAbandonedProjects, 1);
       assert.deepEqual(finalStatus.projects, []);
+      const doctor = await doctorResearchWorkspace(root);
+      assert.equal(doctor.status, "ready", JSON.stringify(doctor.checks));
+      assert.equal(doctor.checks.find((check) => check.id === "project-state")?.status, "pass");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2248,6 +2337,7 @@ describe("research workspace CLI", () => {
         },
       });
       assert.equal(userHandoff.status, "waiting-user");
+      assert.equal((await doctorResearchWorkspace(root)).status, "ready");
       assert.equal((await loadProject(root, "handoff-state")).packages[0]?.attempts, 0);
       const waiting = await runNativeControlledWorkspace(
         root,
@@ -2289,6 +2379,7 @@ describe("research workspace CLI", () => {
         },
       });
       assert.equal(external.status, "waiting-external");
+      assert.equal((await doctorResearchWorkspace(root)).status, "ready");
       const status = await invoke([
         "research",
         "status",
@@ -2304,6 +2395,31 @@ describe("research workspace CLI", () => {
       };
       assert.equal(statusValue.projects[0]?.status, "waiting-external");
       assert.match(statusValue.projects[0]?.recommendedAction ?? "", /Do not continue/i);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an unknown project status in both doctor and the project loader", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const project = await initializeProject(
+        root,
+        "unknown-status",
+        "Reject corrupt project state.",
+      );
+      await writeJsonAtomic(join(workspacePaths(root).projects, project.id, "project.json"), {
+        ...project,
+        status: "unrecognized-terminal-state",
+      });
+      await assert.rejects(
+        loadProject(root, project.id),
+        (error: unknown) => error instanceof CliError && error.code === "RESEARCH_PROJECT_INVALID",
+      );
+      const doctor = await doctorResearchWorkspace(root);
+      assert.equal(doctor.status, "blocked");
+      assert.equal(doctor.checks.find((check) => check.id === "project-state")?.status, "fail");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2969,7 +3085,7 @@ describe("research workspace CLI", () => {
           preflightValue.budget.maxInputContextTokens,
       );
       assert.deepEqual(preflightValue.budget.stageContextTokenReservations, {
-        acquire: 1_024,
+        acquire: 128_000,
         analyze: 128_000,
         synthesize: 128_000,
         review: 256_000,
@@ -3106,6 +3222,72 @@ describe("research workspace CLI", () => {
     }
   });
 });
+
+async function nativeDiscoveryContextFixture(relevanceBytes: number) {
+  const root = await temporaryDirectory();
+  const projectId = "incremental-context";
+  await initializeResearchWorkspace(root, undefined);
+  await lockCapabilities(root);
+  await initializeProject(root, projectId, "Bound incremental evidence metadata at acquisition.");
+  const inputPath = join(root, "context-source.txt");
+  await writeFile(inputPath, "Observed source evidence.\n");
+  await addProjectInput(root, projectId, inputPath, "primary");
+  const packet = await prepareNativeResearchStage({
+    root,
+    projectId,
+    stage: "discover",
+    hostAgent: "codex",
+  });
+  const candidate = (await listEvidenceCandidates(root, projectId))[0]!;
+  await recordDiscoveryAssessmentBatch({
+    root,
+    projectId,
+    value: {
+      schemaVersion: 1,
+      assessments: [
+        {
+          decision: "admit",
+          candidateId: candidate.id,
+          sourceId: "source-1",
+          sourceType: "primary",
+          relevance: "Measured scope. "
+            .repeat(Math.ceil(relevanceBytes / 16))
+            .slice(0, relevanceBytes),
+          quality: { level: "primary", rationale: "Direct measurement." },
+          applicability: "The declared bounded question.",
+          coverageDimensions: ["research-question"],
+          limitations: [],
+        },
+      ],
+    },
+  });
+  const outputPath = join(root, "discovery-closeout.json");
+  await writeJsonAtomic(outputPath, {
+    schemaVersion: 2,
+    limitations: [],
+    dimensionJudgments: [{ id: "research-question", status: "covered" }],
+    gaps: [],
+  });
+  await submitNativeResearchStage({
+    root,
+    projectId,
+    sessionId: packet.sessionId,
+    outputPath,
+    confirmedModel: packet.expectedModel,
+  });
+  const evidencePath = join(workspacePaths(root).projects, projectId, "outputs", "evidence.json");
+  return {
+    root,
+    projectId,
+    evidencePath,
+    evidenceSha256: await sha256File(evidencePath),
+    contextTokens: Math.ceil(
+      Buffer.byteLength(
+        `### outputs/evidence.json\n${(await readFile(evidencePath, "utf8")).trimEnd()}`,
+      ) / 3,
+    ),
+  };
+}
 
 function fakeExecutor(agentLog: string[]): PackageExecutor {
   return async (request) => {

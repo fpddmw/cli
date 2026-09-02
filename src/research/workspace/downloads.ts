@@ -168,9 +168,9 @@ export async function bindEvidenceDownload(input: {
   if (!info?.isFile() || info.isSymbolicLink()) {
     throw downloadError("Downloaded file must be one existing regular non-symlink file.");
   }
-  if (info.size < 1 || info.size > config.budget.maxBytesPerPackage) {
+  if (info.size < 1 || info.size > config.budget.maxBytesPerArtifact) {
     throw downloadError(
-      `Downloaded file size must be 1-${config.budget.maxBytesPerPackage} bytes.`,
+      `Downloaded file size must be 1-${config.budget.maxBytesPerArtifact} bytes (maxBytesPerArtifact); preflight known sizes and request a provider-side subset/filter for larger files.`,
     );
   }
   const fileSha256 = await sha256File(sourcePath);
