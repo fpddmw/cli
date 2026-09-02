@@ -454,6 +454,7 @@ describe("lightweight original task and authorized scope", () => {
             await readFile(join(request.projectRoot, "inputs/review-packet.json"), "utf8"),
           );
           assert.equal(packet.taskAcceptance.requirements.length, 2);
+          assert.equal(packet.taskAcceptance.originalRequest, contractInput().originalRequest);
           assert.equal(packet.taskAcceptance.results.length, 1);
           assert.equal(
             request.prompt.split(
