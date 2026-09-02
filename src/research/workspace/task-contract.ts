@@ -548,6 +548,11 @@ async function assertTaskWindow(root: string, project: ProjectState, initial: bo
   if (
     project.handoff.state !== "agent-actionable" ||
     project.status === "complete" ||
+    (initial &&
+      project.scientificDesign &&
+      Object.values(project.scientificDesign.gates).some(
+        (gate) => gate.status !== "pending" || gate.packetSha256 !== null,
+      )) ||
     (await pathExists(join(workspacePaths(root).projects, project.id, "native", "active.json"))) ||
     project.packages.some(
       (item) =>
@@ -556,7 +561,7 @@ async function assertTaskWindow(root: string, project: ProjectState, initial: bo
     )
   ) {
     throw new CliError(
-      "Task definition/scope changes require an idle pre-analysis boundary. Original requirements must be recorded before execution; use a new generation for later scientific changes.",
+      "Task definition/scope changes require an idle pre-analysis boundary. Original requirements must be recorded before execution or scientific review; use a new generation for later scientific changes.",
       { code: "RESEARCH_TASK_WINDOW_REQUIRED", exitCode: 3 },
     );
   }
