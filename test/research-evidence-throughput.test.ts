@@ -135,6 +135,25 @@ describe("bounded evidence throughput", () => {
       );
       assert.equal(bound.exitCode, 3);
       assert.match(bound.stderr, /RESEARCH_EVIDENCE_BATCH_INVALID/);
+      const regrouped = await batch(root, "atom", [records[1]!, records[0]!]);
+      assert.equal(regrouped.exitCode, 0, regrouped.stderr);
+      const regroupedResult = JSON.parse(regrouped.stdout);
+      const regroupedPath = join(
+        workspacePaths(root).projects,
+        "batch-project",
+        "evidence",
+        "content-batches",
+        `${regroupedResult.batchSha256}.json`,
+      );
+      assert.equal(
+        JSON.parse(await readFile(regroupedPath, "utf8")).batchSha256,
+        regroupedResult.batchSha256,
+      );
+      assert.equal(regroupedResult.work.ledgerAppends, 1);
+      const regroupedReplay = await batch(root, "atom", [records[1]!, records[0]!]);
+      assert.equal(regroupedReplay.exitCode, 0, regroupedReplay.stderr);
+      assert.equal(JSON.parse(regroupedReplay.stdout).work.ledgerAppends, 0);
+      assert.equal((await loadEvidenceAtomRecords(root, "batch-project")).length, 40);
       const frozen = await freezeEvidenceContentSnapshot(root, "batch-project");
       assert.equal(frozen.gate.decision, "pass");
       assert.equal(

@@ -430,7 +430,13 @@ export async function registerEvidenceContentBatch(input: {
   };
   const batchSha256 = contentBatchHash(stable);
   let batch: ContentBatch = { ...stable, batchSha256 };
-  if (added) {
+  const committed =
+    added === 0 &&
+    (await readVerifiedJournal(evidenceLedgerPath(input.root, input.projectId))).some(
+      (event) =>
+        event.type === "content.batch.registered" && event.payload.batchSha256 === batchSha256,
+    );
+  if (!committed) {
     const path = contentBatchPath(input.root, input.projectId, batchSha256);
     if (await pathExists(path)) {
       // A crash before the commit event can leave a complete invisible envelope.
