@@ -755,7 +755,12 @@ export async function prepareNativeResearchStage(input: {
         : "";
       if (
         taskContract &&
-        Buffer.byteLength(taskPrompt + capsule.contextBundleContent + stageContextContent, "utf8") >
+        Buffer.byteLength(
+          taskPrompt +
+            (input.stage === "discover" ? capsule.contextBundleContent : "") +
+            stageContextContent,
+          "utf8",
+        ) >
           config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN
       ) {
         throw new CliError(
