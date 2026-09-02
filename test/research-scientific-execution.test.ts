@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
-import { initializeProject, loadProject } from "../src/research/workspace/projects.js";
+import { initializeProject, loadProject, saveProject } from "../src/research/workspace/projects.js";
 import {
   initializeResearchWorkspace,
   loadWorkspaceConfig,
@@ -14,11 +14,135 @@ import {
   type ScientificReviewPacket,
 } from "../src/research/workspace/scientific-review.js";
 import { executeScientificReview } from "../src/research/workspace/scientific-review-execution.js";
-import { workspacePaths, writeJsonAtomic } from "../src/research/workspace/storage.js";
+import {
+  workspacePaths,
+  writeJsonAtomic,
+  writeTextAtomic,
+  sha256Text,
+} from "../src/research/workspace/storage.js";
 import type { ExecutionResult, ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("explicit isolated scientific review execution", () => {
+  it("revalidates immutable submitted proof before replaying a completed execution", async () => {
+    const fixture = await preparedFixture("execution-replay-drift");
+    try {
+      const executed = await executeScientificReview(
+        { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+        async () => result(fixture.packet),
+      );
+      const path = join(
+        workspacePaths(fixture.root).projects,
+        fixture.projectId,
+        "scientific/reviews/research-design",
+        executed.reviewSha256 + ".json",
+      );
+      await chmod(path, 0o600);
+      await writeFile(path, "{}\n");
+      await assert.rejects(
+        executeScientificReview(
+          { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+          async () => {
+            throw new Error("replay must not invoke");
+          },
+        ),
+        { code: "RESEARCH_SCIENTIFIC_GATE_INVALID" },
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("refuses recovered submission when its authoritative project became abandoned", async () => {
+    const fixture = await preparedFixture("execution-recovered-authority");
+    try {
+      await executeScientificReview(
+        { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+        async () => result(fixture.packet),
+      );
+      const project = await loadProject(fixture.root, fixture.projectId);
+      project.status = "abandoned";
+      project.scientificDesign!.gates["research-design"].status = "prepared";
+      project.scientificDesign!.gates["research-design"].reviewSha256 = null;
+      await saveProject(fixture.root, project);
+      await assert.rejects(
+        executeScientificReview(
+          { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+          async () => {
+            throw new Error("replay must not invoke");
+          },
+        ),
+        { code: "RESEARCH_PROJECT_NOT_AUTHORITATIVE" },
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("preserves conservative reservation when a failed call returns no usage", async () => {
+    const fixture = await preparedFixture("execution-unknown-usage");
+    try {
+      await assert.rejects(
+        executeScientificReview(
+          { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+          async () => ({
+            ...result(fixture.packet),
+            exitCode: 86,
+            stdout: "",
+            tokens: 0,
+            inputTokens: 0,
+            cachedInputTokens: 0,
+            outputTokens: 0,
+          }),
+        ),
+        { code: "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_FAILED" },
+      );
+      assert.ok((await loadProject(fixture.root, fixture.projectId)).usage.tokens > 0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("reserves finite wall time before a call can be interrupted", async () => {
+    const fixture = await preparedFixture("execution-wall-reserve");
+    try {
+      await executeScientificReview(
+        { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+        async (request) => {
+          assert.ok(
+            (await loadProject(fixture.root, fixture.projectId)).usage.wallSeconds >=
+              request.timeoutSeconds,
+          );
+          return result(fixture.packet);
+        },
+      );
+      assert.equal((await loadProject(fixture.root, fixture.projectId)).usage.wallSeconds, 0.01);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("stages and embeds the exact approved Policy Markdown in the tool-free review", async () => {
+    const fixture = await preparedFixture(
+      "execution-policy-text",
+      true,
+      "# Reviewed Policy\nHuman rule: distinguish field observations from simulations.\n",
+    );
+    try {
+      await executeScientificReview(
+        { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+        async (request) => {
+          assert.match(
+            request.prompt,
+            /Human rule: distinguish field observations from simulations/u,
+          );
+          return result(fixture.packet);
+        },
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
   it("requires explicit cost consent before invoking a reviewer", async () => {
     const fixture = await preparedFixture("execution-consent");
     try {
@@ -192,7 +316,7 @@ describe("explicit isolated scientific review execution", () => {
   });
 });
 
-async function preparedFixture(projectId: string, passing = true) {
+async function preparedFixture(projectId: string, passing = true, policyText?: string) {
   const root = await mkdtemp(join(tmpdir(), "tiangong-scientific-execute-"));
   await initializeResearchWorkspace(root, "Scientific execution fixture");
   await lockCapabilities(root);
@@ -221,6 +345,19 @@ async function preparedFixture(projectId: string, passing = true) {
   const design = await scientificDesignInput(root, projectId, {
     targetJournal: policy.targetJournal,
   });
+  if (policyText) {
+    const sha256 = sha256Text(policyText);
+    const objectLocator = `policies/objects/${sha256}.md`;
+    await writeTextAtomic(join(workspacePaths(root).control, objectLocator), policyText);
+    policy.documents.push({
+      id: "human-rule",
+      kind: "baseline",
+      logicalPath: "baseline.md",
+      sha256,
+      sourceClass: "human-customized",
+      objectLocator,
+    });
+  }
   const project = await initializeProject(
     root,
     projectId,
