@@ -10,6 +10,67 @@ import {
 } from "../src/research/workspace/evidence-role-coverage.js";
 
 describe("shared evidence-role coverage", () => {
+  it("does not turn same-dimension metadata or binary-only sources into potential atoms", () => {
+    const roles: EvidenceRoleRequirement[] = [
+      {
+        id: "mitigation",
+        required: true,
+        minimumFullText: 1,
+        minimumIndependentSources: 1,
+        minimumDatedSources: 1,
+        coverageDimensionIds: ["water"],
+        sourceTypeRequirements: ["paper", "patent"],
+      },
+    ];
+    const sources = [
+      {
+        id: "readable-paper",
+        sourceType: "paper",
+        fullTextAvailable: true,
+        producerContextLevel: "bounded-text-artifact",
+        artifactIds: ["paper-text"],
+        producerVisibleArtifactIds: ["paper-text"],
+        publicationDate: "2026-01-01",
+        coverageDimensions: ["water"],
+      },
+      {
+        id: "metadata-patent",
+        sourceType: "patent",
+        fullTextAvailable: false,
+        producerContextLevel: "metadata-only",
+        artifactIds: [],
+        producerVisibleArtifactIds: [],
+        publicationDate: "2026-01-01",
+        coverageDimensions: ["water"],
+      },
+      {
+        id: "binary-patent",
+        sourceType: "patent",
+        fullTextAvailable: false,
+        producerContextLevel: "metadata-only",
+        artifactIds: ["unread-pdf"],
+        producerVisibleArtifactIds: [],
+        publicationDate: "2026-01-01",
+        coverageDimensions: ["water"],
+      },
+    ];
+    const forecast = forecastRoleEligibility(roles, sources)[0]!;
+    assert.equal(forecast.eligibility, "insufficient");
+    assert.deepEqual(forecast.sourceIds, ["readable-paper"]);
+    assert.deepEqual(forecast.gaps, ["evidence role mitigation lacks source type patent"]);
+    const restored = {
+      ...sources[1],
+      fullTextAvailable: true,
+      producerContextLevel: "bounded-text-artifact",
+      artifactIds: ["patent-text"],
+      producerVisibleArtifactIds: ["patent-text"],
+    };
+    assert.equal(
+      forecastRoleEligibility(roles, [sources[0]!, restored])[0]!.eligibility,
+      "potentially-sufficient",
+    );
+  });
+
   it("retains flat all-of and evaluates combined groups using distinct source types", () => {
     assert.deepEqual(sourceTypeRequirementGaps(["paper", "government"], ["paper"]), [
       "lacks source type government",
