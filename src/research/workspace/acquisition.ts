@@ -5,6 +5,7 @@ import { CliError } from "../../errors.js";
 import {
   loadEvidenceArtifactRecords,
   producerVisibleMediaType,
+  producerReadableArtifactPath,
   registerEvidenceArtifact,
   type EvidenceArtifactRecord,
 } from "./artifacts.js";
@@ -218,21 +219,7 @@ export async function materializeAcquisitionAudit(
       !(options.readOnly && provenance.kind === "input") &&
       !boundArtifacts.some((artifact) => producerVisibleMediaType(artifact.mediaType))
     ) {
-      throw new CliError(
-        `Accepted full-text input ${decision.sourceId} requires a producer-readable artifact before acquisition can close.`,
-        {
-          code: "RESEARCH_INPUT_ATOMIZATION_REQUIRED",
-          exitCode: 3,
-          details: {
-            sourceId: decision.sourceId,
-            candidateId: decision.candidateId,
-            artifactIds: normalizedArtifactIds,
-            acceptedMediaTypes: ["application/json", "text/csv", "text/markdown", "text/plain"],
-            recovery:
-              "Register the exact local input or a readable derivative during the active acquire stage, then include its artifact ID in this decision.",
-          },
-        },
-      );
+      throw inputAtomizationError(decision.sourceId, decision.candidateId, normalizedArtifactIds);
     }
     decisions.push({ ...decision, artifactIds: normalizedArtifactIds, artifacts: boundArtifacts });
   }
@@ -242,6 +229,35 @@ export async function materializeAcquisitionAudit(
     limitations: parsed.limitations,
     gaps: parsed.gaps,
   };
+}
+
+export function inputCanProvideReadableArtifact(input: ProjectState["inputs"][number]): boolean {
+  return (
+    producerReadableArtifactPath(input.path) ||
+    Boolean(input.contextPath && producerReadableArtifactPath(input.contextPath))
+  );
+}
+
+function inputAtomizationError(
+  sourceId: string,
+  candidateId: string,
+  artifactIds: string[],
+): CliError {
+  return new CliError(
+    `Accepted full-text input ${sourceId} requires a producer-readable artifact before acquisition can close.`,
+    {
+      code: "RESEARCH_INPUT_ATOMIZATION_REQUIRED",
+      exitCode: 3,
+      details: {
+        sourceId,
+        candidateId,
+        artifactIds,
+        acceptedMediaTypes: ["application/json", "text/csv", "text/markdown", "text/plain"],
+        recovery:
+          "Register the exact local input or a readable derivative during the active acquire stage, then include its artifact ID in this decision.",
+      },
+    },
+  );
 }
 
 function artifactHasDownloadProvenance(
@@ -497,7 +513,11 @@ export async function loadCurrentEvidenceSnapshot(
 export async function loadVerifiedEvidencePreparationView(
   root: string,
   projectId: string,
-): Promise<{ snapshot: EvidenceSnapshot; artifacts: EvidenceArtifactRecord[] }> {
+): Promise<{
+  snapshot: EvidenceSnapshot;
+  artifacts: EvidenceArtifactRecord[];
+  ancestorSnapshotSha256s: string[];
+}> {
   const projectRoot = join(workspacePaths(root).projects, projectId);
   const path = join(projectRoot, "outputs", "evidence-snapshot.json");
   if (!(await pathExists(path))) {
@@ -588,7 +608,11 @@ export async function loadVerifiedEvidencePreparationView(
       throw snapshotError(`Snapshot artifact binding drifted: ${artifact.artifactId}.`);
     }
   }
-  return { snapshot, artifacts };
+  return {
+    snapshot,
+    artifacts,
+    ancestorSnapshotSha256s: chain.slice(1).map((item) => item.snapshotSha256),
+  };
 }
 
 export async function loadInferenceReadyEvidenceSnapshot(

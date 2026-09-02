@@ -1681,7 +1681,9 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         );
         const result = await inspectAcquisitionForecast(root, projectId, value);
         writeJson(io, result, args);
-        return result.acquisitionGate.decision === "pass" && !result.knownRoleDeficits.length
+        return result.submissionGate.decision !== "stop" &&
+          result.acquisitionGate.decision === "pass" &&
+          !result.knownRoleDeficits.length
           ? 0
           : 3;
       }
