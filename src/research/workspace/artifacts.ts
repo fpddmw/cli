@@ -735,6 +735,20 @@ function canonicalSourceUrl(value: string | undefined): string | null {
   return url.toString();
 }
 
+/** The registration media contract, without reading or inventing artifact bytes. */
+export function producerReadableArtifactPath(path: string): boolean {
+  try {
+    return producerVisibleMediaType(inferMediaType(path));
+  } catch {
+    return false;
+  }
+}
+
+export function producerVisibleMediaType(mediaType: string): boolean {
+  // HTML can be a login/challenge response; it is auditable but not atom-capable.
+  return ["application/json", "text/plain", "text/markdown", "text/csv"].includes(mediaType);
+}
+
 function inferMediaType(path: string): string {
   const extension = extname(path).toLowerCase();
   const byExtension: Record<string, string> = {

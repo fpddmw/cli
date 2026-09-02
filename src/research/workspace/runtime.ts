@@ -3,6 +3,7 @@ import { cp, lstat, readFile, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { CliError } from "../../errors.js";
+import { isConsistentAnalysisRunMetadata } from "./analysis-run.js";
 import { dataPublicSchemas } from "../../data/schemas.js";
 import {
   loadCapabilityDeclarations,
@@ -3503,27 +3504,11 @@ async function validateAnalysis(path: string, value: Record<string, unknown>): P
       "Analysis run refers to an artifact outside the inference snapshot.",
     );
   }
-  if (run.mode === "qualitative") {
-    if (
-      run.status !== "not-applicable" ||
-      run.command !== null ||
-      run.randomSeed !== null ||
-      implementationSha256s.length > 0 ||
-      environmentSha256s.length > 0
-    ) {
-      throw new StructuredOutputError("Qualitative analysis run metadata is inconsistent.");
-    }
-  } else if (
-    run.status !== "reproduced" ||
-    typeof run.command !== "string" ||
-    run.command.trim().length < 1 ||
-    typeof run.randomSeed !== "string" ||
-    run.randomSeed.trim().length < 1 ||
-    implementationSha256s.length < 1 ||
-    environmentSha256s.length < 1
-  ) {
+  if (!isConsistentAnalysisRunMetadata(run)) {
     throw new StructuredOutputError(
-      "Computational analysis requires exact reproduced run metadata.",
+      run.mode === "qualitative"
+        ? "Qualitative analysis run metadata is inconsistent."
+        : "Computational analysis requires exact reproduced run metadata.",
     );
   }
   const findings = value.findings as unknown[];
