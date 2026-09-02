@@ -1016,6 +1016,12 @@ replay is idempotent and a changed ID is rejected. Uncommitted envelopes are nev
 visible and a retry can safely complete their commit. `work` reports deterministic
 verification, read, and append counts; no persistent verification cache is trusted.
 
+Retrieve these CLI-owned input schemas with `research schema show evidence-atom`,
+`artifact-decomposition`, `evidence-atom-batch`, or `artifact-decomposition-batch`
+and `--json`. Help and command intake share the batch-limit constants. Schemas
+validate structure; execution still checks exact artifact/lineage bindings,
+locator semantics, stage, and sensitive content. A schema pass is not admission.
+
 Before a potentially large download, use the offline command
 `research project evidence artifact preflight --bytes <known-bytes> --workspace
 <path> --json`, or replace `--bytes` with `--path <exact-local-file>` for a stat-only

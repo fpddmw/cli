@@ -5,6 +5,13 @@ import { CliError } from "../../errors.js";
 import { loadCurrentEvidenceSnapshot, loadVerifiedEvidencePreparationView } from "./acquisition.js";
 import { loadEvidenceArtifactRecords, type EvidenceArtifactRecord } from "./artifacts.js";
 import { loadBoundAcquisitionDesign } from "./acquisition-routes.js";
+import {
+  EVIDENCE_CONTENT_CLASSES,
+  EVIDENCE_CONTENT_FUNCTIONS,
+  EVIDENCE_CONTENT_IDENTIFIER,
+  EVIDENCE_CONTENT_LIMITS,
+  isEvidenceContentInputShape,
+} from "./evidence-content-schema.js";
 import { appendEvidenceLedgerEvent, evidenceLedgerPath } from "./evidence-ledger.js";
 import { computeRoleCoverage } from "./evidence-role-coverage.js";
 import { readJournal, readVerifiedJournal } from "./journal.js";
@@ -23,35 +30,19 @@ import {
   writeTextAtomic,
 } from "./storage.js";
 
-const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const IDENTIFIER = new RegExp(EVIDENCE_CONTENT_IDENTIFIER);
 const SHA256 = /^[a-f0-9]{64}$/;
-const CONTENT_CLASSES = new Set([
-  "fulltext",
-  "table-data",
-  "supplementary-data",
-  "structured-data",
-  "metadata",
-  "figure-text",
-  "code",
-  "container-index",
-]);
-const EVIDENCE_FUNCTIONS = new Set([
-  "support",
-  "counterevidence",
-  "definition",
-  "method",
-  "limitation",
-  "context",
-]);
+const CONTENT_CLASSES = new Set<string>(EVIDENCE_CONTENT_CLASSES);
+const EVIDENCE_FUNCTIONS = new Set<string>(EVIDENCE_CONTENT_FUNCTIONS);
 const PRODUCER_VISIBLE_MEDIA_TYPES = new Set([
   "application/json",
   "text/plain",
   "text/markdown",
   "text/csv",
 ]);
-const MAX_EXCERPT_BYTES = 8_000;
-const MAX_BATCH_RECORDS = 500;
-const MAX_BATCH_INPUT_BYTES = 4 * 1024 * 1024;
+const MAX_EXCERPT_BYTES = EVIDENCE_CONTENT_LIMITS.maxExcerptBytes;
+const MAX_BATCH_RECORDS = EVIDENCE_CONTENT_LIMITS.maxBatchRecords;
+const MAX_BATCH_INPUT_BYTES = EVIDENCE_CONTENT_LIMITS.maxBatchInputBytes;
 
 interface ContentPreparationView {
   acquisition: Awaited<ReturnType<typeof loadCurrentEvidenceSnapshot>>;
@@ -369,10 +360,14 @@ export async function registerEvidenceContentBatch(input: {
     values.length < 1 ||
     values.length > MAX_BATCH_RECORDS ||
     values.some((value) => !isObject(value)) ||
-    Buffer.byteLength(canonicalJson(input.value)) > MAX_BATCH_INPUT_BYTES
+    Buffer.byteLength(canonicalJson(input.value)) > MAX_BATCH_INPUT_BYTES ||
+    !isEvidenceContentInputShape(
+      input.kind === "atom" ? "evidence-atom-batch" : "artifact-decomposition-batch",
+      input.value,
+    )
   ) {
     throw contentError(
-      "Evidence batch requires 1-500 records within 4 MiB.",
+      `Evidence batch requires 1-${MAX_BATCH_RECORDS} records within ${MAX_BATCH_INPUT_BYTES} bytes.`,
       "RESEARCH_EVIDENCE_BATCH_INVALID",
     );
   }
@@ -946,6 +941,7 @@ function parseDecompositionInput(value: Record<string, unknown>): {
     "limitations",
   ]);
   if (
+    !isEvidenceContentInputShape("artifact-decomposition", value) ||
     Object.keys(value).some((key) => !allowed.has(key)) ||
     value.schemaVersion !== 1 ||
     typeof value.sourceArtifactId !== "string" ||
@@ -1011,6 +1007,7 @@ function parseAtomInput(value: Record<string, unknown>): {
     "limitations",
   ]);
   if (
+    !isEvidenceContentInputShape("evidence-atom", value) ||
     Object.keys(value).some((key) => !allowed.has(key)) ||
     value.schemaVersion !== 1 ||
     !identifierValue(value.atomId) ||

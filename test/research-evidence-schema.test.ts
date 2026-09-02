@@ -3,6 +3,7 @@ import { it } from "node:test";
 import { Ajv2020 } from "ajv/dist/2020.js";
 
 import { runCli } from "../src/cli.js";
+import { isEvidenceContentInputShape } from "../src/research/workspace/evidence-content-schema.js";
 
 it("publishes closed CLI-owned content input schemas and shared batch bounds", async () => {
   const atom = {
@@ -42,6 +43,15 @@ it("publishes closed CLI-owned content input schemas and shared batch bounds", a
     assert.equal(validate(input), true, JSON.stringify(validate.errors));
     assert.equal(validate({ ...input, unexpected: true }), false);
     assert.equal(validate({ ...input, schemaVersion: 2 }), false);
+    for (const sample of [
+      input,
+      { ...input, unexpected: true },
+      { ...input, schemaVersion: 2 },
+      {},
+      null,
+    ]) {
+      assert.equal(isEvidenceContentInputShape(name, sample), Boolean(validate(sample)));
+    }
     const batch = await invoke(["research", "schema", "show", `${name}-batch`, "--json"]);
     assert.equal(batch.exitCode, 0, batch.stderr);
     const batchSchema = JSON.parse(batch.stdout);
@@ -58,6 +68,16 @@ it("publishes closed CLI-owned content input schemas and shared batch bounds", a
       validateBatch({ schemaVersion: 1, records: [{ ...input, unexpected: true }] }),
       false,
     );
+    for (const sample of [
+      { schemaVersion: 1, records: [input] },
+      { schemaVersion: 1, records: [] },
+      { schemaVersion: 1, records: [{ ...input, unexpected: true }] },
+    ]) {
+      assert.equal(
+        isEvidenceContentInputShape(`${name}-batch`, sample),
+        Boolean(validateBatch(sample)),
+      );
+    }
   }
   const help = await invoke(["research", "--help"]);
   assert.equal(help.exitCode, 0, help.stderr);

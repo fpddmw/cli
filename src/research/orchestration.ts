@@ -41,6 +41,12 @@ import {
   registerEvidenceContentBatch,
 } from "./workspace/content-evidence.js";
 import { inspectDiscoveryProgress } from "./workspace/discovery-status.js";
+import {
+  EVIDENCE_CONTENT_LIMITS,
+  EVIDENCE_CONTENT_SCHEMA_NAMES,
+  evidenceContentInputSchema,
+  isEvidenceContentSchemaName,
+} from "./workspace/evidence-content-schema.js";
 import { inspectEvidenceAccessStatus } from "./workspace/evidence-exhaustion.js";
 import { recordDiscoveryAssessmentBatch } from "./workspace/discovery.js";
 import { bindEvidenceDownload } from "./workspace/downloads.js";
@@ -226,6 +232,10 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research schema show <discover|acquire|analyze|synthesize|review|doctor|scientific-design|scientific-assessment-research-design|scientific-assessment-evidence-construct|scientific-assessment-pilot-methods|scientific-review-research-design|scientific-review-evidence-construct|scientific-review-pilot-methods|publication-assessment|publication-review-evidence|publication-review-methods-reproducibility|publication-review-domain-novelty|publication-review-journal-editor> [--compatibility claude-code] [--json]
   tiangong-ai research status [--project <project-id>] [--all] [--workspace <absolute-path>] [--json]
   tiangong-ai research run [--project <project-id>] [--max-parallel <1-8>] [--max-cycles <1-100>] [--dry-run] [--progress-jsonl] [--workspace <absolute-path>] [--json]
+
+Evidence input schemas: ${EVIDENCE_CONTENT_SCHEMA_NAMES.join(", ")}.
+Evidence batches: at most ${EVIDENCE_CONTENT_LIMITS.maxBatchRecords} records and ${EVIDENCE_CONTENT_LIMITS.maxBatchInputBytes} bytes (${EVIDENCE_CONTENT_LIMITS.maxBatchInputBytes / (1024 * 1024)} MiB) of UTF-8 input.
+Use research schema show <name> --json; schemas validate shape only, not exact artifact/lineage/locator semantics.
 
 ${researchSetupHelp()}
 `;
@@ -665,7 +675,9 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
   if (strictBoolean(args, "help")) return writeHelp(io);
   const stage = onePositional(args.positionals, "research schema show");
   let schema: Record<string, unknown>;
-  if (stage === "scientific-design") {
+  if (isEvidenceContentSchemaName(stage)) {
+    schema = evidenceContentInputSchema(stage);
+  } else if (stage === "scientific-design") {
     schema = scientificDesignSchema();
   } else if (stage.startsWith("scientific-assessment-")) {
     const role = scientificReviewRole(stage.slice("scientific-assessment-".length));
@@ -1564,7 +1576,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         recordPath,
         "--record",
         "RESEARCH_DECOMPOSITION_INVALID",
-        decompositionAction === "batch" ? 4 * 1024 * 1024 : undefined,
+        decompositionAction === "batch" ? EVIDENCE_CONTENT_LIMITS.maxBatchInputBytes : undefined,
       );
       const result = await withWorkspaceLock(root, "research.decomposition.record", async () =>
         decompositionAction === "batch"
@@ -1598,7 +1610,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         recordPath,
         "--record",
         "RESEARCH_EVIDENCE_ATOM_INVALID",
-        atomAction === "batch" ? 4 * 1024 * 1024 : undefined,
+        atomAction === "batch" ? EVIDENCE_CONTENT_LIMITS.maxBatchInputBytes : undefined,
       );
       const result = await withWorkspaceLock(root, "research.evidence-atom.register", async () =>
         atomAction === "batch"
