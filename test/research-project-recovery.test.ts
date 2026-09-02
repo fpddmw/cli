@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,6 +58,82 @@ function killFork(root: string, point: string) {
 }
 
 describe("committed research project authority and crash recovery", () => {
+  it("does not overwrite a concurrently changed source after a committed response is lost", async () => {
+    const root = await fixture();
+    try {
+      killFork(root, "committed");
+      const source = await loadProject(root, "source");
+      source.question = "Preserve an external owner change instead of overwriting it.";
+      await saveProject(root, source);
+      await assert.rejects(forkProject(root, "source", "target"), {
+        code: "RESEARCH_PROJECT_RECOVERY_REQUIRED",
+      });
+      assert.equal((await loadProject(root, "source")).question, source.question);
+      assert.equal(await pathExists(join(workspacePaths(root).projects, "target")), true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves unknown targets and refuses linked replacements during recovery", async () => {
+    const root = await fixture();
+    const outside = await mkdtemp(join(tmpdir(), "tiangong-recovery-owner-"));
+    try {
+      await writeFile(join(outside, "owner.txt"), "Owner bytes must survive.\n");
+      const targetPath = join(workspacePaths(root).projects, "target");
+      killFork(root, "target-state");
+      await rename(targetPath, join(root, "saved-interrupted-target"));
+      await symlink(outside, targetPath, process.platform === "win32" ? "junction" : "dir");
+      await assert.rejects(forkProject(root, "source", "target"), {
+        code: "RESEARCH_PROJECT_RECOVERY_REQUIRED",
+      });
+      assert.equal(
+        await readFile(join(outside, "owner.txt"), "utf8"),
+        "Owner bytes must survive.\n",
+      );
+      assert.equal((await loadProject(root, "source")).lineage.supersededBy, null);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(outside, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("does not leak malformed recovery-record contents through errors", async () => {
+    const root = await fixture();
+    try {
+      killFork(root, "target-state");
+      const pending = join(
+        workspacePaths(root).control,
+        "lineage",
+        "pending-project-mutations",
+        "fork-target.json",
+      );
+      await writeFile(pending, "Cookie: private-value Authorization: secret-value");
+      const result = await invoke([
+        "research",
+        "project",
+        "fork",
+        "source",
+        "--to",
+        "target",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(result.exitCode, 3);
+      assert.match(result.stderr, /RESEARCH_PROJECT_RECOVERY_REQUIRED/);
+      assert.doesNotMatch(result.stderr, /private-value|secret-value|Cookie:/);
+      assert.equal(
+        await readFile(pending, "utf8"),
+        "Cookie: private-value Authorization: secret-value",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   for (const point of ["retry-state", "retry-committed"]) {
     it("recovers a report revision and acknowledges its lost response at " + point, async () => {
       const root = await fixture();
