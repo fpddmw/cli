@@ -61,6 +61,110 @@ import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("research acquisition and evidence snapshots", () => {
+  it("explicitly reopens discovery for a new source while preserving project identity and prior snapshot bytes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tiangong-discovery-revision-"));
+    const staging = await mkdtemp(join(tmpdir(), "tiangong-discovery-revision-files-"));
+    const projectId = "new-source-same-project";
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      await lockCapabilities(root);
+      const { snapshot } = await freezeInputOnlyProject(root, staging, projectId);
+      const projectRoot = join(workspacePaths(root).projects, projectId);
+      const oldEvidence = await readFile(join(projectRoot, snapshot.evidenceRecord.path));
+      const original = await loadProject(root, projectId);
+      const opened = await invokeCli([
+        "research",
+        "project",
+        "evidence",
+        "acquisition",
+        "revise",
+        projectId,
+        "--expected-snapshot",
+        snapshot.snapshotSha256,
+        "--reason",
+        "Admit one new lawful source within the existing question.",
+        "--include-discovery",
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(opened.exitCode, 0, opened.stderr);
+      const reopened = await loadProject(root, projectId);
+      assert.equal(reopened.packages.find((item) => item.stage === "discover")?.status, "ready");
+      assert.equal(reopened.packages.find((item) => item.stage === "acquire")?.status, "pending");
+      assert.deepEqual(reopened.usage, original.usage);
+      const addedPath = join(staging, "additional-source.txt");
+      await writeFile(
+        addedPath,
+        "One additional source, not a reinterpretation of the original source.\n",
+      );
+      const added = await addProjectInput(root, projectId, addedPath, "primary");
+      const discover = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      const candidates = await listEvidenceCandidates(root, projectId);
+      const second = candidates.find((candidate) => candidate.origin.inputId === added.id)!;
+      assert.ok(second);
+      await recordAdmission(root, projectId, second.id, "source-2");
+      const discoveryPath = join(staging, "revised-discovery.json");
+      await writeFile(discoveryPath, JSON.stringify(discoveryValue(second.id, "source-2")));
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: discover.sessionId,
+        outputPath: discoveryPath,
+        confirmedModel: discover.expectedModel,
+      });
+      const acquire = await prepareNativeResearchStage({
+        root,
+        projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      const first = candidates.find((candidate) => candidate.id !== second.id)!;
+      const auditPath = join(staging, "revised-acquisition.json");
+      const firstAudit = acquisitionValue(
+        first.id,
+        "source-1",
+        snapshot.artifacts.map((artifact) => artifact.artifactId),
+      );
+      const secondAudit = acquisitionValue(second.id, "source-2");
+      await writeFile(
+        auditPath,
+        JSON.stringify({
+          ...firstAudit,
+          decisions: [
+            ...(firstAudit.decisions as unknown[]),
+            ...(secondAudit.decisions as unknown[]),
+          ],
+        }),
+      );
+      await submitNativeResearchStage({
+        root,
+        projectId,
+        sessionId: acquire.sessionId,
+        outputPath: auditPath,
+        confirmedModel: acquire.expectedModel,
+      });
+      const current = await loadCurrentEvidenceSnapshot(root, projectId);
+      assert.deepEqual(current.sources.map((source) => source.id).sort(), ["source-1", "source-2"]);
+      assert.equal(current.parentSnapshotSha256, snapshot.snapshotSha256);
+      assert.deepEqual(
+        await readFile(join(projectRoot, snapshot.evidenceRecord.path)),
+        oldEvidence,
+      );
+      assert.equal((await loadProject(root, projectId)).lineage.supersededBy, null);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(staging, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   for (const point of ["acquisition-before-commit", "acquisition-committed", "acquisition-state"]) {
     it(`recovers the exact acquisition revision after process interruption at ${point}`, async () => {
       const root = await mkdtemp(join(tmpdir(), "tiangong-revision-crash-"));
