@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmod, cp, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
@@ -33,6 +35,7 @@ import {
 } from "../src/research/workspace/runtime.js";
 import { passResearchDesignGate, scientificDesignInput } from "./helpers/scientific-design.js";
 import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
+import { inspectScientificReviewStatus } from "../src/research/workspace/scientific-review.js";
 
 async function cli(argv: string[]) {
   let stdout = "";
@@ -117,6 +120,154 @@ async function fixture() {
 }
 
 describe("lightweight original task and authorized scope", () => {
+  it("shows committed scope invalidation read-only after a crash before the state projection", async () => {
+    const fx = await fixture();
+    try {
+      await initializeProject(
+        fx.root,
+        "source",
+        "Retain precise task and scientific approval authority after interruption.",
+        undefined,
+        false,
+        undefined,
+        scientificPolicy("source"),
+        await scientificDesignInput(fx.root, "source"),
+      );
+      const defined = await fx.task(["define", "--input", fx.inputPath], "source");
+      assert.equal(defined.exitCode, 0, defined.stderr);
+      await passResearchDesignGate(fx.root, "source");
+      const scopePath = join(fx.files, "crash-scope.json");
+      await writeFile(
+        scopePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          reason: "Explicit operator scope change for a process-crash regression.",
+          requirements: [contractInput().requirements[0]],
+        }),
+      );
+      const proposed = await cli([
+        "research",
+        "project",
+        "task",
+        "scope",
+        "propose",
+        "source",
+        "--input",
+        scopePath,
+        "--expected-contract",
+        JSON.parse(defined.stdout).contractSha256,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(proposed.exitCode, 0, proposed.stderr);
+      const proposalSha = JSON.parse(proposed.stdout).proposalSha256;
+      const worker = fileURLToPath(
+        new URL("./fixtures/research-recovery/crash-worker.mjs", import.meta.url),
+      );
+      const crashed = spawnSync(
+        process.execPath,
+        ["--import", "tsx", worker, fx.root, "scope-committed", proposalSha],
+        {
+          encoding: "utf8",
+          timeout: 15_000,
+          env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR },
+        },
+      );
+      assert.equal(crashed.stderr, "");
+      assert.ok(crashed.signal || crashed.status !== 0);
+      assert.equal(await readFile(join(fx.root, "fault-point.txt"), "utf8"), "scope-committed");
+      const projectPath = join(workspacePaths(fx.root).projects, "source", "project.json");
+      const before = await readFile(projectPath);
+      const status = await inspectScientificReviewStatus(fx.root, "source");
+      assert.equal(status.gates?.["research-design"].status, "pending");
+      assert.deepEqual(await readFile(projectPath), before);
+      const replay = await cli([
+        "research",
+        "project",
+        "task",
+        "scope",
+        "approve",
+        "source",
+        "--proposal",
+        proposalSha,
+        "--confirm-change",
+        proposalSha,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(replay.exitCode, 0, replay.stderr);
+      assert.equal(JSON.parse(replay.stdout).replayed, true);
+      assert.equal(
+        (await loadProject(fx.root, "source")).scientificDesign!.gates["research-design"].status,
+        "pending",
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("reports workflow completion separately when the reviewed task remains inconclusive", async () => {
+    const fx = await acquiredFixture();
+    try {
+      for (const row of fx.rows)
+        assert.equal(
+          (await recordAcceptance(fx, acceptanceInput(row, fx.atom.atomId, [], "inconclusive")))
+            .exitCode,
+          0,
+        );
+      await finishProducer(fx);
+      let calls = 0;
+      const run = await runResearchWorkspace(
+        fx.root,
+        { maxParallel: 1, maxCycles: 2, dryRun: false, environment: {} },
+        async (request) => {
+          calls += 1;
+          const packet = JSON.parse(
+            await readFile(join(request.projectRoot, "inputs/review-packet.json"), "utf8"),
+          );
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              schemaVersion: 1,
+              packetSha256: packet.packetSha256,
+              decision: "pass",
+              issues: [],
+              rationale: "The report accurately states that evidence is inconclusive.",
+              taskAssessment: {
+                contextSha256: packet.taskAcceptance.contextSha256,
+                requirements: packet.taskAcceptance.requirements.map(
+                  (row: { requirementSha256: string }) => ({
+                    requirementSha256: row.requirementSha256,
+                    decision: "not-answered",
+                    reason: "The required evidence is still inconclusive.",
+                  }),
+                ),
+              },
+            }),
+            stderr: "",
+            tokens: 10,
+            inputTokens: 5,
+            cachedInputTokens: 0,
+            outputTokens: 5,
+            costUsd: 0,
+            wallSeconds: 0,
+            model: null,
+            runtime: null,
+          };
+        },
+      );
+      const value = JSON.parse(JSON.stringify(run));
+      assert.equal(value.status, "complete");
+      assert.equal(value.projects[0].task.currentScope.status, "incomplete");
+      assert.equal(value.projects[0].task.originalScope.status, "incomplete");
+      assert.equal(calls, 1);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
   it("exports task relationships and verifies a moved audit without the source workspace", async () => {
     const fx = await acquiredFixture();
     try {
@@ -636,6 +787,10 @@ describe("lightweight original task and authorized scope", () => {
       assert.equal(proposed.exitCode, 0, proposed.stderr);
       const proposal = JSON.parse(proposed.stdout);
       assert.deepEqual(proposal.changes.withdrawnRequirementIds, ["water"]);
+      assert.deepEqual(
+        proposal.changes.details.find((item: { id: string }) => item.id === "water").before,
+        contractInput().requirements[1],
+      );
       assert.equal(JSON.parse((await fx.task(["status"])).stdout).contractSha256, original);
       const approve = (confirmation?: string) =>
         cli([
