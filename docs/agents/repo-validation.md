@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-09-02
-lastReviewedCommit: 6fafd3a831917e202ed3782268fa7da095cf5e73
+lastReviewedCommit: 8a18ba69f432d2c639517549157ef29545722cff
 ---
 
 # Repo Validation
@@ -283,6 +283,22 @@ already published, runs the local gates, performs a package dry run, and then
 executes `npm publish --access public --provenance`.
 
 ## Coverage Policy
+
+`research-reviewer-status.test.ts` and `research-scientific-execution.test.ts`
+cover transport-aware read-only status, smoke versus production readiness,
+explicit cost consent, exact prepared reviewer execution, immutable proof replay,
+project-authority checks on recovered submission, concurrent idempotent replay,
+unknown-usage and wall-time reservations, Policy Markdown inclusion, and secret
+non-persistence. These tests do not call a real model. The external native
+canary runs the packaged CLI and a clearly synthetic reviewer through the real
+platform capsule, without credentials or provider requests.
+
+The integrated role forecast regression specifically includes a same-dimension
+metadata-only patent and a binary-only patent: neither may fill an atom-level
+source-type slot even when global acquisition coverage passes. Runtime tests
+also exercise expanded discovery input between the output and input caps,
+true input overflow, valid historical/wait states through Doctor, and each due
+scientific-gate status through public run/status.
 
 The coverage gate uses `c8` and fails when coverage drops below the thresholds
 encoded in `scripts/run-test-coverage.cjs`. Coverage ignore pragmas are

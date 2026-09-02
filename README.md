@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-09-01
-lastReviewedCommit: ca716c2fea59d0a8085aa32dbd8f65a686b3353e
+lastReviewedAt: 2026-09-02
+lastReviewedCommit: 8a18ba69f432d2c639517549157ef29545722cff
 ---
 
 # Tiangong AI CLI
@@ -650,7 +650,33 @@ tiangong-ai research project scientific review submit top-journal-paper \
   --workspace /absolute/path/to/workspace --json
 ```
 
-Repeat the same prepare/submit route for `evidence-construct`, adding an
+For a prepared packet, use explicit isolated execution instead of writing a
+custom reviewer runner:
+
+```bash
+tiangong-ai research reviewer status --workspace /absolute/path/to/workspace --json
+tiangong-ai research project scientific review execute top-journal-paper \
+  --role research-design --confirm-review-cost \
+  --workspace /absolute/path/to/workspace --json
+```
+
+Confirm the bounded cost before execution. The command uses the configured
+`native-direct` or `sandbox-bridge` reviewer, copies exact hash-verified packet
+inputs and human Policy documents into its capsule, and submits only a
+schema-valid, packet/session-bound review. A saved successful execution is
+replayed without another model call after revalidating its immutable proof.
+Failures require explicit `--retry` and remain bounded by the attempt budget;
+unreported usage and interrupted wall time retain conservative reservations.
+A nonpassing mechanical packet can receive an independent stop verdict, never
+an override. The existing manual submit command remains available for an exact
+independent review.
+
+Reviewer status is read-only and transport-aware. Native-direct does not
+require a bridge connection. Smoke configuration readiness is explicitly not
+production readiness and does not demand an attestation that smoke mode never
+writes. Production still requires its current reviewer doctor attestation.
+
+Repeat the same prepare/execute route for `evidence-construct`, adding an
 owner-reviewed JSON array of absolute canonical canary paths with
 `--canary-artifacts /absolute/path/to/canary-paths.json`, and then for
 `pilot-methods` at its stage boundary. A top-journal fork or addendum is a
@@ -1059,6 +1085,12 @@ that project is checked, scheduled, summarized, and bound to the top-level
 JSON/JSONL `projectId`, so historical blocked siblings do not alter its exit
 status. Omit `--project` and use `--max-parallel` only for an intentional
 workspace-wide run.
+
+Run/status share the same due scientific-gate decision: pending/prepared review,
+revision-required, and stopped are distinct from a runnable native stage.
+Future gates do not prevent earlier discovery or acquisition. Legitimate
+historical and user/external-wait project states remain doctor-readable;
+unknown states and broken evidence bindings still block readiness.
 
 Inputs are admitted by SHA-256. Native producer preparation creates an
 ephemeral, hash-bound packet directory but does not copy agent authentication
