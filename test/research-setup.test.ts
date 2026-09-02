@@ -92,11 +92,11 @@ describe("research setup catalog and immutable plans", () => {
       assert.ok(catalog.sources.every((source) => /^[0-9a-f]{40}$/.test(source.immutableRef)));
       assert.equal(
         catalog.sources.find((source) => source.id === "tiangong-ai-skills")?.immutableRef,
-        "f40b70309e981cb706a950e7abfa40e65a29b3dc",
+        "75ea8ff1001ffed887aa53675cea0dff101c40cd",
       );
       assert.equal(
         catalog.entries.find((entry) => entry.id === "tiangong.auto-research")?.expectedTreeSha256,
-        "b1e2d7b79e175cf6fde2a3a151ad0e9f567eb04c0c75439741840f7728beb174",
+        "d5edebbb2b15e7914b9f4dd2b332b3e5701f2f295878134d118ef0b7779793ba",
       );
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-sci-search"));
       assert.ok(catalog.roles.evidenceCapabilities.includes("tiangong.kb-report-search"));
@@ -121,7 +121,7 @@ describe("research setup catalog and immutable plans", () => {
       assert.equal(
         catalog.entries.find((entry) => entry.id === "tiangong.auto-research-workbuddy")
           ?.expectedTreeSha256,
-        "c0223acc0a57866b858ddeac4e4723661f9f55e725328febb3bac1f2ad9f4c24",
+        "e5be05338b95e4729e45eec27ed9089c59b073f928d4e5e4f3befec809e29482",
       );
       assert.ok(catalog.roles.inputPreprocessors.includes("tiangong.document-granular-decompose"));
       assert.ok(catalog.roles.acquisitionAdapters.includes("tiangong.academic-paper-download"));

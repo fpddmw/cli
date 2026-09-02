@@ -20,6 +20,16 @@ lastReviewedCommit: 8a18ba69f432d2c639517549157ef29545722cff
 
 Package: `@tiangong-ai/cli` Executable: `tiangong-ai` Node: `>=24`
 
+## Feedback
+
+Use the [Bug and feature forms](https://github.com/tiangong-ai/cli/issues/new/choose)
+and [reporting guide](https://github.com/tiangong-ai/cli/blob/main/CONTRIBUTING.md).
+Chinese and English reports are welcome; unknown versions or incomplete
+reproduction are accepted with an explanation. CLI help exposes these links,
+and the npm package includes `CONTRIBUTING.md`. For Skill instructions and
+orchestration, use the [Skills forms](https://github.com/tiangong-ai/skills/issues/new/choose);
+uncertain ownership can be reported here for maintainer triage.
+
 ## Run From This Repository
 
 ```bash

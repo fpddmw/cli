@@ -1,0 +1,103 @@
+# Reporting contract: v1
+name: Bug report
+description: Report a problem / 反馈问题
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Chinese and English reports are welcome. Search existing issues and report one problem or capability per issue.
+        支持中文和英文；先搜索已有反馈，一条 Issue 聚焦一个问题或能力。Unknown / Not applicable is accepted with a reason.
+        [Reporting principles](https://github.com/tiangong-ai/workspace/blob/main/_docs/contracts/issue-reporting-policy.md) · [Contribution guide](https://github.com/tiangong-ai/cli/blob/main/CONTRIBUTING.md)
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: |
+        One observable problem and its impact. 一个问题及其影响。
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: |
+        What were you trying to accomplish? 原本想完成什么任务？
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: |
+        Choose the affected surface; Unsure is welcome. 无法判断时请选择“不确定”。
+      options:
+        - Auto Research Skill
+        - CLI
+        - Integration
+        - Unsure / 不确定
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: |
+        Actual CLI package/version and Skill revision or source used in the failing run. A managed runtime lock may differ from the global CLI. Write Unknown with a reason when unavailable; do not upgrade to collect this. 填写出错时实际使用的 CLI 和 Skill 版本，不知道可注明原因。
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        OS, Node version if known, installation method, native host (Codex / Claude Code / WorkBuddy / CodeBuddy), and model if applicable. Unknown or Not applicable is accepted. 系统、安装方式、宿主和模型；未知或不适用可注明。
+    validations:
+      required: true
+  - type: input
+    id: stage
+    attributes:
+      label: Stage
+      description: |
+        For example setup, discovery, acquisition, analysis, review, closure, another command, or Unknown. 出错阶段或命令，不确定可注明。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: |
+        Minimal steps, sanitized command or prompt excerpt, and frequency. If it cannot be reproduced, describe the available evidence and limits. Do not rerun paid research just to report. 最小步骤、脱敏命令或提示词及发生频率；无法复现也可提交。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: |
+        What did you expect to happen? 预期结果是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: |
+        What happened, including the exact sanitized error if available? 实际结果及脱敏报错。Separate observations from suspected causes. 区分观察与推测。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: |
+        Optional minimal sanitized logs, screenshot, or relevant run identifier. Remove keys, tokens, private paths, private research data, and unrelated chat. Do not upload the entire workspace or environment dump. 可选：最少量脱敏证据。
+    validations:
+      required: false
+  - type: textarea
+    id: cli_details
+    attributes:
+      label: CLI diagnostics
+      description: |
+        Optional sanitized invocation, exit code, and already available diagnostic output. Do not expose authorization headers or secrets. 可选：脱敏调用、退出码和已有诊断。
+    validations:
+      required: false

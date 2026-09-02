@@ -557,3 +557,12 @@ research path silently downgrades to a direct wrapper. When Codex is the
 reviewer, it receives a capsule-local project-root marker override so parent host
 `.codex/config.toml` discovery stops at the capsule boundary without widening
 the sandbox's readable roots.
+
+## Feedback Entry Points
+
+The top-level CLI help and README link to the GitHub issue chooser and
+`CONTRIBUTING.md`, which is included in the npm package. Issue forms implement
+the shared workspace reporting contract; the CLI bug form adds only optional
+CLI diagnostics. The installed Auto Research Skill owns agent report drafting,
+while the CLI catalog pins its reviewed commit and complete tree hash. Feedback
+discovery through help requires no provider, credential, or research workspace.
