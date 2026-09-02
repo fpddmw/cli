@@ -8,10 +8,11 @@ import type { JournalEvent, ProjectState } from "./types.js";
 
 export interface ProjectAuthorityIndex {
   forks: Map<string, JournalEvent>;
-  addenda: Set<string>;
+  addenda: Map<string, JournalEvent>;
   successors: Map<string, string>;
   pendingTargets: Set<string>;
   registered: Set<string>;
+  resolvedSuccessors: Map<string, string | null>;
 }
 
 /** One verified journal view per inspection/admission, never a per-project artifact scan. */
@@ -22,10 +23,11 @@ export async function readProjectAuthorityIndex(root: string): Promise<ProjectAu
 export function projectAuthorityIndex(events: JournalEvent[]): ProjectAuthorityIndex {
   const result: ProjectAuthorityIndex = {
     forks: new Map(),
-    addenda: new Set(),
+    addenda: new Map(),
     successors: new Map(),
     pendingTargets: new Set(),
     registered: new Set(),
+    resolvedSuccessors: new Map(),
   };
   const pending = new Map<string, string>();
   for (const event of events) {
@@ -52,7 +54,7 @@ export function projectAuthorityIndex(events: JournalEvent[]): ProjectAuthorityI
     result.registered.add(target);
     result.successors.set(source, target);
     if (event.type === "project.forked") result.forks.set(target, event);
-    else result.addenda.add(target);
+    else result.addenda.set(target, event);
     if (
       isObject(event.payload.mutation) &&
       typeof event.payload.mutation.operationId === "string"
@@ -73,23 +75,48 @@ export function projectAuthority(
   state: "authoritative" | "superseded" | "archived" | "abandoned" | "invalid";
   projectId: string;
 } {
+  const creation =
+    project.lineage.kind === "fork" ? index.forks.get(project.id) : index.addenda.get(project.id);
   if (
-    (project.lineage.kind === "fork" && !index.forks.has(project.id)) ||
-    (project.lineage.kind === "addendum" && !index.addenda.has(project.id))
+    project.lineage.kind !== "primary" &&
+    (!creation ||
+      creation.payload.sourceProjectId !== project.lineage.derivedFrom ||
+      creation.payload.sourceProjectId !== project.lineage.supersedes)
   ) {
     return { state: "invalid", projectId: project.id };
   }
-  let current = project.id;
-  const visited = new Set<string>();
-  while (index.successors.has(current)) {
-    if (visited.has(current)) return { state: "invalid", projectId: project.id };
-    visited.add(current);
-    current = index.successors.get(current)!;
-  }
+  const current = resolveSuccessor(project.id, index);
+  if (current === null) return { state: "invalid", projectId: project.id };
   if (project.status === "archived" || project.status === "abandoned") {
     return { state: project.status, projectId: current };
   }
   return { state: current === project.id ? "authoritative" : "superseded", projectId: current };
+}
+
+function resolveSuccessor(id: string, index: ProjectAuthorityIndex): string | null {
+  let current = id;
+  const path = new Set<string>();
+  let resolved: string | null;
+  for (;;) {
+    if (index.resolvedSuccessors.has(current)) {
+      resolved = index.resolvedSuccessors.get(current)!;
+      break;
+    }
+    if (path.has(current)) {
+      resolved = null;
+      break;
+    }
+    path.add(current);
+    const next = index.successors.get(current);
+    if (!next) {
+      resolved = current;
+      break;
+    }
+    current = next;
+  }
+  // Cache only within this immutable verified-journal view, never across commands.
+  for (const entry of path) index.resolvedSuccessors.set(entry, resolved);
+  return resolved;
 }
 
 export function assertProjectAuthority(project: ProjectState, index: ProjectAuthorityIndex): void {

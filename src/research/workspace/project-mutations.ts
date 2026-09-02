@@ -275,7 +275,10 @@ async function settleMutation(
         throw error;
       })
     : undefined;
-  if (started?.payload.identitySha256 !== sha256Text(canonicalJson(identity))) {
+  if (
+    started?.scope !== identity.sourceProjectId ||
+    started?.payload.identitySha256 !== sha256Text(canonicalJson(identity))
+  ) {
     // A crash before the intent append cannot have created a target.
     if (started || commit || targetInfo)
       throw failure("Project recovery has no matching journal intent.", record);
@@ -287,6 +290,10 @@ async function settleMutation(
       binding.requestSha256 !== identity.requestSha256 ||
       binding.resultSha256 !== record.afterSha256 ||
       commit.scope !== (identity.targetProjectId ?? identity.sourceProjectId) ||
+      (identity.kind === "fork"
+        ? commit.payload.sourceProjectId !== identity.sourceProjectId ||
+          commit.payload.targetProjectId !== identity.targetProjectId
+        : commit.payload.projectId !== identity.sourceProjectId) ||
       !record.after ||
       !record.afterSha256
     ) {
