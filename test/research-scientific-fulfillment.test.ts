@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -18,6 +18,7 @@ import {
   loadProject,
 } from "../src/research/workspace/projects.js";
 import { recordScientificFulfillment } from "../src/research/workspace/scientific-fulfillment.js";
+import { prepareScientificReview } from "../src/research/workspace/scientific-review.js";
 import {
   initializeResearchPolicy,
   approveResearchPolicy,
@@ -29,6 +30,7 @@ import {
 } from "../src/research/workspace/runtime.js";
 import {
   workspacePaths,
+  sha256File,
   writeJsonAtomic,
   writeTextAtomic,
 } from "../src/research/workspace/storage.js";
@@ -233,6 +235,54 @@ describe("predeclared scientific parameter fulfillment", () => {
       assert.equal(
         (await loadProject(root, projectId)).scientificDesign!.gates["research-design"].status,
         "passed",
+      );
+      const canaryPath = join(await realpath(root), "source-canary.json");
+      await writeJsonAtomic(canaryPath, {
+        sourceId: "parameter-source",
+        rowCount: 1,
+        syntheticProtocolFixture: true,
+      });
+      const assessmentPath = join(root, "evidence-assessment.json");
+      await writeJsonAtomic(assessmentPath, {
+        schemaVersion: 1,
+        role: "evidence-construct",
+        designSha256: project.scientificDesign!.designSha256,
+        recommendation: "stop",
+        constructCanary: {
+          usesRealRecords: false,
+          outcomeBlind: true,
+          resultValuesInspected: false,
+          rowCount: 1,
+          constructedEdgeIds: [],
+          failedEdgeIds: original.edges
+            .filter((edge) => edge.role === "central")
+            .map((edge) => edge.id),
+          artifactSha256s: [await sha256File(canaryPath)],
+        },
+        evidenceRoleCoverage: [],
+        closestWorkDispositionComplete: false,
+        centralEvidenceFitsContext: true,
+        findings: [],
+      });
+      const packet = await prepareScientificReview({
+        root,
+        projectId,
+        role: "evidence-construct",
+        assessmentPath,
+        reviewerAgent: "claude",
+        reviewerSessionId: "source-readable-review",
+        canaryArtifactPaths: [canaryPath],
+      });
+      assert.equal(
+        packet.mechanicalAssessment.canPass,
+        false,
+        "a synthetic protocol fixture is not a passing scientific study",
+      );
+      assert.ok(
+        packet.stageInputs.some(
+          (input) => input.sha256 === artifact.sha256 && input.sourceLocator === artifact.locator,
+        ),
+        "scientific review needs the exact acquired source bytes, not only source hashes/excerpts",
       );
     } finally {
       await rm(root, { recursive: true, force: true });

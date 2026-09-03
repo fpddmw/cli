@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-09-03
-lastReviewedCommit: 0ded79c7acefc557f154115a6bf9a5b1a0ed67d7
+lastReviewedCommit: e32225df1be81164327aff19f00162fa9a02acb0
 ---
 
 # Tiangong AI CLI
@@ -1555,9 +1555,44 @@ between native stages. Records bind the exact requirement version, source/atom/
 finding IDs, and explicitly selected bounded UTF-8 result files. The declared
 command is stored only by hash and is **not executed by this command**. Raw result
 bytes are copied into immutable hash-addressed objects; secrets and control-store
-sources are rejected. Positive/negative computational outcomes need a command and
-results; failed, inconclusive, and not-run checks remain honest without invented
-results. All records say `trust=native-observation`, `executionCertified=false`.
+sources are rejected. A reported computation without an observed run remains
+`unverified-execution`, not an answered computational requirement. Failed,
+inconclusive and not-run checks remain honest without invented results. Evidence
+and proof checks need no fabricated computation. All records say
+`trust=native-observation`, `executionCertified=false`.
+
+For an actual calculation, the native host authors and reviews one ordinary
+Node/Python program and explicitly requests observation:
+
+```bash
+tiangong-ai research schema show task-native-run --json
+tiangong-ai research project task run observe PROJECT \
+  --input /absolute/native-run.json --confirm-execution --workspace /absolute/workspace --json
+tiangong-ai research project task run inspect PROJECT --run RUN_ID \
+  --workspace /absolute/workspace --json
+```
+
+The closed request binds the computational requirement version, explicit
+interpreter, script, environment-lock declaration, current acquisition artifact
+IDs/hashes, unique output filenames, non-secret arguments and finite timeout.
+Use `{input:ID}` / `{output:ID}` placeholders rather than host paths in arguments,
+and name `nativeSessionId` when a producer stage is active. The CLI snapshots
+inputs and plans exact output paths before invoking the ordinary program. It
+adds no permission bypass or dependency installation, forwards no provider
+credentials and launches no reasoning agent. The workspace lease is released
+during computation. Program authoring and scientific decisions remain native.
+
+The returned record binds runtime/code/input/output bytes, process exit/signal
+and time. Use `nativeRunSha256` at acceptance; those results come only from that
+run, not a directory scan or unrelated external files. Success requires a zero
+exit, stable inputs and every declared output; failure/timeout/cancellation and
+missing or changed outputs remain nonpassing records. Committed replay does not
+run again. An incomplete interrupted run requires inspection and an explicitly
+new run ID, not automatic retry. `stagingDirectoryName` is only a safe relative
+local-inspection hint; permanent hash-bound objects carry audit authority.
+`observation=cli-observed-native-process` is not mathematical correctness or an
+authenticated execution certificate. The dependency lock is explicitly
+`declared-lock-not-attested`; no hermetic-environment claim is inferred.
 
 One unchanged result blob is stored once and appears once in the reviewer directory. The
 existing independent review receives the original request, original/current
@@ -1566,6 +1601,11 @@ there is no additional default paid review round. Missing current checks stop
 before review, and stale/failed/inconclusive checks cannot be promoted to answered.
 Publication packets and portable audit verification retain these relationships;
 hash integrity does not prove execution, scientific validity, or editorial acceptance.
+Native and scientific packets stage observed programs, locks, inputs and outputs
+for exact on-demand inspection. Portable audit checks native start/completion
+events, requirement versions and all run objects. It also replays read selectors
+against the exact stored object, directory and packet/delivery records; a rehashed
+outer inventory cannot hide missing program bytes or a changed read receipt.
 
 `project task status` and each `research run` project summary report original and
 current task completion separately from workflow completion and publication verdict.

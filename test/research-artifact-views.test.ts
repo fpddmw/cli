@@ -7,9 +7,18 @@ import {
   openArtifactViews,
   artifactPromptContext,
   persistArtifactReads,
+  persistArtifactViewIndex,
   writeArtifactViewIndex,
 } from "../src/research/workspace/artifact-views.js";
-import { sha256Bytes, sha256Text } from "../src/research/workspace/storage.js";
+import {
+  canonicalJson,
+  sha256Bytes,
+  sha256Text,
+  workspacePaths,
+  writeTextAtomic,
+  writeJsonAtomic,
+} from "../src/research/workspace/storage.js";
+import { loadVerifiedReviewPacket } from "../src/research/workspace/runtime.js";
 import { startArtifactViewServer } from "../src/research/workspace/artifact-view-mcp.js";
 import { executeAgent } from "../src/research/workspace/executor.js";
 import { researchPlatformCapabilities } from "../src/research/workspace/platform-capabilities.js";
@@ -39,6 +48,46 @@ async function fixture(files: Record<string, string | Buffer>) {
 }
 
 describe("snapshot-bound on-demand artifact views", () => {
+  it("revalidates a persistent review packet's artifact directory at the live trust boundary", async () => {
+    const fx = await fixture({ "inputs/source.txt": "Exact original evidence.\n" });
+    try {
+      const projectRoot = join(workspacePaths(fx.root).projects, "view-project");
+      await mkdir(projectRoot, { recursive: true });
+      const index = await persistArtifactViewIndex(projectRoot, fx.project, fx.binding);
+      const content = "Initial context, not the complete evidence.\n";
+      const context = {
+        path: `review/contexts/${sha256Text(content)}.txt`,
+        sha256: sha256Text(content),
+        bytes: Buffer.byteLength(content),
+      };
+      await writeTextAtomic(join(projectRoot, context.path), content);
+      const core = {
+        schemaVersion: 1,
+        projectId: "view-project",
+        reviewEvidenceContext: context,
+        snapshotChain: [],
+        artifactViews: index,
+      };
+      const packetSha256 = sha256Text(canonicalJson(core));
+      await writeJsonAtomic(join(projectRoot, "review/packets", `${packetSha256}.json`), {
+        ...core,
+        packetSha256,
+      });
+      await loadVerifiedReviewPacket(fx.root, "view-project", packetSha256);
+      await writeJsonAtomic(join(projectRoot, index.path), {
+        schemaVersion: 1,
+        kind: "tiangong-artifact-view-index",
+        projectId: "view-project",
+        objects: [],
+      });
+      await assert.rejects(
+        loadVerifiedReviewPacket(fx.root, "view-project", packetSha256),
+        /artifact|directory|view/i,
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
   it("applies the same secret refusal to small inline artifacts as to on-demand reads", async () => {
     const fx = await fixture({
       "outputs/unsafe.txt": "Authorization: Bearer private-inline-fixture-token\n",

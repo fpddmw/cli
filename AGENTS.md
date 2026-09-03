@@ -18,7 +18,7 @@ checkPaths:
   - docs/agents/**
   - src/**
 lastReviewedAt: 2026-09-03
-lastReviewedCommit: 0ded79c7acefc557f154115a6bf9a5b1a0ed67d7
+lastReviewedCommit: e32225df1be81164327aff19f00162fa9a02acb0
 ---
 
 # Tiangong AI CLI Contract

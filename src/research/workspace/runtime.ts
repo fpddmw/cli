@@ -11,9 +11,11 @@ import {
   persistArtifactReads,
   persistArtifactViewIndex,
   writeArtifactViewIndex,
+  verifyPersistedArtifactViewIndex,
   type ArtifactReadSelection,
 } from "./artifact-views.js";
 import { taskContext } from "./task-contract.js";
+import { nativeRunArtifactRecords } from "./native-run.js";
 import {
   compileTaskAcceptanceContext,
   inspectProjectTask,
@@ -694,6 +696,36 @@ export async function readNativeStageArtifact(input: {
     );
     return result;
   });
+}
+
+/** Called under an existing short lease; observing a calculation never opens a producer. */
+export async function inspectNativeCalculationScope(
+  root: string,
+  project: ProjectState,
+  sessionId: string,
+): Promise<string> {
+  const session = await readNativeStageSession(root, project.id);
+  const events = await readVerifiedJournal(workspacePaths(root).journal);
+  const prepared = events.findLast(
+    (event) =>
+      event.scope === project.id &&
+      event.type === "native.stage.prepared" &&
+      event.payload.sessionId === sessionId,
+  );
+  if (
+    session.packet.sessionId !== sessionId ||
+    !["analyze", "synthesize"].includes(session.packet.stage) ||
+    prepared?.payload.packetSha256 !== session.packet.packetSha256 ||
+    packageById(project, session.packet.packageId).status !== "running" ||
+    Date.now() - Date.parse(session.packet.preparedAt) > session.packet.limits.maxWallSeconds * 1000
+  ) {
+    throw new CliError(
+      "The calculation must bind the exact active post-acquisition native packet.",
+      { code: "RESEARCH_NATIVE_RUN_BINDING_INVALID", exitCode: 3 },
+    );
+  }
+  await assertNativeStageBinding(root, project, session.packet);
+  return session.packet.packetSha256;
 }
 
 export async function prepareNativeResearchStage(input: {
@@ -2633,13 +2665,24 @@ async function createCapsule(
       );
     }
   }
-  for (const result of taskAcceptance?.results ?? []) {
+  const taskArtifacts = new Map(
+    (taskAcceptance?.results ?? []).map((record) => [record.path, record]),
+  );
+  if (task)
+    for (const record of await nativeRunArtifactRecords(root, project.id))
+      taskArtifacts.set(record.path, record);
+  for (const result of taskArtifacts.values()) {
     await ensureDirectory(dirname(resolveContained(capsuleProject, result.path)));
     await cp(
       resolveContained(projectRoot(root, project.id), result.path),
       resolveContained(capsuleProject, result.path),
       { force: false },
     );
+    if ((await sha256File(resolveContained(capsuleProject, result.path))) !== result.sha256)
+      throw new CliError("Native run/check artifact changed while staging the packet.", {
+        code: "RESEARCH_TASK_ARTIFACT_DRIFT",
+        exitCode: 3,
+      });
   }
   const reviewPacket = reviewEvidenceContext
     ? await writeReviewPacket(
@@ -3202,6 +3245,17 @@ export async function loadVerifiedReviewPacket(
   const path = resolveContained(projectRoot(root, projectId), logicalPath);
   const packet = await readJsonFile<Record<string, unknown>>(path, "Research review packet");
   verifyReviewPacketValue(packet, packetSha256);
+  if (packet.projectId !== projectId)
+    throw new CliError("Review packet belongs to another project.", {
+      code: "RESEARCH_REVIEW_PACKET_DRIFT",
+      exitCode: 3,
+    });
+  if (packet.artifactViews !== undefined)
+    await verifyPersistedArtifactViewIndex(
+      projectRoot(root, projectId),
+      projectId,
+      packet.artifactViews,
+    );
   const context = packet.reviewEvidenceContext;
   if (
     !isObject(context) ||

@@ -1,9 +1,12 @@
 import { Ajv2020, type ErrorObject, type ValidateFunction } from "ajv/dist/2020.js";
-import { lstat, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, copyFile, lstat, mkdir, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { taskContext } from "./task-contract.js";
+import { nativeRunArtifactRecords } from "./native-run.js";
+import { loadEvidenceArtifactRecords } from "./artifacts.js";
 import { sourceTypeRequirementGaps } from "./evidence-role-coverage.js";
 import { appendJournalEvent, verifyJournal } from "./journal.js";
 import { loadProject, nextScientificGate, saveProject } from "./projects.js";
@@ -198,6 +201,8 @@ interface ScientificReviewStageInput {
     | "scientific-fulfillment"
     | "effective-scientific-design"
     | "original-request-source"
+    | "native-calculation"
+    | "acquired-evidence"
     | "stage-output";
   ownerId: string;
   sourceLocator: string;
@@ -572,6 +577,24 @@ export async function prepareScientificReview(input: {
       input.canaryArtifactPaths ?? [],
     );
     const currentTask = await taskContext(input.root, project.id);
+    if (currentTask) {
+      for (const record of await nativeRunArtifactRecords(input.root, project.id)) {
+        const locator = `projects/${project.id}/${record.path}`;
+        stageInputs.push({
+          ...record,
+          path: locator,
+          sourceLocator: locator,
+          purpose: "native-calculation",
+          ownerId: project.id,
+          hashBasis: "raw-file-bytes",
+          mediaType: record.path.endsWith(".json")
+            ? "application/json"
+            : "application/octet-stream",
+          objectKind: null,
+          registrationRecordSha256: null,
+        });
+      }
+    }
     const requestSource = currentTask?.requestProvenance.source;
     if (requestSource) {
       const locator = `projects/${project.id}/task/request-sources/${requestSource.objectSha256}.json`;
@@ -1537,13 +1560,10 @@ async function stageInputRecords(
     });
   }
   const relativeOutputs = ["outputs/acquisition.json", "outputs/evidence-snapshot.json"];
-  if (
-    role === "evidence-construct" &&
-    (await pathExists(join(projectRoot, "outputs", "content-snapshot.json")))
-  ) {
+  if (await pathExists(join(projectRoot, "outputs", "content-snapshot.json"))) {
     relativeOutputs.push("outputs/content-snapshot.json");
   }
-  const stageOutputs = await Promise.all(
+  const stageOutputs: ScientificReviewStageInput[] = await Promise.all(
     relativeOutputs.map(async (relativePath) => {
       const sourceLocator = `projects/${project.id}/${relativePath}`;
       return {
@@ -1558,6 +1578,82 @@ async function stageInputRecords(
       };
     }),
   );
+  const snapshot = await readExactJson(
+    join(projectRoot, "outputs/evidence-snapshot.json"),
+    "Scientific evidence snapshot",
+    "RESEARCH_SCIENTIFIC_GATE_INVALID",
+  );
+  if (!isObject(snapshot) || !Array.isArray(snapshot.artifacts))
+    throw scientificGateError("Scientific evidence snapshot has no exact artifact set.", role);
+  if (snapshot.artifacts.length) {
+    const registered = new Map(
+      (await loadEvidenceArtifactRecords(root, project.id)).map((artifact) => [
+        artifact.artifactId,
+        artifact,
+      ]),
+    );
+    for (const selected of snapshot.artifacts) {
+      const artifact =
+        isObject(selected) && typeof selected.artifactId === "string"
+          ? registered.get(selected.artifactId)
+          : undefined;
+      if (
+        !artifact ||
+        !isObject(selected) ||
+        artifact.sha256 !== selected.sha256 ||
+        artifact.bytes !== selected.bytes ||
+        artifact.locator !== selected.locator ||
+        artifact.mediaType !== selected.mediaType
+      )
+        throw scientificGateError(
+          "Scientific review source is not the exact frozen registered artifact.",
+          role,
+        );
+      let directory = projectRoot;
+      for (const part of ["scientific", "evidence-objects", artifact.sha256]) {
+        directory = join(directory, part);
+        await mkdir(directory, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "EEXIST") throw error;
+        });
+        const info = await lstat(directory);
+        if (!info.isDirectory() || info.isSymbolicLink())
+          throw scientificGateError(
+            "Scientific evidence directories cannot redirect through links.",
+            role,
+          );
+      }
+      const path = `projects/${project.id}/scientific/evidence-objects/${artifact.sha256}/blob`;
+      const target = resolveContained(paths.control, path);
+      if (!(await pathExists(target))) {
+        await copyFile(
+          resolveContained(paths.control, artifact.locator),
+          target,
+          constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE,
+        );
+        await chmod(target, 0o444);
+      }
+      const info = await lstat(target);
+      if (
+        !info.isFile() ||
+        info.isSymbolicLink() ||
+        info.size !== artifact.bytes ||
+        (await sha256File(target)) !== artifact.sha256
+      )
+        throw scientificGateError("Scientific review source bytes changed while staging.", role);
+      stageOutputs.push({
+        path,
+        sha256: artifact.sha256,
+        bytes: artifact.bytes,
+        purpose: "acquired-evidence",
+        ownerId: artifact.artifactId,
+        sourceLocator: artifact.locator,
+        hashBasis: "raw-file-bytes",
+        mediaType: artifact.mediaType,
+        objectKind: null,
+        registrationRecordSha256: null,
+      });
+    }
+  }
   if (role !== "evidence-construct") {
     if (canaryArtifactPaths.length)
       throw canaryArtifactError("Only evidence-construct accepts canary artifacts.");
@@ -2239,6 +2335,8 @@ function isScientificReviewPacket(
           "scientific-fulfillment",
           "effective-scientific-design",
           "original-request-source",
+          "native-calculation",
+          "acquired-evidence",
           "stage-output",
         ].includes(String(record.purpose)) &&
         typeof record.ownerId === "string" &&

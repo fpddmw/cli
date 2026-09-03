@@ -156,6 +156,33 @@ export function validateArtifactViewIndex(value: unknown): ArtifactViewIndex {
   return value as unknown as ArtifactViewIndex;
 }
 
+export async function verifyPersistedArtifactViewIndex(
+  root: string,
+  projectId: string,
+  value: unknown,
+): Promise<ArtifactViewIndex> {
+  if (
+    !isObject(value) ||
+    Object.keys(value).sort().join(",") !== "bytes,path,sha256" ||
+    typeof value.sha256 !== "string" ||
+    !HASH.test(value.sha256) ||
+    value.path !== `reads/indexes/${value.sha256}.json` ||
+    !Number.isSafeInteger(value.bytes) ||
+    Number(value.bytes) <= 0
+  )
+    throw invalid("Persistent artifact directory binding is invalid.");
+  const bytes = await readRegularBytes(root, value as unknown as OutputRecord);
+  let index: ArtifactViewIndex;
+  try {
+    index = validateArtifactViewIndex(JSON.parse(bytes.toString("utf8")));
+  } catch {
+    throw invalid("Persistent artifact directory is invalid.");
+  }
+  if (index.projectId !== projectId)
+    throw invalid("Persistent artifact directory belongs to another project.");
+  return index;
+}
+
 export async function openArtifactViews(
   projectRoot: string,
   binding: OutputRecord,

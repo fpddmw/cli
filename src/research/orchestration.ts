@@ -141,6 +141,11 @@ import {
   scientificFulfillmentSchema,
 } from "./workspace/scientific-fulfillment.js";
 import {
+  inspectNativeRun,
+  nativeRunInputSchema,
+  observeNativeRun,
+} from "./workspace/native-run.js";
+import {
   inspectScientificReviewStatus,
   prepareScientificReview,
   scientificGateAssessmentSchema,
@@ -220,6 +225,8 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research scientific object inspect --kind model-implementation|environment-lock --locator <control-relative-locator> [--workspace <path>] [--json]
   tiangong-ai research scientific fulfillment record <project> --input <json-file> [--workspace <path>] [--json]
   tiangong-ai research scientific fulfillment status <project> [--workspace <path>] [--json]
+  tiangong-ai research project task run observe <project> --input <json-file> --confirm-execution [--workspace <path>] [--json]
+  tiangong-ai research project task run inspect <project> --run <run-id> [--workspace <path>] [--json]
   tiangong-ai research project init <project-id> --question <question> [--goal evidence-report|top-journal] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
   tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id> --design <absolute-json>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--trust-status verified-owner-input|unverified-owner-input|reference-only|replication-candidate] [--independently-reproduced] [--workspace <path>] [--json]
@@ -747,6 +754,8 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
   let schema: Record<string, unknown>;
   if (stage === "task-acceptance") {
     schema = taskAcceptanceInputSchema();
+  } else if (stage === "task-native-run") {
+    schema = nativeRunInputSchema();
   } else if (isTaskSchemaName(stage)) {
     schema = taskInputSchema(stage);
   } else if (isEvidenceContentSchemaName(stage)) {
@@ -1426,6 +1435,34 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   }
   if (action === "task") {
     const [taskAction, ...taskRest] = rest;
+    if (taskAction === "run") {
+      const [runAction, ...runRest] = taskRest;
+      if (runAction !== "observe" && runAction !== "inspect")
+        throw unknownAction("research project task run", runAction ?? "");
+      const args = parseStrictArgs(
+        runRest,
+        { ...WORKSPACE_OPTIONS, input: "string", run: "string", "confirm-execution": "boolean" },
+        `research project task run ${runAction}`,
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, `research project task run ${runAction}`);
+      const root = await workspaceFromArgs(args);
+      const result =
+        runAction === "inspect"
+          ? await inspectNativeRun(root, projectId, strictString(args, "run") ?? "")
+          : await observeNativeRun(
+              root,
+              projectId,
+              await readBoundedJsonRecord(
+                strictString(args, "input") ?? "",
+                "--input",
+                "RESEARCH_NATIVE_RUN_INVALID",
+              ),
+              strictBoolean(args, "confirm-execution"),
+            );
+      writeJson(io, result, args);
+      return "record" in result && result.record && result.record.status !== "succeeded" ? 3 : 0;
+    }
     if (taskAction === "acceptance") {
       const [acceptanceAction, ...acceptanceRest] = taskRest;
       if (acceptanceAction !== "record")

@@ -283,7 +283,7 @@ export async function executeScientificReview(
         brokerUrl: null,
         environment: input.environment,
       });
-      if (result.artifactReads?.length)
+      if (result.artifactReads?.length) {
         await persistArtifactReads(
           join(paths.projects, project.id),
           capsuleProject,
@@ -291,6 +291,22 @@ export async function executeScientificReview(
           packet.packetSha256,
           result.artifactReads,
         );
+        await appendJournalEvent(
+          paths.journal,
+          "review.artifacts.read",
+          project.id,
+          sanitizeResearchValue(
+            {
+              requestId: runId,
+              role: input.role,
+              packetSha256: packet.packetSha256,
+              indexSha256: artifactViews.sha256,
+              receipts: result.artifactReads.map((receipt) => receipt.receiptSha256),
+            },
+            configuredResearchSecrets(input.environment),
+          ) as Record<string, unknown>,
+        );
+      }
       const reportedUsage = checkedUsage(result);
       const usageKnown = reportedUsage.tokens > 0;
       const usage = usageKnown

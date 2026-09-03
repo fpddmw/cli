@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-09-03
-lastReviewedCommit: 0ded79c7acefc557f154115a6bf9a5b1a0ed67d7
+lastReviewedCommit: e32225df1be81164327aff19f00162fa9a02acb0
 ---
 
 # Repo Architecture
@@ -477,8 +477,8 @@ journal, immutable objects, evidence IDs and existing reviewer pipeline. The
 original request and small versioned requirement set are recorded before execution
 or review. Scope changes require separate exact-hash operator confirmation and
 reset scoped scientific approvals; this is not authenticated human identity.
-Native observations bind requirement/source/atom/finding/result versions, store
-declared commands by hash, and never certify or execute them. Positive and supported
+Acceptance observations bind requirement/source/atom/finding/result versions and
+store declared commands by hash; acceptance intake never executes them. Positive and supported
 negative outcomes need review; failed, stale, unrun, withdrawn and unanswered
 requirements remain distinct. The existing review uses a dynamic taskAssessment
 schema, one unique result object per context, and no extra paid round. Missing
@@ -521,6 +521,23 @@ independent-review validation, and this predicate is not a trusted execution
 receipt. Acquisition forecast reuses the artifact media predicate and already
 verified input hashes, so local binaries without readable text are not counted
 as atom-eligible merely because an admitted full file exists.
+
+`native-run.ts` observes one explicitly requested ordinary Node/Python calculation,
+not an AI producer or workflow. It snapshots exact program/frozen input bytes,
+plans outputs, releases the workspace lease during the process, and commits a
+requirement-bound start/result with stable-input and exit/output checks. Runtime
+fingerprints are observed; dependency locks remain declarations, not hermetic
+attestation. Failed/incomplete runs cannot grant positive acceptance; identical
+committed replay does not execute again. Packets and task audit retain the exact
+program, lock, inputs, outputs and event relationships. Unobserved computational
+reports remain `unverified-execution`; evidence/proof checks are not forced to run.
+
+`artifact-read-audit.ts` validates persisted read directories, intrinsic receipt
+identity, packet/delivery authority and exact byte selectors. It groups pages by
+object so full bytes and UTF-8 validity are loaded once per object during this
+verification, and reports undeclared interrupted receipts separately from
+journal-verified delivery. Live review loading also revalidates the persistent
+artifact index before trusting it.
 
 `scientific-review-execution.ts` executes an already prepared early review
 through the same reviewer abstraction. It reserves finite token/cost/wall

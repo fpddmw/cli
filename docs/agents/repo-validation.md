@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-09-03
-lastReviewedCommit: 0ded79c7acefc557f154115a6bf9a5b1a0ed67d7
+lastReviewedCommit: e32225df1be81164327aff19f00162fa9a02acb0
 ---
 
 # Repo Validation
@@ -265,6 +265,15 @@ portable object export with rehashed-but-disconnected audit rejection.
 through native discover/acquire, freezes its typed atom, and binds exact parameter
 states without changing units or identities. It uses mock scientific judgement,
 not a provider or a claim of scientific validity.
+
+Native-run regressions execute ordinary local Node programs, including CommonJS,
+and use a file-based barrier to prove the workspace lease is free during actual
+calculation. They cover exact run/requirement/result binding, replay without
+reexecution, failed/timeout/missing-output refusal, credential-free process
+environment and sanitized diagnostics. Observed program/input/output bytes must
+be packet-readable and portable-audit-bound. Rehashed manifests cannot hide a
+missing program or a changed read receipt; a live review loader revalidates its
+stored artifact directory. These process tests are not model-driven research.
 
 For this boundary, supplement fresh Docker RED/GREEN with a fresh external native
 workspace using the exact locally packed candidate, isolated HOME/npm cache, and

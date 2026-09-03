@@ -17,6 +17,7 @@ import { verifyTaskAudit, writeTaskAuditContext, type TaskAuditBinding } from ".
 import { loadScientificFulfillmentView } from "./scientific-fulfillment.js";
 import { verifyScientificFulfillmentAudit } from "./scientific-fulfillment-audit.js";
 import { resolveScientificObjectBinding } from "./scientific-objects.js";
+import { verifyArtifactReadAudit } from "./artifact-read-audit.js";
 import { sanitizeResearchText, sanitizeResearchValue } from "./sanitization.js";
 import {
   canonicalJson,
@@ -367,6 +368,7 @@ export async function verifyProjectAuditBundle(bundlePath: string): Promise<{
   projectId: string;
   manifestSha256: string;
   files: number;
+  artifactReads: { verifiedReadReceipts: number; uncommittedReadReceipts: number };
   task?: TaskAuditBinding & { executionCertified: false };
 }> {
   if (!isAbsolute(bundlePath) || resolve(bundlePath) !== bundlePath) {
@@ -416,6 +418,17 @@ export async function verifyProjectAuditBundle(bundlePath: string): Promise<{
   }
   await assertPortableTextFiles(bundlePath);
   await verifyScientificFulfillmentAudit(bundlePath, manifest.projectId, manifest.files);
+  const readProof = await readJsonFile<{
+    events: Array<Pick<import("./types.js").JournalEvent, "type" | "scope" | "payload">>;
+  }>(join(bundlePath, "state/journal-event-proofs.json"), "Artifact read journal proof");
+  const artifactReads = await verifyArtifactReadAudit({
+    projectId: manifest.projectId,
+    files: manifest.files
+      .filter((file) => file.path.startsWith("project/"))
+      .map((file) => ({ ...file, path: file.path.slice("project/".length) })),
+    events: readProof.events,
+    readBytes: (path) => readFile(resolveContained(bundlePath, `project/${path}`)),
+  });
   let task: Awaited<ReturnType<typeof verifyTaskAudit>>;
   try {
     task = await verifyTaskAudit(
@@ -432,6 +445,7 @@ export async function verifyProjectAuditBundle(bundlePath: string): Promise<{
     projectId: manifest.projectId,
     manifestSha256,
     files: manifest.files.length,
+    artifactReads,
     ...(task ? { task } : {}),
   };
 }
