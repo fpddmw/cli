@@ -351,6 +351,87 @@ describe("research capability locks", () => {
 
 describe("research project execution", () => {
   it(
+    "handles Claude structured results and declared errors instead of trusting final text",
+    {
+      skip: !researchPlatformCapabilities().nativeReviewerExecution,
+    },
+    async () => {
+      const secret = "claude-result-error-boundary-secret";
+      for (const message of [
+        { type: "result", subtype: "success", is_error: false, structured_output: { ok: true } },
+        {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "Informal summary, not JSON",
+          structured_output: { ok: true },
+        },
+        {
+          type: "result",
+          subtype: "error_max_structured_output_retries",
+          is_error: true,
+          result: '{"ok":true}',
+          errors: ["x".repeat(990) + secret],
+        },
+      ]) {
+        const capsule = await temporaryDirectory();
+        try {
+          const projectRoot = join(capsule, "project");
+          await mkdir(projectRoot);
+          const binary = join(capsule, "fake-claude-result.mjs");
+          await writeFile(
+            binary,
+            `#!/usr/bin/env node\nif(process.argv.includes('--version')){console.log('fake-claude-result 1');process.exit(0)}\nprocess.stdout.write(JSON.stringify(${JSON.stringify(message)}));\n`,
+          );
+          await chmod(binary, 0o755);
+          const result = await executeAgent({
+            route: { agent: "claude", binary, model: "test-model" },
+            prompt: "Return the requested result.",
+            outputSchema: schemaForStage("doctor"),
+            requestId: "claude-result-shape",
+            purpose: "doctor",
+            capsuleRoot: capsule,
+            projectRoot,
+            workspaceRoot: capsule,
+            timeoutSeconds: 10,
+            maxTurns: 2,
+            maxOutputTokens: 100,
+            maxCostUsd: 1,
+            toolPolicy: "none",
+            brokerUrl: null,
+            environment: { PATH: process.env.PATH, RESEARCH_API_KEY: secret },
+          });
+          if (message.is_error) {
+            assert.notEqual(
+              result.exitCode,
+              0,
+              "A declared provider error cannot become success through result text",
+            );
+            assert.match(
+              result.telemetry?.providerErrors.join("; ") ?? "",
+              /error_max_structured_output_retries/u,
+            );
+            assert.doesNotMatch(
+              JSON.stringify(result),
+              /claude-result-error-boundary/u,
+              "Sanitize complete provider errors before truncating at a secret boundary",
+            );
+            assert.ok(
+              !result.telemetry?.providerErrors.join("; ").includes(secret.slice(0, 10)),
+              "Even the ten-character secret fragment left by premature truncation must be absent",
+            );
+          } else {
+            assert.equal(result.exitCode, 0, result.stderr);
+            assert.equal(result.stdout, '{"ok":true}');
+          }
+        } finally {
+          await rm(capsule, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it(
     "streams large Codex and Claude prompts over stdin instead of argv",
     { skip: !researchPlatformCapabilities().nativeReviewerExecution },
     async () => {
@@ -518,7 +599,7 @@ describe("research project execution", () => {
   );
 
   it(
-    "reserves capture space for bounded MCP tool context",
+    "reserves capture space for explicitly allowed bounded MCP tool context",
     { skip: !researchPlatformCapabilities().nativeReviewerExecution },
     async () => {
       const capsule = await temporaryDirectory();
@@ -571,7 +652,7 @@ describe("research project execution", () => {
           maxOutputTokens: 100,
           maxToolContextTokens: 40_000,
           maxCostUsd: 1,
-          toolPolicy: "none",
+          toolPolicy: "workspace-read",
           environment: { PATH: process.env.PATH },
           brokerUrl: null,
         });
@@ -1184,6 +1265,20 @@ describe("research project execution", () => {
         });
         assert.match(packet.prompt, /current interactive host session/i);
         assert.match(packet.prompt, /do not launch codex exec/i);
+        assert.match(
+          packet.prompt,
+          /Save only the final schema-conforming JSON object to a new regular file/,
+        );
+        assert.doesNotMatch(packet.prompt, /Operate only inside this isolated research capsule/);
+        assert.doesNotMatch(packet.prompt, /Do not write stage output files directly/);
+        if (stage === "acquire") {
+          assert.match(packet.prompt, /provisionally admitted sources/);
+          assert.match(packet.prompt, /bindDownload/);
+          assert.match(packet.prompt, /registerArtifact/);
+          assert.doesNotMatch(packet.prompt, /No new evidence acquisition/);
+        } else if (stage === "analyze" || stage === "synthesize") {
+          assert.match(packet.prompt, /No new evidence acquisition/);
+        }
         assert.equal(packet.commands.submit.argv.includes("--confirm-model"), false);
         nativeReservedTokens += packet.limits.reservedPackageTokens;
         if (stage === "discover") {
@@ -1273,10 +1368,20 @@ describe("research project execution", () => {
       }
 
       const launched: string[] = [];
+      const reviewerExecutor = fakeExecutor(launched);
       const completed = await runNativeControlledWorkspace(
         root,
         { maxParallel: 1, maxCycles: 5, dryRun: false, environment: {} },
-        fakeExecutor(launched),
+        async (request) => {
+          assert.match(request.prompt, /Operate only inside this isolated research capsule/);
+          assert.match(request.prompt, /Do not write stage output files directly/);
+          assert.match(request.prompt, /Your final response must be only the JSON object/);
+          assert.match(request.prompt, /No new evidence acquisition/);
+          assert.doesNotMatch(request.prompt, /Save only the final schema-conforming JSON object/);
+          assert.equal(request.toolPolicy, "packet-read");
+          assert.equal(request.brokerUrl, null);
+          return reviewerExecutor(request);
+        },
       );
       assert.equal(completed.status, "complete", JSON.stringify(completed));
       assert.deepEqual(nativeAgents, ["codex", "codex", "codex", "codex"]);
@@ -1333,7 +1438,45 @@ describe("research project execution", () => {
     }
   });
 
-  it("reserves the same acquire input ceiling at preflight without enlarging the output ceiling", async () => {
+  it("does not turn a large legacy context planning hint into an indirect preflight admission ceiling", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const config = await loadWorkspaceConfig(root);
+      const baseline = await evaluateProjectPreflight(
+        root,
+        "Estimate on-demand artifact reads.",
+        null,
+        null,
+      );
+      config.budget.maxInputContextTokens = 5_000_000;
+      await writeFile(workspacePaths(root).config, JSON.stringify(config));
+      const largeHint = await evaluateProjectPreflight(
+        root,
+        "Estimate on-demand artifact reads.",
+        null,
+        null,
+      );
+      assert.deepEqual(
+        largeHint.budget.preCallTokenReservations,
+        baseline.budget.preCallTokenReservations,
+      );
+      assert.deepEqual(
+        largeHint.gaps.filter((gap) => gap.startsWith("package-precall-reservation-exceeds-")),
+        baseline.gaps.filter((gap) => gap.startsWith("package-precall-reservation-exceeds-")),
+        "a planning hint cannot introduce additional package admission failures",
+      );
+      assert.equal(
+        (largeHint.budget as unknown as { inputContextTokenLimit: number | null })
+          .inputContextTokenLimit,
+        null,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reserves a rough initial acquire context without enlarging the output ceiling", async () => {
     const root = await temporaryDirectory();
     try {
       await initializeResearchWorkspace(root, undefined);
@@ -1346,7 +1489,7 @@ describe("research project execution", () => {
       );
       assert.equal(
         preflight.budget.stageContextTokenReservations.acquire,
-        config.budget.maxInputContextTokens,
+        Math.min(config.budget.maxInputContextTokens, 8_000),
       );
       assert.equal(preflight.budget.maxOutputTokens, config.budget.maxOutputTokens);
       assert.ok(
@@ -1357,38 +1500,84 @@ describe("research project execution", () => {
     }
   });
 
-  it("rejects real acquire input overflow before spending an attempt and preserves frozen evidence", async () => {
-    const fixture = await nativeDiscoveryContextFixture(40_000);
+  it("prepares acquire above 32,000 context tokens without rewriting frozen evidence", async () => {
+    const fixture = await nativeDiscoveryContextFixture(125_000, 32_000);
     try {
       const config = await loadWorkspaceConfig(fixture.root);
       assert.ok(fixture.contextTokens > config.budget.maxInputContextTokens);
-      await assert.rejects(
-        prepareNativeResearchStage({
-          root: fixture.root,
-          projectId: fixture.projectId,
-          stage: "acquire",
-          hostAgent: "codex",
-        }),
-        (error: unknown) => {
-          assert.ok(error instanceof CliError);
-          assert.equal(error.code, "RESEARCH_INPUT_CONTEXT_BUDGET_EXCEEDED");
-          const details = error.details as Record<string, unknown>;
-          assert.equal(details.maxStageContextTokens, config.budget.maxInputContextTokens);
-          assert.equal(details.limitField, "budget.maxInputContextTokens");
-          assert.match(String(details.recommendedAction), /fork|bounded/i);
-          assert.match(String(details.recommendedAction), /immutable|frozen/i);
-          return true;
-        },
-      );
+      const packet = await prepareNativeResearchStage({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
       const project = await loadProject(fixture.root, fixture.projectId);
-      assert.equal(project.packages.find((item) => item.id === "acquire")?.attempts, 0);
+      assert.equal(project.packages.find((item) => item.id === "acquire")?.attempts, 1);
       assert.equal(await sha256File(fixture.evidencePath), fixture.evidenceSha256);
-      assert.equal(
-        await lstat(
-          join(workspacePaths(fixture.root).projects, fixture.projectId, "native", "active.json"),
-        ).catch(() => null),
-        null,
+      assert.equal(packet.limits.maxOutputTokens, config.budget.maxOutputTokens);
+      await abortNativeResearchStage({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        sessionId: packet.sessionId,
+      });
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("reads exact stage artifacts on demand without truncating a large object or changing scope", async () => {
+    const fixture = await nativeDiscoveryContextFixture(125_000, 32_000);
+    try {
+      const packet = await prepareNativeResearchStage({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      assert.ok(
+        Buffer.byteLength(packet.prompt) < 32_000 * 3,
+        "Large material should be referenced, not all embedded in the initial prompt.",
       );
+      const call = (action: string, options: string[] = []) =>
+        invoke([
+          "research",
+          "project",
+          "stage",
+          action,
+          fixture.projectId,
+          "--session",
+          packet.sessionId,
+          "--workspace",
+          fixture.root,
+          "--json",
+          ...options,
+        ]);
+      const listed = await call("artifacts", ["--limit", "1000"]);
+      assert.equal(listed.exitCode, 0, listed.stderr);
+      assert.equal(listed.stdout.includes(fixture.root), false);
+      const directory = JSON.parse(listed.stdout);
+      const evidence = directory.items.find(
+        (item: { path: string }) => item.path === "outputs/evidence.json",
+      );
+      assert.equal(evidence.sha256, fixture.evidenceSha256);
+      const read = await call("read", ["--artifact", evidence.objectId, "--length", "all"]);
+      assert.equal(read.exitCode, 0, read.stderr);
+      const view = JSON.parse(read.stdout);
+      assert.equal(view.content, await readFile(fixture.evidencePath, "utf8"));
+      assert.equal(view.receipt.objectSha256, fixture.evidenceSha256);
+      assert.equal(view.receipt.packetSha256, packet.packetSha256);
+      assert.equal(view.hasMore, false);
+      const unknown = await call("read", ["--artifact", "../credentials.json"]);
+      assert.equal(unknown.exitCode, 3);
+      assert.equal(unknown.stderr.includes(fixture.root), false);
+      await abortNativeResearchStage({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        sessionId: packet.sessionId,
+      });
+      const stale = await call("read", ["--artifact", evidence.objectId]);
+      assert.notEqual(stale.exitCode, 0);
+      assert.equal(await sha256File(fixture.evidencePath), fixture.evidenceSha256);
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }
@@ -3084,10 +3273,10 @@ describe("research workspace CLI", () => {
           preflightValue.budget.maxInputContextTokens,
       );
       assert.deepEqual(preflightValue.budget.stageContextTokenReservations, {
-        acquire: 128_000,
-        analyze: 128_000,
-        synthesize: 128_000,
-        review: 256_000,
+        acquire: 8_000,
+        analyze: 8_000,
+        synthesize: 8_000,
+        review: 24_000,
       });
       assert.deepEqual(preflightValue.budget.outputTokenLimitEnforcement, {
         producer: "reserved-native-host-on-submit",
@@ -3222,10 +3411,17 @@ describe("research workspace CLI", () => {
   });
 });
 
-async function nativeDiscoveryContextFixture(relevanceBytes: number) {
+async function nativeDiscoveryContextFixture(relevanceBytes: number, contextCeiling?: number) {
   const root = await temporaryDirectory();
   const projectId = "incremental-context";
   await initializeResearchWorkspace(root, undefined);
+  if (contextCeiling !== undefined) {
+    const config = await loadWorkspaceConfig(root);
+    await writeJsonAtomic(workspacePaths(root).config, {
+      ...config,
+      budget: { ...config.budget, maxInputContextTokens: contextCeiling },
+    });
+  }
   await lockCapabilities(root);
   await initializeProject(root, projectId, "Bound incremental evidence metadata at acquisition.");
   const inputPath = join(root, "context-source.txt");

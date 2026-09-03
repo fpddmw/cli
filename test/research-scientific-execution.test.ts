@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { openArtifactViews } from "../src/research/workspace/artifact-views.js";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +27,31 @@ import { scientificDesignInput } from "./helpers/scientific-design.js";
 import { appendJournalEvent, readVerifiedJournal } from "../src/research/workspace/journal.js";
 
 describe("explicit isolated scientific review execution", () => {
+  it("uses the approved finite cost ceiling instead of treating a rough read-cost estimate as exact", async () => {
+    const fixture = await preparedFixture("execution-estimated-read-cost");
+    try {
+      const config = await loadWorkspaceConfig(fixture.root);
+      config.reviewer.pricing = {
+        inputUsdPerMillionTokens: 1,
+        cachedInputUsdPerMillionTokens: 0.1,
+        outputUsdPerMillionTokens: 5,
+      };
+      await writeJsonAtomic(workspacePaths(fixture.root).config, config);
+      const executed = await executeScientificReview(
+        { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+        async (request) => {
+          assert.ok(
+            request.maxCostUsd > 2,
+            "a rough sub-dollar read estimate is not the owner's hard cost ceiling",
+          );
+          return { ...result(fixture.packet), costUsd: 2 };
+        },
+      );
+      assert.equal(executed.status, "passed");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
   it("does not execute a reviewer for a derived project without its authority commit", async () => {
     const fixture = await preparedFixture("execution-uncommitted-target");
     try {
@@ -250,7 +276,46 @@ describe("explicit isolated scientific review execution", () => {
     }
   });
 
-  it("stages and embeds the exact approved Policy Markdown in the tool-free review", async () => {
+  it("offers oversized approved Policy through packet-bound reads without a context rejection", async () => {
+    const policy =
+      "# Reviewed Policy\nHuman rule: retain conflicting observations and test uncertainty.\n".repeat(
+        6_000,
+      );
+    const fixture = await preparedFixture("execution-large-policy", true, policy);
+    try {
+      const executed = await executeScientificReview(
+        { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+        async (request) => {
+          assert.equal(request.toolPolicy, "packet-read");
+          assert.ok(request.artifactViews);
+          assert.ok(Buffer.byteLength(request.prompt) < 128_000 * 3);
+          const views = await openArtifactViews(
+            request.projectRoot,
+            request.artifactViews!.index,
+            fixture.packet.packetSha256,
+          );
+          const item = views.index.objects.find((item) =>
+            item.path.endsWith(`${sha256Text(policy)}.md`),
+          )!;
+          const read = await views.read({ objectId: item.objectId, length: null });
+          assert.equal(read.content, policy);
+          const value = result(fixture.packet);
+          value.isolation = {
+            ...value.isolation!,
+            toolPolicy: "packet-read",
+            networkPolicy: "reviewer-provider-and-local-artifacts",
+          };
+          value.artifactReads = views.receipts();
+          return value;
+        },
+      );
+      assert.equal(executed.status, "passed");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("stages and embeds small approved Policy Markdown in the packet-read review", async () => {
     const fixture = await preparedFixture(
       "execution-policy-text",
       true,
@@ -291,7 +356,7 @@ describe("explicit isolated scientific review execution", () => {
     }
   });
 
-  it("executes one bound tool-free reviewer, commits proof, and replays without a model call", async () => {
+  it("executes one bound packet-read reviewer, commits proof, and replays without a model call", async () => {
     const fixture = await preparedFixture("execution-success");
     try {
       let calls = 0;
@@ -300,10 +365,21 @@ describe("explicit isolated scientific review execution", () => {
       ) => {
         calls++;
         assert.equal(request.route.agent, "claude");
-        assert.equal(request.toolPolicy, "none");
+        assert.equal(request.toolPolicy, "packet-read");
         assert.equal(request.brokerUrl, null);
         assert.match(request.prompt, new RegExp(fixture.packet.packetSha256));
-        assert.match(request.prompt, /model-comparison|cross-model/u);
+        const views = await openArtifactViews(
+          request.projectRoot,
+          request.artifactViews!.index,
+          fixture.packet.packetSha256,
+        );
+        const design = views.index.objects.find(
+          (item) => item.path === fixture.packet.design.objectLocator,
+        )!;
+        assert.match(
+          (await views.read({ objectId: design.objectId, length: null })).content,
+          /model-comparison|cross-model/u,
+        );
         assert.equal(request.expectedRuntime, undefined);
         return result(fixture.packet);
       };
@@ -381,6 +457,70 @@ describe("explicit isolated scientific review execution", () => {
         async () => result(fixture.packet),
       );
       assert.equal(recovered.status, "passed");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("retains bounded sanitized startup diagnostics for a failed scientific reviewer", async () => {
+    const fixture = await preparedFixture("execution-diagnostic");
+    try {
+      const secret = "scientific-review-diagnostic-secret";
+      let calls = 0;
+      await assert.rejects(
+        executeScientificReview(
+          {
+            ...fixture,
+            role: "research-design",
+            confirmCost: true,
+            environment: { ANTHROPIC_API_KEY: secret },
+          },
+          async () => {
+            calls++;
+            return {
+              ...result(fixture.packet),
+              exitCode: 2,
+              stderr: `Unknown reviewer option. Authorization: Bearer ${secret}\nCookie: session=${secret}\n${fixture.root}/runtime/file\n${"x".repeat(5000)}`,
+              telemetry: {
+                eventCounts: { result: 1 },
+                itemCounts: {},
+                toolCalls: 0,
+                providerTurns: 1,
+                reasoningOutputTokens: 0,
+                providerErrors: ["error_during_execution: precise provider cause"],
+              },
+            };
+          },
+        ),
+        (error: unknown) => {
+          const value = error as { code?: string; details?: Record<string, unknown> };
+          assert.equal(value.code, "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_FAILED");
+          assert.equal(value.details?.exitCode, 2);
+          assert.match(String(value.details?.diagnostic), /Unknown reviewer option/u);
+          assert.match(
+            String(value.details?.diagnostic),
+            /^error_during_execution: precise provider cause/u,
+          );
+          assert.ok(String(value.details?.diagnostic).length <= 2048);
+          assert.doesNotMatch(JSON.stringify(value.details), new RegExp(secret));
+          assert.ok(!JSON.stringify(value.details).includes(fixture.root));
+          return true;
+        },
+      );
+      const failed = (await readVerifiedJournal(workspacePaths(fixture.root).journal)).findLast(
+        (event) => event.type === "scientific-review.execution.failed",
+      )!;
+      assert.equal(failed.payload.exitCode, 2);
+      assert.match(String(failed.payload.diagnostic), /Unknown reviewer option/u);
+      assert.doesNotMatch(JSON.stringify(failed), new RegExp(secret));
+      assert.ok(!JSON.stringify(failed).includes(fixture.root));
+      assert.equal(calls, 1);
+      assert.equal(
+        (await loadProject(fixture.root, fixture.projectId)).scientificDesign?.gates[
+          "research-design"
+        ].status,
+        "prepared",
+      );
     } finally {
       await fixture.cleanup();
     }
@@ -567,8 +707,8 @@ function result(
       policySha256: "4".repeat(64),
       readScopes: ["platform-runtime", "agent-runtime", "private-capsule"],
       writeScopes: ["private-capsule"],
-      networkPolicy: "reviewer-provider-only",
-      toolPolicy: "none",
+      networkPolicy: "reviewer-provider-and-local-artifacts",
+      toolPolicy: "packet-read",
     },
   };
 }

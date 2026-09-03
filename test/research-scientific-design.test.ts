@@ -17,6 +17,13 @@ const fixtureRoot = resolve(
 );
 
 describe("top-journal scientific design contract", () => {
+  it("does not confuse a large context estimate with an unavailable evidence read route", async () => {
+    const design = await fixture("ev-r9-narrowed-valid.json");
+    design.contextPlan.estimatedTokens = 410_000;
+    design.contextPlan.maxEstimatedTokens = 32_000;
+    design.contextPlan.centralEvidenceFits = true;
+    assert.equal(evaluateScientificDesign(design).readyForDesignReview, true);
+  });
   it("accepts explicit conjunctive source-type groups without changing flat-array all-of semantics", async () => {
     const value = JSON.parse(
       await readFile(join(fixtureRoot, "ev-r9-narrowed-valid.json"), "utf8"),

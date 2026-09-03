@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-09-03
-lastReviewedCommit: 06dadef170ab79c19eef9a35663e86fdee22479b
+lastReviewedAt: 2026-09-04
+lastReviewedCommit: 4cb45f23331677a7c713f20f3aa3cbb65afe9358
 ---
 
 # Repo Validation
@@ -240,6 +240,62 @@ using timing assertions. Publication regressions bind task context to the existi
 reviewers. Portable audit tests move the bundle, remove the source workspace, and
 reject altered task bindings even with a recomputed manifest digest.
 
+Request-provenance regressions preserve exact BOM/CRLF source bytes and hashed
+locators, distinguish interpreted/unrecorded origin, and reject false verbatim
+claims or retrospective replacement. `test/research-artifact-views.test.ts` covers
+complete oversized reads, UTF-8 pagination, bounded per-object verification work,
+late-file exclusion, links/tamper, secret refusal, exact persisted receipts,
+Host/Origin checks, and actual isolated mock Codex/Claude MCP clients. The mock
+Claude client follows its structured-result preference and must receive actual
+content, not just receipts. The server sends one complete text response; it must
+not attach a metadata-only structured alternative. Native qualification also
+requires recovery of unpredictable fixture text omitted from the prompt, not
+merely a model assertion that it read a file.
+The mock
+Codex consumer verifies all 6 MiB of one read before emitting its duplicate JSONL
+tool trace; only that duplicate capture is compacted, not delivered evidence.
+Unexpected general I/O tool events are rejected. Preflight/design regressions
+separate total corpus size and large legacy planning hints from finite execution
+budgets; scientific cost tests distinguish a rough estimate from the approved ceiling.
+Bridge tests carry the same read-only binding through the signed sidecar and still
+refuse general workspace tools or external MCP/broker routes. Native/scientific
+regressions first reproduce former context-length refusals, then require normal
+preparation and exact on-demand reads without modifying frozen evidence. Mock
+passes remain distinct from an external real independent-review canary.
+
+The isolated mock Claude process also receives the actual early scientific
+review schema and rejects an unsupported Draft 2020-12 annotation before any
+tool/model work. Its provider view and manual `--compatibility claude-code`
+share one adapter; constraints, literal values and the canonical validation
+schema remain unchanged. Scientific-execution failures retain bounded sanitized
+exit diagnostics in both the structured error and journal, never the full prompt.
+Executor regressions consume Claude's actual `structured_output` envelope,
+prefer it over informal `result` text, and reject `is_error`/error-subtype results
+even when a wrapper exits zero. Structured errors take priority over incidental
+stderr warnings and are sanitized before truncation, including a secret that
+crosses the diagnostic boundary.
+The native format probe exposed Claude's untyped numeric `const` becoming a
+string tool parameter. The provider projection makes implied scalar types
+explicit, while retaining `const`/`enum` and rejecting mismatched returned data.
+
+`test/research-scientific-review.test.ts` exercises same-project fulfillment of
+predeclared model/environment slots, byte-identical base design preservation,
+idempotent replay, unchanged earlier approvals, stale due-packet rejection, and
+portable object export with rehashed-but-disconnected audit rejection.
+`test/research-scientific-fulfillment.test.ts` admits a real local synthetic input
+through native discover/acquire, freezes its typed atom, and binds exact parameter
+states without changing units or identities. It uses mock scientific judgement,
+not a provider or a claim of scientific validity.
+
+Native-run regressions execute ordinary local Node programs, including CommonJS,
+and use a file-based barrier to prove the workspace lease is free during actual
+calculation. They cover exact run/requirement/result binding, replay without
+reexecution, failed/timeout/missing-output refusal, credential-free process
+environment and sanitized diagnostics. Observed program/input/output bytes must
+be packet-readable and portable-audit-bound. Rehashed manifests cannot hide a
+missing program or a changed read receipt; a live review loader revalidates its
+stored artifact directory. These process tests are not model-driven research.
+
 For this boundary, supplement fresh Docker RED/GREEN with a fresh external native
 workspace using the exact locally packed candidate, isolated HOME/npm cache, and
 real public input bytes/native calculations. Label any deterministic reviewer as
@@ -338,8 +394,8 @@ platform capsule, without credentials or provider requests.
 The integrated role forecast regression specifically includes a same-dimension
 metadata-only patent and a binary-only patent: neither may fill an atom-level
 source-type slot even when global acquisition coverage passes. Runtime tests
-also exercise expanded discovery input between the output and input caps,
-true input overflow, valid historical/wait states through Doctor, and each due
+also exercise expanded discovery input and context beyond the old input cap,
+valid historical/wait states through Doctor, and each due
 scientific-gate status through public run/status.
 
 The coverage gate uses `c8` and fails when coverage drops below the thresholds
@@ -410,7 +466,7 @@ bounded local context with full-source review, stage tool isolation, runtime
 target/wrapper/adapter fingerprinting and drift rejection, telemetry redaction,
 owner-only whitelisted Claude settings authentication, production doctor
 attestation creation, default-doctor reuse, current-runtime drift rejection,
-two-protocol-turn tool-free review with exact local views and cited broker
+packet-only review with exact local views and cited broker
 items selected from hash-bound raw responses by admitted JSON Pointer,
 persistent packet/context tamper rejection at closure, JSONL progress,
 reviewer-driven synthesis reopening with a read-only prior-report archive,
@@ -431,6 +487,11 @@ invokes the producer executor, prepare/submit advances discover through
 synthesize with hash-bound sessions and reserved accounting, native broker
 fetches remain call-bounded and sanitized, and only the other-family reviewer
 CLI is launched before mechanical closure.
+The same native flow checks mode-specific prompt instructions across all four
+producer stages: acquire permits only provisionally admitted-source retrieval,
+later stages prohibit new evidence, and native submission files do not inherit
+headless JSON-only or capsule-only directives. Its reviewer mock separately
+requires the unchanged isolated, packet-read, no-broker and JSON-only boundary.
 `test/research-policy.test.ts` and `test/research-policy-wizard.test.ts` cover
 verified project-installed Policy source resolution, exhaustive bundled-template
 parsing, mandatory top-journal invariants, default selection and human
@@ -493,6 +554,11 @@ verification, formal evidence/artifact bytes, transformed input bindings,
 environment and journal proofs, read-only content, tamper/extra-byte rejection,
 and exclusion of credentials, active state, capsules, unrelated projects,
 host-specific paths, and sensitive URL/authentication material.
+It also runs native prepare-to-handoff export/verify and compares the source and
+exported ledger bytes exactly. Credential regressions retain true session UUID,
+prefixed API/password and OAuth secret checks, preserve JSON validity with escaped
+quotes/backslashes, and reject Unicode-escaped keys, JSONL and nested credential
+payloads without exempting whole events or UUID values.
 Production tests additionally require an external
 public-internet plan and block downstream work when any capability marked
 `requiredForDiscovery` lacks a broker receipt. The failure distinguishes a

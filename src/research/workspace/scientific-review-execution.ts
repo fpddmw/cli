@@ -4,6 +4,13 @@ import { copyFile, lstat, mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { CliError } from "../../errors.js";
+import {
+  artifactPromptContext,
+  artifactReadInstructions,
+  persistArtifactReads,
+  persistArtifactViewIndex,
+  writeArtifactViewIndex,
+} from "./artifact-views.js";
 import { verifyCapabilities } from "./capabilities.js";
 import type { AgentExecutionRequest } from "./executor.js";
 import { appendJournalEvent, readVerifiedJournal } from "./journal.js";
@@ -11,6 +18,8 @@ import { assertProjectAuthority, projectAuthorityIndex } from "./project-authori
 import {
   calculateAgentCallTokenReservation,
   RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
+  RESEARCH_PACKET_READ_MAX_TURNS,
+  RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS,
   researchStructuredOutputMaxTurns,
   reservedAgentPackageCost,
 } from "./preflight.js";
@@ -44,6 +53,7 @@ import type {
   ResearchPolicyBinding,
   ScientificReviewRole,
   WorkspaceConfig,
+  OutputRecord,
 } from "./types.js";
 import { loadWorkspaceConfig, verifyDoctorAttestation, withWorkspaceLock } from "./workspace.js";
 
@@ -161,7 +171,7 @@ export async function executeScientificReview(
     if (attempts > 0 && !input.retry) {
       throw executionError(
         "RESEARCH_SCIENTIFIC_REVIEW_RETRY_REQUIRED",
-        "The previous execution did not complete. Inspect its receipt, correct the cause, then explicitly use --retry.",
+        "The previous execution did not complete. Inspect its recorded failure diagnostic, correct the cause, then explicitly use --retry.",
       );
     }
     if (attempts >= config.budget.maxAttemptsPerPackage) {
@@ -181,29 +191,39 @@ export async function executeScientificReview(
     let usageBeforeReservation: typeof project.usage | null = null;
     let callStartedAt: bigint | null = null;
     let usageSettled = false;
+    let failureDiagnostic: Record<string, unknown> | null = null;
     try {
       await copyPacketInputs(input.root, capsuleProject, packet, project.publicationPolicy!);
+      await writeJsonAtomic(join(capsuleProject, "inputs/scientific-review-packet.json"), packet);
+      const artifactViews = await writeArtifactViewIndex(capsuleProject, project.id);
+      const persistedViews = await persistArtifactViewIndex(
+        join(paths.projects, project.id),
+        capsuleProject,
+        artifactViews,
+      );
       const prompt = await scientificReviewPrompt(
         capsuleProject,
         packet,
         config,
         project.publicationPolicy!,
+        artifactViews,
       );
       const schema = scientificReviewSchema(input.role);
-      const maxTurns = researchStructuredOutputMaxTurns(config.reviewer);
+      const maxTurns = RESEARCH_PACKET_READ_MAX_TURNS;
       const reservation = calculateAgentCallTokenReservation({
         route: config.reviewer,
         primaryPayloadTokens: Math.ceil(
           Buffer.byteLength(prompt + JSON.stringify(schema)) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
         ),
         repairPayloadTokens: 0,
-        maxTurns,
+        maxTurns: researchStructuredOutputMaxTurns(config.reviewer),
         maxOutputTokens: config.budget.maxOutputTokens,
-        maxToolContextTokens: 0,
+        maxToolContextTokens: RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS,
         maxRepairTokens: 0,
         reserveRepair: false,
       }).totalTokens;
       const reservedCostUsd = reservedAgentPackageCost(config.reviewer, reservation, config);
+      const availableCostUsd = Math.max(0, config.budget.maxCostUsd - project.usage.costUsd);
       const timeoutSeconds = Math.min(
         config.budget.earlyScientificReviewMaxWallSeconds,
         config.budget.maxWallSeconds - project.usage.wallSeconds,
@@ -211,7 +231,7 @@ export async function executeScientificReview(
       if (
         reservation > config.budget.earlyScientificReviewMaxTokens ||
         reservation > config.budget.maxTokens - project.usage.tokens ||
-        reservedCostUsd > config.budget.maxCostUsd - project.usage.costUsd ||
+        reservedCostUsd > availableCostUsd ||
         timeoutSeconds <= 0
       ) {
         throw executionError(
@@ -231,6 +251,7 @@ export async function executeScientificReview(
       await appendJournalEvent(paths.journal, "scientific-review.execution.started", project.id, {
         role: input.role,
         packetSha256: packet.packetSha256,
+        artifactViewIndexSha256: artifactViews.sha256,
         runId,
         attempt: attempts + 1,
         reservedTokens: reservation,
@@ -255,13 +276,38 @@ export async function executeScientificReview(
         timeoutSeconds,
         maxTurns,
         maxOutputTokens: config.budget.maxOutputTokens,
-        maxToolContextTokens: 0,
-        maxCostUsd: reservedCostUsd,
+        maxToolContextTokens: RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS,
+        maxCostUsd: availableCostUsd,
         expectedRuntime,
-        toolPolicy: "none",
+        toolPolicy: "packet-read",
+        artifactViews: { index: artifactViews, packetSha256: packet.packetSha256 },
         brokerUrl: null,
         environment: input.environment,
       });
+      if (result.artifactReads?.length) {
+        await persistArtifactReads(
+          join(paths.projects, project.id),
+          capsuleProject,
+          artifactViews,
+          packet.packetSha256,
+          result.artifactReads,
+        );
+        await appendJournalEvent(
+          paths.journal,
+          "review.artifacts.read",
+          project.id,
+          sanitizeResearchValue(
+            {
+              requestId: runId,
+              role: input.role,
+              packetSha256: packet.packetSha256,
+              indexSha256: artifactViews.sha256,
+              receipts: result.artifactReads.map((receipt) => receipt.receiptSha256),
+            },
+            configuredResearchSecrets(input.environment),
+          ) as Record<string, unknown>,
+        );
+      }
       const reportedUsage = checkedUsage(result);
       const usageKnown = reportedUsage.tokens > 0;
       const usage = usageKnown
@@ -281,28 +327,34 @@ export async function executeScientificReview(
       await saveProject(input.root, project);
       usageSettled = true;
       if (result.exitCode !== 0) {
+        failureDiagnostic = reviewerFailureDiagnostic(result, input, capsuleRoot);
         throw executionError(
           "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_FAILED",
           "The isolated reviewer failed. No scientific review was submitted.",
+          failureDiagnostic,
         );
       }
       if (
-        usage.tokens > reservation ||
+        usage.tokens >
+          Math.min(
+            config.budget.earlyScientificReviewMaxTokens,
+            config.budget.maxTokens - priorUsage.tokens,
+          ) ||
         usage.outputTokens > config.budget.maxOutputTokens ||
-        (config.reviewer.pricing && usage.costUsd > reservedCostUsd) ||
+        usage.costUsd > availableCostUsd ||
         usage.wallSeconds > timeoutSeconds
       ) {
         throw executionError(
           "RESEARCH_BUDGET_EXCEEDED",
-          "The reviewer exceeded its reserved execution limit. No review was submitted.",
+          "The reviewer exceeded an approved finite execution limit. No review was submitted.",
         );
       }
       if (
         !result.runtime ||
         result.runtime.agent !== config.reviewer.agent ||
         (config.reviewer.model !== null && result.model !== config.reviewer.model) ||
-        result.isolation?.toolPolicy !== "none" ||
-        result.isolation.networkPolicy !== "reviewer-provider-only" ||
+        result.isolation?.toolPolicy !== "packet-read" ||
+        result.isolation.networkPolicy !== "reviewer-provider-and-local-artifacts" ||
         (config.reviewerExecution.transport === "sandbox-bridge" && !result.reviewAttestation)
       ) {
         throw executionError(
@@ -371,6 +423,8 @@ export async function executeScientificReview(
           runtime: result.runtime,
           isolation: result.isolation,
           reviewAttestation: result.reviewAttestation ?? null,
+          artifactViews: persistedViews,
+          artifactReads: result.artifactReads ?? [],
           stdoutSha256: sha256Text(result.stdout),
           stderrSha256: sha256Text(result.stderr),
         },
@@ -412,6 +466,7 @@ export async function executeScientificReview(
           attempt: attempts + 1,
           code:
             error instanceof CliError ? error.code : "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_FAILED",
+          ...(failureDiagnostic ?? {}),
           capsuleDisposition: "retained-failed-execution",
         });
       }
@@ -559,56 +614,33 @@ async function scientificReviewPrompt(
   packet: ScientificReviewPacket,
   config: WorkspaceConfig,
   policy: ResearchPolicyBinding,
+  index: OutputRecord,
 ) {
   const mandatory = [
-    "Review the exact prepared scientific packet independently. Tools are disabled. Read only embedded content; complete files are bound for audit but are not evidence that you read omitted bytes.",
+    "Review the exact prepared scientific packet independently using only its packet-bound artifact tools. Read the design, assessment and approved Policy documents, then inspect relevant implementations, inputs, failed checks and counterevidence. Complete files are available, not assumed read.",
     "Return the supplied JSON schema with the exact packetSha256 and reviewerSessionSha256. A mechanical canPass=false cannot be upgraded by prose; return stop, handoff, or revise as appropriate.",
-    JSON.stringify(packet),
+    `packetSha256=${packet.packetSha256}; reviewerSessionSha256=${packet.reviewer.sessionSha256}; role=${packet.role}`,
+    artifactReadInstructions(index),
   ];
-  for (const locator of [
-    packet.design.objectLocator,
-    packet.assessment.objectLocator,
-    packet.policy.objectLocator,
-    ...new Set(policy.documents.map((document) => document.objectLocator)),
-  ]) {
-    const path = resolveContained(controlRoot, locator);
-    mandatory.push("### " + locator + "\n" + (await readFile(path, "utf8")));
-  }
-  const maxBytes = config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN;
-  const required = mandatory.join("\n\n");
-  if (Buffer.byteLength(required) > maxBytes) {
-    throw executionError(
-      "RESEARCH_INPUT_CONTEXT_BUDGET_EXCEEDED",
-      "Required scientific review design, policy, and assessment exceed the input context limit; revise the bounded assessment before execution.",
-    );
-  }
-  let remaining = maxBytes - Buffer.byteLength(required);
-  const context: string[] = [required];
-  for (const [index, record] of packet.stageInputs.entries()) {
-    const allowance = Math.max(
-      0,
-      Math.floor(remaining / (packet.stageInputs.length - index)) - 256,
-    );
-    if (!allowance) continue;
-    const path = resolveContained(controlRoot, record.path);
-    const handle = await open(path, "r");
-    let text: string;
-    try {
-      const buffer = Buffer.alloc(Math.min(record.bytes, allowance));
-      const read = await handle.read(buffer, 0, buffer.length, 0);
-      text = buffer.subarray(0, read.bytesRead).toString("utf8");
-    } finally {
-      await handle.close();
-    }
-    const section =
-      "### " + record.path + " (bounded excerpt; " + record.bytes + " total file bytes)\n" + text;
-    const size = Buffer.byteLength(section);
-    if (size <= remaining) {
-      context.push(section);
-      remaining -= size;
-    }
-  }
-  return context.join("\n\n");
+  const locators = [
+    ...new Set([
+      "inputs/scientific-review-packet.json",
+      packet.design.objectLocator,
+      packet.assessment.objectLocator,
+      packet.policy.objectLocator,
+      ...policy.documents.map((document) => document.objectLocator),
+      ...packet.stageInputs.map((record) => record.path),
+    ]),
+  ];
+  mandatory.push(
+    await artifactPromptContext(
+      controlRoot,
+      index,
+      locators,
+      Math.min(8_000, config.budget.maxInputContextTokens) * RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
+    ),
+  );
+  return mandatory.join("\n\n");
 }
 
 async function copyPacketInputs(
@@ -645,6 +677,41 @@ async function copyPacketInputs(
   await writeJsonAtomic(join(capsuleProject, "packet.json"), packet);
 }
 
-function executionError(code: string, message: string) {
-  return new CliError(message, { code, exitCode: 3 });
+function reviewerFailureDiagnostic(
+  result: ExecutionResult,
+  input: { root: string; environment: NodeJS.ProcessEnv },
+  capsuleRoot: string,
+): Record<string, unknown> {
+  const secrets = configuredResearchSecrets(input.environment);
+  let diagnostic = sanitizeResearchText(
+    [result.telemetry?.providerErrors.join("; "), result.stderr.trim()]
+      .filter(Boolean)
+      .join("\n") ||
+      "Reviewer exited without a textual diagnostic; inspect the configured runtime before retrying.",
+    secrets,
+  );
+  for (const path of [
+    capsuleRoot,
+    input.root,
+    input.environment.HOME,
+    input.environment.CLAUDE_CONFIG_DIR,
+    input.environment.CODEX_HOME,
+  ]) {
+    if (path) diagnostic = diagnostic.replaceAll(path, "[private-path]");
+  }
+  return sanitizeResearchValue(
+    {
+      exitCode: result.exitCode,
+      diagnostic: diagnostic.slice(0, 2048),
+      stdoutSha256: sha256Text(result.stdout),
+      stderrSha256: sha256Text(result.stderr),
+      minimumAction:
+        "Correct the reported runtime or provider failure, then explicitly use --retry. No review was submitted.",
+    },
+    secrets,
+  ) as Record<string, unknown>;
+}
+
+function executionError(code: string, message: string, details?: Record<string, unknown>) {
+  return new CliError(message, { code, exitCode: 3, ...(details ? { details } : {}) });
 }

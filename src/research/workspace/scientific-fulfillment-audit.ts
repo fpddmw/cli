@@ -1,0 +1,172 @@
+import { readFile } from "node:fs/promises";
+import { CliError } from "../../errors.js";
+import { parseScientificDesign } from "./scientific-design.js";
+import {
+  applyScientificFulfillmentRecord,
+  validateScientificFulfillmentRecord,
+} from "./scientific-fulfillment.js";
+import { canonicalJson, isObject, resolveContained, sha256Text } from "./storage.js";
+import type { JournalEvent, OutputRecord, ProjectState } from "./types.js";
+
+/** A portable integrity check, not certification of authorship, scientific truth or execution. */
+export async function verifyScientificFulfillmentAudit(
+  bundle: string,
+  projectId: string,
+  files: OutputRecord[],
+) {
+  const indexed = new Map(files.map((file) => [file.path, file]));
+  const cache = new Map<string, unknown>();
+  const read = async <T>(path: string): Promise<T> => {
+    if (!cache.has(path)) {
+      const expected = indexed.get(path);
+      if (!expected || expected.bytes > 16 * 1024 * 1024) throw invalid();
+      const text = await readFile(resolveContained(bundle, path), "utf8");
+      if (sha256Text(text) !== expected.sha256 || Buffer.byteLength(text) !== expected.bytes)
+        throw invalid();
+      try {
+        cache.set(path, JSON.parse(text));
+      } catch {
+        throw invalid();
+      }
+    }
+    return cache.get(path) as T;
+  };
+  const project = await read<ProjectState>("state/project.json");
+  const proof = await read<{
+    events: Array<
+      Pick<JournalEvent, "scope" | "type" | "payload"> & { sourcePayloadSha256: string }
+    >;
+  }>("state/journal-event-proofs.json");
+  if (project.id !== projectId || !Array.isArray(proof.events)) throw invalid();
+  const events = proof.events.filter(
+    (event) => event.scope === projectId && event.type === "scientific.fulfillment.recorded",
+  );
+  const binding = project.scientificDesign;
+  if (!events.length) {
+    if (binding?.fulfillmentSha256) throw invalid();
+    return;
+  }
+  if (!binding || binding.fulfillmentSha256 !== events.at(-1)?.payload.recordSha256)
+    throw invalid();
+  const basePath = `project/scientific/design/objects/${binding.designSha256}.json`;
+  if (indexed.get(basePath)?.sha256 !== binding.designSha256) throw invalid();
+  const base = parseScientificDesign(await read(basePath));
+  if (base.projectId !== projectId) throw invalid();
+  const effective = structuredClone(base);
+  let parent: string | null = null;
+  const seen = new Set<string>();
+  for (const event of events) {
+    if (event.sourcePayloadSha256 !== sha256Text(canonicalJson(event.payload))) throw invalid();
+    const hash = String(event.payload.recordSha256);
+    if (seen.has(hash) || !/^[a-f0-9]{64}$/.test(hash)) throw invalid();
+    seen.add(hash);
+    const record = validateScientificFulfillmentRecord(
+      await read(`project/scientific/fulfillments/${hash}.json`),
+      projectId,
+      hash,
+    );
+    if (
+      record.designSha256 !== binding.designSha256 ||
+      record.parentFulfillmentSha256 !== parent ||
+      event.payload.parentFulfillmentSha256 !== parent ||
+      record.requestSha256 !== event.payload.requestSha256
+    )
+      throw invalid();
+    for (const [kind, items] of [
+      ["model-implementation", record.modelImplementations],
+      ["environment-lock", record.environmentLocks],
+    ] as const) {
+      for (const item of items) {
+        const locator = `lineage/objects/${item.sha256}/${kind}.json`;
+        const metadata = await read<Record<string, unknown>>(`workspace-objects/${locator}`);
+        const { recordSha256, ...core } = metadata;
+        const bytes = indexed.get(`workspace-objects/${item.objectLocator}`);
+        if (
+          metadata.kind !== "tiangong-scientific-object" ||
+          metadata.schemaVersion !== 1 ||
+          metadata.objectKind !== kind ||
+          metadata.sha256 !== item.sha256 ||
+          metadata.objectLocator !== item.objectLocator ||
+          metadata.recordLocator !== locator ||
+          metadata.hashBasis !== "raw-file-bytes" ||
+          recordSha256 !== item.recordSha256 ||
+          recordSha256 !== sha256Text(canonicalJson(core)) ||
+          bytes?.sha256 !== item.sha256 ||
+          bytes.bytes !== metadata.bytes
+        )
+          throw invalid();
+      }
+    }
+    if (record.parameterStates.length) {
+      const content = await read<{ snapshotSha256: string; atoms: Array<Record<string, unknown>> }>(
+        "project/outputs/content-snapshot.json",
+      );
+      const { snapshotSha256, ...core } = content;
+      if (snapshotSha256 !== sha256Text(canonicalJson(core)) || !Array.isArray(content.atoms))
+        throw invalid();
+      const atoms = new Map(content.atoms.map((atom) => [String(atom.atomId), atom]));
+      for (const parameter of record.parameterStates) {
+        const declared = base.uncertaintyParameters.find(
+          (item) => item.id === parameter.parameterId,
+        );
+        for (const state of parameter.states)
+          for (const reference of state.atoms) {
+            const atom = atoms.get(reference.id);
+            if (
+              !atom ||
+              atom.atomSha256 !== reference.sha256 ||
+              !Array.isArray(atom.evidenceRoleIds) ||
+              !atom.evidenceRoleIds.some((role) =>
+                declared?.sourceEvidenceRoleIds.includes(String(role)),
+              )
+            )
+              throw invalid();
+            const { atomSha256, ...atomCore } = atom;
+            if (atomSha256 !== sha256Text(canonicalJson(atomCore))) throw invalid();
+          }
+      }
+    }
+    applyScientificFulfillmentRecord(effective, record);
+    parent = hash;
+  }
+  // Current prepared/passed gate packets must bind their deadline-specific view.
+  for (const role of ["research-design", "evidence-construct", "pilot-methods"] as const) {
+    const gate = binding.gates[role];
+    if (!gate.packetSha256) continue;
+    const packet = await read<Record<string, unknown>>(
+      `project/scientific/review-packets/${role}/${gate.packetSha256}.json`,
+    );
+    const { packetSha256, ...packetCore } = packet;
+    if (
+      packetSha256 !== gate.packetSha256 ||
+      sha256Text(canonicalJson(packetCore)) !== packetSha256 ||
+      !isObject(packet.design)
+    )
+      throw invalid();
+    const view = structuredClone(base);
+    for (const event of events)
+      applyScientificFulfillmentRecord(
+        view,
+        validateScientificFulfillmentRecord(
+          await read(`project/scientific/fulfillments/${event.payload.recordSha256}.json`),
+          projectId,
+          String(event.payload.recordSha256),
+        ),
+        role,
+      );
+    const packetView = packet.design.fulfillment;
+    if (isObject(packetView)) {
+      if (
+        packetView.effectiveSha256 !== sha256Text(canonicalJson(view)) ||
+        (packetView.headSha256 !== null && !seen.has(String(packetView.headSha256)))
+      )
+        throw invalid();
+    } else if (canonicalJson(view) !== canonicalJson(base)) throw invalid();
+  }
+}
+function invalid() {
+  return new CliError(
+    "Scientific fulfillment audit relationships or source objects are inconsistent.",
+    { code: "RESEARCH_AUDIT_BUNDLE_INVALID", exitCode: 3 },
+  );
+}

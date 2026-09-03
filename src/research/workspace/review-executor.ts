@@ -12,6 +12,12 @@ import { cp, chmod, lstat, mkdir, open, readFile, realpath, rm } from "node:fs/p
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { CliError } from "../../errors.js";
+import {
+  isIsolatedReviewToolPolicy,
+  openArtifactViews,
+  reviewNetworkPolicy,
+  type ArtifactViewBinding,
+} from "./artifact-views.js";
 import { packageVersion, RESEARCH_PACKAGE_NAME } from "./constants.js";
 import {
   researchPlatformCapabilities,
@@ -129,7 +135,8 @@ interface ReviewBridgeExecutePayload {
   maxToolContextTokens: number;
   maxCostUsd: number;
   expectedRuntime: AgentRuntimeFingerprint | null;
-  toolPolicy: "none";
+  toolPolicy: "none" | "packet-read";
+  artifactViews?: ArtifactViewBinding;
   brokerUrl: null;
 }
 
@@ -419,10 +426,10 @@ async function executeThroughBridge(
   request: AgentExecutionRequest,
   nonceFactory: () => string,
 ): Promise<ExecutionResult> {
-  if (request.toolPolicy !== "none" || request.brokerUrl !== null) {
+  if (!isIsolatedReviewToolPolicy(request)) {
     throw bridgeError(
       "RESEARCH_REVIEW_BRIDGE_SANDBOX_POLICY_INVALID",
-      "sandbox-bridge accepts only a tool-free reviewer request with no broker or MCP route.",
+      "sandbox-bridge accepts only tool-free or exact packet-read review, without a broker or external MCP route.",
     );
   }
   const binding = await bridgeBinding(root, "execute", request.requestId, nonceFactory);
@@ -446,7 +453,8 @@ async function executeThroughBridge(
     maxToolContextTokens: request.maxToolContextTokens ?? 0,
     maxCostUsd: request.maxCostUsd,
     expectedRuntime: request.expectedRuntime ?? null,
-    toolPolicy: "none",
+    toolPolicy: request.toolPolicy as "none" | "packet-read",
+    ...(request.artifactViews ? { artifactViews: request.artifactViews } : {}),
     brokerUrl: null,
   };
   const core = { ...binding.core, action: "execute" as const, payload };
@@ -681,10 +689,10 @@ async function executeSidecarReview(input: {
   executeNative: NativeExecutor;
 }): Promise<{ result: ExecutionResult }> {
   const payload = input.request.payload;
-  if (payload.toolPolicy !== "none" || payload.brokerUrl !== null) {
+  if (!isIsolatedReviewToolPolicy(payload)) {
     throw bridgeError(
       "RESEARCH_REVIEW_BRIDGE_SANDBOX_POLICY_INVALID",
-      "The reviewer sidecar rejected a request that could enable tools, MCP, browser, or broker access.",
+      "The reviewer sidecar accepts no unrestricted tools, browser, broker, or external MCP route.",
     );
   }
   if (
@@ -729,6 +737,12 @@ async function executeSidecarReview(input: {
         "The private reviewer capsule does not match the signed source capsule.",
       );
     }
+    if (payload.artifactViews)
+      await openArtifactViews(
+        privateProject,
+        payload.artifactViews.index,
+        payload.artifactViews.packetSha256,
+      );
     const result = await input.executeNative({
       route: input.config.reviewer,
       prompt: payload.prompt,
@@ -744,14 +758,15 @@ async function executeSidecarReview(input: {
       maxToolContextTokens: payload.maxToolContextTokens,
       maxCostUsd: payload.maxCostUsd,
       expectedRuntime: payload.expectedRuntime ?? undefined,
-      toolPolicy: "none",
+      toolPolicy: payload.toolPolicy,
+      ...(payload.artifactViews ? { artifactViews: payload.artifactViews } : {}),
       environment: input.environment,
       brokerUrl: null,
     });
     if (
       !result.isolation ||
-      result.isolation.toolPolicy !== "none" ||
-      result.isolation.networkPolicy !== "reviewer-provider-only" ||
+      result.isolation.toolPolicy !== payload.toolPolicy ||
+      result.isolation.networkPolicy !== reviewNetworkPolicy(payload.toolPolicy) ||
       !HASH_PATTERN.test(result.isolation.policySha256)
     ) {
       throw bridgeError(
@@ -769,7 +784,7 @@ async function executeSidecarReview(input: {
         "The executed reviewer runtime does not match the configured reviewer model.",
       );
     }
-    if ((result.telemetry?.toolCalls ?? 0) !== 0) {
+    if (payload.toolPolicy === "none" && (result.telemetry?.toolCalls ?? 0) !== 0) {
       throw bridgeError(
         "RESEARCH_REVIEW_BRIDGE_SANDBOX_POLICY_INVALID",
         "The reviewer attempted a tool call despite the tool-free bridge policy.",
@@ -795,7 +810,8 @@ function signBridgeAttestation(input: {
     protocolVersion: REVIEW_BRIDGE_PROTOCOL_VERSION,
     transport: "sandbox-bridge" as const,
     isolationProvider: input.isolationProvider,
-    toolPolicy: "none" as const,
+    toolPolicy:
+      input.request.action === "execute" ? input.request.payload.toolPolicy : ("none" as const),
     workspaceId: input.request.workspaceId,
     requestId: input.request.requestId,
     requestSha256: input.request.requestSha256,
@@ -837,6 +853,8 @@ function verifyBridgeResponse(
   const { signature, attestationSha256, ...core } = attestation;
   if (
     attestation.workspaceId !== request.workspaceId ||
+    attestation.toolPolicy !==
+      (request.action === "execute" ? request.payload.toolPolicy : "none") ||
     attestation.requestId !== request.requestId ||
     attestation.requestSha256 !== request.requestSha256 ||
     attestation.runtimeLockSha256 !== request.runtimeLockSha256 ||
@@ -1297,7 +1315,11 @@ function isExecutePayload(value: unknown): value is ReviewBridgeExecutePayload {
     Number(value.maxToolContextTokens) >= 0 &&
     typeof value.maxCostUsd === "number" &&
     value.maxCostUsd >= 0 &&
-    value.toolPolicy === "none" &&
+    isIsolatedReviewToolPolicy({
+      toolPolicy: value.toolPolicy,
+      artifactViews: value.artifactViews,
+      brokerUrl: value.brokerUrl,
+    }) &&
     value.brokerUrl === null
   );
 }

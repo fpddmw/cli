@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { CliError } from "../../errors.js";
+import { unrecordedRequestProvenance } from "./request-provenance.js";
+import { validateNativeRunRecord, type NativeRunRecord } from "./native-run.js";
 import {
   compileTaskAcceptanceContext,
   taskRecordStatus,
@@ -84,7 +86,11 @@ export async function verifyTaskAudit(
   const events = proof.events.filter((event) => event.scope === projectId);
   const currentBinding = latestTaskBinding(events, projectId);
   if (!currentBinding) {
-    if (binding || indexed.has("state/task-acceptance.json"))
+    if (
+      binding ||
+      indexed.has("state/task-acceptance.json") ||
+      events.some((event) => event.type.startsWith("project.task.run."))
+    )
       throw invalid("Task audit has no committed task authority.");
     return undefined;
   }
@@ -95,7 +101,10 @@ export async function verifyTaskAudit(
     hash: string,
     hashField: string,
   ) => {
-    if (!["contracts", "proposals", "acceptance"].includes(group) || !HASH.test(hash))
+    if (
+      !["contracts", "proposals", "acceptance", "request-sources", "runs"].includes(group) ||
+      !HASH.test(hash)
+    )
       throw invalid("Task audit object address is invalid.");
     return validateTaskObject<T>(await read(`project/task/${group}/${hash}.json`), hash, hashField);
   };
@@ -116,6 +125,8 @@ export async function verifyTaskAudit(
     context.contractSha256 !== binding.contractSha256 ||
     context.originalContractSha256 !== binding.originalContractSha256 ||
     context.originalRequest !== history.original.originalRequest ||
+    canonicalJson(context.requestProvenance) !==
+      canonicalJson(history.original.requestProvenance ?? unrecordedRequestProvenance()) ||
     !Array.isArray(context.requirements) ||
     !Array.isArray(context.results)
   )
@@ -124,6 +135,8 @@ export async function verifyTaskAudit(
     history.contracts.map((contract) => [contract.contractSha256, contract]),
   );
   const latest = new Map<string, TaskAcceptanceRecord>();
+  const runStarts = new Map<string, ProofEvent>();
+  const nativeRuns = new Map<string, NativeRunRecord>();
   let activeContract: string | null = null;
   for (const event of events) {
     const isTaskAuthority = latestTaskBinding([event], projectId);
@@ -132,6 +145,53 @@ export async function verifyTaskAudit(
         throw invalid("Task audit journal payload changed from its source proof.");
     }
     if (isTaskAuthority) activeContract = String(isTaskAuthority.contractSha256);
+    if (event.type === "project.task.run.started") {
+      const runId = String(event.payload.runId);
+      const contract = activeContract ? contracts.get(activeContract) : null;
+      const requirement = contract?.requirements.find(
+        (item) =>
+          taskRequirementSha256(item) === event.payload.requirementSha256 &&
+          item.id === event.payload.requirementId,
+      );
+      if (runStarts.has(runId) || !requirement || requirement.checkKind !== "computation")
+        throw invalid("Native run start is not bound to its active computational requirement.");
+      runStarts.set(runId, event);
+      continue;
+    }
+    if (event.type === "project.task.run.completed") {
+      const hash = String(event.payload.recordSha256);
+      const run = validateNativeRunRecord(
+        await objectReader("runs", hash, "recordSha256"),
+        projectId,
+      );
+      const started = runStarts.get(run.runId);
+      if (
+        !started ||
+        nativeRuns.has(hash) ||
+        event.payload.runId !== run.runId ||
+        event.payload.requestSha256 !== run.requestSha256 ||
+        event.payload.status !== run.status ||
+        started.payload.requestSha256 !== run.requestSha256 ||
+        started.payload.requirementSha256 !== run.requirementSha256 ||
+        started.payload.requirementId !== run.requirementId ||
+        started.payload.scriptSha256 !== run.script.sha256 ||
+        started.payload.environmentLockSha256 !== run.environmentLock.sha256 ||
+        started.payload.runtimeBinarySha256 !== run.runtime.binarySha256 ||
+        started.payload.nativePacketSha256 !== run.nativePacketSha256
+      )
+        throw invalid(
+          "Native run completion does not bind its exact observed start and artifacts.",
+        );
+      for (const object of [run.script, run.environmentLock, ...run.inputs, ...run.outputs]) {
+        const file = indexed.get(`project/${object.path}`);
+        if (!file || file.sha256 !== object.sha256 || file.bytes !== object.bytes)
+          throw invalid(
+            "Native run program, input, environment or output bytes are absent or inconsistent.",
+          );
+      }
+      nativeRuns.set(hash, run);
+      continue;
+    }
     if (event.type !== "project.task.acceptance.recorded") continue;
     const record = validateTaskAcceptanceRecord(
       await objectReader<TaskAcceptanceRecord>(
@@ -156,6 +216,11 @@ export async function verifyTaskAudit(
         "Audit check history is not bound to its active requirement or previous record.",
       );
     latest.set(record.requirementSha256, record);
+    if (
+      record.nativeRunSha256 &&
+      canonicalJson(nativeRuns.get(record.nativeRunSha256)) !== canonicalJson(record.nativeRun)
+    )
+      throw invalid("Acceptance does not bind a previously committed exact native run.");
     for (const result of record.results) {
       const file = indexed.get(`project/${result.path}`);
       if (!file || file.sha256 !== result.sha256 || file.bytes !== result.bytes)
@@ -167,6 +232,7 @@ export async function verifyTaskAudit(
     sources: new Map(),
     atoms: new Map(),
     findings: new Map(),
+    artifacts: new Map(),
   };
   if (references.ready && latest.size) {
     const acquisition = await read<{
@@ -183,6 +249,8 @@ export async function verifyTaskAudit(
       `project/${acquisition.evidenceRecord.path}`,
     );
     const included = new Set(acquisition.sources.map((source) => source.id));
+    for (const artifact of acquisition.artifacts)
+      references.artifacts.set(artifact.artifactId, artifact.sha256);
     for (const source of evidence.sources)
       if (included.has(String(source.id)))
         references.sources.set(String(source.id), sha256Text(canonicalJson(source)));

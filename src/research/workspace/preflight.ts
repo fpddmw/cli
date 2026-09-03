@@ -35,6 +35,9 @@ export const RESEARCH_CODEX_STRUCTURED_OUTPUT_MAX_TURNS = 2;
 export const RESEARCH_CLAUDE_STRUCTURED_OUTPUT_MAX_TURNS = 3;
 export const RESEARCH_BROKER_MAX_TURNS = 6;
 export const RESEARCH_REPAIR_MAX_TURNS = 1;
+export const RESEARCH_PACKET_READ_MAX_TURNS = 64;
+// Rough reservation inputs, not corpus, page-count or provider-context limits.
+export const RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS = 16_000;
 const RESEARCH_PREFLIGHT_PROMPT_ALLOWANCE_TOKENS = 3_000;
 
 export interface EvidenceCoverageGap {
@@ -316,10 +319,10 @@ export async function evaluateProjectPreflight(
     }
   }
   const stageContextTokenReservations = {
-    acquire: researchStageContextTokenLimit(config, "acquire"),
-    analyze: researchStageContextTokenLimit(config, "analyze"),
-    synthesize: researchStageContextTokenLimit(config, "synthesize"),
-    review: researchStageContextTokenLimit(config, "review"),
+    acquire: researchStageContextTokenEstimate(config, "acquire"),
+    analyze: researchStageContextTokenEstimate(config, "analyze"),
+    synthesize: researchStageContextTokenEstimate(config, "synthesize"),
+    review: researchStageContextTokenEstimate(config, "review"),
   };
   const producerStructuredOutputMaxTurns = researchStructuredOutputMaxTurns(config.producer);
   const reviewerStructuredOutputMaxTurns = researchStructuredOutputMaxTurns(config.reviewer);
@@ -339,11 +342,6 @@ export async function evaluateProjectPreflight(
       (sum, input) => sum + Math.ceil((input.contextBytes ?? input.bytes) / 4),
       0,
     ) ?? 0;
-  if (estimatedInputContextTokens > config.budget.maxInputContextTokens) {
-    gaps.push(
-      `input-context-reservation-exceeds-total:${estimatedInputContextTokens}/${config.budget.maxInputContextTokens}`,
-    );
-  }
   const maxTurns = {
     // The native producer receives one prepared packet and submits one closeout.
     // Broker fetches are separately bounded CLI operations, not repeated nested
@@ -381,7 +379,8 @@ export async function evaluateProjectPreflight(
   const preCallTokenReservations = {
     discover: estimatedStageTokenReservation(
       config.producer,
-      estimatedInputContextTokens + capabilityDocumentationReservation,
+      Math.min(estimatedInputContextTokens, 8_000) +
+        Math.min(capabilityDocumentationReservation, 8_000),
       schemaTokens.discover,
       maxTurns.discover,
       config,
@@ -416,6 +415,7 @@ export async function evaluateProjectPreflight(
       schemaTokens.review,
       reviewerStructuredOutputMaxTurns,
       config,
+      RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS,
     ),
   };
   for (const [stage, reservation] of Object.entries(preCallTokenReservations)) {
@@ -494,6 +494,10 @@ export async function evaluateProjectPreflight(
       maxRepairTokens: config.budget.maxRepairTokens,
       estimatedInputContextTokens,
       maxInputContextTokens: config.budget.maxInputContextTokens,
+      inputContextTokenLimit: null,
+      contextReservationBasis: "initial-inline-plus-on-demand-estimate",
+      estimatedReviewReadTokens: RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS,
+      reviewerTurnLimit: config.reviewer.agent === "claude" ? RESEARCH_PACKET_READ_MAX_TURNS : null,
       embeddedStageContextReservation,
       stageContextTokenReservations,
       recommendedDiscoverOutputTokens,
@@ -569,16 +573,14 @@ export function researchStructuredOutputMaxTurns(route: Pick<AgentRoute, "agent"
     : RESEARCH_CODEX_STRUCTURED_OUTPUT_MAX_TURNS;
 }
 
-/** Stage inputs are distinct from generated output, including incremental discovery metadata. */
-export function researchStageContextTokenLimit(
+/** Legacy-named planning estimate, not a stage admission or corpus-length limit. */
+export function researchStageContextTokenEstimate(
   config: Pick<WorkspaceConfig, "budget">,
   stage: AgentPackageStage | "close",
   addendum = false,
 ): number {
-  if (stage === "review")
-    return config.budget.maxInputContextTokens + config.budget.maxOutputTokens * 4;
   if (stage === "close" || (stage === "discover" && !addendum)) return 0;
-  return config.budget.maxInputContextTokens;
+  return Math.min(config.budget.maxInputContextTokens, 8_000) * (stage === "review" ? 3 : 1);
 }
 
 function estimatedStageTokenReservation(

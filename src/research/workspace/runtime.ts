@@ -1,10 +1,21 @@
 import { randomUUID } from "node:crypto";
-import { cp, lstat, readFile, rm } from "node:fs/promises";
+import { cp, lstat, readFile, realpath, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { CliError } from "../../errors.js";
 import { isConsistentAnalysisRunMetadata } from "./analysis-run.js";
+import {
+  artifactPromptContext,
+  artifactReadInstructions,
+  openArtifactViews,
+  persistArtifactReads,
+  persistArtifactViewIndex,
+  writeArtifactViewIndex,
+  verifyPersistedArtifactViewIndex,
+  type ArtifactReadSelection,
+} from "./artifact-views.js";
 import { taskContext } from "./task-contract.js";
+import { nativeRunArtifactRecords } from "./native-run.js";
 import {
   compileTaskAcceptanceContext,
   inspectProjectTask,
@@ -15,6 +26,7 @@ import {
 import {
   assertProjectAuthority,
   projectAuthority,
+  projectAuthorityIndex,
   projectWithEffectiveAuthority,
   readProjectAuthorityIndex,
   type ProjectAuthorityIndex,
@@ -63,7 +75,7 @@ import {
   freezeInferenceSnapshot,
   loadCurrentInferenceSnapshot,
 } from "./inference.js";
-import { appendJournalEvent, readJournal, verifyJournal } from "./journal.js";
+import { appendJournalEvent, readJournal, readVerifiedJournal, verifyJournal } from "./journal.js";
 import { nativeActivityRecordSchema } from "./native-activity.js";
 import {
   calculateAgentCallTokenReservation,
@@ -71,7 +83,8 @@ import {
   RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
   RESEARCH_MAX_REPAIR_SOURCE_BYTES,
   RESEARCH_REPAIR_MAX_TURNS,
-  researchStageContextTokenLimit,
+  RESEARCH_PACKET_READ_MAX_TURNS,
+  RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS,
   researchStructuredOutputMaxTurns,
   reservedAgentPackageCost,
 } from "./preflight.js";
@@ -463,6 +476,7 @@ export interface NativeStagePacket {
   outputSchema: Record<string, unknown>;
   publicationPolicy: StagedPublicationPolicy | null;
   taskContract: Awaited<ReturnType<typeof taskContext>>;
+  artifactViews: OutputRecord;
   discovery: DiscoveryProgress | null;
   limits: {
     maxOutputBytes: number;
@@ -473,6 +487,8 @@ export interface NativeStagePacket {
     maxWallSeconds: number;
   };
   commands: {
+    listArtifacts: { argv: string[] };
+    readArtifact: { argv: string[] };
     fetchEvidence: { argv: string[]; requestSchema: Record<string, unknown> } | null;
     runDataCapability: {
       argv: string[];
@@ -616,6 +632,102 @@ export async function inspectNativeResearchStage(
   }
 }
 
+export async function readNativeStageArtifact(input: {
+  root: string;
+  projectId: string;
+  sessionId: string;
+  selection?: ArtifactReadSelection;
+  listing?: { offset?: number; limit?: number; pathPrefix?: string };
+}) {
+  return withWorkspaceLock(input.root, "research.native-stage.read", async () => {
+    const project = await loadProject(input.root, input.projectId);
+    const events = await readVerifiedJournal(workspacePaths(input.root).journal);
+    assertProjectAuthority(project, projectAuthorityIndex(events));
+    const session = await readNativeStageSession(input.root, input.projectId);
+    const prepared = events.findLast(
+      (event) =>
+        event.scope === project.id &&
+        event.type === "native.stage.prepared" &&
+        event.payload.sessionId === input.sessionId,
+    );
+    const runtimeRoot = await realpath(workspacePaths(input.root).runtime);
+    const capsule = await realpath(session.capsuleProject);
+    if (
+      session.packet.sessionId !== input.sessionId ||
+      prepared?.payload.packetSha256 !== session.packet.packetSha256 ||
+      project.handoff.state !== "agent-actionable" ||
+      relative(runtimeRoot, capsule).startsWith("..") ||
+      isAbsolute(relative(runtimeRoot, capsule)) ||
+      Date.now() - Date.parse(session.packet.preparedAt) >
+        session.packet.limits.maxWallSeconds * 1000 ||
+      packageById(project, session.packet.packageId).status !== "running" ||
+      !session.packet.artifactViews
+    ) {
+      throw new CliError("Artifact reads require the exact active native stage packet.", {
+        code: "RESEARCH_NATIVE_STAGE_SESSION_REQUIRED",
+        exitCode: 3,
+      });
+    }
+    await assertNativeStageBinding(input.root, project, session.packet);
+    const views = await openArtifactViews(
+      session.capsuleProject,
+      session.packet.artifactViews,
+      session.packet.packetSha256,
+    );
+    if (views.index.projectId !== project.id)
+      throw new CliError("Artifact directory belongs to another project.", {
+        code: "RESEARCH_ARTIFACT_VIEW_INVALID",
+        exitCode: 3,
+      });
+    if (!input.selection) return views.list(input.listing);
+    const result = await views.read(input.selection);
+    await persistArtifactReads(
+      projectRoot(input.root, project.id),
+      session.capsuleProject,
+      session.packet.artifactViews,
+      session.packet.packetSha256,
+      [result.receipt],
+    );
+    await appendJournalEvent(
+      workspacePaths(input.root).journal,
+      "native.artifact.read",
+      project.id,
+      sanitizeResearchRecord({ ...result.receipt }),
+    );
+    return result;
+  });
+}
+
+/** Called under an existing short lease; observing a calculation never opens a producer. */
+export async function inspectNativeCalculationScope(
+  root: string,
+  project: ProjectState,
+  sessionId: string,
+): Promise<string> {
+  const session = await readNativeStageSession(root, project.id);
+  const events = await readVerifiedJournal(workspacePaths(root).journal);
+  const prepared = events.findLast(
+    (event) =>
+      event.scope === project.id &&
+      event.type === "native.stage.prepared" &&
+      event.payload.sessionId === sessionId,
+  );
+  if (
+    session.packet.sessionId !== sessionId ||
+    !["analyze", "synthesize"].includes(session.packet.stage) ||
+    prepared?.payload.packetSha256 !== session.packet.packetSha256 ||
+    packageById(project, session.packet.packageId).status !== "running" ||
+    Date.now() - Date.parse(session.packet.preparedAt) > session.packet.limits.maxWallSeconds * 1000
+  ) {
+    throw new CliError(
+      "The calculation must bind the exact active post-acquisition native packet.",
+      { code: "RESEARCH_NATIVE_RUN_BINDING_INVALID", exitCode: 3 },
+    );
+  }
+  await assertNativeStageBinding(root, project, session.packet);
+  return session.packet.packetSha256;
+}
+
 export async function prepareNativeResearchStage(input: {
   root: string;
   projectId: string;
@@ -723,6 +835,7 @@ export async function prepareNativeResearchStage(input: {
         capsule.projectRoot,
         project,
         workPackage,
+        capsule.artifactViews,
         config,
       );
       const declarations = await loadCapabilityDeclarations(input.root);
@@ -743,6 +856,7 @@ export async function prepareNativeResearchStage(input: {
         stageContextContent,
         discovery,
         await listEvidenceCandidates(input.root, project.id),
+        "native-host",
       );
       const taskContract = await taskContext(
         input.root,
@@ -751,26 +865,14 @@ export async function prepareNativeResearchStage(input: {
       );
       const taskPrompt = taskContract
         ? "Original task and current authorized scope (a workflow finish is not task completion):\n" +
-          JSON.stringify(taskContract)
+          (await artifactPromptContext(capsule.projectRoot, capsule.artifactViews, [
+            "inputs/task-context.json",
+          ]))
         : "";
-      if (
-        taskContract &&
-        Buffer.byteLength(
-          taskPrompt +
-            (input.stage === "discover" ? capsule.contextBundleContent : "") +
-            stageContextContent,
-          "utf8",
-        ) >
-          config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN
-      ) {
-        throw new CliError(
-          "The complete task and evidence context exceeds the reviewed input allowance. Condense representation without dropping requirements or explicitly review a larger context budget.",
-          { code: "RESEARCH_TASK_CONTEXT_TOO_LARGE", exitCode: 3 },
-        );
-      }
       const prompt = [
         "Perform this producer stage in the current interactive host session. Do not launch codex exec, claude -p, or any other nested reasoning agent.",
         capsule.publicationPolicyDocumentation,
+        artifactReadInstructions(capsule.artifactViews),
         taskPrompt,
         input.stage === "discover" && (hasBrokeredEvidence || hasDataEvidence)
           ? [
@@ -788,7 +890,6 @@ export async function prepareNativeResearchStage(input: {
             ? "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. Capture the exact browser/adapter Download object, save it to the planned unique staging path, and call bindDownload before registerArtifact. Record browser/download/file-inspection activity with recordActivity. Failed or cancelled downloads cannot create bindings or artifacts. Never scan a download directory or infer success from file existence."
             : "Do not acquire additional evidence in this stage.",
         basePrompt,
-        "Save only the final schema-conforming JSON object to a new regular file, then submit it with the packet's submit command. The CLI remains the sole authority for validation and atomic promotion.",
       ].join("\n\n");
       const preparedAt = new Date().toISOString();
       const bindingSha256 = await nativeStageBinding(input.root, project, workPackage);
@@ -813,6 +914,7 @@ export async function prepareNativeResearchStage(input: {
         ),
         publicationPolicy: capsule.publicationPolicy,
         taskContract,
+        artifactViews: capsule.artifactViews,
         discovery,
         limits: {
           maxOutputBytes: config.budget.maxBytesPerPackage,
@@ -823,6 +925,42 @@ export async function prepareNativeResearchStage(input: {
           maxWallSeconds: config.budget.packageMaxWallSeconds[input.stage],
         },
         commands: {
+          listArtifacts: {
+            argv: [
+              "tiangong-ai",
+              "research",
+              "project",
+              "stage",
+              "artifacts",
+              project.id,
+              "--session",
+              sessionId,
+              "--workspace",
+              input.root,
+              "--json",
+            ],
+          },
+          readArtifact: {
+            argv: [
+              "tiangong-ai",
+              "research",
+              "project",
+              "stage",
+              "read",
+              project.id,
+              "--session",
+              sessionId,
+              "--artifact",
+              "<objectId-from-directory>",
+              "--offset",
+              "<byte-offset>",
+              "--length",
+              "<bytes-or-all>",
+              "--workspace",
+              input.root,
+              "--json",
+            ],
+          },
           inspectAccess: project.scientificDesign
             ? {
                 argv: [
@@ -1146,6 +1284,7 @@ export async function prepareNativeResearchStage(input: {
         {
           sessionId,
           packetSha256: packet.packetSha256,
+          artifactViewIndexSha256: packet.artifactViews.sha256,
           bindingSha256,
           projectId: project.id,
           packageId: workPackage.id,
@@ -1887,6 +2026,7 @@ async function executeWorkPackage(
         capsule.projectRoot,
         project,
         workPackage,
+        capsule.artifactViews,
         config,
       );
       const route = workPackage.executor === "reviewer" ? config.reviewer : config.producer;
@@ -1924,11 +2064,15 @@ async function executeWorkPackage(
             stageContextContent,
             discovery,
             await listEvidenceCandidates(root, project.id),
+            "headless-cli",
           ) +
           (capsule.publicationPolicyDocumentation
             ? `\n\n${capsule.publicationPolicyDocumentation}`
             : "") +
-          (capsule.taskAcceptancePrompt ? `\n\n${capsule.taskAcceptancePrompt}` : ""),
+          (capsule.taskAcceptancePrompt ? `\n\n${capsule.taskAcceptancePrompt}` : "") +
+          (workPackage.stage === "review"
+            ? `\n\n${artifactReadInstructions(capsule.artifactViews)}`
+            : ""),
         brokerUrl: primaryBrokerUrl,
         inputOnlyProvenance,
         maxOutputTokens: Math.min(stageOutputTokens, reservation.tokens),
@@ -1946,6 +2090,26 @@ async function executeWorkPackage(
         config,
       );
       accountedResult = result;
+      if (primaryRequest.artifactViews && result.artifactReads?.length) {
+        await persistArtifactReads(
+          projectRoot(root, project.id),
+          capsule.projectRoot,
+          capsule.artifactViews,
+          primaryRequest.artifactViews.packetSha256,
+          result.artifactReads,
+        );
+        await appendJournalEvent(
+          workspacePaths(root).journal,
+          "review.artifacts.read",
+          project.id,
+          sanitizeResearchRecord({
+            requestId,
+            packetSha256: primaryRequest.artifactViews.packetSha256,
+            indexSha256: capsule.artifactViews.sha256,
+            receipts: result.artifactReads.map((receipt) => receipt.receiptSha256),
+          }),
+        );
+      }
       assertExecutorSucceeded(result);
       assertActualPackageBudget(project, workPackage, config, result, stageOutputTokens);
       let acceptedRaw = result.stdout;
@@ -2252,6 +2416,7 @@ interface Capsule {
   reviewPacketRecord: OutputRecord | null;
   taskAcceptance: TaskAcceptanceContext | null;
   taskAcceptancePrompt: string;
+  artifactViews: OutputRecord;
 }
 
 interface CapsuleInputRecord {
@@ -2314,7 +2479,14 @@ async function stagePublicationPolicy(
     manifestPath: resolveContained(capsuleProject, manifestPath),
     documents,
   };
-  await writeJsonAtomic(staged.manifestPath, staged);
+  await writeJsonAtomic(staged.manifestPath, {
+    ...staged,
+    manifestPath,
+    documents: documents.map((document) => ({
+      ...document,
+      path: relative(capsuleProject, document.path).replaceAll("\\", "/"),
+    })),
+  });
   return staged;
 }
 
@@ -2457,16 +2629,16 @@ async function createCapsule(
         `verdictCeiling=${publicationPolicy.verdictCeiling}`,
         ...publicationPolicy.documents.map(
           (document) =>
-            `- ${document.kind}:${document.id} sha256=${document.sha256} path=${document.path}`,
+            `- ${document.kind}:${document.id} sha256=${document.sha256} path=${relative(capsuleProject, document.path).replaceAll("\\", "/")}`,
         ),
         "Read every listed policy document before reasoning. Generic defaults are explicit constraints, not evidence that a target journal will accept the manuscript.",
       ].join("\n")
     : "";
   const stagedSkills = await stageLockedCapabilities(root, join(capsuleProject, "skills"));
-  const capabilityDocumentation = await buildCapabilityDocumentation(
-    capsuleProject,
-    stagedSkills,
-    config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
+  const capabilityDocumentation = await buildCapabilityDocumentation(capsuleProject, stagedSkills);
+  await writeTextAtomic(
+    join(capsuleProject, "inputs/capability-documentation.txt"),
+    capabilityDocumentation,
   );
   const reviewEvidenceContext =
     workPackage.stage === "review"
@@ -2480,6 +2652,39 @@ async function createCapsule(
           config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
         )
       : null;
+  const task = taskAcceptance ?? (await taskContext(root, project.id));
+  if (task) {
+    await writeJsonAtomic(join(capsuleProject, "inputs/task-context.json"), task);
+    const source = task.requestProvenance.source;
+    if (source) {
+      const logical = `task/request-sources/${source.objectSha256}.json`;
+      await ensureDirectory(dirname(resolveContained(capsuleProject, logical)));
+      await cp(
+        resolveContained(projectRoot(root, project.id), logical),
+        resolveContained(capsuleProject, logical),
+        { force: false },
+      );
+    }
+  }
+  const taskArtifacts = new Map(
+    (taskAcceptance?.results ?? []).map((record) => [record.path, record]),
+  );
+  if (task)
+    for (const record of await nativeRunArtifactRecords(root, project.id))
+      taskArtifacts.set(record.path, record);
+  for (const result of taskArtifacts.values()) {
+    await ensureDirectory(dirname(resolveContained(capsuleProject, result.path)));
+    await cp(
+      resolveContained(projectRoot(root, project.id), result.path),
+      resolveContained(capsuleProject, result.path),
+      { force: false },
+    );
+    if ((await sha256File(resolveContained(capsuleProject, result.path))) !== result.sha256)
+      throw new CliError("Native run/check artifact changed while staging the packet.", {
+        code: "RESEARCH_TASK_ARTIFACT_DRIFT",
+        exitCode: 3,
+      });
+  }
   const reviewPacket = reviewEvidenceContext
     ? await writeReviewPacket(
         root,
@@ -2492,27 +2697,33 @@ async function createCapsule(
         taskAcceptance,
       )
     : null;
+  const artifactViews =
+    reviewPacket?.artifactViews ?? (await writeArtifactViewIndex(capsuleProject, project.id));
   return {
     capsuleRoot,
     projectRoot: capsuleProject,
     inputManifest,
     contextBundle,
-    contextBundleContent,
+    contextBundleContent: await artifactPromptContext(capsuleProject, artifactViews, [
+      "inputs/context-bundle.txt",
+    ]),
     stagedSkills,
-    capabilityDocumentation,
+    capabilityDocumentation: await artifactPromptContext(capsuleProject, artifactViews, [
+      "inputs/capability-documentation.txt",
+    ]),
     publicationPolicy,
     publicationPolicyDocumentation,
     reviewPacketSha256: reviewPacket?.sha256 ?? null,
     reviewPacketRecord: reviewPacket?.record ?? null,
     taskAcceptance,
-    taskAcceptancePrompt: await taskAcceptancePrompt(root, taskAcceptance),
+    taskAcceptancePrompt: await taskAcceptancePrompt(taskAcceptance, capsuleProject, artifactViews),
+    artifactViews,
   };
 }
 
 async function buildCapabilityDocumentation(
   capsuleProject: string,
   stagedSkills: string[],
-  maxBytes: number,
 ): Promise<string> {
   const documents = [
     {
@@ -2529,14 +2740,6 @@ async function buildCapabilityDocumentation(
   const bundle = documents
     .map((document) => `--- ${document.path} ---\n${document.content.trimEnd()}`)
     .join("\n\n");
-  const bytes = Buffer.byteLength(bundle, "utf8");
-  if (bytes > maxBytes) {
-    throw new CliError("Staged external Skill documentation exceeds the input context budget.", {
-      code: "RESEARCH_CAPABILITY_CONTEXT_BUDGET_EXCEEDED",
-      exitCode: 3,
-      details: { bytes, maxBytes, skills: stagedSkills.map((path) => basename(path)) },
-    });
-  }
   return bundle;
 }
 
@@ -2573,7 +2776,7 @@ async function writeReviewPacket(
   evidenceArtifacts: Awaited<ReturnType<typeof stageEvidenceArtifacts>>,
   reviewEvidenceContext: OutputRecord,
   taskAcceptance: TaskAcceptanceContext | null,
-): Promise<{ sha256: string; record: OutputRecord }> {
+): Promise<{ sha256: string; record: OutputRecord; artifactViews: OutputRecord }> {
   const snapshot = await loadCurrentEvidenceSnapshot(root, project.id);
   const immutableSnapshots = await loadImmutableEvidenceSnapshotChain(
     root,
@@ -2633,6 +2836,12 @@ async function writeReviewPacket(
     }
   }
   await writeJsonAtomic(join(capsuleProject, "inputs", "runtime-fingerprint.json"), environment);
+  const artifactViews = await writeArtifactViewIndex(capsuleProject, project.id);
+  const persistedViews = await persistArtifactViewIndex(
+    projectRoot(root, project.id),
+    capsuleProject,
+    artifactViews,
+  );
   const packet = {
     schemaVersion: 1,
     projectId: project.id,
@@ -2646,6 +2855,7 @@ async function writeReviewPacket(
     },
     snapshotChain,
     taskAcceptance,
+    artifactViews: persistedViews,
     inputs: inputManifest,
     reviewEvidenceContext,
     inputFiles: [...inputFiles.values()].sort((left, right) => left.path.localeCompare(right.path)),
@@ -2676,7 +2886,7 @@ async function writeReviewPacket(
   };
   await writeJsonAtomic(join(capsuleProject, "inputs", "review-packet.json"), completePacket);
   const record = await persistReviewPacket(root, project.id, completePacket, packetSha256);
-  return { sha256: packetSha256, record };
+  return { sha256: packetSha256, record, artifactViews };
 }
 
 async function writeReviewEvidenceContext(
@@ -2768,15 +2978,10 @@ async function writeReviewEvidenceContext(
     ...views.map((view) => `${view.prefix}${view.active ? "" : view.content}${view.suffix}`),
   ].join("\n\n");
   const fixedBytes = Buffer.byteLength(`${fixedContent}\n`, "utf8");
-  if (fixedBytes > maxBytes) {
-    throw new CliError("Review evidence metadata exceeds the configured context budget.", {
-      code: "RESEARCH_REVIEW_CONTEXT_BUDGET_EXCEEDED",
-      exitCode: 3,
-      details: { fixedBytes, maxBytes, views: views.length },
-    });
-  }
   const activeViews = views.filter((view) => view.active).length;
-  const contentBudgetPerView = activeViews ? Math.floor((maxBytes - fixedBytes) / activeViews) : 0;
+  const contentBudgetPerView = activeViews
+    ? Math.max(0, Math.floor((maxBytes - fixedBytes) / activeViews))
+    : 0;
   const sections = [
     header,
     ...views.map(
@@ -2789,14 +2994,6 @@ async function writeReviewEvidenceContext(
   const logicalPath = "inputs/review-evidence-context.txt";
   const path = resolveContained(capsuleProject, logicalPath);
   const content = `${sections.join("\n\n")}\n`;
-  const actualBytes = Buffer.byteLength(content, "utf8");
-  if (actualBytes > maxBytes) {
-    throw new CliError("Review evidence context exceeded its deterministic byte budget.", {
-      code: "RESEARCH_REVIEW_CONTEXT_BUDGET_EXCEEDED",
-      exitCode: 3,
-      details: { actualBytes, maxBytes },
-    });
-  }
   await writeTextAtomic(path, content);
   const capsule = await fileRecord(path, logicalPath);
   const persistentLogicalPath = `review/contexts/${capsule.sha256}.txt`;
@@ -2858,15 +3055,8 @@ async function writeProducerArtifactContext(
     .map((view) => `${view.prefix}${view.active ? "" : view.content}${view.suffix}`)
     .join("\n\n")}\n`;
   const fixedBytes = Buffer.byteLength(fixed, "utf8");
-  if (fixedBytes > maxBytes) {
-    throw new CliError("Producer artifact metadata exceeds the configured context budget.", {
-      code: "RESEARCH_INPUT_CONTEXT_BUDGET_EXCEEDED",
-      exitCode: 3,
-      details: { fixedBytes, maxBytes, artifacts: views.length },
-    });
-  }
   const activeViews = views.filter((view) => view.active).length;
-  const perView = activeViews ? Math.floor((maxBytes - fixedBytes) / activeViews) : 0;
+  const perView = activeViews ? Math.max(0, Math.floor((maxBytes - fixedBytes) / activeViews)) : 0;
   const content = `${header}\n\n${views
     .map(
       (view) =>
@@ -3056,6 +3246,17 @@ export async function loadVerifiedReviewPacket(
   const path = resolveContained(projectRoot(root, projectId), logicalPath);
   const packet = await readJsonFile<Record<string, unknown>>(path, "Research review packet");
   verifyReviewPacketValue(packet, packetSha256);
+  if (packet.projectId !== projectId)
+    throw new CliError("Review packet belongs to another project.", {
+      code: "RESEARCH_REVIEW_PACKET_DRIFT",
+      exitCode: 3,
+    });
+  if (packet.artifactViews !== undefined)
+    await verifyPersistedArtifactViewIndex(
+      projectRoot(root, projectId),
+      projectId,
+      packet.artifactViews,
+    );
   const context = packet.reviewEvidenceContext;
   if (
     !isObject(context) ||
@@ -3246,13 +3447,19 @@ function agentRequest(input: {
   maxWallSeconds?: number;
   expectedRuntime?: WorkspaceDoctorAttestation["runtimes"][number] | undefined;
 }): AgentExecutionRequest {
-  const toolPolicy = "none" as const;
+  const packetRead =
+    input.purpose === "primary" &&
+    input.workPackage.stage === "review" &&
+    input.capsule.reviewPacketSha256 !== null;
+  const toolPolicy = packetRead ? ("packet-read" as const) : ("none" as const);
   const maxTurns =
     input.purpose === "repair"
       ? RESEARCH_REPAIR_MAX_TURNS
-      : input.brokerUrl
-        ? RESEARCH_BROKER_MAX_TURNS
-        : researchStructuredOutputMaxTurns(input.route);
+      : packetRead
+        ? RESEARCH_PACKET_READ_MAX_TURNS
+        : input.brokerUrl
+          ? RESEARCH_BROKER_MAX_TURNS
+          : researchStructuredOutputMaxTurns(input.route);
   return {
     route: input.route,
     prompt: input.prompt,
@@ -3286,11 +3493,22 @@ function agentRequest(input: {
         input.config.budget.packageMaxWallSeconds[input.workPackage.stage as AgentPackageStage],
     ),
     maxTurns,
+    ...(packetRead
+      ? {
+          reservationTurns: researchStructuredOutputMaxTurns(input.route),
+          artifactViews: {
+            index: input.capsule.artifactViews,
+            packetSha256: input.capsule.reviewPacketSha256!,
+          },
+        }
+      : {}),
     maxOutputTokens: input.maxOutputTokens,
     maxToolContextTokens: input.brokerUrl
       ? input.config.budget.maxBrokerContextTokens *
         (input.brokerCallBudget ?? input.config.budget.maxBrokerCalls)
-      : 0,
+      : packetRead
+        ? RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS
+        : 0,
     maxCostUsd: input.maxCostUsd,
     expectedRuntime: input.expectedRuntime,
     toolPolicy,
@@ -4213,6 +4431,7 @@ async function stageContextForPackage(
   capsuleProject: string,
   project: ProjectState,
   workPackage: WorkPackage,
+  index: OutputRecord,
   config: WorkspaceConfig,
 ): Promise<string> {
   let analyzeFallbackContext: string[] = [];
@@ -4254,39 +4473,12 @@ async function stageContextForPackage(
                   "outputs/report.md",
                 ]
               : [];
-  const sections: string[] = [];
-  for (const logicalPath of logicalPaths) {
-    const content = await readFile(resolveContained(capsuleProject, logicalPath), "utf8");
-    sections.push(`### ${logicalPath}\n${content.trimEnd()}`);
-  }
-  const bundled = sections.join("\n\n");
-  const estimatedTokens = Math.ceil(
-    Buffer.byteLength(bundled, "utf8") / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
+  return artifactPromptContext(
+    capsuleProject,
+    index,
+    logicalPaths,
+    Math.min(8_000, config.budget.maxInputContextTokens) * RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
   );
-  const maxStageContextTokens = researchStageContextTokenLimit(
-    config,
-    workPackage.stage,
-    project.lineage.kind === "addendum",
-  );
-  if (estimatedTokens > maxStageContextTokens) {
-    throw new CliError(
-      `Admitted stage context exceeds the configured input context limit for ${workPackage.id}.`,
-      {
-        code: "RESEARCH_INPUT_CONTEXT_BUDGET_EXCEEDED",
-        exitCode: 3,
-        details: {
-          packageId: workPackage.id,
-          estimatedTokens,
-          maxStageContextTokens,
-          limitField: "budget.maxInputContextTokens",
-          contextPaths: logicalPaths,
-          recommendedAction:
-            "Keep frozen evidence unchanged. Use research project fork to regenerate a bounded context with concise metadata, or explicitly review budget.maxInputContextTokens in .tiangong-research/config.json and rerun project preflight plus workspace doctor before preparing this stage again. Do not raise output limits to accommodate input context.",
-        },
-      },
-    );
-  }
-  return bundled;
 }
 
 function packagePrompt(
@@ -4301,6 +4493,7 @@ function packagePrompt(
   stageContextContent: string,
   discovery: DiscoveryProgress | null,
   evidenceCandidates: Awaited<ReturnType<typeof listEvidenceCandidates>>,
+  executionMode: "native-host" | "headless-cli",
 ): string {
   const stageInstructions: Record<WorkPackage["stage"], string> = {
     discover:
@@ -4308,14 +4501,16 @@ function packagePrompt(
     acquire:
       "Audit every provisionally admitted source exactly once. For each source, bind its ledger candidateId, list only artifactIds returned by the exact artifact registration command, and choose accepted, limited, or rejected with a concise rationale and explicit limitations. A broker receipt is an immutable discovery record but is not full text. Use an empty artifactIds array only when intentionally retaining a source as metadata/abstract evidence or when the source is an already registered local input. Put unresolved blocking acquisition or coverage deficiencies in gaps; put honest non-blocking scope constraints in limitations. Do not invent file paths, hashes, URLs, artifact IDs, or successful downloads.",
     analyze:
-      "Use only the complete embedded inference snapshot below and return analysis schema v2. Bind the exact inference snapshot hash and one reproducible analysisRun. Every finding must cite admitted source IDs and exact evidenceAtomIds; a top-journal finding must also bind design claimIds. State uncertainty and applicability. Never promote a source-level citation when no exact atom supports the statement.",
+      "Use only the admitted inference snapshot and its packet-bound on-demand artifacts; return analysis schema v2. Bind the exact inference snapshot hash and one reproducible analysisRun. Every finding must cite admitted source IDs and exact evidenceAtomIds; a top-journal finding must also bind design claimIds. State uncertainty and applicability. Never promote a source-level citation when no exact atom supports the statement.",
     synthesize:
-      "Use only the complete embedded inference snapshot, analysis, and Claim–Evidence Graph below. Return the schema-defined object whose reportMarkdown separates supported conclusions, uncertainty, limitations, and next actions. Every material statement must remain within a graph-bound finding. Use real Markdown line breaks encoded exactly once for JSON; never place literal /n or double-escaped \\n markers in reportMarkdown.",
-    review: `Independently inspect the complete embedded artifacts and globally bounded evidence excerpts. The CLI has already verified every bound full evidence object's size and SHA-256 and persistently stored the complete review packet; its hash is schema-bound even though the packet metadata is not duplicated in model context. Do not claim to have read beyond the embedded excerpts. Return the schema-defined review bound to packetSha256 ${reviewPacketSha256 ?? "unavailable"}. Use pass only when every material claim is traceable within the admitted evidence and clearly scoped to its limitations.`,
+      "Use only the admitted inference snapshot, analysis, and Claim–Evidence Graph, reading their complete packet-bound objects on demand. Return the schema-defined object whose reportMarkdown separates supported conclusions, uncertainty, limitations, and next actions. Every material statement must remain within a graph-bound finding. Use real Markdown line breaks encoded exactly once for JSON; never place literal /n or double-escaped \\n markers in reportMarkdown.",
+    review: `Independently inspect the supplied excerpts and use the packet-only artifact tools for further material, including failed checks and counterevidence. Every full object's size and SHA-256 is bound; metadata or a digest is not proof that you read it. Return the schema-defined review bound to packetSha256 ${reviewPacketSha256 ?? "unavailable"}. Use pass only after sufficient inspection supports every material claim and its stated limitations.`,
     close: "No agent action is allowed for mechanical closure.",
   };
   const prompt = [
-    "Operate only inside this isolated research capsule.",
+    executionMode === "native-host"
+      ? "Operate in the current native host with this project's authorized inputs and packet operations; host permissions still apply."
+      : "Operate only inside this isolated research capsule.",
     `Project: ${project.id}`,
     `Question: ${project.question}`,
     `Stage: ${workPackage.stage}`,
@@ -4324,15 +4519,19 @@ function packagePrompt(
     `Bounded input context bundle: ${JSON.stringify(contextBundle)}`,
     `Staged capability directories: ${JSON.stringify(stagedSkills.map((path) => `skills/${basename(path)}`))}`,
     workPackage.stage === "discover"
-      ? "The exact capability manifest and each staged external SKILL.md are embedded below. Use this documentation directly; filesystem tools are disabled."
+      ? "The exact capability manifest and each staged external SKILL.md are supplied inline or through the native packet's artifact read commands. Read the required documentation; do not launch its standalone commands for broker work."
       : workPackage.stage === "acquire"
         ? "Use the installed external acquisition/document Skills in the current native host, but treat the CLI artifact registry and acquisition schema as the only authority for durable evidence."
         : "Capability files are provenance-bound but are not available as execution tools in this stage.",
     workPackage.stage === "discover"
       ? `Follow the reviewed discovery plan: ${JSON.stringify(discovery)}. The plan's max evidence-call count is a hard working ceiling, not a target to exhaust. Execute required first-pass channels before supplemental channels, prefer broad high-yield queries, assess registered candidates between batches, and use the next gap-fill batch only for explicit uncovered dimensions, source types, date ranges, full text, limitations, or counterevidence. Stop fetching as soon as the declared coverage minimums are supportable. Native Web/Browser may broaden lead discovery, but every such action must be recorded through recordActivity, every useful result must be registered as a candidate, and the same URL/DOI must then be formalized through the broker before admission. A broker receipt, structured data-runtime receipt, or immutable registered input is an admissible evidence path. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. For generic broker capabilities, invoke fetch_candidate_source with the manifest capability ID and obey its exact declared HTTP method. For structured data capabilities, use the packet's dynamic catalog and describe command, then invoke runDataCapability; never call standalone data run for project evidence. Never place API keys, tokens, authorization data, cookies, or other credential-like fields in request files. The Research control plane injects declared logical credentials and persists only safe hash-bound results. Exercise every manifest capability with requiredForDiscovery=true and every project-required data capability ID, or the mechanical coverage gate will stop downstream work.`
-      : "Use only the complete embedded stage context; no tools or additional source reads are allowed.",
+      : executionMode === "native-host" && workPackage.stage === "acquire"
+        ? "Acquire files and readable derivatives only for provisionally admitted sources using the packet's bindDownload and registerArtifact commands. Do not reopen discovery, admit new sources, or access unrelated host files."
+        : "Use only admitted stage context and this packet's read-only artifact channel. No new evidence acquisition or arbitrary host-file access is authorized.",
     stageInstructions[workPackage.stage],
-    "Do not write stage output files directly. Your final response must be only the JSON object required by the supplied output schema; the CLI will validate and atomically materialize it.",
+    executionMode === "native-host"
+      ? "Do not write admitted output paths or control-plane files directly. Save only the final schema-conforming JSON object to a new regular file, then submit it with the packet's submit command. The CLI remains the sole authority for validation and atomic promotion."
+      : "Do not write stage output files directly. Your final response must be only the JSON object required by the supplied output schema; the CLI will validate and atomically materialize it.",
     "Do not edit project.json, input manifests, prior outputs, evidence objects, or staged capability files.",
   ];
   if (workPackage.stage === "discover") {
@@ -4348,15 +4547,15 @@ function packagePrompt(
           originKind: candidate.origin.kind,
         })),
       )}`,
-      "The complete external capability documentation bundle is embedded below:",
+      "External capability documentation (inline or exact on-demand reference):",
       capabilityDocumentation,
-      "The complete authorized local-input context is embedded below. Use it directly and do not re-read individual local input files. Full evidence files are intentionally withheld from producer packages when fullTextStaged=false.",
+      "Authorized local-input context (inline or exact on-demand reference). Full evidence files are intentionally withheld from producer packages when fullTextStaged=false; the read channel does not widen that authorization.",
       contextBundleContent,
     );
   }
   if (stageContextContent) {
     prompt.push(
-      "The complete admitted stage context is embedded below. Use it directly and do not re-read output files.",
+      "Admitted stage context (inline or exact on-demand reference; no material is discarded to meet an embedding preference):",
       stageContextContent,
     );
   }
@@ -4392,7 +4591,7 @@ function assertPreCallTokenReservation(
     repairPayloadTokens: Math.ceil(
       (schemaBytes + RESEARCH_MAX_REPAIR_SOURCE_BYTES + 2_048) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
     ),
-    maxTurns: request.maxTurns,
+    maxTurns: request.reservationTurns ?? request.maxTurns,
     maxOutputTokens: request.maxOutputTokens,
     maxToolContextTokens: request.maxToolContextTokens ?? 0,
     maxRepairTokens: config.budget.maxRepairTokens,

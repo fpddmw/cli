@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-09-03
-lastReviewedCommit: 06dadef170ab79c19eef9a35663e86fdee22479b
+lastReviewedAt: 2026-09-04
+lastReviewedCommit: 25b236a15c846c0168ffb84f8afa390d71985f4b
 ---
 
 # Tiangong AI CLI
@@ -607,8 +607,9 @@ owns the same due gate. Pending implementations use `null` for implementation
 SHA-256, locator, and entrypoint; pending environments use `null` for lock
 SHA-256 and locator. They are exposed in every earlier review packet as
 `futureGateObligations` and become blocking mechanical errors at that gate.
-Freezing them requires a new authoritative generation; it never upgrades the
-old object in place.
+Their predeclared slots may be fulfilled through the append-only same-project
+command below. The original design bytes never change; a material assumption,
+question, policy or already-frozen value still requires a reviewed successor.
 
 Use the same Policy project ID and exact design when preflighting and admitting
 the research project:
@@ -677,6 +678,16 @@ schema-valid, packet/session-bound review. A saved successful execution is
 replayed without another model call after revalidating its immutable proof.
 Failures require explicit `--retry` and remain bounded by the attempt budget;
 unreported usage and interrupted wall time retain conservative reservations.
+Failed processes return a bounded, sanitized exit diagnostic and record it in
+the journal; no full prompt or raw authentication output is persisted. Automatic
+Claude invocation uses the same dialect-annotation conversion as
+`research schema show NAME --compatibility claude-code`; canonical controller
+validation and its scientific constraints remain unchanged.
+The provider view explicitly types scalar constants/enums; returned values are
+never coerced to satisfy the canonical schema.
+Claude's structured result is used instead of any accompanying narrative;
+declared error results remain failures, with their safe diagnostic ahead of
+incidental stderr warnings.
 A nonpassing mechanical packet can receive an independent stop verdict, never
 an override. The existing manual submit command remains available for an exact
 independent review.
@@ -685,6 +696,8 @@ Reviewer status is read-only and transport-aware. Native-direct does not
 require a bridge connection. Smoke configuration readiness is explicitly not
 production readiness and does not demand an attestation that smoke mode never
 writes. Production still requires its current reviewer doctor attestation.
+Packet read responses carry their actual content and receipt together; a
+receipt alone does not establish that the host displayed the content to its model.
 
 Repeat the same prepare/execute route for `evidence-construct`, adding an
 owner-reviewed JSON array of absolute canonical canary paths with
@@ -758,6 +771,12 @@ outputs, environment fingerprints, and safe hash-preserving journal proof
 derivatives. Credentials, setup
 sources, browser profiles, native active state, capsules, unrelated projects,
 and host-specific absolute paths are excluded.
+
+Text inspection distinguishes internal identifiers such as `interruptedSessionId`
+from credential fields. It checks raw text and read-only decoded JSON/JSONL,
+including escaped keys and nested string payloads, while retaining the exact
+evidence and ledger bytes. Authentication values remain blocked even when wrapped
+in arrays or objects; an identifier's UUID shape is never a credential exemption.
 
 ```bash
 tiangong-ai research project audit export top-journal-paper \
@@ -859,8 +878,10 @@ For large local sources, pass an immutable `--input-plan` to both preflight and
 project initialization. Each plan entry may expose either a separate
 `contextPath` or non-overlapping, one-based `contextRanges`; the producer sees
 only that bounded context, while independent review receives the hash-verified
-full source. Symlinks, duplicate content, changed hashes, and context above
-`maxInputContextTokens` are rejected.
+full source. Symlinks, duplicate content and changed hashes are rejected.
+There is no total stage-context length gate: large admitted objects remain complete
+and are read through the packet's artifact directory instead of being forced into
+the initial prompt. This does not expose files deliberately withheld by an input plan.
 
 The workspace stores its current protocol state under `.tiangong-research/`.
 Each project follows the evidence-first sequence: broad discovery, strict
@@ -870,6 +891,13 @@ synthesize run in the current interactive Codex, Claude Code, WorkBuddy, or
 CodeBuddy session. The CLI never launches a nested producer process. Independent review
 runs through the other configured agent family's CLI, and execution is blocked
 when the two roles use the same family.
+
+Native packets direct the host to save one new JSON submission file, not to write
+admitted output paths. Acquire may retrieve files and readable derivatives for
+provisionally admitted sources through the packet's binding/registration commands;
+it may not reopen discovery. Analyze, synthesize and the isolated reviewer retain
+their no-new-evidence boundary. Headless reviewer prompts remain capsule-scoped
+and return JSON rather than saving native submission files.
 
 Every workspace mutation is serialized by an owner-recorded directory lease
 with a heartbeat. A later command immediately reclaims a lease whose same-host
@@ -1165,7 +1193,8 @@ total tokens, USD 5,000, 30 days, and package ceilings of 12,000,000 for discove
 acquisition, 1,500,000 each for analysis and synthesis, and 2,500,000 for
 review. Primary output is bounded at 32,000 tokens and a separately invoked
 repair at 16,000. The production broker hard ceiling is 256 bounded views with
-32,000 context tokens per view; input context is bounded at 128,000 tokens.
+32,000 context tokens per broker view. The legacy `maxInputContextTokens` setting
+is an embedding/planning hint, not an input admission or artifact-read ceiling.
 Top-journal admission additionally reserves three early scientific reviews at
 500,000 tokens each, four final publication reviews at 750,000 each, and one
 4,000,000-token revision cycle, including their finite wall-time allowances.
@@ -1174,7 +1203,7 @@ stop control ordinary use, while the finite ceilings, three attempts per
 package, and explicit confirmation above the cost threshold stop runaway work.
 Smoke-test workspaces retain their smaller low-cost defaults.
 Before project initialization and every executable package, the control plane
-requires the complete token and conservative price reservation to fit. Native
+requires a token and conservative price estimate to fit the finite execution budget. Native
 producer stages reserve prompt, schema, admitted context, bounded broker
 context, and output allowance, but the host app does not expose trusted
 per-stage usage telemetry to this CLI. A successful native submit therefore
@@ -1184,9 +1213,14 @@ output bytes/tokens, provenance, coverage, hashes, and remaining project budget.
 It does not claim a provider-side turn or output-token cap for the host app.
 
 Independent review uses the pre-call reservation calculator and the reviewer's
-provider-side structured-output/turn controls where available. Review admission
-reserves three maximum-size generated artifacts plus one globally bounded
-evidence-excerpt bundle, and formatting repair remains one separately budgeted,
+provider-side structured-output/turn controls where available. Claude packet-only
+review has a 64-turn provider guard; Codex uses the existing finite wall-time and
+token/cost guards because its CLI has no equivalent turn flag. Planning uses a
+small initial-context estimate and expected reads, not the entire corpus or an
+unbounded legacy context hint. Preflight reports `inputContextTokenLimit=null`.
+These are approximate estimates, not precise billing; scientific review keeps
+the approved remaining cost ceiling separate from its rough read-cost estimate.
+Formatting repair remains one separately budgeted,
 tool-free JSON correction. Production workspaces enforce a finite 256-view
 broker ceiling mechanically, while each project derives a much smaller working
 budget from its reviewed coverage requirements and stops early when they are
@@ -1211,8 +1245,9 @@ context, evidence objects, and registered local input hashes before recording
 their safe locators. Capsule deletion therefore does not delete the durable
 review chain.
 
-Native discovery preparation embeds the exact staged capability manifest and
-each external Skill's top-level `SKILL.md`. It also projects every built-in data
+Native discovery preparation supplies the exact staged capability manifest and
+each external Skill's top-level `SKILL.md` inline or by an exact artifact reference.
+It also projects every built-in data
 operation dynamically, with no per-provider Research adapter. The current host
 may fetch generic broker evidence with `research project evidence fetch`, whose bounded request file
 contains logical IDs but no credential values. The manifest includes the locked,
@@ -1240,19 +1275,37 @@ credentialed operation must resolve its namespaced logical credential from the
 workspace's owner-only store or it is blocked before any provider request.
 Standalone `tiangong-ai data run` keeps its separate manifest-declared
 environment-variable policy. A blocked data result is not promoted to evidence.
-Analyze and synthesize packets contain bounded, hash-verified prior-stage
-artifacts and require no external evidence calls. Review is tool-free and uses the
-reviewer's route-specific structured-output turn cap:
-its prompt embeds the complete generated artifacts and a deterministic,
-globally bounded set of excerpts distributed across registered local contexts
-and broker receipts. Broker excerpts prioritize deterministic, sanitized
+Analyze and synthesize packets contain hash-verified prior-stage artifacts and
+require no external evidence calls. Base and scientific review use only the
+packet-bound `research_list_artifacts` and `research_read_artifact` tools; shell,
+general filesystem, browser, broker and undeclared integrations remain disabled.
+The same surface works through native-direct and the signed sandbox-bridge.
+Small objects/excerpts are included initially; large objects are referenced without
+rejecting the stage. Broker excerpts prioritize deterministic, sanitized
 projections of the exact raw-response items selected by admitted evidence JSON
 Pointers; uncited receipts retain metadata-only bindings, and unresolved
 pointers receive a bounded-context fallback. The packet hash is schema-bound, but complete packet
 metadata is not redundantly copied into model context. Full local files,
-original per-receipt bounded contexts, raw broker objects, and the complete
-packet remain hash-bound for durable human/mechanical audit; the model must not
-claim to have read beyond the embedded excerpts.
+original per-receipt contexts, raw broker objects, checks and counterevidence stay
+discoverable in the exact directory. Reads use opaque object IDs and byte offsets;
+UTF-8 pages preserve character boundaries. Omit `length` for a 16 KiB page or use
+`length: null` for the whole object, without a CLI read-length ceiling. Objects
+actually read are preserved under `reads/objects/`, with exact directory and
+packet/object/view hash receipts. Receipts prove bytes delivered, not comprehension
+or scientific truth; actual provider/model capacity remains a limitation.
+
+Native hosts can use the same primitives without adding an IDE integration:
+
+```bash
+tiangong-ai research project stage artifacts PROJECT --session SESSION --workspace /absolute/workspace --json
+tiangong-ai research project stage read PROJECT --session SESSION --artifact OBJECT_ID --offset 0 --length 16384 --workspace /absolute/workspace --json
+tiangong-ai research project stage read PROJECT --session SESSION --artifact OBJECT_ID --length all --workspace /absolute/workspace --json
+```
+
+Follow `nextOffset` for subsequent pages. `--encoding base64` explicitly requests
+binary bytes; prefer a registered text derivative for interpretation. The channel
+does not scan arbitrary host paths or discover files created after the snapshot.
+Stopped, changed or expired native sessions cannot read through it.
 The CLI mechanically derives local full-text availability, source types,
 counts, date coverage, source IDs, and the coverage decision. A `partial`
 dimension is usable but incomplete; a missing dimension or unmet declared
@@ -1444,6 +1497,43 @@ start a new generation. There is no automatic migration. A top-journal successor
 requires a Policy approved for TARGET and `--design`, `--design-producer-agent`,
 and `--design-producer-session`; it cannot inherit scientific approval.
 
+### Fulfill predeclared scientific objects
+
+At an idle boundary before analysis, register the exact code/environment files
+as scientific objects, then supply only the pending slots already named in the
+frozen design:
+
+```bash
+tiangong-ai research schema show scientific-fulfillment --json
+tiangong-ai research scientific fulfillment status PROJECT --workspace /absolute/workspace --json
+tiangong-ai research scientific fulfillment record PROJECT \
+  --input /absolute/fulfillment.json --workspace /absolute/workspace --json
+```
+
+The closed input names `designSha256`, the exact `parentFulfillmentSha256`
+(`null` initially), a non-sensitive reason, and arrays `modelImplementations`,
+`environmentLocks`, and `parameterStates`. Model entries bind the registered
+`objectLocator`, raw `sha256`, registration `recordSha256`, and the declared
+`modelId`; implementations additionally supply `entrypoint`. Parameter entries
+name the existing `parameterId` and every exact `stateId`, its source-derived
+`value`, and admitted `evidenceAtomIds` from the frozen typed-content snapshot.
+Units, state sets, ranges, factors, composition, claims, thresholds and Policy
+cannot be changed through this intake. At least one pending slot is required.
+
+Identical replay returns the same immutable record. Replacing an already-frozen
+slot, guessing a parent, an active native session, or analysis/inference already
+started is refused. The journal is the commit point; interrupted state projection
+uses the same narrow recovery mechanism as acquisition/scope revisions.
+
+Only the fulfillment's due gate and later scientific gates are reset; earlier
+reviews remain bound to their unchanged deadline-specific design view. New review
+packets include the original design, the exact fulfillment chain, the effective
+view and registered code/environment bytes. Filing objects does **not** mark the
+original Policy rule scientifically satisfied or certify code execution. The
+existing independent reviewer must assess the actual objects and rule. Portable
+audits retain the raw objects and registration metadata and verify the committed
+fulfillment head, slot semantics and current review view after relocation.
+
 ### Original task, current scope, and actual checks
 
 For a new research project, record a small original-requirement checklist after
@@ -1462,6 +1552,17 @@ Each requirement has a stable ID, acceptance condition, `checkKind` (`evidence`,
 coverage dimensions. Original wording cannot be overwritten. Old projects without
 a task remain explicitly unassessed rather than retrospectively accepted.
 
+Optional `requestProvenance` supplies `mode` (`verbatim`, `interpreted`, or
+`reconstructed`), `source` (`kind: user-message|user-file`, exact `text`, `locator`
+or null), and `explanation`. A null source is valid only for reconstruction.
+Verbatim source text must equal `originalRequest` exactly, including BOM and line
+endings. Source bytes are immutable; locator values are retained only by hash.
+Missing provenance is explicitly `unrecorded`, never inferred retroactively.
+Scope changes and forks preserve it. Declared origin is not authenticated authorship;
+secrets are rejected before admission.
+Scientific review also stages the exact supplied request-source object, so its
+original bytes are available through the same packet-only read channel as its hash.
+
 Before analysis, use `research schema show task-scope-change` and
 `project task scope propose PROJECT --input FILE --expected-contract SHA` to
 propose a change. Review the returned `changes.details` before/after values, then
@@ -1479,17 +1580,57 @@ between native stages. Records bind the exact requirement version, source/atom/
 finding IDs, and explicitly selected bounded UTF-8 result files. The declared
 command is stored only by hash and is **not executed by this command**. Raw result
 bytes are copied into immutable hash-addressed objects; secrets and control-store
-sources are rejected. Positive/negative computational outcomes need a command and
-results; failed, inconclusive, and not-run checks remain honest without invented
-results. All records say `trust=native-observation`, `executionCertified=false`.
+sources are rejected. A reported computation without an observed run remains
+`unverified-execution`, not an answered computational requirement. Failed,
+inconclusive and not-run checks remain honest without invented results. Evidence
+and proof checks need no fabricated computation. All records say
+`trust=native-observation`, `executionCertified=false`.
 
-One unchanged result blob is stored and included once per reviewer context. The
+For an actual calculation, the native host authors and reviews one ordinary
+Node/Python program and explicitly requests observation:
+
+```bash
+tiangong-ai research schema show task-native-run --json
+tiangong-ai research project task run observe PROJECT \
+  --input /absolute/native-run.json --confirm-execution --workspace /absolute/workspace --json
+tiangong-ai research project task run inspect PROJECT --run RUN_ID \
+  --workspace /absolute/workspace --json
+```
+
+The closed request binds the computational requirement version, explicit
+interpreter, script, environment-lock declaration, current acquisition artifact
+IDs/hashes, unique output filenames, non-secret arguments and finite timeout.
+Use `{input:ID}` / `{output:ID}` placeholders rather than host paths in arguments,
+and name `nativeSessionId` when a producer stage is active. The CLI snapshots
+inputs and plans exact output paths before invoking the ordinary program. It
+adds no permission bypass or dependency installation, forwards no provider
+credentials and launches no reasoning agent. The workspace lease is released
+during computation. Program authoring and scientific decisions remain native.
+
+The returned record binds runtime/code/input/output bytes, process exit/signal
+and time. Use `nativeRunSha256` at acceptance; those results come only from that
+run, not a directory scan or unrelated external files. Success requires a zero
+exit, stable inputs and every declared output; failure/timeout/cancellation and
+missing or changed outputs remain nonpassing records. Committed replay does not
+run again. An incomplete interrupted run requires inspection and an explicitly
+new run ID, not automatic retry. `stagingDirectoryName` is only a safe relative
+local-inspection hint; permanent hash-bound objects carry audit authority.
+`observation=cli-observed-native-process` is not mathematical correctness or an
+authenticated execution certificate. The dependency lock is explicitly
+`declared-lock-not-attested`; no hermetic-environment claim is inferred.
+
+One unchanged result blob is stored once and appears once in the reviewer directory. The
 existing independent review receives the original request, original/current
 requirements, exact checks and results, and returns a bound `taskAssessment`;
 there is no additional default paid review round. Missing current checks stop
 before review, and stale/failed/inconclusive checks cannot be promoted to answered.
 Publication packets and portable audit verification retain these relationships;
 hash integrity does not prove execution, scientific validity, or editorial acceptance.
+Native and scientific packets stage observed programs, locks, inputs and outputs
+for exact on-demand inspection. Portable audit checks native start/completion
+events, requirement versions and all run objects. It also replays read selectors
+against the exact stored object, directory and packet/delivery records; a rehashed
+outer inventory cannot hide missing program bytes or a changed read receipt.
 
 `project task status` and each `research run` project summary report original and
 current task completion separately from workflow completion and publication verdict.

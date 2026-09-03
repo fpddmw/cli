@@ -19,6 +19,14 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CliError } from "../../errors.js";
+import {
+  isArtifactViewBinding,
+  openArtifactViews,
+  reviewNetworkPolicy,
+  type ArtifactViewBinding,
+} from "./artifact-views.js";
+import { ARTIFACT_VIEW_TOOL_NAMES, startArtifactViewServer } from "./artifact-view-mcp.js";
+import { codexArtifactTrace, isPacketArtifactTool } from "./artifact-trace.js";
 import { researchPlatformCapabilities } from "./platform-capabilities.js";
 import {
   configuredResearchSecrets,
@@ -26,6 +34,7 @@ import {
   sanitizeResearchText,
 } from "./sanitization.js";
 import type { JsonSchema } from "./schemas.js";
+import { claudeCodeCompatibleSchema } from "./schema-compatibility.js";
 import { isObject, sha256File, sha256Text } from "./storage.js";
 import type {
   AgentReasoningEffort,
@@ -64,6 +73,7 @@ const CODEX_DISABLED_FEATURES = [
   "tool_call_mcp_elicitation",
   "tool_suggest",
   "workspace_dependencies",
+  "view_image",
 ] as const;
 
 const ROUTE_AUTH_ENVIRONMENT: Record<AgentRoute["agent"], readonly string[]> = {
@@ -93,11 +103,14 @@ export interface AgentExecutionRequest {
   workspaceRoot: string;
   timeoutSeconds: number;
   maxTurns: number;
+  /** Approximate planning turns; provider turn guards apply only where supported. */
+  reservationTurns?: number;
   maxOutputTokens: number;
   maxToolContextTokens?: number;
   maxCostUsd: number;
   expectedRuntime?: AgentRuntimeFingerprint | undefined;
-  toolPolicy?: "none" | "workspace-read";
+  toolPolicy?: "none" | "workspace-read" | "packet-read";
+  artifactViews?: ArtifactViewBinding;
   environment: NodeJS.ProcessEnv;
   brokerUrl: string | null;
 }
@@ -118,6 +131,28 @@ interface PreparedCapsuleAuthentication {
 
 export async function executeAgent(request: AgentExecutionRequest): Promise<ExecutionResult> {
   requireHeadlessAgentRoute(request.route);
+  if (
+    (request.toolPolicy === "packet-read" &&
+      (!isArtifactViewBinding(request.artifactViews) || request.brokerUrl !== null)) ||
+    (request.artifactViews && request.toolPolicy !== "packet-read")
+  ) {
+    throw new CliError(
+      "Packet-only review requires its exact artifact index and no broker route.",
+      { code: "RESEARCH_ARTIFACT_VIEW_INVALID", exitCode: 3 },
+    );
+  }
+  const artifactSecrets = [
+    ...configuredResearchSecrets(process.env),
+    ...configuredResearchSecrets(request.environment),
+  ];
+  const artifactViews = request.artifactViews
+    ? await openArtifactViews(
+        request.projectRoot,
+        request.artifactViews.index,
+        request.artifactViews.packetSha256,
+        artifactSecrets,
+      )
+    : null;
   validateAgentBinary(request.route);
   if (!Number.isInteger(request.maxOutputTokens) || request.maxOutputTokens < 1) {
     throw new CliError("Agent max output tokens must be a positive integer.", {
@@ -161,6 +196,7 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
   const capsuleHome = join(request.capsuleRoot, "home");
   const capsuleAuth = await prepareCapsuleHome(request.route, capsuleHome, request.environment);
   const secrets = [...configuredResearchSecrets(request.environment), ...capsuleAuth.secrets];
+  artifactSecrets.push(...capsuleAuth.secrets);
   if (request.route.agent === "codex") {
     // Codex discovers project configuration by walking parent directories. Bound that
     // discovery to the isolated capsule project so a host workspace .codex/config.toml
@@ -170,22 +206,26 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
       mode: 0o600,
     });
   }
-  const invocation = await buildInvocation(
-    request,
-    executables.launcher,
-    join(request.capsuleRoot, `${request.purpose}-output-schema.json`),
-  );
-  const sandboxed = await sandboxInvocation(
-    invocation.binary,
-    invocation.args,
-    request.capsuleRoot,
-    request.projectRoot,
-    request.workspaceRoot,
-    executables.target,
-  );
   const started = process.hrtime.bigint();
   let completed: Awaited<ReturnType<typeof spawnCaptured>>;
+  let sandboxed: Awaited<ReturnType<typeof sandboxInvocation>>;
+  let artifactServer: Awaited<ReturnType<typeof startArtifactViewServer>> | null = null;
   try {
+    artifactServer = artifactViews ? await startArtifactViewServer(artifactViews) : null;
+    const invocation = await buildInvocation(
+      request,
+      executables.launcher,
+      join(request.capsuleRoot, `${request.purpose}-output-schema.json`),
+      artifactServer?.url,
+    );
+    sandboxed = await sandboxInvocation(
+      invocation.binary,
+      invocation.args,
+      request.capsuleRoot,
+      request.projectRoot,
+      request.workspaceRoot,
+      executables.target,
+    );
     completed = await spawnCaptured({
       binary: sandboxed.binary,
       args: sandboxed.args,
@@ -200,6 +240,7 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
         capsuleAuth.environment,
       ),
       timeoutMs: request.timeoutSeconds * 1000,
+      compactArtifactTrace: request.route.agent === "codex" && request.toolPolicy === "packet-read",
       maxCaptureBytes: Math.min(
         MAX_CAPTURE_BYTES,
         Math.max(
@@ -218,6 +259,7 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
     }
     throw error;
   } finally {
+    if (artifactServer) await artifactServer.stop();
     secrets.push(...(await reconcileCapsuleAuthentication(capsuleAuth)));
   }
   const wallSeconds = Number(process.hrtime.bigint() - started) / 1_000_000_000;
@@ -239,15 +281,22 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
   }
   const parsed = parseAgentResult(request.route, completed.stdout, completed.stderr);
   const redacted = redactResult(parsed.stdout, parsed.stderr, secrets);
+  const toolPolicyViolated =
+    request.toolPolicy === "packet-read"
+      ? (parsed.telemetry.packetReadViolations ?? 0) > 0
+      : request.toolPolicy === "none" &&
+        (parsed.telemetry.toolCalls > 0 || (parsed.telemetry.packetReadViolations ?? 0) > 0);
   const exitCode = redacted.exposed
     ? 86
     : completed.captureExceeded
       ? 75
       : completed.exitCode !== 0
         ? completed.exitCode
-        : parsed.parseFailed
-          ? 3
-          : 0;
+        : toolPolicyViolated
+          ? 78
+          : parsed.parseFailed
+            ? 3
+            : 0;
   const inputTokens = redacted.exposed ? 0 : parsed.inputTokens;
   const cachedInputTokens = redacted.exposed ? 0 : parsed.cachedInputTokens;
   const outputTokens = redacted.exposed ? 0 : parsed.outputTokens;
@@ -259,7 +308,9 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
     stdout: redacted.stdout,
     stderr: completed.captureExceeded
       ? `${redacted.stderr}\nagent output exceeded the configured capture limit`.trim()
-      : redacted.stderr,
+      : toolPolicyViolated
+        ? `${redacted.stderr}\nreviewer tool policy violation: an unapproved I/O tool was reported`.trim()
+        : redacted.stderr,
     tokens,
     inputTokens,
     cachedInputTokens,
@@ -268,7 +319,8 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
     wallSeconds,
     model: parsed.model ?? request.route.model,
     runtime: { ...runtime, model: parsed.model ?? request.route.model },
-    ...(request.toolPolicy === "none" && request.brokerUrl === null
+    ...((request.toolPolicy === "none" || request.toolPolicy === "packet-read") &&
+    request.brokerUrl === null
       ? {
           isolation: {
             ...sandboxed.isolation,
@@ -278,12 +330,13 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
               "private-capsule",
             ] as ReviewIsolationFingerprint["readScopes"],
             writeScopes: ["private-capsule"] as ["private-capsule"],
-            networkPolicy: "reviewer-provider-only" as const,
-            toolPolicy: "none" as const,
+            networkPolicy: reviewNetworkPolicy(request.toolPolicy),
+            toolPolicy: request.toolPolicy,
           },
         }
       : {}),
     telemetry: sanitizeExecutionTelemetry(parsed.telemetry, secrets),
+    ...(artifactViews ? { artifactReads: artifactViews.receipts() } : {}),
   };
 }
 
@@ -433,8 +486,13 @@ async function buildInvocation(
   request: AgentExecutionRequest,
   resolvedBinary: string,
   outputSchemaPath: string,
+  artifactServerUrl?: string,
 ): Promise<{ binary: string; args: string[]; stdin: string }> {
-  await writeFile(outputSchemaPath, `${JSON.stringify(request.outputSchema, null, 2)}\n`, {
+  const outputSchema =
+    request.route.agent === "claude"
+      ? claudeCodeCompatibleSchema(request.outputSchema)
+      : request.outputSchema;
+  await writeFile(outputSchemaPath, `${JSON.stringify(outputSchema, null, 2)}\n`, {
     encoding: "utf8",
     mode: 0o600,
   });
@@ -460,7 +518,8 @@ async function buildInvocation(
       "--json",
     ];
     for (const feature of CODEX_DISABLED_FEATURES) args.push("--disable", feature);
-    if (toolPolicy === "none") args.push("--disable", "shell_tool", "--disable", "unified_exec");
+    if (toolPolicy !== "workspace-read")
+      args.push("--disable", "shell_tool", "--disable", "unified_exec");
     args.push(
       "-c",
       "include_apps_instructions=false",
@@ -488,6 +547,15 @@ async function buildInvocation(
       );
     }
     if (request.route.model) args.push("--model", request.route.model);
+    if (artifactServerUrl)
+      args.push(
+        "-c",
+        `mcp_servers.research_artifacts.url=${JSON.stringify(artifactServerUrl)}`,
+        "-c",
+        "mcp_servers.research_artifacts.required=true",
+        "-c",
+        `mcp_servers.research_artifacts.enabled_tools=${JSON.stringify(ARTIFACT_VIEW_TOOL_NAMES)}`,
+      );
     return { binary: resolvedBinary, args, stdin: request.prompt };
   }
   if (request.route.agent !== "claude") {
@@ -511,14 +579,14 @@ async function buildInvocation(
     "--no-chrome",
     "--disable-slash-commands",
     "--tools",
-    toolPolicy === "none" ? "" : "Read,Glob,Grep",
+    toolPolicy === "workspace-read" ? "Read,Glob,Grep" : "",
     "--effort",
     request.route.effort ?? DEFAULT_AGENT_EFFORT,
   ];
   if (request.purpose !== "repair") {
-    args.splice(1, 0, "--json-schema", JSON.stringify(request.outputSchema));
+    args.splice(1, 0, "--json-schema", JSON.stringify(outputSchema));
   }
-  const allowedTools = toolPolicy === "none" ? [] : ["Read", "Glob", "Grep"];
+  const allowedTools = toolPolicy === "workspace-read" ? ["Read", "Glob", "Grep"] : [];
   if (request.brokerUrl) {
     const mcpConfigPath = join(request.capsuleRoot, "research-mcp.json");
     await writeFile(
@@ -531,6 +599,22 @@ async function buildInvocation(
       { encoding: "utf8", mode: 0o600 },
     );
     allowedTools.push("mcp__research_broker__fetch_candidate_source");
+    args.push("--strict-mcp-config", "--mcp-config", mcpConfigPath);
+  }
+  if (artifactServerUrl) {
+    const mcpConfigPath = join(request.capsuleRoot, "artifact-mcp.json");
+    await writeFile(
+      mcpConfigPath,
+      JSON.stringify({
+        mcpServers: {
+          research_artifacts: { type: "http", url: artifactServerUrl },
+        },
+      }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    allowedTools.push(
+      ...ARTIFACT_VIEW_TOOL_NAMES.map((name) => `mcp__research_artifacts__${name}`),
+    );
     args.push("--strict-mcp-config", "--mcp-config", mcpConfigPath);
   }
   args.push("--allowedTools", allowedTools.join(","));
@@ -1055,6 +1139,7 @@ async function spawnCaptured(input: {
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
   maxCaptureBytes: number;
+  compactArtifactTrace?: boolean;
 }): Promise<{ exitCode: number; stdout: string; stderr: string; captureExceeded: boolean }> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(input.binary, input.args, {
@@ -1097,7 +1182,19 @@ async function spawnCaptured(input: {
       }
       target.push(chunk);
     };
-    child.stdout.on("data", (chunk: Buffer) => capture(stdout, chunk));
+    const artifactTrace = input.compactArtifactTrace
+      ? codexArtifactTrace({
+          maxControlBytes: input.maxCaptureBytes,
+          line: (chunk) => capture(stdout, chunk),
+          oversized: () => {
+            captureExceeded = true;
+            terminate();
+          },
+        })
+      : null;
+    child.stdout.on("data", (chunk: Buffer) =>
+      artifactTrace ? artifactTrace.write(chunk) : capture(stdout, chunk),
+    );
     child.stderr.on("data", (chunk: Buffer) => capture(stderr, chunk));
     child.on("error", (error) => {
       if (settled) return;
@@ -1107,6 +1204,7 @@ async function spawnCaptured(input: {
     });
     child.on("close", (code, signal) => {
       if (settled) return;
+      artifactTrace?.end();
       settled = true;
       clearTimeout(timer);
       const detail = signal ? `\nprocess terminated by ${signal}` : "";
@@ -1145,6 +1243,7 @@ function parseAgentResult(
     const eventCounts: Record<string, number> = {};
     const itemCounts: Record<string, number> = {};
     let toolCalls = 0;
+    let packetReadViolations = 0;
     let reasoningOutputTokens = 0;
     const providerErrors: string[] = [];
     for (const line of stdout.split(/\r?\n/)) {
@@ -1165,6 +1264,11 @@ function parseAgentResult(
           if (typeof event.item.type === "string") {
             incrementCount(itemCounts, event.item.type);
             if (isToolItemType(event.item.type)) toolCalls += 1;
+            if (
+              event.item.type === "file_change" ||
+              (isToolItemType(event.item.type) && !isPacketArtifactTool(event.item))
+            )
+              packetReadViolations += 1;
             if (event.item.type === "error") appendProviderError(providerErrors, event.item);
           }
           if (event.item.type === "agent_message" && typeof event.item.text === "string") {
@@ -1188,6 +1292,7 @@ function parseAgentResult(
         eventCounts,
         itemCounts,
         toolCalls,
+        ...(packetReadViolations ? { packetReadViolations } : {}),
         providerTurns: eventCounts["turn.completed"] ?? eventCounts["turn.started"] ?? null,
         reasoningOutputTokens,
         providerErrors,
@@ -1197,8 +1302,26 @@ function parseAgentResult(
   try {
     const value = JSON.parse(stdout) as Record<string, unknown>;
     const usage = isObject(value.usage) ? value.usage : {};
+    const providerFailed =
+      value.is_error === true ||
+      (typeof value.subtype === "string" && value.subtype.startsWith("error_"));
+    const providerErrors: string[] = [];
+    if (providerFailed) {
+      if (typeof value.subtype === "string")
+        appendProviderError(providerErrors, { message: value.subtype });
+      if (Array.isArray(value.errors)) {
+        for (const error of value.errors)
+          if (typeof error === "string") appendProviderError(providerErrors, { message: error });
+      }
+    }
+    const structured = value.structured_output !== undefined && value.structured_output !== null;
+    const answer = structured
+      ? JSON.stringify(value.structured_output)
+      : typeof value.result === "string"
+        ? value.result
+        : stdout;
     return {
-      stdout: typeof value.result === "string" ? value.result : stdout,
+      stdout: providerFailed ? "" : answer,
       stderr,
       inputTokens: numeric(usage.input_tokens),
       cachedInputTokens:
@@ -1206,14 +1329,14 @@ function parseAgentResult(
       outputTokens: numeric(usage.output_tokens),
       costUsd: numeric(value.total_cost_usd),
       model: typeof value.model === "string" ? value.model : route.model,
-      parseFailed: typeof value.result !== "string",
+      parseFailed: providerFailed || (!structured && typeof value.result !== "string"),
       telemetry: {
         eventCounts: { result: 1 },
         itemCounts: {},
         toolCalls: 0,
         providerTurns: numeric(value.num_turns) || null,
         reasoningOutputTokens: numeric(usage.reasoning_output_tokens),
-        providerErrors: [],
+        providerErrors,
       },
     };
   } catch {
@@ -1491,8 +1614,9 @@ function appendProviderError(target: string[], value: Record<string, unknown>): 
     })
     .find(Boolean);
   if (!candidate) return;
-  const bounded = candidate.slice(0, 1_000);
-  if (!target.includes(bounded)) target.push(bounded);
+  // Truncate only after sanitization; otherwise a boundary can leave part of a
+  // configured secret unmatched by the later exact-value redactor.
+  if (!target.includes(candidate)) target.push(candidate);
 }
 
 function sanitizeExecutionTelemetry(

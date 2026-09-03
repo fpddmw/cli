@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
+import { openArtifactViews } from "../src/research/workspace/artifact-views.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import { readVerifiedJournal } from "../src/research/workspace/journal.js";
 import {
@@ -20,7 +21,11 @@ import {
   sha256Text,
   workspacePaths,
 } from "../src/research/workspace/storage.js";
-import { initializeResearchWorkspace } from "../src/research/workspace/workspace.js";
+import {
+  initializeResearchWorkspace,
+  withWorkspaceLock,
+} from "../src/research/workspace/workspace.js";
+import { setTimeout as delay } from "node:timers/promises";
 import { loadCurrentEvidenceSnapshot } from "../src/research/workspace/acquisition.js";
 import {
   freezeEvidenceContentSnapshot,
@@ -120,6 +125,492 @@ async function fixture() {
 }
 
 describe("lightweight original task and authorized scope", () => {
+  it("binds acceptance to one observed native calculation and replays without running it again", async () => {
+    const fx = await acquiredFixture("computation");
+    try {
+      const scriptPath = join(fx.files, "calculate.mjs");
+      const lockPath = join(fx.files, "environment.json");
+      await writeFile(
+        scriptPath,
+        "import {readFile,writeFile} from 'node:fs/promises';\nimport {randomUUID} from 'node:crypto';\nconst source=await readFile(process.argv[2],'utf8');\nawait writeFile(process.argv[3],JSON.stringify({nonce:randomUUID(),lines:source.trim().split('\\n').length})+'\\n');\n",
+      );
+      await writeFile(lockPath, JSON.stringify({ node: process.version, dependencies: [] }));
+      const inputPath = join(fx.files, "native-run.json");
+      const input = {
+        schemaVersion: 1,
+        runId: "observed-check-001",
+        requirementId: fx.rows[0]!.id,
+        requirementSha256: fx.rows[0]!.requirementSha256,
+        nativeSessionId: null,
+        workingDirectory: fx.files,
+        runtime: { kind: "node", path: process.execPath },
+        scriptPath,
+        environmentLockPath: lockPath,
+        inputs: [{ id: "source", artifactId: fx.artifact.artifactId, sha256: fx.artifact.sha256 }],
+        outputs: [{ id: "result", fileName: "result.json", mediaType: "application/json" }],
+        arguments: ["{input:source}", "{output:result}"],
+        timeoutSeconds: 30,
+      };
+      await writeFile(inputPath, JSON.stringify(input));
+      const argv = [
+        "research",
+        "project",
+        "task",
+        "run",
+        "observe",
+        "task-project",
+        "--input",
+        inputPath,
+        "--confirm-execution",
+        "--workspace",
+        fx.root,
+        "--json",
+      ];
+      const observed = await cli(argv);
+      assert.equal(observed.exitCode, 0, observed.stderr);
+      const first = JSON.parse(observed.stdout);
+      assert.equal(first.record.status, "succeeded");
+      assert.equal(first.record.observation, "cli-observed-native-process");
+      assert.equal(first.record.executionCertified, false);
+      assert.equal(first.record.process.exitCode, 0);
+      assert.equal(first.record.runtime.kind, "node");
+      assert.match(first.record.runtime.binarySha256, /^[a-f0-9]{64}$/);
+      assert.equal(first.record.inputs[0].sha256, fx.artifact.sha256);
+      assert.equal(first.record.outputs.length, 1);
+      assert.equal(observed.stdout.includes(fx.files), false);
+      assert.equal(observed.stdout.includes(fx.root), false);
+      const replay = await cli(argv);
+      assert.equal(replay.exitCode, 0, replay.stderr);
+      assert.deepEqual(JSON.parse(replay.stdout).record, first.record);
+      assert.equal(JSON.parse(replay.stdout).replayed, true);
+      const accepted = await recordAcceptance(fx, {
+        ...acceptanceInput(fx.rows[0]!, fx.atom.atomId, [], "negative-result"),
+        checkKind: "computation",
+        reportedCommand: null,
+        nativeRunSha256: first.record.recordSha256,
+      });
+      assert.equal(accepted.exitCode, 0, accepted.stderr);
+      const record = JSON.parse(accepted.stdout);
+      assert.equal(record.nativeRunSha256, first.record.recordSha256);
+      assert.equal(record.results[0].sha256, first.record.outputs[0].sha256);
+      const auditPath = join(fx.files, "native-run-audit");
+      const exported = await cli([
+        "research",
+        "project",
+        "audit",
+        "export",
+        "task-project",
+        "--output",
+        auditPath,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(exported.exitCode, 0, exported.stderr);
+      const manifestPath = join(auditPath, "manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      const missingScript = `project/${first.record.script.path}`;
+      await rm(join(auditPath, missingScript));
+      manifest.files = manifest.files.filter(
+        (file: { path: string }) => file.path !== missingScript,
+      );
+      const { manifestSha256: _previousManifest, ...core } = manifest;
+      await chmod(manifestPath, 0o600);
+      await writeFile(
+        manifestPath,
+        JSON.stringify({ ...core, manifestSha256: sha256Text(canonicalJson(core)) }, null, 2) +
+          "\n",
+      );
+      const invalidAudit = await cli([
+        "research",
+        "project",
+        "audit",
+        "verify",
+        "--bundle",
+        auditPath,
+        "--json",
+      ]);
+      assert.equal(
+        invalidAudit.exitCode,
+        3,
+        "rehashed inventories must not hide a missing observed program",
+      );
+      assert.equal(
+        (await readVerifiedJournal(workspacePaths(fx.root).journal)).filter(
+          (event) => event.type === "project.task.run.started",
+        ).length,
+        1,
+      );
+      const changed = {
+        ...input,
+        arguments: ["{input:source}", "{output:result}", "changed-intent"],
+      };
+      await writeFile(inputPath, JSON.stringify(changed));
+      assert.equal((await cli(argv)).exitCode, 3);
+      const analyze = await prepareNativeResearchStage({
+        root: fx.root,
+        projectId: "task-project",
+        stage: "analyze",
+        hostAgent: "codex",
+      });
+      const directory = await cli([
+        "research",
+        "project",
+        "stage",
+        "artifacts",
+        "task-project",
+        "--session",
+        analyze.sessionId,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(directory.exitCode, 0, directory.stderr);
+      const listed = JSON.parse(directory.stdout).items as Array<{ path: string; sha256: string }>;
+      for (const object of [
+        first.record.script,
+        first.record.environmentLock,
+        ...first.record.inputs,
+        ...first.record.outputs,
+      ]) {
+        assert.ok(
+          listed.some((item) => item.path === object.path && item.sha256 === object.sha256),
+          `missing packet-readable run object ${object.path}`,
+        );
+      }
+      const scriptObject = listed.find((item) => item.path === first.record.script.path) as {
+        path: string;
+        sha256: string;
+        objectId: string;
+      };
+      const read = await cli([
+        "research",
+        "project",
+        "stage",
+        "read",
+        "task-project",
+        "--session",
+        analyze.sessionId,
+        "--artifact",
+        scriptObject.objectId,
+        "--length",
+        "all",
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(read.exitCode, 0, read.stderr);
+      const receipt = JSON.parse(read.stdout).receipt;
+      const readAudit = join(fx.files, "read-receipt-audit");
+      const exportedRead = await cli([
+        "research",
+        "project",
+        "audit",
+        "export",
+        "task-project",
+        "--output",
+        readAudit,
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      assert.equal(exportedRead.exitCode, 0, exportedRead.stderr);
+      const readManifestPath = join(readAudit, "manifest.json");
+      const readManifest = JSON.parse(await readFile(readManifestPath, "utf8"));
+      const receiptPath = `project/reads/receipts/${receipt.receiptSha256}.json`;
+      const receiptFile = join(readAudit, receiptPath);
+      await chmod(receiptFile, 0o600);
+      await writeFile(
+        receiptFile,
+        JSON.stringify({ ...receipt, offset: receipt.offset + 1 }, null, 2) + "\n",
+      );
+      const changedReceipt = readManifest.files.find(
+        (file: { path: string }) => file.path === receiptPath,
+      );
+      changedReceipt.sha256 = await sha256File(receiptFile);
+      changedReceipt.bytes = (await readFile(receiptFile)).length;
+      const { manifestSha256: _readManifestHash, ...readCore } = readManifest;
+      await chmod(readManifestPath, 0o600);
+      await writeFile(
+        readManifestPath,
+        JSON.stringify(
+          { ...readCore, manifestSha256: sha256Text(canonicalJson(readCore)) },
+          null,
+          2,
+        ) + "\n",
+      );
+      const alteredRead = await cli([
+        "research",
+        "project",
+        "audit",
+        "verify",
+        "--bundle",
+        readAudit,
+        "--json",
+      ]);
+      assert.equal(
+        alteredRead.exitCode,
+        3,
+        "a rehashed outer inventory cannot certify a changed read receipt",
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("releases the workspace lease while an explicitly staged CommonJS calculation waits", async () => {
+    const fx = await acquiredFixture("computation");
+    let pending: ReturnType<typeof cli> | undefined;
+    let barrier: string | undefined;
+    try {
+      const scriptPath = join(fx.files, "lease-check.cjs");
+      const lockPath = join(fx.files, "lease-environment.json");
+      await writeFile(
+        scriptPath,
+        "const fs=require('node:fs');\nconst output=process.argv[3];\nfs.writeFileSync(output,JSON.stringify({waiting:true}));\nconst timer=setInterval(()=>{if(fs.existsSync(output+'.continue')){clearInterval(timer);fs.writeFileSync(output,JSON.stringify({completed:true}));}},20);\n",
+      );
+      await writeFile(lockPath, JSON.stringify({ node: process.version, dependencies: [] }));
+      const inputPath = join(fx.files, "lease-run.json");
+      await writeFile(
+        inputPath,
+        JSON.stringify({
+          schemaVersion: 1,
+          runId: "lease-check-001",
+          requirementId: fx.rows[0]!.id,
+          requirementSha256: fx.rows[0]!.requirementSha256,
+          nativeSessionId: null,
+          workingDirectory: fx.files,
+          runtime: { kind: "node", path: process.execPath },
+          scriptPath,
+          environmentLockPath: lockPath,
+          inputs: [
+            { id: "source", artifactId: fx.artifact.artifactId, sha256: fx.artifact.sha256 },
+          ],
+          outputs: [{ id: "result", fileName: "lease-result.json", mediaType: "application/json" }],
+          arguments: ["{input:source}", "{output:result}"],
+          timeoutSeconds: 30,
+        }),
+      );
+      pending = cli([
+        "research",
+        "project",
+        "task",
+        "run",
+        "observe",
+        "task-project",
+        "--input",
+        inputPath,
+        "--confirm-execution",
+        "--workspace",
+        fx.root,
+        "--json",
+      ]);
+      let waiting = false;
+      for (let attempt = 0; attempt < 400; attempt += 1) {
+        const event = (await readVerifiedJournal(workspacePaths(fx.root).journal)).find(
+          (item) =>
+            item.type === "project.task.run.started" && item.payload.runId === "lease-check-001",
+        );
+        if (event) {
+          const path = join(
+            fx.files,
+            String(event.payload.stagingDirectoryName),
+            "lease-result.json",
+          );
+          barrier = path + ".continue";
+          const content = await readFile(path, "utf8").catch(() => "");
+          if (content && JSON.parse(content).waiting) {
+            waiting = true;
+            break;
+          }
+        }
+        await delay(25);
+      }
+      assert.equal(waiting, true, "the actual child reached the file-based wait barrier");
+      await withWorkspaceLock(fx.root, "test.native-run.concurrent-reader", async () => {
+        await writeFile(barrier!, "continue");
+      });
+      const result = await pending;
+      assert.equal(result.exitCode, 0, result.stderr);
+      assert.equal(JSON.parse(result.stdout).record.status, "succeeded");
+    } finally {
+      if (barrier) await writeFile(barrier, "continue").catch(() => undefined);
+      await pending;
+      await fx.cleanup();
+    }
+  });
+
+  it("records failed, timed-out and missing-output calculations without granting positive acceptance", async () => {
+    const fx = await acquiredFixture("computation");
+    try {
+      for (const [name, source, expected] of [
+        ["failed", "process.exit(7);", "failed"],
+        ["missing", "console.log('no output file was produced');", "invalid-output"],
+        ["timeout", "setInterval(()=>{},100);", "timed-out"],
+      ]) {
+        const request = await nativeRunTestRequest(fx, name!, source!);
+        if (name === "timeout") request.input.timeoutSeconds = 1;
+        await writeFile(request.path, JSON.stringify(request.input));
+        const attempted = await cli(request.argv);
+        assert.equal(attempted.exitCode, 3, attempted.stderr);
+        const observed = JSON.parse(attempted.stdout).record;
+        assert.equal(observed.status, expected);
+        const forged = await recordAcceptance(fx, {
+          ...acceptanceInput(fx.rows[0]!, fx.atom.atomId, [], "satisfied"),
+          checkKind: "computation",
+          reportedCommand: null,
+          nativeRunSha256: observed.recordSha256,
+        });
+        assert.equal(forged.exitCode, 3);
+        const replay = await cli(request.argv);
+        assert.equal(JSON.parse(replay.stdout).replayed, true);
+      }
+      const events = await readVerifiedJournal(workspacePaths(fx.root).journal);
+      assert.equal(events.filter((event) => event.type === "project.task.run.started").length, 3);
+      assert.equal(
+        events.filter((event) => event.type === "project.task.acceptance.recorded").length,
+        0,
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("keeps native calculation credentials out of its environment, diagnostics and journal", async () => {
+    const fx = await acquiredFixture("computation");
+    const previous = process.env.TIANGONG_TEST_NATIVE_SECRET;
+    const secret = "native-run-secret-marker";
+    process.env.TIANGONG_TEST_NATIVE_SECRET = secret;
+    try {
+      const source =
+        "import {writeFile} from 'node:fs/promises';\nconst value=['native','run','secret','marker'].join('-');\nif(process.env.TIANGONG_TEST_NATIVE_SECRET)process.exit(9);\nconsole.error(['Author','ization'].join('')+': '+'Bearer'+' '+value);\nconsole.error('https://example.invalid/report'+'?'+['to','ken'].join('')+'='+value);\nconsole.error(process.cwd());\nawait writeFile(process.argv[3],JSON.stringify({credentialInherited:false}));\n";
+      const request = await nativeRunTestRequest(fx, "secrets", source);
+      const result = await cli(request.argv);
+      assert.equal(result.exitCode, 0, result.stderr);
+      const journal = await readFile(workspacePaths(fx.root).journal, "utf8");
+      assert.equal((result.stdout + result.stderr + journal).includes(secret), false);
+      assert.equal(result.stdout.includes(fx.files), false);
+      assert.match(JSON.parse(result.stdout).record.process.diagnostic, /REDACTED/);
+    } finally {
+      if (previous === undefined) delete process.env.TIANGONG_TEST_NATIVE_SECRET;
+      else process.env.TIANGONG_TEST_NATIVE_SECRET = previous;
+      await fx.cleanup();
+    }
+  });
+
+  it("rejects malformed provenance before committing an unreadable original task", async () => {
+    const fx = await fixture();
+    try {
+      await writeFile(
+        fx.inputPath,
+        JSON.stringify({
+          ...contractInput(),
+          requestProvenance: {
+            mode: "verbatim",
+            source: { kind: "user-message", text: contractInput().originalRequest, locator: null },
+            explanation: "        ",
+          },
+        }),
+      );
+      const result = await fx.task(["define", "--input", fx.inputPath]);
+      assert.equal(result.exitCode, 3, result.stdout);
+      assert.equal(
+        (await readVerifiedJournal(workspacePaths(fx.root).journal)).some(
+          (event) => event.type === "project.task.defined",
+        ),
+        false,
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("preserves original request provenance separately from interpreted requirements", async () => {
+    const fx = await fixture();
+    try {
+      const original =
+        "\uFEFFCompare electricity and water evidence, retaining uncertainty and counterevidence.\r\n";
+      const input = {
+        ...contractInput(),
+        requestProvenance: {
+          mode: "interpreted",
+          source: { kind: "user-message", text: original, locator: "conversation:request-17" },
+          explanation:
+            "The requirement list operationalizes the quoted user message without assuming an outcome.",
+        },
+      };
+      await writeFile(fx.inputPath, JSON.stringify(input));
+      const defined = await fx.task(["define", "--input", fx.inputPath]);
+      assert.equal(defined.exitCode, 0, defined.stderr);
+      const inspected = await fx.task(["status"]);
+      assert.equal(inspected.exitCode, 0, inspected.stderr);
+      const context = JSON.parse(inspected.stdout);
+      assert.equal(context.requestProvenance.mode, "interpreted");
+      assert.equal(context.requestProvenance.source.textSha256, sha256Text(original));
+      assert.equal(
+        context.requestProvenance.source.locatorSha256,
+        sha256Text("conversation:request-17"),
+      );
+      assert.equal(context.requestProvenance.authorshipVerified, false);
+      const object = JSON.parse(
+        await readFile(
+          join(
+            workspacePaths(fx.root).projects,
+            "task-project",
+            "task/request-sources",
+            `${context.requestProvenance.source.objectSha256}.json`,
+          ),
+          "utf8",
+        ),
+      );
+      assert.equal(object.text, original);
+      assert.equal(inspected.stdout.includes("conversation:request-17"), false);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("cannot call a rewritten request verbatim or add provenance retrospectively", async () => {
+    const fx = await fixture();
+    try {
+      await writeFile(
+        fx.inputPath,
+        JSON.stringify({
+          ...contractInput(),
+          requestProvenance: {
+            mode: "verbatim",
+            source: {
+              kind: "user-file",
+              text: "A different original task must not be hidden.",
+              locator: null,
+            },
+            explanation: "The user supplied this complete request.",
+          },
+        }),
+      );
+      const rejected = await fx.task(["define", "--input", fx.inputPath]);
+      assert.equal(rejected.exitCode, 3);
+      await writeFile(fx.inputPath, JSON.stringify(contractInput()));
+      assert.equal((await fx.task(["define", "--input", fx.inputPath])).exitCode, 0);
+      const inspected = await fx.task(["status"]);
+      assert.equal(JSON.parse(inspected.stdout).requestProvenance.mode, "unrecorded");
+      await writeFile(
+        fx.inputPath,
+        JSON.stringify({
+          ...contractInput(),
+          requestProvenance: {
+            mode: "verbatim",
+            source: { kind: "user-file", text: contractInput().originalRequest, locator: null },
+            explanation: "An original file was supplied after the first definition.",
+          },
+        }),
+      );
+      assert.equal((await fx.task(["define", "--input", fx.inputPath])).exitCode, 3);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
   it("does not charge a non-embedded raw input bundle against a later task context", async () => {
     const fx = await acquiredFixture("evidence", 33_000);
     try {
@@ -137,24 +628,22 @@ describe("lightweight original task and authorized scope", () => {
     }
   });
 
-  it("still rejects a genuinely oversized task prompt before spending a native attempt", async () => {
+  it("prepares a detailed original task without an arbitrary input length rejection", async () => {
     const fx = await fixture();
     try {
       const input = contractInput();
       input.originalRequest = "Preserve this detailed original requirement. ".repeat(1_000);
       await writeFile(fx.inputPath, JSON.stringify(input));
       assert.equal((await fx.task(["define", "--input", fx.inputPath])).exitCode, 0);
-      await assert.rejects(
-        prepareNativeResearchStage({
-          root: fx.root,
-          projectId: "task-project",
-          stage: "discover",
-          hostAgent: "codex",
-        }),
-        { code: "RESEARCH_TASK_CONTEXT_TOO_LARGE" },
-      );
+      const prepared = await prepareNativeResearchStage({
+        root: fx.root,
+        projectId: "task-project",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      assert.match(prepared.prompt, /Original task and current authorized scope/);
       const project = await loadProject(fx.root, "task-project");
-      assert.ok(project.packages.every((item) => item.attempts === 0));
+      assert.equal(project.packages.find((item) => item.id === "discover")?.attempts, 1);
       assert.equal(project.usage.tokens, 0);
     } finally {
       await fx.cleanup();
@@ -476,6 +965,25 @@ describe("lightweight original task and authorized scope", () => {
     }
   });
 
+  it("retains an unobserved computational report but does not promote it to verified execution", async () => {
+    const fx = await acquiredFixture("computation");
+    try {
+      const path = join(fx.files, "reported-only.json");
+      await writeFile(path, JSON.stringify({ reportedDifference: 0 }));
+      const accepted = await recordAcceptance(fx, {
+        ...acceptanceInput(fx.rows[0]!, fx.atom.atomId, [path], "negative-result"),
+        checkKind: "computation",
+        reportedCommand: "node claimed-calculation.mjs",
+      });
+      assert.equal(accepted.exitCode, 0, accepted.stderr);
+      const status = JSON.parse((await fx.task(["status"])).stdout);
+      assert.equal(status.currentScope.requirements[0].status, "unverified-execution");
+      assert.equal(status.currentScope.status, "incomplete");
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
   it("rejects control-store result paths through a parent-directory alias", async () => {
     const fx = await acquiredFixture();
     try {
@@ -519,6 +1027,24 @@ describe("lightweight original task and authorized scope", () => {
         scientificPolicy(id),
         await scientificDesignInput(fx.root, id),
       );
+      const sourceText =
+        "Exact owner-provided scientific request, including counterevidence and unsuccessful outcomes.\r\n";
+      await writeFile(
+        fx.inputPath,
+        JSON.stringify({
+          ...contractInput(),
+          requestProvenance: {
+            mode: "interpreted",
+            source: {
+              kind: "user-message",
+              text: sourceText,
+              locator: "conversation:scientific-original",
+            },
+            explanation:
+              "The operational checklist interprets the supplied original request without authenticating authorship.",
+          },
+        }),
+      );
       const defined = await fx.task(["define", "--input", fx.inputPath], id);
       assert.equal(defined.exitCode, 0, defined.stderr);
       const originalContract = JSON.parse(defined.stdout).contractSha256;
@@ -532,6 +1058,19 @@ describe("lightweight original task and authorized scope", () => {
       );
       const packetBytes = await readFile(packetPath, "utf8");
       assert.equal(JSON.parse(packetBytes).taskContract.contractSha256, originalContract);
+      const sourceRecord = JSON.parse(packetBytes).stageInputs.find(
+        (item: { purpose: string }) => item.purpose === "original-request-source",
+      );
+      assert.ok(
+        sourceRecord,
+        "the real canary exposed a request hash with no reviewer-readable original source",
+      );
+      const sourceObjectBytes = await readFile(
+        join(workspacePaths(fx.root).control, sourceRecord.path),
+        "utf8",
+      );
+      assert.equal(JSON.parse(sourceObjectBytes).text, sourceText);
+      assert.equal(sourceRecord.sha256, sha256Text(sourceObjectBytes));
       const proposalPath = join(fx.files, "science-scope.json");
       await writeFile(
         proposalPath,
@@ -682,11 +1221,18 @@ describe("lightweight original task and authorized scope", () => {
           assert.equal(packet.taskAcceptance.requirements.length, 2);
           assert.equal(packet.taskAcceptance.originalRequest, contractInput().originalRequest);
           assert.equal(packet.taskAcceptance.results.length, 1);
-          assert.equal(
-            request.prompt.split(
-              `UNTRUSTED CHECK RESULT ${packet.taskAcceptance.results[0].sha256}`,
-            ).length - 1,
-            1,
+          const views = await openArtifactViews(
+            request.projectRoot,
+            request.artifactViews!.index,
+            packet.packetSha256,
+          );
+          const results = views.index.objects.filter(
+            (item) => item.sha256 === packet.taskAcceptance.results[0].sha256,
+          );
+          assert.equal(results.length, 1);
+          assert.deepEqual(
+            JSON.parse((await views.read({ objectId: results[0]!.objectId })).content),
+            { fixtureDifference: 0 },
           );
           assert.ok(
             Array.isArray(request.outputSchema?.required) &&
@@ -712,6 +1258,7 @@ describe("lightweight original task and authorized scope", () => {
           return {
             exitCode: 0,
             stdout: JSON.stringify(review),
+            artifactReads: views.receipts(),
             stderr: "",
             tokens: 10,
             inputTokens: 5,
@@ -1015,6 +1562,52 @@ describe("lightweight original task and authorized scope", () => {
     }
   });
 });
+
+async function nativeRunTestRequest(
+  fx: Awaited<ReturnType<typeof acquiredFixture>>,
+  name: string,
+  source: string,
+) {
+  const scriptPath = join(fx.files, `${name}.mjs`);
+  const environmentLockPath = join(fx.files, `${name}-environment.json`);
+  await writeFile(scriptPath, source);
+  await writeFile(environmentLockPath, JSON.stringify({ node: process.version, dependencies: [] }));
+  const input = {
+    schemaVersion: 1,
+    runId: `observed-${name}`,
+    requirementId: fx.rows[0]!.id,
+    requirementSha256: fx.rows[0]!.requirementSha256,
+    nativeSessionId: null,
+    workingDirectory: fx.files,
+    runtime: { kind: "node", path: process.execPath },
+    scriptPath,
+    environmentLockPath,
+    inputs: [{ id: "source", artifactId: fx.artifact.artifactId, sha256: fx.artifact.sha256 }],
+    outputs: [{ id: "result", fileName: "result.json", mediaType: "application/json" }],
+    arguments: ["{input:source}", "{output:result}"],
+    timeoutSeconds: 30,
+  };
+  const path = join(fx.files, `${name}-run.json`);
+  await writeFile(path, JSON.stringify(input));
+  return {
+    input,
+    path,
+    argv: [
+      "research",
+      "project",
+      "task",
+      "run",
+      "observe",
+      "task-project",
+      "--input",
+      path,
+      "--confirm-execution",
+      "--workspace",
+      fx.root,
+      "--json",
+    ],
+  };
+}
 
 async function acquiredFixture(
   checkKind: "evidence" | "computation" = "evidence",

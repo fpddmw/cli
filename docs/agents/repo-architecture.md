@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-09-03
-lastReviewedCommit: 06dadef170ab79c19eef9a35663e86fdee22479b
+lastReviewedAt: 2026-09-04
+lastReviewedCommit: 4cb45f23331677a7c713f20f3aa3cbb65afe9358
 ---
 
 # Repo Architecture
@@ -154,11 +154,13 @@ storage writes, queueing, and document status transitions.
   but finite production runaway ceilings,
   stdin-delivered agent prompts that are independent of host argv limits,
   tool-context-aware process capture, classified retries,
+  incremental Codex JSONL compaction of duplicated packet-only MCP payloads
+  without trimming model-visible evidence or final answers,
   project-scoped scheduling/exit status, durable user-action and
   external-response handoffs, JSONL progress, recovery events, exact
   companion readiness gates, domain-scoped setup readiness, persistent review
-  packets/bounded evidence contexts with exact cited-item JSON-Pointer
-  projections, tool-free independent review, and
+  packets/initial evidence excerpts with exact cited-item JSON-Pointer
+  projections, packet-only independent artifact reads, and
   mechanical closure-time hash verification. For `top-journal` goals it also
   owns the project-installed Policy-source resolver, whole-pack Policy parsing
   across every template category before catalog use, generic Policy catalog and
@@ -194,7 +196,10 @@ storage writes, queueing, and document status transitions.
   evidence/artifact bytes, Policy/design/review objects, environment
   fingerprints, and sanitized hash-preserving journal proofs,
   while excluding credentials, ephemeral/native state, unrelated projects, and
-  host paths. Top-level status exposes the acquisition, typed-content,
+  host paths. Portable text screening preserves field-name boundaries for native
+  identifiers and inspects decoded JSON/JSONL keys and values without rewriting
+  evidence. Per-file key classification is cached; nested credential arrays or
+  objects retain their sensitive-key context. Top-level status exposes the acquisition, typed-content,
   inference, and graph chain and distinguishes active base research from
   invalid scientific or publication state.
 - `src/education/**`: education search command handling and source specs for
@@ -392,7 +397,12 @@ identifiers and digests.
 
 The current interactive host is the producer boundary: the CLI prepares an
 ephemeral hash-bound packet but does not start Codex or Claude for discover,
-acquire, analyze, or synthesize. Discovery uses explicit one-shot broker
+acquire, analyze, or synthesize. Prompt generation receives an explicit native or
+headless execution mode. Native packets authorize a new JSON submission file and
+acquire-only retrieval of provisionally admitted sources; they do not describe
+the host as an isolated reviewer capsule. Later-stage evidence restrictions and
+headless JSON-only/read-only capsule instructions remain unchanged.
+Discovery uses explicit one-shot broker
 commands whose request files contain logical IDs only. It records candidate
 judgments in bounded append-only batches instead of returning a source-sized
 JSON document. Native Web/Browser discovery remains visible as hashed activity
@@ -475,18 +485,41 @@ journal, immutable objects, evidence IDs and existing reviewer pipeline. The
 original request and small versioned requirement set are recorded before execution
 or review. Scope changes require separate exact-hash operator confirmation and
 reset scoped scientific approvals; this is not authenticated human identity.
-Native observations bind requirement/source/atom/finding/result versions, store
-declared commands by hash, and never certify or execute them. Positive and supported
+Acceptance observations bind requirement/source/atom/finding/result versions and
+store declared commands by hash; acceptance intake never executes them. Positive and supported
 negative outcomes need review; failed, stale, unrun, withdrawn and unanswered
 requirements remain distinct. The existing review uses a dynamic taskAssessment
 schema, one unique result object per context, and no extra paid round. Missing
-checks stop before a call; existing prompt/reservation limits still apply.
-Scientific/publication packets carry the current task binding. Status/run derive
+checks stop before a call; finite runaway budgets remain without a total
+context-length admission gate. Request provenance distinguishes exact source
+wording, interpretation, reconstruction and unrecorded origin. Original source
+bytes and hashed locators survive scope/fork/audit; supplied transcripts are not
+authenticated authorship.
+Scientific/publication packets carry the current task binding.
+Scientific review stages the request-source bytes as well as the declared origin.
+The packet MCP surface has only the two closed read tools. Codex additionally
+disables supported I/O features and rejects reported non-packet I/O tool use;
+this is not a claim that its runtime has no built-in utility tools. Finite time
+and token/cost guards remain; only Claude exposes the configured provider turn cap.
+
+Status/run derive
 original/current scope completion independently of workflow/publication state;
 there is no mutable acceptance cache. Portable audit shares relationship validation
 and uses an operation-local file/JSON index after the original workspace is gone.
 It verifies integrity, not execution, authorship, or scientific truth. Absent-task
 projects have a cheap unassessed path; there is no retrospective completion.
+
+`scientific-fulfillment.ts` projects append-only, journal-committed fulfillment
+records over exact immutable base design bytes. Only predeclared pending model,
+environment and source-bound parameter slots can change; assumptions, identities,
+units, state sets and Policy are not patches. Idle pre-analysis admission reuses
+the narrow project-mutation recovery journal. The due gate and later approvals
+are reset; deadline-specific views preserve unaffected earlier reviews. Both
+scientific review and acquisition route resolution load that verified view.
+Model registration and frozen typed-content atoms remain the source authorities.
+`scientific-fulfillment-audit.ts` checks the same slot transitions, raw objects,
+registration hashes and committed head using portable indexed files. It does not
+turn an object-filing obligation into independent scientific approval.
 
 `analysis-run.ts` centralizes mode consistency for both stage submission and
 publication freeze. Qualitative records retain `not-applicable` computational
@@ -497,6 +530,23 @@ receipt. Acquisition forecast reuses the artifact media predicate and already
 verified input hashes, so local binaries without readable text are not counted
 as atom-eligible merely because an admitted full file exists.
 
+`native-run.ts` observes one explicitly requested ordinary Node/Python calculation,
+not an AI producer or workflow. It snapshots exact program/frozen input bytes,
+plans outputs, releases the workspace lease during the process, and commits a
+requirement-bound start/result with stable-input and exit/output checks. Runtime
+fingerprints are observed; dependency locks remain declarations, not hermetic
+attestation. Failed/incomplete runs cannot grant positive acceptance; identical
+committed replay does not execute again. Packets and task audit retain the exact
+program, lock, inputs, outputs and event relationships. Unobserved computational
+reports remain `unverified-execution`; evidence/proof checks are not forced to run.
+
+`artifact-read-audit.ts` validates persisted read directories, intrinsic receipt
+identity, packet/delivery authority and exact byte selectors. It groups pages by
+object so full bytes and UTF-8 validity are loaded once per object during this
+verification, and reports undeclared interrupted receipts separately from
+journal-verified delivery. Live review loading also revalidates the persistent
+artifact index before trusting it.
+
 `scientific-review-execution.ts` executes an already prepared early review
 through the same reviewer abstraction. It reserves finite token/cost/wall
 budgets before invocation, stages exact packet and Policy prose, and records an
@@ -504,8 +554,32 @@ immutable output/receipt before atomic idempotent submission. Receipt replay
 revalidates canonical upstream and review bytes without another model call;
 pending recovered submission also rechecks project authority and production
 Policy/readiness. Missing provider usage does not erase a consumed reservation.
+Failed processes expose a bounded sanitized diagnostic and exit code in the
+structured error and failed journal event without persisting the full prompt.
+`schema-compatibility.ts` shares Claude Code's dialect-annotation adapter between
+manual schema export and automatic reviewer invocation. Canonical controller
+schemas and their strict output checks are unchanged.
+The projection also states scalar types already implied by `const`/`enum`, so
+numeric constants do not become string parameters in Claude's output tool.
+Claude result normalization prefers `structured_output` over narrative `result`
+and retains declared error subtypes/messages as sanitized telemetry. An error
+envelope cannot become successful merely because its process exits zero.
 
 Reviewer transport is separate from producer host and reviewer model identity.
+`artifact-views.ts` owns immutable packet directories, opaque object selection,
+UTF-8/base64 byte views, exact delivery receipts and once-per-selected-object
+verification for adjacent pages. `artifact-view-mcp.ts` exposes only directory
+listing and reading on an ephemeral loopback endpoint with Host/Origin checks.
+It returns the complete bytes and receipt in one text result, without a
+metadata-only structured alternative that a client could prefer and hide text.
+No total corpus or requested-read length gate is added. Initial embedding targets
+choose inline content versus a retrievable reference; they do not drop artifacts.
+Reviewer invocation carries the exact index/packet binding, disables unrestricted
+tools, and keeps finite turn/time/cost guards separate from approximate planning
+estimates. Only read objects are additionally preserved, rather than copying the
+entire corpus into another evidence store. These receipts prove delivery, not
+comprehension or scientific correctness.
+
 `native-direct` invokes the platform capsule in-process. `sandbox-bridge` uses
 an owner-only local connection record and short Unix socket to an exact-version
 sidecar outside an outer IDE sandbox. The sidecar keeps its Ed25519 private key

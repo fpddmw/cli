@@ -73,6 +73,7 @@ import { recordNativeResearchActivity } from "./workspace/native-activity.js";
 import { inspectReviewerStatus, startReviewerBridgeSidecar } from "./workspace/review-executor.js";
 import { readAndVerifyProjectInputPlan } from "./workspace/input-plan.js";
 import { executeScientificReview } from "./workspace/scientific-review-execution.js";
+import { claudeCodeCompatibleSchema } from "./workspace/schema-compatibility.js";
 import {
   loadCurrentClaimEvidenceGraph,
   loadCurrentInferenceSnapshot,
@@ -119,6 +120,7 @@ import {
   abortNativeResearchStage,
   inspectNativeResearchStage,
   prepareNativeResearchStage,
+  readNativeStageArtifact,
   requestResearchHandoff,
   resolveResearchHandoff,
   runResearchWorkspace,
@@ -134,6 +136,16 @@ import {
   parseScientificObjectKind,
   registerScientificObject,
 } from "./workspace/scientific-objects.js";
+import {
+  inspectScientificFulfillment,
+  recordScientificFulfillment,
+  scientificFulfillmentSchema,
+} from "./workspace/scientific-fulfillment.js";
+import {
+  inspectNativeRun,
+  nativeRunInputSchema,
+  observeNativeRun,
+} from "./workspace/native-run.js";
 import {
   inspectScientificReviewStatus,
   prepareScientificReview,
@@ -212,6 +224,10 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research publication close <project-id> [--workspace <path>] [--json]
   tiangong-ai research scientific object register --kind model-implementation|environment-lock --path <absolute-file> [--media-type <type>] [--workspace <path>] [--json]
   tiangong-ai research scientific object inspect --kind model-implementation|environment-lock --locator <control-relative-locator> [--workspace <path>] [--json]
+  tiangong-ai research scientific fulfillment record <project> --input <json-file> [--workspace <path>] [--json]
+  tiangong-ai research scientific fulfillment status <project> [--workspace <path>] [--json]
+  tiangong-ai research project task run observe <project> --input <json-file> --confirm-execution [--workspace <path>] [--json]
+  tiangong-ai research project task run inspect <project> --run <run-id> [--workspace <path>] [--json]
   tiangong-ai research project init <project-id> --question <question> [--goal evidence-report|top-journal] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
   tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id> --design <absolute-json>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--trust-status verified-owner-input|unverified-owner-input|reference-only|replication-candidate] [--independently-reproduced] [--workspace <path>] [--json]
@@ -237,6 +253,8 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project stage prepare <project-id> --stage discover|acquire|analyze|synthesize --host-agent codex|claude|workbuddy|codebuddy [--workspace <path>] [--json]
   tiangong-ai research project stage submit <project-id> --session <id> --output <absolute-json> [--confirm-model <id>] [--workspace <path>] [--json]
   tiangong-ai research project stage abort <project-id> --session <id> [--workspace <path>] [--json]
+  tiangong-ai research project stage artifacts <project-id> --session <id> [--offset <n>] [--limit <n>] [--path-prefix <prefix>] [--workspace <path>] [--json]
+  tiangong-ai research project stage read <project-id> --session <id> --artifact <object-id> [--offset <bytes>] [--length <bytes|all>] [--encoding utf8|base64] [--workspace <path>] [--json]
   tiangong-ai research project evidence fetch <project-id> --request <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence data run <project-id> --request <absolute-data-run-request.json> [--workspace <path>] [--json]
   tiangong-ai research project evidence activity record <project-id> --record <absolute-json> [--workspace <path>] [--json]
@@ -268,6 +286,42 @@ ${researchSetupHelp()}
 async function runScientific(argv: string[], io: CliIO): Promise<number> {
   const [action, ...rest] = argv;
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action === "fulfillment") {
+    const [operation, ...arguments_] = rest;
+    if (operation !== "record" && operation !== "status")
+      throw unknownAction("research scientific fulfillment", operation ?? "");
+    const args = parseStrictArgs(
+      arguments_,
+      { ...WORKSPACE_OPTIONS, ...(operation === "record" ? { input: "string" as const } : {}) },
+      `research scientific fulfillment ${operation}`,
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(
+      args.positionals,
+      `research scientific fulfillment ${operation}`,
+    );
+    const root = await workspaceFromArgs(args);
+    if (operation === "status")
+      writeJson(io, await inspectScientificFulfillment(root, projectId), args);
+    else {
+      const path = strictString(args, "input");
+      if (!path)
+        throw new CliError("Fulfillment record requires --input.", {
+          code: "RESEARCH_SCIENTIFIC_FULFILLMENT_INVALID",
+          exitCode: 2,
+        });
+      writeJson(
+        io,
+        await recordScientificFulfillment(
+          root,
+          projectId,
+          await readBoundedJsonRecord(path, "--input", "RESEARCH_SCIENTIFIC_FULFILLMENT_INVALID"),
+        ),
+        args,
+      );
+    }
+    return 0;
+  }
   if (action !== "object") throw unknownAction("research scientific", action);
   const [objectAction, ...objectRest] = rest;
   if (objectAction === "register") {
@@ -701,12 +755,16 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
   let schema: Record<string, unknown>;
   if (stage === "task-acceptance") {
     schema = taskAcceptanceInputSchema();
+  } else if (stage === "task-native-run") {
+    schema = nativeRunInputSchema();
   } else if (isTaskSchemaName(stage)) {
     schema = taskInputSchema(stage);
   } else if (isEvidenceContentSchemaName(stage)) {
     schema = evidenceContentInputSchema(stage);
   } else if (stage === "scientific-design") {
     schema = scientificDesignSchema();
+  } else if (stage === "scientific-fulfillment") {
+    schema = scientificFulfillmentSchema();
   } else if (stage.startsWith("scientific-assessment-")) {
     const role = scientificReviewRole(stage.slice("scientific-assessment-".length));
     schema = scientificGateAssessmentSchema(role);
@@ -749,20 +807,7 @@ function compatibleSchema(
       details: { supported: ["claude-code"] },
     });
   }
-  const compatible = structuredClone(schema);
-  const stripMetadata = (value: unknown): void => {
-    if (Array.isArray(value)) {
-      for (const item of value) stripMetadata(item);
-      return;
-    }
-    if (!value || typeof value !== "object") return;
-    const record = value as Record<string, unknown>;
-    delete record.$schema;
-    delete record.$id;
-    for (const item of Object.values(record)) stripMetadata(item);
-  };
-  stripMetadata(compatible);
-  return compatible;
+  return claudeCodeCompatibleSchema(schema);
 }
 
 async function runContext(argv: string[], io: CliIO): Promise<number> {
@@ -1243,6 +1288,70 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   }
   if (action === "stage") {
     const [stageAction, ...stageRest] = rest;
+    if (stageAction === "artifacts" || stageAction === "read") {
+      const args = parseStrictArgs(
+        stageRest,
+        {
+          ...WORKSPACE_OPTIONS,
+          session: "string",
+          artifact: "string",
+          offset: "string",
+          limit: "string",
+          length: "string",
+          encoding: "string",
+          "path-prefix": "string",
+        },
+        `research project stage ${stageAction}`,
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const sessionId = strictString(args, "session");
+      const objectId = strictString(args, "artifact");
+      if (!sessionId || (stageAction === "read" && !objectId))
+        throw new CliError(
+          "Stage artifact reads require --session and an exact --artifact for read.",
+          { code: "RESEARCH_NATIVE_STAGE_SESSION_REQUIRED", exitCode: 3 },
+        );
+      const offset = strictString(args, "offset");
+      const limit = strictString(args, "limit");
+      const length = strictString(args, "length");
+      const encoding = strictString(args, "encoding");
+      if (encoding && encoding !== "utf8" && encoding !== "base64")
+        throw new CliError("Artifact encoding must be utf8 or base64.", {
+          code: "RESEARCH_ARTIFACT_VIEW_INVALID",
+          exitCode: 3,
+        });
+      const projectId = onePositional(args.positionals, `research project stage ${stageAction}`);
+      writeJson(
+        io,
+        await readNativeStageArtifact({
+          root: await workspaceFromArgs(args),
+          projectId,
+          sessionId,
+          ...(stageAction === "read"
+            ? {
+                selection: {
+                  objectId: objectId!,
+                  ...(offset === undefined ? {} : { offset: Number(offset) }),
+                  ...(length === undefined
+                    ? {}
+                    : { length: length === "all" ? null : Number(length) }),
+                  ...(encoding ? { encoding: encoding as "utf8" | "base64" } : {}),
+                },
+              }
+            : {
+                listing: {
+                  ...(offset === undefined ? {} : { offset: Number(offset) }),
+                  ...(limit === undefined ? {} : { limit: Number(limit) }),
+                  ...(strictString(args, "path-prefix")
+                    ? { pathPrefix: strictString(args, "path-prefix")! }
+                    : {}),
+                },
+              }),
+        }),
+        args,
+      );
+      return 0;
+    }
     if (stageAction === "prepare") {
       const args = parseStrictArgs(
         stageRest,
@@ -1314,6 +1423,34 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   }
   if (action === "task") {
     const [taskAction, ...taskRest] = rest;
+    if (taskAction === "run") {
+      const [runAction, ...runRest] = taskRest;
+      if (runAction !== "observe" && runAction !== "inspect")
+        throw unknownAction("research project task run", runAction ?? "");
+      const args = parseStrictArgs(
+        runRest,
+        { ...WORKSPACE_OPTIONS, input: "string", run: "string", "confirm-execution": "boolean" },
+        `research project task run ${runAction}`,
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const projectId = onePositional(args.positionals, `research project task run ${runAction}`);
+      const root = await workspaceFromArgs(args);
+      const result =
+        runAction === "inspect"
+          ? await inspectNativeRun(root, projectId, strictString(args, "run") ?? "")
+          : await observeNativeRun(
+              root,
+              projectId,
+              await readBoundedJsonRecord(
+                strictString(args, "input") ?? "",
+                "--input",
+                "RESEARCH_NATIVE_RUN_INVALID",
+              ),
+              strictBoolean(args, "confirm-execution"),
+            );
+      writeJson(io, result, args);
+      return "record" in result && result.record && result.record.status !== "succeeded" ? 3 : 0;
+    }
     if (taskAction === "acceptance") {
       const [acceptanceAction, ...acceptanceRest] = taskRest;
       if (acceptanceAction !== "record")

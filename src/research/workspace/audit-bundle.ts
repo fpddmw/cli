@@ -14,7 +14,15 @@ import { readJournal, verifyJournal } from "./journal.js";
 import { loadProject } from "./projects.js";
 import { inspectPublicationStatus } from "./publication-workflow.js";
 import { verifyTaskAudit, writeTaskAuditContext, type TaskAuditBinding } from "./task-audit.js";
-import { sanitizeResearchText, sanitizeResearchValue } from "./sanitization.js";
+import { loadScientificFulfillmentView } from "./scientific-fulfillment.js";
+import { verifyScientificFulfillmentAudit } from "./scientific-fulfillment-audit.js";
+import { resolveScientificObjectBinding } from "./scientific-objects.js";
+import { verifyArtifactReadAudit } from "./artifact-read-audit.js";
+import {
+  isSensitiveEnvironmentName,
+  sanitizeResearchText,
+  sanitizeResearchValue,
+} from "./sanitization.js";
 import {
   canonicalJson,
   ensureDirectory,
@@ -34,6 +42,8 @@ import { loadWorkspaceConfig, withWorkspaceLock } from "./workspace.js";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_TEXT_SCAN_BYTES = 16 * 1024 * 1024;
+const SENSITIVE_CONTAINER_KEY =
+  /^(?:(?:access|refresh|id|auth|bearer|session|csrf|xsrf)[_-]?token|(?:client|app|consumer)[_-]?secret|api[_-]?key|apikey|auth|authorization|cookie|credential|password|passwd|private[_-]?key|secret[_-]?access[_-]?key|session(?:[_-]?id)?|token)$/i;
 
 export interface ProjectAuditManifest {
   schemaVersion: 1;
@@ -116,6 +126,29 @@ export async function exportProjectAuditBundle(input: {
 
       const projectRoot = join(paths.projects, project.id);
       const researchChain = await loadVerifiedResearchChain(input.root, project);
+      if (project.scientificDesign) {
+        const fulfillment = await loadScientificFulfillmentView(input.root, project);
+        for (const record of fulfillment.records) {
+          for (const [kind, items] of [
+            ["model-implementation", record.modelImplementations],
+            ["environment-lock", record.environmentLocks],
+          ] as const) {
+            for (const item of items) {
+              const object = await resolveScientificObjectBinding({
+                root: input.root,
+                objectKind: kind,
+                objectLocator: item.objectLocator,
+                expectedSha256: item.sha256,
+              });
+              await stageFile(object.sourcePath, `workspace-objects/${item.objectLocator}`);
+              await stageFile(
+                resolveContained(paths.control, object.record!.recordLocator),
+                `workspace-objects/${object.record!.recordLocator}`,
+              );
+            }
+          }
+        }
+      }
       const task = await writeTaskAuditContext(input.root, project, temporary);
       if (task) researchChain.task = task;
       const projectFiles = await regularTreeFiles(projectRoot).catch((error) => {
@@ -341,6 +374,7 @@ export async function verifyProjectAuditBundle(bundlePath: string): Promise<{
   projectId: string;
   manifestSha256: string;
   files: number;
+  artifactReads: { verifiedReadReceipts: number; uncommittedReadReceipts: number };
   task?: TaskAuditBinding & { executionCertified: false };
 }> {
   if (!isAbsolute(bundlePath) || resolve(bundlePath) !== bundlePath) {
@@ -389,6 +423,18 @@ export async function verifyProjectAuditBundle(bundlePath: string): Promise<{
     }
   }
   await assertPortableTextFiles(bundlePath);
+  await verifyScientificFulfillmentAudit(bundlePath, manifest.projectId, manifest.files);
+  const readProof = await readJsonFile<{
+    events: Array<Pick<import("./types.js").JournalEvent, "type" | "scope" | "payload">>;
+  }>(join(bundlePath, "state/journal-event-proofs.json"), "Artifact read journal proof");
+  const artifactReads = await verifyArtifactReadAudit({
+    projectId: manifest.projectId,
+    files: manifest.files
+      .filter((file) => file.path.startsWith("project/"))
+      .map((file) => ({ ...file, path: file.path.slice("project/".length) })),
+    events: readProof.events,
+    readBytes: (path) => readFile(resolveContained(bundlePath, `project/${path}`)),
+  });
   let task: Awaited<ReturnType<typeof verifyTaskAudit>>;
   try {
     task = await verifyTaskAudit(
@@ -405,6 +451,7 @@ export async function verifyProjectAuditBundle(bundlePath: string): Promise<{
     projectId: manifest.projectId,
     manifestSha256,
     files: manifest.files.length,
+    artifactReads,
     ...(task ? { task } : {}),
   };
 }
@@ -470,13 +517,7 @@ async function assertPortableTextFiles(root: string, forbiddenRoot?: string): Pr
     const bytes = await readFile(path);
     if (!looksTextual(path, bytes)) continue;
     const text = bytes.toString("utf8");
-    if (forbiddenRoot && text.includes(forbiddenRoot)) {
-      throw new CliError("Audit bundle contains a host-specific workspace path.", {
-        code: "RESEARCH_AUDIT_BUNDLE_NONPORTABLE",
-        exitCode: 3,
-      });
-    }
-    if (sanitizeResearchText(text) !== text) {
+    const sensitive = (): never => {
       throw new CliError(
         `Audit bundle contains credential-like or sensitive text in ${relative(root, path).split(sep).join("/")}.`,
         {
@@ -484,6 +525,67 @@ async function assertPortableTextFiles(root: string, forbiddenRoot?: string): Pr
           exitCode: 3,
         },
       );
+    };
+    const inspectText = (value: string): void => {
+      if (forbiddenRoot && value.includes(forbiddenRoot)) {
+        throw new CliError("Audit bundle contains a host-specific workspace path.", {
+          code: "RESEARCH_AUDIT_BUNDLE_NONPORTABLE",
+          exitCode: 3,
+        });
+      }
+      if (sanitizeResearchText(value) !== value) sensitive();
+    };
+    inspectText(text);
+
+    // Decode only for inspection. Evidence and ledger bytes must remain unchanged.
+    const pending: unknown[] = [];
+    const enqueueJson = (value: string): boolean => {
+      if (!/^\s*[[{"]/u.test(value)) return false;
+      try {
+        pending.push(JSON.parse(value) as unknown);
+        return true;
+      } catch (error) {
+        if (error instanceof SyntaxError) return false;
+        throw auditError("Audit JSON could not be inspected safely.");
+      }
+    };
+    if (!enqueueJson(text)) {
+      for (const line of text.split(/\r?\n/u)) enqueueJson(line);
+    }
+    const sensitiveStringKeys = new Map<string, boolean>();
+    const sensitiveContainerKeys = new Map<string, boolean>();
+    while (pending.length > 0) {
+      const value = pending.pop();
+      if (typeof value === "string") {
+        inspectText(value);
+        enqueueJson(value);
+      } else if (Array.isArray(value)) {
+        for (const item of value) pending.push(item);
+      } else if (isObject(value)) {
+        for (const [key, item] of Object.entries(value)) {
+          inspectText(key);
+          const stringValue = typeof item === "string" && item !== "[REDACTED]";
+          const containerValue =
+            (Array.isArray(item) && item.length > 0) ||
+            (isObject(item) && Object.keys(item).length > 0);
+          if (stringValue || containerValue) {
+            const keyCache = containerValue ? sensitiveContainerKeys : sensitiveStringKeys;
+            let keyIsSensitive = keyCache.get(key);
+            if (keyIsSensitive === undefined) {
+              if (containerValue) {
+                keyIsSensitive =
+                  isSensitiveEnvironmentName(key) || SENSITIVE_CONTAINER_KEY.test(key);
+              } else {
+                const probe = JSON.stringify({ [key]: "audit-field-probe" });
+                keyIsSensitive = sanitizeResearchText(probe) !== probe;
+              }
+              keyCache.set(key, keyIsSensitive);
+            }
+            if (keyIsSensitive) sensitive();
+          }
+          pending.push(item);
+        }
+      }
     }
   }
 }
