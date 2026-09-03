@@ -56,6 +56,14 @@ it("removes Claude schema dialect annotations without changing constraints or li
   assert.equal(compatible.$schema, undefined);
   assert.deepEqual(schema, original, "The canonical controller schema must remain unchanged");
   const { $schema: _dialect, ...constraints } = original;
+  const properties = constraints.properties as Record<string, Record<string, unknown>>;
+  properties.schemaVersion!.type = "integer";
+  properties.role!.type = "string";
+  properties.decision!.type = "string";
+  const finding = properties.findings!.items as {
+    properties: Record<string, Record<string, unknown>>;
+  };
+  finding.properties.severity!.type = "string";
   assert.deepEqual(compatible, constraints);
   const literal = { $schema: "literal-data", $id: "literal-identity" };
   const propertySchema = { type: "string", minLength: 1 };
@@ -245,6 +253,7 @@ if (${JSON.stringify(agent)} === 'codex') {
   const schema = JSON.parse(args[args.indexOf('--json-schema') + 1]);
   assert.equal(schema.$schema, undefined, 'Claude CLI rejects the Draft 2020-12 meta-schema before model execution');
   assert.equal(schema.properties.schemaVersion.const, 1);
+  assert.equal(schema.properties.schemaVersion.type, 'integer', 'A numeric constant must not be encoded as a string by the structured-output tool');
   assert.deepEqual(schema.properties.decision.enum, ['pass', 'revise', 'stop', 'handoff']);
   url = JSON.parse(await readFile(args[args.indexOf('--mcp-config') + 1], 'utf8')).mcpServers.research_artifacts.url;
 }

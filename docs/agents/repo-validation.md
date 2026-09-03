@@ -268,6 +268,9 @@ prefer it over informal `result` text, and reject `is_error`/error-subtype resul
 even when a wrapper exits zero. Structured errors take priority over incidental
 stderr warnings and are sanitized before truncation, including a secret that
 crosses the diagnostic boundary.
+The native format probe exposed Claude's untyped numeric `const` becoming a
+string tool parameter. The provider projection makes implied scalar types
+explicit, while retaining `const`/`enum` and rejecting mismatched returned data.
 
 `test/research-scientific-review.test.ts` exercises same-project fulfillment of
 predeclared model/environment slots, byte-identical base design preservation,

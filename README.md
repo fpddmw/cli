@@ -683,6 +683,8 @@ the journal; no full prompt or raw authentication output is persisted. Automatic
 Claude invocation uses the same dialect-annotation conversion as
 `research schema show NAME --compatibility claude-code`; canonical controller
 validation and its scientific constraints remain unchanged.
+The provider view explicitly types scalar constants/enums; returned values are
+never coerced to satisfy the canonical schema.
 Claude's structured result is used instead of any accompanying narrative;
 declared error results remain failures, with their safe diagnostic ahead of
 incidental stderr warnings.

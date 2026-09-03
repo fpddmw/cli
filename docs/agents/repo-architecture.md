@@ -551,6 +551,8 @@ structured error and failed journal event without persisting the full prompt.
 `schema-compatibility.ts` shares Claude Code's dialect-annotation adapter between
 manual schema export and automatic reviewer invocation. Canonical controller
 schemas and their strict output checks are unchanged.
+The projection also states scalar types already implied by `const`/`enum`, so
+numeric constants do not become string parameters in Claude's output tool.
 Claude result normalization prefers `structured_output` over narrative `result`
 and retains declared error subtypes/messages as sanitized telemetry. An error
 envelope cannot become successful merely because its process exits zero.
