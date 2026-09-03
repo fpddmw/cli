@@ -856,6 +856,7 @@ export async function prepareNativeResearchStage(input: {
         stageContextContent,
         discovery,
         await listEvidenceCandidates(input.root, project.id),
+        "native-host",
       );
       const taskContract = await taskContext(
         input.root,
@@ -889,7 +890,6 @@ export async function prepareNativeResearchStage(input: {
             ? "Acquire the provisionally admitted sources with the installed external acquisition/document Skills or an explicitly selected user-authorized browser. Capture the exact browser/adapter Download object, save it to the planned unique staging path, and call bindDownload before registerArtifact. Record browser/download/file-inspection activity with recordActivity. Failed or cancelled downloads cannot create bindings or artifacts. Never scan a download directory or infer success from file existence."
             : "Do not acquire additional evidence in this stage.",
         basePrompt,
-        "Save only the final schema-conforming JSON object to a new regular file, then submit it with the packet's submit command. The CLI remains the sole authority for validation and atomic promotion.",
       ].join("\n\n");
       const preparedAt = new Date().toISOString();
       const bindingSha256 = await nativeStageBinding(input.root, project, workPackage);
@@ -2064,6 +2064,7 @@ async function executeWorkPackage(
             stageContextContent,
             discovery,
             await listEvidenceCandidates(root, project.id),
+            "headless-cli",
           ) +
           (capsule.publicationPolicyDocumentation
             ? `\n\n${capsule.publicationPolicyDocumentation}`
@@ -4492,6 +4493,7 @@ function packagePrompt(
   stageContextContent: string,
   discovery: DiscoveryProgress | null,
   evidenceCandidates: Awaited<ReturnType<typeof listEvidenceCandidates>>,
+  executionMode: "native-host" | "headless-cli",
 ): string {
   const stageInstructions: Record<WorkPackage["stage"], string> = {
     discover:
@@ -4506,7 +4508,9 @@ function packagePrompt(
     close: "No agent action is allowed for mechanical closure.",
   };
   const prompt = [
-    "Operate only inside this isolated research capsule.",
+    executionMode === "native-host"
+      ? "Operate in the current native host with this project's authorized inputs and packet operations; host permissions still apply."
+      : "Operate only inside this isolated research capsule.",
     `Project: ${project.id}`,
     `Question: ${project.question}`,
     `Stage: ${workPackage.stage}`,
@@ -4521,9 +4525,13 @@ function packagePrompt(
         : "Capability files are provenance-bound but are not available as execution tools in this stage.",
     workPackage.stage === "discover"
       ? `Follow the reviewed discovery plan: ${JSON.stringify(discovery)}. The plan's max evidence-call count is a hard working ceiling, not a target to exhaust. Execute required first-pass channels before supplemental channels, prefer broad high-yield queries, assess registered candidates between batches, and use the next gap-fill batch only for explicit uncovered dimensions, source types, date ranges, full text, limitations, or counterevidence. Stop fetching as soon as the declared coverage minimums are supportable. Native Web/Browser may broaden lead discovery, but every such action must be recorded through recordActivity, every useful result must be registered as a candidate, and the same URL/DOI must then be formalized through the broker before admission. A broker receipt, structured data-runtime receipt, or immutable registered input is an admissible evidence path. Do not execute a staged Skill's curl/CLI examples or read provider environment variables. For generic broker capabilities, invoke fetch_candidate_source with the manifest capability ID and obey its exact declared HTTP method. For structured data capabilities, use the packet's dynamic catalog and describe command, then invoke runDataCapability; never call standalone data run for project evidence. Never place API keys, tokens, authorization data, cookies, or other credential-like fields in request files. The Research control plane injects declared logical credentials and persists only safe hash-bound results. Exercise every manifest capability with requiredForDiscovery=true and every project-required data capability ID, or the mechanical coverage gate will stop downstream work.`
-      : "Use only admitted stage context and this packet's read-only artifact channel. No new evidence acquisition or arbitrary host-file access is authorized.",
+      : executionMode === "native-host" && workPackage.stage === "acquire"
+        ? "Acquire files and readable derivatives only for provisionally admitted sources using the packet's bindDownload and registerArtifact commands. Do not reopen discovery, admit new sources, or access unrelated host files."
+        : "Use only admitted stage context and this packet's read-only artifact channel. No new evidence acquisition or arbitrary host-file access is authorized.",
     stageInstructions[workPackage.stage],
-    "Do not write stage output files directly. Your final response must be only the JSON object required by the supplied output schema; the CLI will validate and atomically materialize it.",
+    executionMode === "native-host"
+      ? "Do not write admitted output paths or control-plane files directly. Save only the final schema-conforming JSON object to a new regular file, then submit it with the packet's submit command. The CLI remains the sole authority for validation and atomic promotion."
+      : "Do not write stage output files directly. Your final response must be only the JSON object required by the supplied output schema; the CLI will validate and atomically materialize it.",
     "Do not edit project.json, input manifests, prior outputs, evidence objects, or staged capability files.",
   ];
   if (workPackage.stage === "discover") {

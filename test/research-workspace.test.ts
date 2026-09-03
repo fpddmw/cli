@@ -1265,6 +1265,20 @@ describe("research project execution", () => {
         });
         assert.match(packet.prompt, /current interactive host session/i);
         assert.match(packet.prompt, /do not launch codex exec/i);
+        assert.match(
+          packet.prompt,
+          /Save only the final schema-conforming JSON object to a new regular file/,
+        );
+        assert.doesNotMatch(packet.prompt, /Operate only inside this isolated research capsule/);
+        assert.doesNotMatch(packet.prompt, /Do not write stage output files directly/);
+        if (stage === "acquire") {
+          assert.match(packet.prompt, /provisionally admitted sources/);
+          assert.match(packet.prompt, /bindDownload/);
+          assert.match(packet.prompt, /registerArtifact/);
+          assert.doesNotMatch(packet.prompt, /No new evidence acquisition/);
+        } else if (stage === "analyze" || stage === "synthesize") {
+          assert.match(packet.prompt, /No new evidence acquisition/);
+        }
         assert.equal(packet.commands.submit.argv.includes("--confirm-model"), false);
         nativeReservedTokens += packet.limits.reservedPackageTokens;
         if (stage === "discover") {
@@ -1354,10 +1368,20 @@ describe("research project execution", () => {
       }
 
       const launched: string[] = [];
+      const reviewerExecutor = fakeExecutor(launched);
       const completed = await runNativeControlledWorkspace(
         root,
         { maxParallel: 1, maxCycles: 5, dryRun: false, environment: {} },
-        fakeExecutor(launched),
+        async (request) => {
+          assert.match(request.prompt, /Operate only inside this isolated research capsule/);
+          assert.match(request.prompt, /Do not write stage output files directly/);
+          assert.match(request.prompt, /Your final response must be only the JSON object/);
+          assert.match(request.prompt, /No new evidence acquisition/);
+          assert.doesNotMatch(request.prompt, /Save only the final schema-conforming JSON object/);
+          assert.equal(request.toolPolicy, "packet-read");
+          assert.equal(request.brokerUrl, null);
+          return reviewerExecutor(request);
+        },
       );
       assert.equal(completed.status, "complete", JSON.stringify(completed));
       assert.deepEqual(nativeAgents, ["codex", "codex", "codex", "codex"]);

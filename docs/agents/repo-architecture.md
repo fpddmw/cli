@@ -394,7 +394,12 @@ identifiers and digests.
 
 The current interactive host is the producer boundary: the CLI prepares an
 ephemeral hash-bound packet but does not start Codex or Claude for discover,
-acquire, analyze, or synthesize. Discovery uses explicit one-shot broker
+acquire, analyze, or synthesize. Prompt generation receives an explicit native or
+headless execution mode. Native packets authorize a new JSON submission file and
+acquire-only retrieval of provisionally admitted sources; they do not describe
+the host as an isolated reviewer capsule. Later-stage evidence restrictions and
+headless JSON-only/read-only capsule instructions remain unchanged.
+Discovery uses explicit one-shot broker
 commands whose request files contain logical IDs only. It records candidate
 judgments in bounded append-only batches instead of returning a source-sized
 JSON document. Native Web/Browser discovery remains visible as hashed activity

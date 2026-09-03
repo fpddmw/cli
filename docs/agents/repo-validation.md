@@ -487,6 +487,11 @@ invokes the producer executor, prepare/submit advances discover through
 synthesize with hash-bound sessions and reserved accounting, native broker
 fetches remain call-bounded and sanitized, and only the other-family reviewer
 CLI is launched before mechanical closure.
+The same native flow checks mode-specific prompt instructions across all four
+producer stages: acquire permits only provisionally admitted-source retrieval,
+later stages prohibit new evidence, and native submission files do not inherit
+headless JSON-only or capsule-only directives. Its reviewer mock separately
+requires the unchanged isolated, packet-read, no-broker and JSON-only boundary.
 `test/research-policy.test.ts` and `test/research-policy-wizard.test.ts` cover
 verified project-installed Policy source resolution, exhaustive bundled-template
 parsing, mandatory top-journal invariants, default selection and human

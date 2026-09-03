@@ -886,6 +886,13 @@ CodeBuddy session. The CLI never launches a nested producer process. Independent
 runs through the other configured agent family's CLI, and execution is blocked
 when the two roles use the same family.
 
+Native packets direct the host to save one new JSON submission file, not to write
+admitted output paths. Acquire may retrieve files and readable derivatives for
+provisionally admitted sources through the packet's binding/registration commands;
+it may not reopen discovery. Analyze, synthesize and the isolated reviewer retain
+their no-new-evidence boundary. Headless reviewer prompts remain capsule-scoped
+and return JSON rather than saving native submission files.
+
 Every workspace mutation is serialized by an owner-recorded directory lease
 with a heartbeat. A later command immediately reclaims a lease whose same-host
 owner process is definitely dead; an unverifiable cross-host lease is reclaimed
