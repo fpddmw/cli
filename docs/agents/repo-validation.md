@@ -18,8 +18,8 @@ checkPaths:
   - scripts/**
   - test/**
   - .github/workflows/**
-lastReviewedAt: 2026-09-03
-lastReviewedCommit: a002d9abb208f71def948977c5642df0d26b1a60
+lastReviewedAt: 2026-09-04
+lastReviewedCommit: 25b236a15c846c0168ffb84f8afa390d71985f4b
 ---
 
 # Repo Validation
@@ -554,6 +554,11 @@ verification, formal evidence/artifact bytes, transformed input bindings,
 environment and journal proofs, read-only content, tamper/extra-byte rejection,
 and exclusion of credentials, active state, capsules, unrelated projects,
 host-specific paths, and sensitive URL/authentication material.
+It also runs native prepare-to-handoff export/verify and compares the source and
+exported ledger bytes exactly. Credential regressions retain true session UUID,
+prefixed API/password and OAuth secret checks, preserve JSON validity with escaped
+quotes/backslashes, and reject Unicode-escaped keys, JSONL and nested credential
+payloads without exempting whole events or UUID values.
 Production tests additionally require an external
 public-internet plan and block downstream work when any capability marked
 `requiredForDiscovery` lacks a broker receipt. The failure distinguishes a

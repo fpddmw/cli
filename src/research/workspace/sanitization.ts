@@ -34,8 +34,8 @@ export function sanitizeResearchText(value: string, secrets: readonly string[] =
   }
   sanitized = sanitized
     .replace(
-      /(["']?(?:access[_-]?token|api[_-]?key|apikey|auth|authorization|cookie|credential|password|secret|session(?:[_-]?id)?|token)["']?\s*:\s*["'])([^"']*)(["'])/gi,
-      "$1[REDACTED]$3",
+      /((?<![\p{L}\p{N}_-])["']?(?:[\p{L}\p{N}_-]*(?:token|secret|password|passwd|cookie|api[_-]?key|private[_-]?key|secret[_-]?access[_-]?key|authorization|auth|credential)|(?:(?:browser|auth|user|login)[_-]?)?session(?:[_-]?id)?)["']?\s*:\s*)(["'])(?:\\.|(?!\2)[^\\])*\2/giu,
+      "$1$2[REDACTED]$2",
     )
     .replace(
       /\b((?:proxy-)?authorization)\s*:\s*((?:Bearer|Basic)\s+)?[^\s,;}"'<>\\]+/gi,

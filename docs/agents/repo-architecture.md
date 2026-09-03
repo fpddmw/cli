@@ -12,8 +12,8 @@ checkPaths:
   - README.md
   - src/**
   - bin/**
-lastReviewedAt: 2026-09-03
-lastReviewedCommit: a002d9abb208f71def948977c5642df0d26b1a60
+lastReviewedAt: 2026-09-04
+lastReviewedCommit: 25b236a15c846c0168ffb84f8afa390d71985f4b
 ---
 
 # Repo Architecture
@@ -196,7 +196,10 @@ storage writes, queueing, and document status transitions.
   evidence/artifact bytes, Policy/design/review objects, environment
   fingerprints, and sanitized hash-preserving journal proofs,
   while excluding credentials, ephemeral/native state, unrelated projects, and
-  host paths. Top-level status exposes the acquisition, typed-content,
+  host paths. Portable text screening preserves field-name boundaries for native
+  identifiers and inspects decoded JSON/JSONL keys and values without rewriting
+  evidence. Per-file key classification is cached; nested credential arrays or
+  objects retain their sensitive-key context. Top-level status exposes the acquisition, typed-content,
   inference, and graph chain and distinguishes active base research from
   invalid scientific or publication state.
 - `src/education/**`: education search command handling and source specs for

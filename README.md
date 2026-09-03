@@ -12,8 +12,8 @@ checkPaths:
   - package.json
   - bin/**
   - src/**
-lastReviewedAt: 2026-09-03
-lastReviewedCommit: a002d9abb208f71def948977c5642df0d26b1a60
+lastReviewedAt: 2026-09-04
+lastReviewedCommit: 25b236a15c846c0168ffb84f8afa390d71985f4b
 ---
 
 # Tiangong AI CLI
@@ -771,6 +771,12 @@ outputs, environment fingerprints, and safe hash-preserving journal proof
 derivatives. Credentials, setup
 sources, browser profiles, native active state, capsules, unrelated projects,
 and host-specific absolute paths are excluded.
+
+Text inspection distinguishes internal identifiers such as `interruptedSessionId`
+from credential fields. It checks raw text and read-only decoded JSON/JSONL,
+including escaped keys and nested string payloads, while retaining the exact
+evidence and ledger bytes. Authentication values remain blocked even when wrapped
+in arrays or objects; an identifier's UUID shape is never a credential exemption.
 
 ```bash
 tiangong-ai research project audit export top-journal-paper \
