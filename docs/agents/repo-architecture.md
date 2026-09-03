@@ -546,6 +546,11 @@ immutable output/receipt before atomic idempotent submission. Receipt replay
 revalidates canonical upstream and review bytes without another model call;
 pending recovered submission also rechecks project authority and production
 Policy/readiness. Missing provider usage does not erase a consumed reservation.
+Failed processes expose a bounded sanitized diagnostic and exit code in the
+structured error and failed journal event without persisting the full prompt.
+`schema-compatibility.ts` shares Claude Code's dialect-annotation adapter between
+manual schema export and automatic reviewer invocation. Canonical controller
+schemas and their strict output checks are unchanged.
 
 Reviewer transport is separate from producer host and reviewer model identity.
 `artifact-views.ts` owns immutable packet directories, opaque object selection,

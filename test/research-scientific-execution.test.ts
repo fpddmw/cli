@@ -462,6 +462,58 @@ describe("explicit isolated scientific review execution", () => {
     }
   });
 
+  it("retains bounded sanitized startup diagnostics for a failed scientific reviewer", async () => {
+    const fixture = await preparedFixture("execution-diagnostic");
+    try {
+      const secret = "scientific-review-diagnostic-secret";
+      let calls = 0;
+      await assert.rejects(
+        executeScientificReview(
+          {
+            ...fixture,
+            role: "research-design",
+            confirmCost: true,
+            environment: { ANTHROPIC_API_KEY: secret },
+          },
+          async () => {
+            calls++;
+            return {
+              ...result(fixture.packet),
+              exitCode: 2,
+              stderr: `Unknown reviewer option. Authorization: Bearer ${secret}\nCookie: session=${secret}\n${fixture.root}/runtime/file\n${"x".repeat(5000)}`,
+            };
+          },
+        ),
+        (error: unknown) => {
+          const value = error as { code?: string; details?: Record<string, unknown> };
+          assert.equal(value.code, "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_FAILED");
+          assert.equal(value.details?.exitCode, 2);
+          assert.match(String(value.details?.diagnostic), /Unknown reviewer option/u);
+          assert.ok(String(value.details?.diagnostic).length <= 2048);
+          assert.doesNotMatch(JSON.stringify(value.details), new RegExp(secret));
+          assert.ok(!JSON.stringify(value.details).includes(fixture.root));
+          return true;
+        },
+      );
+      const failed = (await readVerifiedJournal(workspacePaths(fixture.root).journal)).findLast(
+        (event) => event.type === "scientific-review.execution.failed",
+      )!;
+      assert.equal(failed.payload.exitCode, 2);
+      assert.match(String(failed.payload.diagnostic), /Unknown reviewer option/u);
+      assert.doesNotMatch(JSON.stringify(failed), new RegExp(secret));
+      assert.ok(!JSON.stringify(failed).includes(fixture.root));
+      assert.equal(calls, 1);
+      assert.equal(
+        (await loadProject(fixture.root, fixture.projectId)).scientificDesign?.gates[
+          "research-design"
+        ].status,
+        "prepared",
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("blocks before execution when the reservation cannot fit", async () => {
     const fixture = await preparedFixture("execution-budget");
     try {

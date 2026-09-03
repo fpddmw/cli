@@ -171,7 +171,7 @@ export async function executeScientificReview(
     if (attempts > 0 && !input.retry) {
       throw executionError(
         "RESEARCH_SCIENTIFIC_REVIEW_RETRY_REQUIRED",
-        "The previous execution did not complete. Inspect its receipt, correct the cause, then explicitly use --retry.",
+        "The previous execution did not complete. Inspect its recorded failure diagnostic, correct the cause, then explicitly use --retry.",
       );
     }
     if (attempts >= config.budget.maxAttemptsPerPackage) {
@@ -191,6 +191,7 @@ export async function executeScientificReview(
     let usageBeforeReservation: typeof project.usage | null = null;
     let callStartedAt: bigint | null = null;
     let usageSettled = false;
+    let failureDiagnostic: Record<string, unknown> | null = null;
     try {
       await copyPacketInputs(input.root, capsuleProject, packet, project.publicationPolicy!);
       await writeJsonAtomic(join(capsuleProject, "inputs/scientific-review-packet.json"), packet);
@@ -326,9 +327,11 @@ export async function executeScientificReview(
       await saveProject(input.root, project);
       usageSettled = true;
       if (result.exitCode !== 0) {
+        failureDiagnostic = reviewerFailureDiagnostic(result, input, capsuleRoot);
         throw executionError(
           "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_FAILED",
           "The isolated reviewer failed. No scientific review was submitted.",
+          failureDiagnostic,
         );
       }
       if (
@@ -463,6 +466,7 @@ export async function executeScientificReview(
           attempt: attempts + 1,
           code:
             error instanceof CliError ? error.code : "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_FAILED",
+          ...(failureDiagnostic ?? {}),
           capsuleDisposition: "retained-failed-execution",
         });
       }
@@ -673,6 +677,40 @@ async function copyPacketInputs(
   await writeJsonAtomic(join(capsuleProject, "packet.json"), packet);
 }
 
-function executionError(code: string, message: string) {
-  return new CliError(message, { code, exitCode: 3 });
+function reviewerFailureDiagnostic(
+  result: ExecutionResult,
+  input: { root: string; environment: NodeJS.ProcessEnv },
+  capsuleRoot: string,
+): Record<string, unknown> {
+  const secrets = configuredResearchSecrets(input.environment);
+  let diagnostic = sanitizeResearchText(
+    result.stderr.trim() ||
+      result.telemetry?.providerErrors.join("; ") ||
+      "Reviewer exited without a textual diagnostic; inspect the configured runtime before retrying.",
+    secrets,
+  );
+  for (const path of [
+    capsuleRoot,
+    input.root,
+    input.environment.HOME,
+    input.environment.CLAUDE_CONFIG_DIR,
+    input.environment.CODEX_HOME,
+  ]) {
+    if (path) diagnostic = diagnostic.replaceAll(path, "[private-path]");
+  }
+  return sanitizeResearchValue(
+    {
+      exitCode: result.exitCode,
+      diagnostic: diagnostic.slice(0, 2048),
+      stdoutSha256: sha256Text(result.stdout),
+      stderrSha256: sha256Text(result.stderr),
+      minimumAction:
+        "Correct the reported runtime or provider failure, then explicitly use --retry. No review was submitted.",
+    },
+    secrets,
+  ) as Record<string, unknown>;
+}
+
+function executionError(code: string, message: string, details?: Record<string, unknown>) {
+  return new CliError(message, { code, exitCode: 3, ...(details ? { details } : {}) });
 }

@@ -73,6 +73,7 @@ import { recordNativeResearchActivity } from "./workspace/native-activity.js";
 import { inspectReviewerStatus, startReviewerBridgeSidecar } from "./workspace/review-executor.js";
 import { readAndVerifyProjectInputPlan } from "./workspace/input-plan.js";
 import { executeScientificReview } from "./workspace/scientific-review-execution.js";
+import { claudeCodeCompatibleSchema } from "./workspace/schema-compatibility.js";
 import {
   loadCurrentClaimEvidenceGraph,
   loadCurrentInferenceSnapshot,
@@ -806,20 +807,7 @@ function compatibleSchema(
       details: { supported: ["claude-code"] },
     });
   }
-  const compatible = structuredClone(schema);
-  const stripMetadata = (value: unknown): void => {
-    if (Array.isArray(value)) {
-      for (const item of value) stripMetadata(item);
-      return;
-    }
-    if (!value || typeof value !== "object") return;
-    const record = value as Record<string, unknown>;
-    delete record.$schema;
-    delete record.$id;
-    for (const item of Object.values(record)) stripMetadata(item);
-  };
-  stripMetadata(compatible);
-  return compatible;
+  return claudeCodeCompatibleSchema(schema);
 }
 
 async function runContext(argv: string[], io: CliIO): Promise<number> {

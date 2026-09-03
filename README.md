@@ -678,6 +678,11 @@ schema-valid, packet/session-bound review. A saved successful execution is
 replayed without another model call after revalidating its immutable proof.
 Failures require explicit `--retry` and remain bounded by the attempt budget;
 unreported usage and interrupted wall time retain conservative reservations.
+Failed processes return a bounded, sanitized exit diagnostic and record it in
+the journal; no full prompt or raw authentication output is persisted. Automatic
+Claude invocation uses the same dialect-annotation conversion as
+`research schema show NAME --compatibility claude-code`; canonical controller
+validation and its scientific constraints remain unchanged.
 A nonpassing mechanical packet can receive an independent stop verdict, never
 an override. The existing manual submit command remains available for an exact
 independent review.

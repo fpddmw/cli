@@ -257,6 +257,13 @@ regressions first reproduce former context-length refusals, then require normal
 preparation and exact on-demand reads without modifying frozen evidence. Mock
 passes remain distinct from an external real independent-review canary.
 
+The isolated mock Claude process also receives the actual early scientific
+review schema and rejects an unsupported Draft 2020-12 annotation before any
+tool/model work. Its provider view and manual `--compatibility claude-code`
+share one adapter; constraints, literal values and the canonical validation
+schema remain unchanged. Scientific-execution failures retain bounded sanitized
+exit diagnostics in both the structured error and journal, never the full prompt.
+
 `test/research-scientific-review.test.ts` exercises same-project fulfillment of
 predeclared model/environment slots, byte-identical base design preservation,
 idempotent replay, unchanged earlier approvals, stale due-packet rejection, and

@@ -21,6 +21,8 @@ import {
 import { loadVerifiedReviewPacket } from "../src/research/workspace/runtime.js";
 import { startArtifactViewServer } from "../src/research/workspace/artifact-view-mcp.js";
 import { executeAgent } from "../src/research/workspace/executor.js";
+import { scientificReviewSchema } from "../src/research/workspace/scientific-review.js";
+import { claudeCodeCompatibleSchema } from "../src/research/workspace/schema-compatibility.js";
 import { researchPlatformCapabilities } from "../src/research/workspace/platform-capabilities.js";
 
 async function fixture(files: Record<string, string | Buffer>) {
@@ -46,6 +48,34 @@ async function fixture(files: Record<string, string | Buffer>) {
     cleanup: () => rm(root, { recursive: true, force: true }),
   };
 }
+
+it("removes Claude schema dialect annotations without changing constraints or literal data", () => {
+  const schema = scientificReviewSchema("research-design");
+  const original = structuredClone(schema);
+  const compatible = claudeCodeCompatibleSchema(schema);
+  assert.equal(compatible.$schema, undefined);
+  assert.deepEqual(schema, original, "The canonical controller schema must remain unchanged");
+  const { $schema: _dialect, ...constraints } = original;
+  assert.deepEqual(compatible, constraints);
+  const literal = { $schema: "literal-data", $id: "literal-identity" };
+  const propertySchema = { type: "string", minLength: 1 };
+  assert.deepEqual(
+    claudeCodeCompatibleSchema({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $id: "https://schemas.example.test/value",
+      type: "object",
+      properties: { $schema: propertySchema, payload: { const: literal } },
+      required: ["$schema", "payload"],
+      additionalProperties: false,
+    }),
+    {
+      type: "object",
+      properties: { $schema: propertySchema, payload: { const: literal } },
+      required: ["$schema", "payload"],
+      additionalProperties: false,
+    },
+  );
+});
 
 describe("snapshot-bound on-demand artifact views", () => {
   it("revalidates a persistent review packet's artifact directory at the live trust boundary", async () => {
@@ -212,6 +242,10 @@ if (${JSON.stringify(agent)} === 'codex') {
   assert.equal(args[args.indexOf('--tools') + 1], '');
   assert.equal(args[args.indexOf('--allowedTools') + 1], 'mcp__research_artifacts__research_list_artifacts,mcp__research_artifacts__research_read_artifact');
   assert.ok(args.includes('--strict-mcp-config'));
+  const schema = JSON.parse(args[args.indexOf('--json-schema') + 1]);
+  assert.equal(schema.$schema, undefined, 'Claude CLI rejects the Draft 2020-12 meta-schema before model execution');
+  assert.equal(schema.properties.schemaVersion.const, 1);
+  assert.deepEqual(schema.properties.decision.enum, ['pass', 'revise', 'stop', 'handoff']);
   url = JSON.parse(await readFile(args[args.indexOf('--mcp-config') + 1], 'utf8')).mcpServers.research_artifacts.url;
 }
 async function rpc(method, params) {
@@ -235,12 +269,15 @@ if (${JSON.stringify(agent)} === 'codex') {
           const result = await executeAgent({
             route: { agent, binary, model: "packet-review-test" },
             prompt: "Inspect the negative result.",
-            outputSchema: {
-              type: "object",
-              properties: { ok: { const: true } },
-              required: ["ok"],
-              additionalProperties: false,
-            },
+            outputSchema:
+              agent === "claude"
+                ? scientificReviewSchema("research-design")
+                : {
+                    type: "object",
+                    properties: { ok: { const: true } },
+                    required: ["ok"],
+                    additionalProperties: false,
+                  },
             requestId: "packet-read-test",
             purpose: "primary",
             capsuleRoot: fx.root,

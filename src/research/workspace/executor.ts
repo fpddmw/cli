@@ -34,6 +34,7 @@ import {
   sanitizeResearchText,
 } from "./sanitization.js";
 import type { JsonSchema } from "./schemas.js";
+import { claudeCodeCompatibleSchema } from "./schema-compatibility.js";
 import { isObject, sha256File, sha256Text } from "./storage.js";
 import type {
   AgentReasoningEffort,
@@ -487,7 +488,11 @@ async function buildInvocation(
   outputSchemaPath: string,
   artifactServerUrl?: string,
 ): Promise<{ binary: string; args: string[]; stdin: string }> {
-  await writeFile(outputSchemaPath, `${JSON.stringify(request.outputSchema, null, 2)}\n`, {
+  const outputSchema =
+    request.route.agent === "claude"
+      ? claudeCodeCompatibleSchema(request.outputSchema)
+      : request.outputSchema;
+  await writeFile(outputSchemaPath, `${JSON.stringify(outputSchema, null, 2)}\n`, {
     encoding: "utf8",
     mode: 0o600,
   });
@@ -579,7 +584,7 @@ async function buildInvocation(
     request.route.effort ?? DEFAULT_AGENT_EFFORT,
   ];
   if (request.purpose !== "repair") {
-    args.splice(1, 0, "--json-schema", JSON.stringify(request.outputSchema));
+    args.splice(1, 0, "--json-schema", JSON.stringify(outputSchema));
   }
   const allowedTools = toolPolicy === "workspace-read" ? ["Read", "Glob", "Grep"] : [];
   if (request.brokerUrl) {
