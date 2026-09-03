@@ -119,6 +119,7 @@ import {
   abortNativeResearchStage,
   inspectNativeResearchStage,
   prepareNativeResearchStage,
+  readNativeStageArtifact,
   requestResearchHandoff,
   resolveResearchHandoff,
   runResearchWorkspace,
@@ -237,6 +238,8 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research project stage prepare <project-id> --stage discover|acquire|analyze|synthesize --host-agent codex|claude|workbuddy|codebuddy [--workspace <path>] [--json]
   tiangong-ai research project stage submit <project-id> --session <id> --output <absolute-json> [--confirm-model <id>] [--workspace <path>] [--json]
   tiangong-ai research project stage abort <project-id> --session <id> [--workspace <path>] [--json]
+  tiangong-ai research project stage artifacts <project-id> --session <id> [--offset <n>] [--limit <n>] [--path-prefix <prefix>] [--workspace <path>] [--json]
+  tiangong-ai research project stage read <project-id> --session <id> --artifact <object-id> [--offset <bytes>] [--length <bytes|all>] [--encoding utf8|base64] [--workspace <path>] [--json]
   tiangong-ai research project evidence fetch <project-id> --request <absolute-json> [--workspace <path>] [--json]
   tiangong-ai research project evidence data run <project-id> --request <absolute-data-run-request.json> [--workspace <path>] [--json]
   tiangong-ai research project evidence activity record <project-id> --record <absolute-json> [--workspace <path>] [--json]
@@ -1243,6 +1246,70 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
   }
   if (action === "stage") {
     const [stageAction, ...stageRest] = rest;
+    if (stageAction === "artifacts" || stageAction === "read") {
+      const args = parseStrictArgs(
+        stageRest,
+        {
+          ...WORKSPACE_OPTIONS,
+          session: "string",
+          artifact: "string",
+          offset: "string",
+          limit: "string",
+          length: "string",
+          encoding: "string",
+          "path-prefix": "string",
+        },
+        `research project stage ${stageAction}`,
+      );
+      if (strictBoolean(args, "help")) return writeHelp(io);
+      const sessionId = strictString(args, "session");
+      const objectId = strictString(args, "artifact");
+      if (!sessionId || (stageAction === "read" && !objectId))
+        throw new CliError(
+          "Stage artifact reads require --session and an exact --artifact for read.",
+          { code: "RESEARCH_NATIVE_STAGE_SESSION_REQUIRED", exitCode: 3 },
+        );
+      const offset = strictString(args, "offset");
+      const limit = strictString(args, "limit");
+      const length = strictString(args, "length");
+      const encoding = strictString(args, "encoding");
+      if (encoding && encoding !== "utf8" && encoding !== "base64")
+        throw new CliError("Artifact encoding must be utf8 or base64.", {
+          code: "RESEARCH_ARTIFACT_VIEW_INVALID",
+          exitCode: 3,
+        });
+      const projectId = onePositional(args.positionals, `research project stage ${stageAction}`);
+      writeJson(
+        io,
+        await readNativeStageArtifact({
+          root: await workspaceFromArgs(args),
+          projectId,
+          sessionId,
+          ...(stageAction === "read"
+            ? {
+                selection: {
+                  objectId: objectId!,
+                  ...(offset === undefined ? {} : { offset: Number(offset) }),
+                  ...(length === undefined
+                    ? {}
+                    : { length: length === "all" ? null : Number(length) }),
+                  ...(encoding ? { encoding: encoding as "utf8" | "base64" } : {}),
+                },
+              }
+            : {
+                listing: {
+                  ...(offset === undefined ? {} : { offset: Number(offset) }),
+                  ...(limit === undefined ? {} : { limit: Number(limit) }),
+                  ...(strictString(args, "path-prefix")
+                    ? { pathPrefix: strictString(args, "path-prefix")! }
+                    : {}),
+                },
+              }),
+        }),
+        args,
+      );
+      return 0;
+    }
     if (stageAction === "prepare") {
       const args = parseStrictArgs(
         stageRest,

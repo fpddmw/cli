@@ -13,6 +13,14 @@ import {
   settleProjectMutation,
 } from "./project-mutations.js";
 import { loadProject } from "./projects.js";
+import {
+  prepareRequestProvenance,
+  requestProvenanceInputSchema,
+  unrecordedRequestProvenance,
+  verifyRequestProvenance,
+  type RequestProvenance,
+  type RequestSource,
+} from "./request-provenance.js";
 import { configuredResearchSecrets, sanitizeResearchValue } from "./sanitization.js";
 import {
   canonicalJson,
@@ -50,11 +58,15 @@ const requirement = object({
 });
 const requirements = { type: "array", minItems: 1, maxItems: 256, items: requirement };
 const inputSchemas = {
-  "task-contract": object({
-    schemaVersion: { const: 1 },
-    originalRequest: { type: "string", minLength: 8, maxLength: 64000 },
-    requirements,
-  }),
+  "task-contract": {
+    ...object({
+      schemaVersion: { const: 1 },
+      originalRequest: { type: "string", minLength: 8 },
+      requirements,
+      requestProvenance: requestProvenanceInputSchema,
+    }),
+    required: ["schemaVersion", "originalRequest", "requirements"],
+  },
   "task-scope-change": object({
     schemaVersion: { const: 1 },
     reason: { type: "string", minLength: 8, maxLength: 4000 },
@@ -81,6 +93,7 @@ export interface TaskContract {
   version: number;
   questionSha256: string;
   originalRequest: string;
+  requestProvenance?: RequestProvenance;
   requirements: TaskRequirement[];
   parentContractSha256: string | null;
   originalContractSha256: string | null;
@@ -208,6 +221,8 @@ export async function loadTaskHistory(
     if (
       cursor.version !== parent.version + 1 ||
       cursor.originalRequest !== parent.originalRequest ||
+      canonicalJson(cursor.requestProvenance ?? unrecordedRequestProvenance()) !==
+        canonicalJson(parent.requestProvenance ?? unrecordedRequestProvenance()) ||
       (cursor.projectId !== parent.projectId &&
         (cursor.origin?.projectId !== parent.projectId ||
           cursor.origin.contractSha256 !== parent.contractSha256))
@@ -219,6 +234,7 @@ export async function loadTaskHistory(
     cursor = parent;
   }
   const original = contracts.at(-1)!;
+  await verifyRequestProvenance(original.originalRequest, original.requestProvenance, read);
   if (
     current.originalContractSha256 !== null &&
     current.originalContractSha256 !== original.contractSha256
@@ -246,6 +262,10 @@ export async function defineProjectTask(
   value: Record<string, unknown>,
 ) {
   const input = validateInput("task-contract", value);
+  const provenance = prepareRequestProvenance(
+    input.originalRequest as string,
+    input.requestProvenance,
+  );
   return withWorkspaceLock(root, "research.task.define", async () => {
     const project = await loadProject(root, projectId);
     const events = await readVerifiedJournal(workspacePaths(root).journal);
@@ -254,6 +274,8 @@ export async function defineProjectTask(
     if (existing) {
       if (
         existing.original.originalRequest !== input.originalRequest ||
+        canonicalJson(existing.original.requestProvenance ?? unrecordedRequestProvenance()) !==
+          canonicalJson(provenance.binding) ||
         canonicalJson(existing.original.requirements) !== canonicalJson(input.requirements)
       )
         throw invalid(
@@ -270,12 +292,22 @@ export async function defineProjectTask(
       version: 1,
       questionSha256: sha256Text(project.question),
       originalRequest: input.originalRequest as string,
+      requestProvenance: provenance.binding,
       requirements: input.requirements as TaskRequirement[],
       parentContractSha256: null,
       originalContractSha256: null,
       origin: null,
       authorization: null,
     });
+    if (provenance.sourceObject) {
+      await writeTaskObject(
+        root,
+        projectId,
+        "request-sources",
+        provenance.sourceObject.objectSha256,
+        provenance.sourceObject,
+      );
+    }
     await writeTaskObject(root, projectId, "contracts", contract.contractSha256, contract);
     await appendJournalEvent(
       workspacePaths(root).journal,
@@ -459,6 +491,17 @@ export async function approveProjectTaskScope(
 export async function inheritProjectTask(root: string, source: ProjectState, target: ProjectState) {
   const view = await loadProjectTask(root, source.id);
   if (!view) return null;
+  const requestSource = view.original.requestProvenance?.source;
+  if (requestSource) {
+    const object = await readTaskObject<RequestSource>(
+      root,
+      source.id,
+      "request-sources",
+      requestSource.objectSha256,
+      "objectSha256",
+    );
+    await writeTaskObject(root, target.id, "request-sources", object.objectSha256, object);
+  }
   for (const contract of view.contracts) {
     await writeTaskObject(root, target.id, "contracts", contract.contractSha256, contract);
     if (contract.authorization) {
@@ -493,6 +536,7 @@ export async function taskContext(root: string, projectId: string, knownEvents?:
     ? {
         ...taskBinding(view.current, view.original),
         originalRequest: view.original.originalRequest,
+        requestProvenance: view.original.requestProvenance ?? unrecordedRequestProvenance(),
         requirements: view.current.requirements,
         originalRequirementRefs: view.original.requirements.map((item) => ({
           id: item.id,

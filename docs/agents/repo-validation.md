@@ -240,6 +240,18 @@ using timing assertions. Publication regressions bind task context to the existi
 reviewers. Portable audit tests move the bundle, remove the source workspace, and
 reject altered task bindings even with a recomputed manifest digest.
 
+Request-provenance regressions preserve exact BOM/CRLF source bytes and hashed
+locators, distinguish interpreted/unrecorded origin, and reject false verbatim
+claims or retrospective replacement. `test/research-artifact-views.test.ts` covers
+complete oversized reads, UTF-8 pagination, bounded per-object verification work,
+late-file exclusion, links/tamper, secret refusal, exact persisted receipts,
+Host/Origin checks, and actual isolated mock Codex/Claude MCP clients.
+Bridge tests carry the same read-only binding through the signed sidecar and still
+refuse general workspace tools or external MCP/broker routes. Native/scientific
+regressions first reproduce former context-length refusals, then require normal
+preparation and exact on-demand reads without modifying frozen evidence. Mock
+passes remain distinct from an external real independent-review canary.
+
 For this boundary, supplement fresh Docker RED/GREEN with a fresh external native
 workspace using the exact locally packed candidate, isolated HOME/npm cache, and
 real public input bytes/native calculations. Label any deterministic reviewer as
@@ -338,8 +350,8 @@ platform capsule, without credentials or provider requests.
 The integrated role forecast regression specifically includes a same-dimension
 metadata-only patent and a binary-only patent: neither may fill an atom-level
 source-type slot even when global acquisition coverage passes. Runtime tests
-also exercise expanded discovery input between the output and input caps,
-true input overflow, valid historical/wait states through Doctor, and each due
+also exercise expanded discovery input and context beyond the old input cap,
+valid historical/wait states through Doctor, and each due
 scientific-gate status through public run/status.
 
 The coverage gate uses `c8` and fails when coverage drops below the thresholds
@@ -410,7 +422,7 @@ bounded local context with full-source review, stage tool isolation, runtime
 target/wrapper/adapter fingerprinting and drift rejection, telemetry redaction,
 owner-only whitelisted Claude settings authentication, production doctor
 attestation creation, default-doctor reuse, current-runtime drift rejection,
-two-protocol-turn tool-free review with exact local views and cited broker
+packet-only review with exact local views and cited broker
 items selected from hash-bound raw responses by admitted JSON Pointer,
 persistent packet/context tamper rejection at closure, JSONL progress,
 reviewer-driven synthesis reopening with a read-only prior-report archive,

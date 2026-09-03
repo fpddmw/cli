@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { openArtifactViews } from "../src/research/workspace/artifact-views.js";
 import {
   appendFile,
   chmod,
@@ -838,12 +839,22 @@ describe("production research evidence and broker", () => {
         { maxParallel: 1, maxCycles: 10, dryRun: false, environment: {} },
         brokerBackedExecutor(
           async (request) => {
-            assert.equal(request.maxTurns, 3);
+            assert.equal(request.maxTurns, 64);
+            assert.equal(request.reservationTurns, 3);
+            const views = await openArtifactViews(
+              request.projectRoot,
+              request.artifactViews!.index,
+              request.artifactViews!.packetSha256,
+            );
+            const object = views.index.objects.find(
+              (item) => item.path === "inputs/review-evidence-context.txt",
+            )!;
+            const excerpt = (await views.read({ objectId: object.objectId, length: null })).content;
             assert.doesNotMatch(request.prompt, /### inputs\/review-packet\.json/);
-            assert.match(request.prompt, /TRUNCATED: the full object/);
-            assert.match(request.prompt, /jsonPointer: \/records\/0/);
-            assert.match(request.prompt, /"id": 1/);
-            assert.doesNotMatch(request.prompt, /"id": 2/);
+            assert.match(excerpt, /TRUNCATED: the full object/);
+            assert.match(excerpt, /jsonPointer: \/records\/0/);
+            assert.match(excerpt, /"id": 1/);
+            assert.doesNotMatch(excerpt, /"id": 2/);
             const contextPath = join(request.projectRoot, "inputs", "review-evidence-context.txt");
             const contextInfo = await lstat(contextPath);
             const config = JSON.parse(await readFile(workspacePaths(root).config, "utf8")) as {
@@ -1507,8 +1518,9 @@ describe("production research control plane", () => {
             }
           } else {
             assert.equal(input.fullTextStaged, true);
-            assert.equal(request.toolPolicy, "none");
-            assert.equal(request.maxTurns, 3);
+            assert.equal(request.toolPolicy, "packet-read");
+            assert.equal(request.maxTurns, 64);
+            assert.equal(request.reservationTurns, 3);
             assert.equal(request.brokerUrl, null);
             assert.doesNotMatch(request.prompt, /### inputs\/review-packet\.json/);
             assert.match(request.prompt, /### inputs\/review-evidence-context\.txt/);
@@ -2724,7 +2736,10 @@ function brokerBackedExecutor(
     const stage = stageFrom(request);
     if (stage === "discover") {
       assert.equal(request.toolPolicy, "none");
-      assert.match(request.prompt, /complete external capability documentation bundle/i);
+      assert.match(
+        await readFile(join(request.projectRoot, "inputs/capability-documentation.txt"), "utf8"),
+        /name: public-source-fetch/,
+      );
       assert.match(request.prompt, /name: public-source-fetch/);
       const state = JSON.parse(
         await readFile(join(request.projectRoot, "project.json"), "utf8"),

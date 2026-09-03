@@ -11,6 +11,10 @@ import { describe, it } from "node:test";
 import { runCli } from "../src/cli.js";
 import { CliError } from "../src/errors.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
+import {
+  openArtifactViews,
+  writeArtifactViewIndex,
+} from "../src/research/workspace/artifact-views.js";
 import { researchPlatformCapabilities } from "../src/research/workspace/platform-capabilities.js";
 import type { AgentExecutionRequest } from "../src/research/workspace/executor.js";
 import {
@@ -37,6 +41,66 @@ import {
 } from "../src/research/workspace/workspace.js";
 
 describe("sandbox-bridge reviewer execution", () => {
+  it(
+    "carries a packet-bound read-only artifact surface through the same signed sidecar",
+    { skip: !researchPlatformCapabilities().reviewerSidecarExecution },
+    async () => {
+      const fixture = await bridgeFixture();
+      const stateDirectory = await mkdtemp(join(tmpdir(), "tiangong-packet-read-sidecar-"));
+      const index = await writeArtifactViewIndex(fixture.request.projectRoot, "bridge-project");
+      const packetSha256 = "a".repeat(64);
+      const sidecar = await startReviewerBridgeSidecar({
+        root: fixture.root,
+        stateDirectory,
+        environment: { PATH: process.env.PATH },
+        executeNative: async (request) => {
+          assert.equal(request.toolPolicy, "packet-read");
+          assert.deepEqual(request.artifactViews, { index, packetSha256 });
+          assert.equal(request.brokerUrl, null);
+          const views = await openArtifactViews(request.projectRoot, index, packetSha256);
+          assert.equal(
+            (await views.read({ objectId: views.index.objects[0]!.objectId })).content,
+            "packet\n",
+          );
+          const result = successfulResult();
+          result.isolation = {
+            ...result.isolation!,
+            toolPolicy: "packet-read",
+            networkPolicy: "reviewer-provider-and-local-artifacts",
+          };
+          result.artifactReads = views.receipts();
+          return result;
+        },
+      });
+      try {
+        const executor = createReviewExecutor({ root: fixture.root, execution: fixture.execution });
+        const result = await executor.execute({
+          ...fixture.request,
+          toolPolicy: "packet-read",
+          artifactViews: { index, packetSha256 },
+        });
+        assert.equal(result.reviewAttestation?.toolPolicy, "packet-read");
+        assert.equal(result.artifactReads?.[0]?.packetSha256, packetSha256);
+        await assert.rejects(executor.execute({ ...fixture.request, toolPolicy: "packet-read" }), {
+          code: "RESEARCH_REVIEW_BRIDGE_SANDBOX_POLICY_INVALID",
+        });
+        await assert.rejects(
+          executor.execute({
+            ...fixture.request,
+            toolPolicy: "packet-read",
+            artifactViews: { index, packetSha256 },
+            brokerUrl: "https://unapproved.test/mcp",
+          }),
+          { code: "RESEARCH_REVIEW_BRIDGE_SANDBOX_POLICY_INVALID" },
+        );
+      } finally {
+        await sidecar.close();
+        await fixture.cleanup();
+        await rm(stateDirectory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("exposes safe reviewer sidecar help and structured unavailable status", async () => {
     const fixture = await bridgeFixture();
     try {

@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { CliError } from "../../errors.js";
+import { unrecordedRequestProvenance } from "./request-provenance.js";
 import {
   compileTaskAcceptanceContext,
   taskRecordStatus,
@@ -95,7 +96,10 @@ export async function verifyTaskAudit(
     hash: string,
     hashField: string,
   ) => {
-    if (!["contracts", "proposals", "acceptance"].includes(group) || !HASH.test(hash))
+    if (
+      !["contracts", "proposals", "acceptance", "request-sources"].includes(group) ||
+      !HASH.test(hash)
+    )
       throw invalid("Task audit object address is invalid.");
     return validateTaskObject<T>(await read(`project/task/${group}/${hash}.json`), hash, hashField);
   };
@@ -116,6 +120,8 @@ export async function verifyTaskAudit(
     context.contractSha256 !== binding.contractSha256 ||
     context.originalContractSha256 !== binding.originalContractSha256 ||
     context.originalRequest !== history.original.originalRequest ||
+    canonicalJson(context.requestProvenance) !==
+      canonicalJson(history.original.requestProvenance ?? unrecordedRequestProvenance()) ||
     !Array.isArray(context.requirements) ||
     !Array.isArray(context.results)
   )

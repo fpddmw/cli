@@ -1382,6 +1382,64 @@ describe("research project execution", () => {
     }
   });
 
+  it("reads exact stage artifacts on demand without truncating a large object or changing scope", async () => {
+    const fixture = await nativeDiscoveryContextFixture(125_000, 32_000);
+    try {
+      const packet = await prepareNativeResearchStage({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
+      assert.ok(
+        Buffer.byteLength(packet.prompt) < 32_000 * 3,
+        "Large material should be referenced, not all embedded in the initial prompt.",
+      );
+      const call = (action: string, options: string[] = []) =>
+        invoke([
+          "research",
+          "project",
+          "stage",
+          action,
+          fixture.projectId,
+          "--session",
+          packet.sessionId,
+          "--workspace",
+          fixture.root,
+          "--json",
+          ...options,
+        ]);
+      const listed = await call("artifacts", ["--limit", "1000"]);
+      assert.equal(listed.exitCode, 0, listed.stderr);
+      assert.equal(listed.stdout.includes(fixture.root), false);
+      const directory = JSON.parse(listed.stdout);
+      const evidence = directory.items.find(
+        (item: { path: string }) => item.path === "outputs/evidence.json",
+      );
+      assert.equal(evidence.sha256, fixture.evidenceSha256);
+      const read = await call("read", ["--artifact", evidence.objectId, "--length", "all"]);
+      assert.equal(read.exitCode, 0, read.stderr);
+      const view = JSON.parse(read.stdout);
+      assert.equal(view.content, await readFile(fixture.evidencePath, "utf8"));
+      assert.equal(view.receipt.objectSha256, fixture.evidenceSha256);
+      assert.equal(view.receipt.packetSha256, packet.packetSha256);
+      assert.equal(view.hasMore, false);
+      const unknown = await call("read", ["--artifact", "../credentials.json"]);
+      assert.equal(unknown.exitCode, 3);
+      assert.equal(unknown.stderr.includes(fixture.root), false);
+      await abortNativeResearchStage({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        sessionId: packet.sessionId,
+      });
+      const stale = await call("read", ["--artifact", evidence.objectId]);
+      assert.notEqual(stale.exitCode, 0);
+      assert.equal(await sha256File(fixture.evidencePath), fixture.evidenceSha256);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("records a WorkBuddy native stage without allowing a child producer executor", async () => {
     const root = await temporaryDirectory();
     try {

@@ -157,8 +157,8 @@ storage writes, queueing, and document status transitions.
   project-scoped scheduling/exit status, durable user-action and
   external-response handoffs, JSONL progress, recovery events, exact
   companion readiness gates, domain-scoped setup readiness, persistent review
-  packets/bounded evidence contexts with exact cited-item JSON-Pointer
-  projections, tool-free independent review, and
+  packets/initial evidence excerpts with exact cited-item JSON-Pointer
+  projections, packet-only independent artifact reads, and
   mechanical closure-time hash verification. For `top-journal` goals it also
   owns the project-installed Policy-source resolver, whole-pack Policy parsing
   across every template category before catalog use, generic Policy catalog and
@@ -480,7 +480,11 @@ declared commands by hash, and never certify or execute them. Positive and suppo
 negative outcomes need review; failed, stale, unrun, withdrawn and unanswered
 requirements remain distinct. The existing review uses a dynamic taskAssessment
 schema, one unique result object per context, and no extra paid round. Missing
-checks stop before a call; existing prompt/reservation limits still apply.
+checks stop before a call; finite runaway budgets remain without a total
+context-length admission gate. Request provenance distinguishes exact source
+wording, interpretation, reconstruction and unrecorded origin. Original source
+bytes and hashed locators survive scope/fork/audit; supplied transcripts are not
+authenticated authorship.
 Scientific/publication packets carry the current task binding. Status/run derive
 original/current scope completion independently of workflow/publication state;
 there is no mutable acceptance cache. Portable audit shares relationship validation
@@ -506,6 +510,18 @@ pending recovered submission also rechecks project authority and production
 Policy/readiness. Missing provider usage does not erase a consumed reservation.
 
 Reviewer transport is separate from producer host and reviewer model identity.
+`artifact-views.ts` owns immutable packet directories, opaque object selection,
+UTF-8/base64 byte views, exact delivery receipts and once-per-selected-object
+verification for adjacent pages. `artifact-view-mcp.ts` exposes only directory
+listing and reading on an ephemeral loopback endpoint with Host/Origin checks.
+No total corpus or requested-read length gate is added. Initial embedding targets
+choose inline content versus a retrievable reference; they do not drop artifacts.
+Reviewer invocation carries the exact index/packet binding, disables unrestricted
+tools, and keeps finite turn/time/cost guards separate from approximate planning
+estimates. Only read objects are additionally preserved, rather than copying the
+entire corpus into another evidence store. These receipts prove delivery, not
+comprehension or scientific correctness.
+
 `native-direct` invokes the platform capsule in-process. `sandbox-bridge` uses
 an owner-only local connection record and short Unix socket to an exact-version
 sidecar outside an outer IDE sandbox. The sidecar keeps its Ed25519 private key

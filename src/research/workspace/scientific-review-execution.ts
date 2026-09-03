@@ -4,6 +4,13 @@ import { copyFile, lstat, mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { CliError } from "../../errors.js";
+import {
+  artifactPromptContext,
+  artifactReadInstructions,
+  persistArtifactReads,
+  persistArtifactViewIndex,
+  writeArtifactViewIndex,
+} from "./artifact-views.js";
 import { verifyCapabilities } from "./capabilities.js";
 import type { AgentExecutionRequest } from "./executor.js";
 import { appendJournalEvent, readVerifiedJournal } from "./journal.js";
@@ -11,6 +18,7 @@ import { assertProjectAuthority, projectAuthorityIndex } from "./project-authori
 import {
   calculateAgentCallTokenReservation,
   RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
+  RESEARCH_PACKET_READ_MAX_TURNS,
   researchStructuredOutputMaxTurns,
   reservedAgentPackageCost,
 } from "./preflight.js";
@@ -44,6 +52,7 @@ import type {
   ResearchPolicyBinding,
   ScientificReviewRole,
   WorkspaceConfig,
+  OutputRecord,
 } from "./types.js";
 import { loadWorkspaceConfig, verifyDoctorAttestation, withWorkspaceLock } from "./workspace.js";
 
@@ -183,23 +192,31 @@ export async function executeScientificReview(
     let usageSettled = false;
     try {
       await copyPacketInputs(input.root, capsuleProject, packet, project.publicationPolicy!);
+      await writeJsonAtomic(join(capsuleProject, "inputs/scientific-review-packet.json"), packet);
+      const artifactViews = await writeArtifactViewIndex(capsuleProject, project.id);
+      const persistedViews = await persistArtifactViewIndex(
+        join(paths.projects, project.id),
+        capsuleProject,
+        artifactViews,
+      );
       const prompt = await scientificReviewPrompt(
         capsuleProject,
         packet,
         config,
         project.publicationPolicy!,
+        artifactViews,
       );
       const schema = scientificReviewSchema(input.role);
-      const maxTurns = researchStructuredOutputMaxTurns(config.reviewer);
+      const maxTurns = RESEARCH_PACKET_READ_MAX_TURNS;
       const reservation = calculateAgentCallTokenReservation({
         route: config.reviewer,
         primaryPayloadTokens: Math.ceil(
           Buffer.byteLength(prompt + JSON.stringify(schema)) / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
         ),
         repairPayloadTokens: 0,
-        maxTurns,
+        maxTurns: researchStructuredOutputMaxTurns(config.reviewer),
         maxOutputTokens: config.budget.maxOutputTokens,
-        maxToolContextTokens: 0,
+        maxToolContextTokens: config.budget.maxInputContextTokens,
         maxRepairTokens: 0,
         reserveRepair: false,
       }).totalTokens;
@@ -231,6 +248,7 @@ export async function executeScientificReview(
       await appendJournalEvent(paths.journal, "scientific-review.execution.started", project.id, {
         role: input.role,
         packetSha256: packet.packetSha256,
+        artifactViewIndexSha256: artifactViews.sha256,
         runId,
         attempt: attempts + 1,
         reservedTokens: reservation,
@@ -255,13 +273,22 @@ export async function executeScientificReview(
         timeoutSeconds,
         maxTurns,
         maxOutputTokens: config.budget.maxOutputTokens,
-        maxToolContextTokens: 0,
+        maxToolContextTokens: config.budget.maxInputContextTokens,
         maxCostUsd: reservedCostUsd,
         expectedRuntime,
-        toolPolicy: "none",
+        toolPolicy: "packet-read",
+        artifactViews: { index: artifactViews, packetSha256: packet.packetSha256 },
         brokerUrl: null,
         environment: input.environment,
       });
+      if (result.artifactReads?.length)
+        await persistArtifactReads(
+          join(paths.projects, project.id),
+          capsuleProject,
+          artifactViews,
+          packet.packetSha256,
+          result.artifactReads,
+        );
       const reportedUsage = checkedUsage(result);
       const usageKnown = reportedUsage.tokens > 0;
       const usage = usageKnown
@@ -287,7 +314,11 @@ export async function executeScientificReview(
         );
       }
       if (
-        usage.tokens > reservation ||
+        usage.tokens >
+          Math.min(
+            config.budget.earlyScientificReviewMaxTokens,
+            config.budget.maxTokens - priorUsage.tokens,
+          ) ||
         usage.outputTokens > config.budget.maxOutputTokens ||
         (config.reviewer.pricing && usage.costUsd > reservedCostUsd) ||
         usage.wallSeconds > timeoutSeconds
@@ -301,8 +332,8 @@ export async function executeScientificReview(
         !result.runtime ||
         result.runtime.agent !== config.reviewer.agent ||
         (config.reviewer.model !== null && result.model !== config.reviewer.model) ||
-        result.isolation?.toolPolicy !== "none" ||
-        result.isolation.networkPolicy !== "reviewer-provider-only" ||
+        result.isolation?.toolPolicy !== "packet-read" ||
+        result.isolation.networkPolicy !== "reviewer-provider-and-local-artifacts" ||
         (config.reviewerExecution.transport === "sandbox-bridge" && !result.reviewAttestation)
       ) {
         throw executionError(
@@ -371,6 +402,8 @@ export async function executeScientificReview(
           runtime: result.runtime,
           isolation: result.isolation,
           reviewAttestation: result.reviewAttestation ?? null,
+          artifactViews: persistedViews,
+          artifactReads: result.artifactReads ?? [],
           stdoutSha256: sha256Text(result.stdout),
           stderrSha256: sha256Text(result.stderr),
         },
@@ -559,56 +592,33 @@ async function scientificReviewPrompt(
   packet: ScientificReviewPacket,
   config: WorkspaceConfig,
   policy: ResearchPolicyBinding,
+  index: OutputRecord,
 ) {
   const mandatory = [
-    "Review the exact prepared scientific packet independently. Tools are disabled. Read only embedded content; complete files are bound for audit but are not evidence that you read omitted bytes.",
+    "Review the exact prepared scientific packet independently using only its packet-bound artifact tools. Read the design, assessment and approved Policy documents, then inspect relevant implementations, inputs, failed checks and counterevidence. Complete files are available, not assumed read.",
     "Return the supplied JSON schema with the exact packetSha256 and reviewerSessionSha256. A mechanical canPass=false cannot be upgraded by prose; return stop, handoff, or revise as appropriate.",
-    JSON.stringify(packet),
+    `packetSha256=${packet.packetSha256}; reviewerSessionSha256=${packet.reviewer.sessionSha256}; role=${packet.role}`,
+    artifactReadInstructions(index),
   ];
-  for (const locator of [
-    packet.design.objectLocator,
-    packet.assessment.objectLocator,
-    packet.policy.objectLocator,
-    ...new Set(policy.documents.map((document) => document.objectLocator)),
-  ]) {
-    const path = resolveContained(controlRoot, locator);
-    mandatory.push("### " + locator + "\n" + (await readFile(path, "utf8")));
-  }
-  const maxBytes = config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN;
-  const required = mandatory.join("\n\n");
-  if (Buffer.byteLength(required) > maxBytes) {
-    throw executionError(
-      "RESEARCH_INPUT_CONTEXT_BUDGET_EXCEEDED",
-      "Required scientific review design, policy, and assessment exceed the input context limit; revise the bounded assessment before execution.",
-    );
-  }
-  let remaining = maxBytes - Buffer.byteLength(required);
-  const context: string[] = [required];
-  for (const [index, record] of packet.stageInputs.entries()) {
-    const allowance = Math.max(
-      0,
-      Math.floor(remaining / (packet.stageInputs.length - index)) - 256,
-    );
-    if (!allowance) continue;
-    const path = resolveContained(controlRoot, record.path);
-    const handle = await open(path, "r");
-    let text: string;
-    try {
-      const buffer = Buffer.alloc(Math.min(record.bytes, allowance));
-      const read = await handle.read(buffer, 0, buffer.length, 0);
-      text = buffer.subarray(0, read.bytesRead).toString("utf8");
-    } finally {
-      await handle.close();
-    }
-    const section =
-      "### " + record.path + " (bounded excerpt; " + record.bytes + " total file bytes)\n" + text;
-    const size = Buffer.byteLength(section);
-    if (size <= remaining) {
-      context.push(section);
-      remaining -= size;
-    }
-  }
-  return context.join("\n\n");
+  const locators = [
+    ...new Set([
+      "inputs/scientific-review-packet.json",
+      packet.design.objectLocator,
+      packet.assessment.objectLocator,
+      packet.policy.objectLocator,
+      ...policy.documents.map((document) => document.objectLocator),
+      ...packet.stageInputs.map((record) => record.path),
+    ]),
+  ];
+  mandatory.push(
+    await artifactPromptContext(
+      controlRoot,
+      index,
+      locators,
+      Math.min(8_000, config.budget.maxInputContextTokens) * RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
+    ),
+  );
+  return mandatory.join("\n\n");
 }
 
 async function copyPacketInputs(

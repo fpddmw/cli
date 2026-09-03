@@ -450,6 +450,7 @@ export interface ExecutionResult {
   isolation?: ReviewIsolationFingerprint | undefined;
   reviewAttestation?: ReviewExecutionAttestation | undefined;
   telemetry?: AgentExecutionTelemetry | undefined;
+  artifactReads?: import("./artifact-views.js").ArtifactReadReceipt[];
 }
 
 export interface ReviewIsolationFingerprint {
@@ -457,8 +458,8 @@ export interface ReviewIsolationFingerprint {
   policySha256: string;
   readScopes: Array<"platform-runtime" | "agent-runtime" | "private-capsule">;
   writeScopes: ["private-capsule"];
-  networkPolicy: "reviewer-provider-only";
-  toolPolicy: "none";
+  networkPolicy: "reviewer-provider-only" | "reviewer-provider-and-local-artifacts";
+  toolPolicy: "none" | "packet-read";
 }
 
 export interface ReviewExecutionAttestation {
@@ -466,7 +467,7 @@ export interface ReviewExecutionAttestation {
   protocolVersion: 1;
   transport: "sandbox-bridge";
   isolationProvider: ReviewIsolationFingerprint["provider"];
-  toolPolicy: "none";
+  toolPolicy: "none" | "packet-read";
   workspaceId: string;
   requestId: string;
   requestSha256: string;

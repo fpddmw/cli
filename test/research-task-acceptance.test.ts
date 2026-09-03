@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
 import { runCli } from "../src/cli.js";
+import { openArtifactViews } from "../src/research/workspace/artifact-views.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
 import { readVerifiedJournal } from "../src/research/workspace/journal.js";
 import {
@@ -120,6 +121,119 @@ async function fixture() {
 }
 
 describe("lightweight original task and authorized scope", () => {
+  it("rejects malformed provenance before committing an unreadable original task", async () => {
+    const fx = await fixture();
+    try {
+      await writeFile(
+        fx.inputPath,
+        JSON.stringify({
+          ...contractInput(),
+          requestProvenance: {
+            mode: "verbatim",
+            source: { kind: "user-message", text: contractInput().originalRequest, locator: null },
+            explanation: "        ",
+          },
+        }),
+      );
+      const result = await fx.task(["define", "--input", fx.inputPath]);
+      assert.equal(result.exitCode, 3, result.stdout);
+      assert.equal(
+        (await readVerifiedJournal(workspacePaths(fx.root).journal)).some(
+          (event) => event.type === "project.task.defined",
+        ),
+        false,
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("preserves original request provenance separately from interpreted requirements", async () => {
+    const fx = await fixture();
+    try {
+      const original =
+        "\uFEFFCompare electricity and water evidence, retaining uncertainty and counterevidence.\r\n";
+      const input = {
+        ...contractInput(),
+        requestProvenance: {
+          mode: "interpreted",
+          source: { kind: "user-message", text: original, locator: "conversation:request-17" },
+          explanation:
+            "The requirement list operationalizes the quoted user message without assuming an outcome.",
+        },
+      };
+      await writeFile(fx.inputPath, JSON.stringify(input));
+      const defined = await fx.task(["define", "--input", fx.inputPath]);
+      assert.equal(defined.exitCode, 0, defined.stderr);
+      const inspected = await fx.task(["status"]);
+      assert.equal(inspected.exitCode, 0, inspected.stderr);
+      const context = JSON.parse(inspected.stdout);
+      assert.equal(context.requestProvenance.mode, "interpreted");
+      assert.equal(context.requestProvenance.source.textSha256, sha256Text(original));
+      assert.equal(
+        context.requestProvenance.source.locatorSha256,
+        sha256Text("conversation:request-17"),
+      );
+      assert.equal(context.requestProvenance.authorshipVerified, false);
+      const object = JSON.parse(
+        await readFile(
+          join(
+            workspacePaths(fx.root).projects,
+            "task-project",
+            "task/request-sources",
+            `${context.requestProvenance.source.objectSha256}.json`,
+          ),
+          "utf8",
+        ),
+      );
+      assert.equal(object.text, original);
+      assert.equal(inspected.stdout.includes("conversation:request-17"), false);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  it("cannot call a rewritten request verbatim or add provenance retrospectively", async () => {
+    const fx = await fixture();
+    try {
+      await writeFile(
+        fx.inputPath,
+        JSON.stringify({
+          ...contractInput(),
+          requestProvenance: {
+            mode: "verbatim",
+            source: {
+              kind: "user-file",
+              text: "A different original task must not be hidden.",
+              locator: null,
+            },
+            explanation: "The user supplied this complete request.",
+          },
+        }),
+      );
+      const rejected = await fx.task(["define", "--input", fx.inputPath]);
+      assert.equal(rejected.exitCode, 3);
+      await writeFile(fx.inputPath, JSON.stringify(contractInput()));
+      assert.equal((await fx.task(["define", "--input", fx.inputPath])).exitCode, 0);
+      const inspected = await fx.task(["status"]);
+      assert.equal(JSON.parse(inspected.stdout).requestProvenance.mode, "unrecorded");
+      await writeFile(
+        fx.inputPath,
+        JSON.stringify({
+          ...contractInput(),
+          requestProvenance: {
+            mode: "verbatim",
+            source: { kind: "user-file", text: contractInput().originalRequest, locator: null },
+            explanation: "An original file was supplied after the first definition.",
+          },
+        }),
+      );
+      assert.equal((await fx.task(["define", "--input", fx.inputPath])).exitCode, 3);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
   it("does not charge a non-embedded raw input bundle against a later task context", async () => {
     const fx = await acquiredFixture("evidence", 33_000);
     try {
@@ -680,11 +794,18 @@ describe("lightweight original task and authorized scope", () => {
           assert.equal(packet.taskAcceptance.requirements.length, 2);
           assert.equal(packet.taskAcceptance.originalRequest, contractInput().originalRequest);
           assert.equal(packet.taskAcceptance.results.length, 1);
-          assert.equal(
-            request.prompt.split(
-              `UNTRUSTED CHECK RESULT ${packet.taskAcceptance.results[0].sha256}`,
-            ).length - 1,
-            1,
+          const views = await openArtifactViews(
+            request.projectRoot,
+            request.artifactViews!.index,
+            packet.packetSha256,
+          );
+          const results = views.index.objects.filter(
+            (item) => item.sha256 === packet.taskAcceptance.results[0].sha256,
+          );
+          assert.equal(results.length, 1);
+          assert.deepEqual(
+            JSON.parse((await views.read({ objectId: results[0]!.objectId })).content),
+            { fixtureDifference: 0 },
           );
           assert.ok(
             Array.isArray(request.outputSchema?.required) &&
@@ -710,6 +831,7 @@ describe("lightweight original task and authorized scope", () => {
           return {
             exitCode: 0,
             stdout: JSON.stringify(review),
+            artifactReads: views.receipts(),
             stderr: "",
             tokens: 10,
             inputTokens: 5,

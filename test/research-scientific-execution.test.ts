@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { openArtifactViews } from "../src/research/workspace/artifact-views.js";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -250,7 +251,46 @@ describe("explicit isolated scientific review execution", () => {
     }
   });
 
-  it("stages and embeds the exact approved Policy Markdown in the tool-free review", async () => {
+  it("offers oversized approved Policy through packet-bound reads without a context rejection", async () => {
+    const policy =
+      "# Reviewed Policy\nHuman rule: retain conflicting observations and test uncertainty.\n".repeat(
+        6_000,
+      );
+    const fixture = await preparedFixture("execution-large-policy", true, policy);
+    try {
+      const executed = await executeScientificReview(
+        { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+        async (request) => {
+          assert.equal(request.toolPolicy, "packet-read");
+          assert.ok(request.artifactViews);
+          assert.ok(Buffer.byteLength(request.prompt) < 128_000 * 3);
+          const views = await openArtifactViews(
+            request.projectRoot,
+            request.artifactViews!.index,
+            fixture.packet.packetSha256,
+          );
+          const item = views.index.objects.find((item) =>
+            item.path.endsWith(`${sha256Text(policy)}.md`),
+          )!;
+          const read = await views.read({ objectId: item.objectId, length: null });
+          assert.equal(read.content, policy);
+          const value = result(fixture.packet);
+          value.isolation = {
+            ...value.isolation!,
+            toolPolicy: "packet-read",
+            networkPolicy: "reviewer-provider-and-local-artifacts",
+          };
+          value.artifactReads = views.receipts();
+          return value;
+        },
+      );
+      assert.equal(executed.status, "passed");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("stages and embeds small approved Policy Markdown in the packet-read review", async () => {
     const fixture = await preparedFixture(
       "execution-policy-text",
       true,
@@ -291,7 +331,7 @@ describe("explicit isolated scientific review execution", () => {
     }
   });
 
-  it("executes one bound tool-free reviewer, commits proof, and replays without a model call", async () => {
+  it("executes one bound packet-read reviewer, commits proof, and replays without a model call", async () => {
     const fixture = await preparedFixture("execution-success");
     try {
       let calls = 0;
@@ -300,10 +340,21 @@ describe("explicit isolated scientific review execution", () => {
       ) => {
         calls++;
         assert.equal(request.route.agent, "claude");
-        assert.equal(request.toolPolicy, "none");
+        assert.equal(request.toolPolicy, "packet-read");
         assert.equal(request.brokerUrl, null);
         assert.match(request.prompt, new RegExp(fixture.packet.packetSha256));
-        assert.match(request.prompt, /model-comparison|cross-model/u);
+        const views = await openArtifactViews(
+          request.projectRoot,
+          request.artifactViews!.index,
+          fixture.packet.packetSha256,
+        );
+        const design = views.index.objects.find(
+          (item) => item.path === fixture.packet.design.objectLocator,
+        )!;
+        assert.match(
+          (await views.read({ objectId: design.objectId, length: null })).content,
+          /model-comparison|cross-model/u,
+        );
         assert.equal(request.expectedRuntime, undefined);
         return result(fixture.packet);
       };
@@ -567,8 +618,8 @@ function result(
       policySha256: "4".repeat(64),
       readScopes: ["platform-runtime", "agent-runtime", "private-capsule"],
       writeScopes: ["private-capsule"],
-      networkPolicy: "reviewer-provider-only",
-      toolPolicy: "none",
+      networkPolicy: "reviewer-provider-and-local-artifacts",
+      toolPolicy: "packet-read",
     },
   };
 }

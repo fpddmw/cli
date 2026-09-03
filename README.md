@@ -859,8 +859,10 @@ For large local sources, pass an immutable `--input-plan` to both preflight and
 project initialization. Each plan entry may expose either a separate
 `contextPath` or non-overlapping, one-based `contextRanges`; the producer sees
 only that bounded context, while independent review receives the hash-verified
-full source. Symlinks, duplicate content, changed hashes, and context above
-`maxInputContextTokens` are rejected.
+full source. Symlinks, duplicate content and changed hashes are rejected.
+There is no total stage-context length gate: large admitted objects remain complete
+and are read through the packet's artifact directory instead of being forced into
+the initial prompt. This does not expose files deliberately withheld by an input plan.
 
 The workspace stores its current protocol state under `.tiangong-research/`.
 Each project follows the evidence-first sequence: broad discovery, strict
@@ -1165,7 +1167,8 @@ total tokens, USD 5,000, 30 days, and package ceilings of 12,000,000 for discove
 acquisition, 1,500,000 each for analysis and synthesis, and 2,500,000 for
 review. Primary output is bounded at 32,000 tokens and a separately invoked
 repair at 16,000. The production broker hard ceiling is 256 bounded views with
-32,000 context tokens per view; input context is bounded at 128,000 tokens.
+32,000 context tokens per broker view. The legacy `maxInputContextTokens` setting
+is an embedding/planning hint, not an input admission or artifact-read ceiling.
 Top-journal admission additionally reserves three early scientific reviews at
 500,000 tokens each, four final publication reviews at 750,000 each, and one
 4,000,000-token revision cycle, including their finite wall-time allowances.
@@ -1174,7 +1177,7 @@ stop control ordinary use, while the finite ceilings, three attempts per
 package, and explicit confirmation above the cost threshold stop runaway work.
 Smoke-test workspaces retain their smaller low-cost defaults.
 Before project initialization and every executable package, the control plane
-requires the complete token and conservative price reservation to fit. Native
+requires a token and conservative price estimate to fit the finite execution budget. Native
 producer stages reserve prompt, schema, admitted context, bounded broker
 context, and output allowance, but the host app does not expose trusted
 per-stage usage telemetry to this CLI. A successful native submit therefore
@@ -1184,9 +1187,10 @@ output bytes/tokens, provenance, coverage, hashes, and remaining project budget.
 It does not claim a provider-side turn or output-token cap for the host app.
 
 Independent review uses the pre-call reservation calculator and the reviewer's
-provider-side structured-output/turn controls where available. Review admission
-reserves three maximum-size generated artifacts plus one globally bounded
-evidence-excerpt bundle, and formatting repair remains one separately budgeted,
+provider-side structured-output/turn controls where available. Packet-only reads
+have a separate 64-turn runaway guard; planning uses the route's smaller estimated
+turn count and estimated read allowance, not the entire corpus size. These are
+approximate estimates, not precise billing. Formatting repair remains one separately budgeted,
 tool-free JSON correction. Production workspaces enforce a finite 256-view
 broker ceiling mechanically, while each project derives a much smaller working
 budget from its reviewed coverage requirements and stops early when they are
@@ -1211,8 +1215,9 @@ context, evidence objects, and registered local input hashes before recording
 their safe locators. Capsule deletion therefore does not delete the durable
 review chain.
 
-Native discovery preparation embeds the exact staged capability manifest and
-each external Skill's top-level `SKILL.md`. It also projects every built-in data
+Native discovery preparation supplies the exact staged capability manifest and
+each external Skill's top-level `SKILL.md` inline or by an exact artifact reference.
+It also projects every built-in data
 operation dynamically, with no per-provider Research adapter. The current host
 may fetch generic broker evidence with `research project evidence fetch`, whose bounded request file
 contains logical IDs but no credential values. The manifest includes the locked,
@@ -1240,19 +1245,37 @@ credentialed operation must resolve its namespaced logical credential from the
 workspace's owner-only store or it is blocked before any provider request.
 Standalone `tiangong-ai data run` keeps its separate manifest-declared
 environment-variable policy. A blocked data result is not promoted to evidence.
-Analyze and synthesize packets contain bounded, hash-verified prior-stage
-artifacts and require no external evidence calls. Review is tool-free and uses the
-reviewer's route-specific structured-output turn cap:
-its prompt embeds the complete generated artifacts and a deterministic,
-globally bounded set of excerpts distributed across registered local contexts
-and broker receipts. Broker excerpts prioritize deterministic, sanitized
+Analyze and synthesize packets contain hash-verified prior-stage artifacts and
+require no external evidence calls. Base and scientific review use only the
+packet-bound `research_list_artifacts` and `research_read_artifact` tools; shell,
+general filesystem, browser, broker and undeclared integrations remain disabled.
+The same surface works through native-direct and the signed sandbox-bridge.
+Small objects/excerpts are included initially; large objects are referenced without
+rejecting the stage. Broker excerpts prioritize deterministic, sanitized
 projections of the exact raw-response items selected by admitted evidence JSON
 Pointers; uncited receipts retain metadata-only bindings, and unresolved
 pointers receive a bounded-context fallback. The packet hash is schema-bound, but complete packet
 metadata is not redundantly copied into model context. Full local files,
-original per-receipt bounded contexts, raw broker objects, and the complete
-packet remain hash-bound for durable human/mechanical audit; the model must not
-claim to have read beyond the embedded excerpts.
+original per-receipt contexts, raw broker objects, checks and counterevidence stay
+discoverable in the exact directory. Reads use opaque object IDs and byte offsets;
+UTF-8 pages preserve character boundaries. Omit `length` for a 16 KiB page or use
+`length: null` for the whole object, without a CLI read-length ceiling. Objects
+actually read are preserved under `reads/objects/`, with exact directory and
+packet/object/view hash receipts. Receipts prove bytes delivered, not comprehension
+or scientific truth; actual provider/model capacity remains a limitation.
+
+Native hosts can use the same primitives without adding an IDE integration:
+
+```bash
+tiangong-ai research project stage artifacts PROJECT --session SESSION --workspace /absolute/workspace --json
+tiangong-ai research project stage read PROJECT --session SESSION --artifact OBJECT_ID --offset 0 --length 16384 --workspace /absolute/workspace --json
+tiangong-ai research project stage read PROJECT --session SESSION --artifact OBJECT_ID --length all --workspace /absolute/workspace --json
+```
+
+Follow `nextOffset` for subsequent pages. `--encoding base64` explicitly requests
+binary bytes; prefer a registered text derivative for interpretation. The channel
+does not scan arbitrary host paths or discover files created after the snapshot.
+Stopped, changed or expired native sessions cannot read through it.
 The CLI mechanically derives local full-text availability, source types,
 counts, date coverage, source IDs, and the coverage decision. A `partial`
 dimension is usable but incomplete; a missing dimension or unmet declared
@@ -1462,6 +1485,15 @@ Each requirement has a stable ID, acceptance condition, `checkKind` (`evidence`,
 coverage dimensions. Original wording cannot be overwritten. Old projects without
 a task remain explicitly unassessed rather than retrospectively accepted.
 
+Optional `requestProvenance` supplies `mode` (`verbatim`, `interpreted`, or
+`reconstructed`), `source` (`kind: user-message|user-file`, exact `text`, `locator`
+or null), and `explanation`. A null source is valid only for reconstruction.
+Verbatim source text must equal `originalRequest` exactly, including BOM and line
+endings. Source bytes are immutable; locator values are retained only by hash.
+Missing provenance is explicitly `unrecorded`, never inferred retroactively.
+Scope changes and forks preserve it. Declared origin is not authenticated authorship;
+secrets are rejected before admission.
+
 Before analysis, use `research schema show task-scope-change` and
 `project task scope propose PROJECT --input FILE --expected-contract SHA` to
 propose a change. Review the returned `changes.details` before/after values, then
@@ -1483,7 +1515,7 @@ sources are rejected. Positive/negative computational outcomes need a command an
 results; failed, inconclusive, and not-run checks remain honest without invented
 results. All records say `trust=native-observation`, `executionCertified=false`.
 
-One unchanged result blob is stored and included once per reviewer context. The
+One unchanged result blob is stored once and appears once in the reviewer directory. The
 existing independent review receives the original request, original/current
 requirements, exact checks and results, and returns a bound `taskAssessment`;
 there is no additional default paid review round. Missing current checks stop
