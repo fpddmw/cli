@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-09-03
-lastReviewedCommit: 06dadef170ab79c19eef9a35663e86fdee22479b
+lastReviewedCommit: d6ba1e16a27834daf3cbe471eebb3ef40e84db54
 ---
 
 # Repo Validation
@@ -251,6 +251,15 @@ refuse general workspace tools or external MCP/broker routes. Native/scientific
 regressions first reproduce former context-length refusals, then require normal
 preparation and exact on-demand reads without modifying frozen evidence. Mock
 passes remain distinct from an external real independent-review canary.
+
+`test/research-scientific-review.test.ts` exercises same-project fulfillment of
+predeclared model/environment slots, byte-identical base design preservation,
+idempotent replay, unchanged earlier approvals, stale due-packet rejection, and
+portable object export with rehashed-but-disconnected audit rejection.
+`test/research-scientific-fulfillment.test.ts` admits a real local synthetic input
+through native discover/acquire, freezes its typed atom, and binds exact parameter
+states without changing units or identities. It uses mock scientific judgement,
+not a provider or a claim of scientific validity.
 
 For this boundary, supplement fresh Docker RED/GREEN with a fresh external native
 workspace using the exact locally packed candidate, isolated HOME/npm cache, and

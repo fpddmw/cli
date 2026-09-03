@@ -1589,6 +1589,7 @@ function isScientificDesignBinding(
   if (
     typeof value.designSha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(value.designSha256) ||
+    (value.fulfillmentSha256 !== undefined && !nullableSha256(value.fulfillmentSha256)) ||
     value.objectLocator !==
       `projects/${projectId}/scientific/design/objects/${value.designSha256}.json` ||
     typeof value.centralStudyKind !== "string" ||

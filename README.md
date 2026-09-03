@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-09-03
-lastReviewedCommit: 06dadef170ab79c19eef9a35663e86fdee22479b
+lastReviewedCommit: d6ba1e16a27834daf3cbe471eebb3ef40e84db54
 ---
 
 # Tiangong AI CLI
@@ -607,8 +607,9 @@ owns the same due gate. Pending implementations use `null` for implementation
 SHA-256, locator, and entrypoint; pending environments use `null` for lock
 SHA-256 and locator. They are exposed in every earlier review packet as
 `futureGateObligations` and become blocking mechanical errors at that gate.
-Freezing them requires a new authoritative generation; it never upgrades the
-old object in place.
+Their predeclared slots may be fulfilled through the append-only same-project
+command below. The original design bytes never change; a material assumption,
+question, policy or already-frozen value still requires a reviewed successor.
 
 Use the same Policy project ID and exact design when preflighting and admitting
 the research project:
@@ -1466,6 +1467,43 @@ be repaired in place; use `research project fork SOURCE --to TARGET
 start a new generation. There is no automatic migration. A top-journal successor
 requires a Policy approved for TARGET and `--design`, `--design-producer-agent`,
 and `--design-producer-session`; it cannot inherit scientific approval.
+
+### Fulfill predeclared scientific objects
+
+At an idle boundary before analysis, register the exact code/environment files
+as scientific objects, then supply only the pending slots already named in the
+frozen design:
+
+```bash
+tiangong-ai research schema show scientific-fulfillment --json
+tiangong-ai research scientific fulfillment status PROJECT --workspace /absolute/workspace --json
+tiangong-ai research scientific fulfillment record PROJECT \
+  --input /absolute/fulfillment.json --workspace /absolute/workspace --json
+```
+
+The closed input names `designSha256`, the exact `parentFulfillmentSha256`
+(`null` initially), a non-sensitive reason, and arrays `modelImplementations`,
+`environmentLocks`, and `parameterStates`. Model entries bind the registered
+`objectLocator`, raw `sha256`, registration `recordSha256`, and the declared
+`modelId`; implementations additionally supply `entrypoint`. Parameter entries
+name the existing `parameterId` and every exact `stateId`, its source-derived
+`value`, and admitted `evidenceAtomIds` from the frozen typed-content snapshot.
+Units, state sets, ranges, factors, composition, claims, thresholds and Policy
+cannot be changed through this intake. At least one pending slot is required.
+
+Identical replay returns the same immutable record. Replacing an already-frozen
+slot, guessing a parent, an active native session, or analysis/inference already
+started is refused. The journal is the commit point; interrupted state projection
+uses the same narrow recovery mechanism as acquisition/scope revisions.
+
+Only the fulfillment's due gate and later scientific gates are reset; earlier
+reviews remain bound to their unchanged deadline-specific design view. New review
+packets include the original design, the exact fulfillment chain, the effective
+view and registered code/environment bytes. Filing objects does **not** mark the
+original Policy rule scientifically satisfied or certify code execution. The
+existing independent reviewer must assess the actual objects and rule. Portable
+audits retain the raw objects and registration metadata and verify the committed
+fulfillment head, slot semantics and current review view after relocation.
 
 ### Original task, current scope, and actual checks
 

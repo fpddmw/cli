@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-09-03
-lastReviewedCommit: 06dadef170ab79c19eef9a35663e86fdee22479b
+lastReviewedCommit: d6ba1e16a27834daf3cbe471eebb3ef40e84db54
 ---
 
 # Repo Architecture
@@ -491,6 +491,18 @@ there is no mutable acceptance cache. Portable audit shares relationship validat
 and uses an operation-local file/JSON index after the original workspace is gone.
 It verifies integrity, not execution, authorship, or scientific truth. Absent-task
 projects have a cheap unassessed path; there is no retrospective completion.
+
+`scientific-fulfillment.ts` projects append-only, journal-committed fulfillment
+records over exact immutable base design bytes. Only predeclared pending model,
+environment and source-bound parameter slots can change; assumptions, identities,
+units, state sets and Policy are not patches. Idle pre-analysis admission reuses
+the narrow project-mutation recovery journal. The due gate and later approvals
+are reset; deadline-specific views preserve unaffected earlier reviews. Both
+scientific review and acquisition route resolution load that verified view.
+Model registration and frozen typed-content atoms remain the source authorities.
+`scientific-fulfillment-audit.ts` checks the same slot transitions, raw objects,
+registration hashes and committed head using portable indexed files. It does not
+turn an object-filing obligation into independent scientific approval.
 
 `analysis-run.ts` centralizes mode consistency for both stage submission and
 publication freeze. Qualitative records retain `not-applicable` computational

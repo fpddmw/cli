@@ -689,7 +689,6 @@ export function scientificDesignSchema(): Record<string, unknown> {
                         pattern: "^lineage/objects/[a-f0-9]{64}/blob$",
                       },
                       implementationEntrypoint: nonEmptyString,
-                      implementationFreezeBeforeGate: { const: "research-design" },
                     },
                   },
                   else: {
@@ -718,7 +717,6 @@ export function scientificDesignSchema(): Record<string, unknown> {
                         type: "string",
                         pattern: "^lineage/objects/[a-f0-9]{64}/blob$",
                       },
-                      environmentLockFreezeBeforeGate: { const: "research-design" },
                     },
                   },
                   else: {
@@ -1818,19 +1816,15 @@ export function evaluateScientificDesign(
   }
   const invalidModelFreezePlans = design.identity.modelStructures.filter(
     (model) =>
-      (model.implementationStatus === "executable-frozen" &&
-        model.implementationFreezeBeforeGate !== "research-design") ||
       (model.implementationStatus === "pending-source-acquisition" &&
         model.implementationFreezeBeforeGate === "research-design") ||
-      (model.environmentLockStatus === "exact-frozen" &&
-        model.environmentLockFreezeBeforeGate !== "research-design") ||
       (model.environmentLockStatus === "pending-runtime-lock" &&
         model.environmentLockFreezeBeforeGate === "research-design"),
   );
   if (invalidModelFreezePlans.length) {
     add(
       "MODEL_FREEZE_PLAN_INVALID",
-      "Frozen model implementations and environment locks must be frozen at research design; pending model objects must declare a later early-review gate before which a new authoritative generation will freeze them.",
+      "Pending model objects must declare a later early-review deadline; registered objects may already be frozen before that deadline.",
       invalidModelFreezePlans.map((model) => model.id),
     );
   }
@@ -2354,15 +2348,13 @@ export function evaluateScientificDesign(
   }
   const invalidStateFreezePlans = design.uncertaintyParameters.filter(
     (parameter) =>
-      (parameter.stateValueStatus === "frozen" &&
-        parameter.freezeBeforeGate !== "research-design") ||
-      (parameter.stateValueStatus === "pending-source-acquisition" &&
-        parameter.freezeBeforeGate === "research-design"),
+      parameter.stateValueStatus === "pending-source-acquisition" &&
+      parameter.freezeBeforeGate === "research-design",
   );
   if (invalidStateFreezePlans.length) {
     add(
       "UNCERTAINTY_STATE_FREEZE_PLAN_INVALID",
-      "Frozen uncertainty states must be frozen at research design; pending source-derived states must name a later early-review gate before which their exact values will be frozen in a new generation.",
+      "Pending source-derived states must name a later early-review deadline; exact values may be frozen before that deadline.",
       invalidStateFreezePlans.map((parameter) => parameter.id),
     );
   }

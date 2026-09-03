@@ -14,6 +14,9 @@ import { readJournal, verifyJournal } from "./journal.js";
 import { loadProject } from "./projects.js";
 import { inspectPublicationStatus } from "./publication-workflow.js";
 import { verifyTaskAudit, writeTaskAuditContext, type TaskAuditBinding } from "./task-audit.js";
+import { loadScientificFulfillmentView } from "./scientific-fulfillment.js";
+import { verifyScientificFulfillmentAudit } from "./scientific-fulfillment-audit.js";
+import { resolveScientificObjectBinding } from "./scientific-objects.js";
 import { sanitizeResearchText, sanitizeResearchValue } from "./sanitization.js";
 import {
   canonicalJson,
@@ -116,6 +119,29 @@ export async function exportProjectAuditBundle(input: {
 
       const projectRoot = join(paths.projects, project.id);
       const researchChain = await loadVerifiedResearchChain(input.root, project);
+      if (project.scientificDesign) {
+        const fulfillment = await loadScientificFulfillmentView(input.root, project);
+        for (const record of fulfillment.records) {
+          for (const [kind, items] of [
+            ["model-implementation", record.modelImplementations],
+            ["environment-lock", record.environmentLocks],
+          ] as const) {
+            for (const item of items) {
+              const object = await resolveScientificObjectBinding({
+                root: input.root,
+                objectKind: kind,
+                objectLocator: item.objectLocator,
+                expectedSha256: item.sha256,
+              });
+              await stageFile(object.sourcePath, `workspace-objects/${item.objectLocator}`);
+              await stageFile(
+                resolveContained(paths.control, object.record!.recordLocator),
+                `workspace-objects/${object.record!.recordLocator}`,
+              );
+            }
+          }
+        }
+      }
       const task = await writeTaskAuditContext(input.root, project, temporary);
       if (task) researchChain.task = task;
       const projectFiles = await regularTreeFiles(projectRoot).catch((error) => {
@@ -389,6 +415,7 @@ export async function verifyProjectAuditBundle(bundlePath: string): Promise<{
     }
   }
   await assertPortableTextFiles(bundlePath);
+  await verifyScientificFulfillmentAudit(bundlePath, manifest.projectId, manifest.files);
   let task: Awaited<ReturnType<typeof verifyTaskAudit>>;
   try {
     task = await verifyTaskAudit(

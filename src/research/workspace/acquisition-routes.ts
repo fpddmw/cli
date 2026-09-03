@@ -1,9 +1,6 @@
 import { CliError } from "../../errors.js";
-import {
-  readAndVerifyScientificDesign,
-  type ScientificDesignContract,
-} from "./scientific-design.js";
-import { resolveContained, workspacePaths } from "./storage.js";
+import type { ScientificDesignContract } from "./scientific-design.js";
+import { loadScientificFulfillmentView } from "./scientific-fulfillment.js";
 import type { ProjectState } from "./types.js";
 
 export type ScientificAcquisitionRoute =
@@ -19,18 +16,7 @@ export async function loadBoundAcquisitionDesign(
       exitCode: 3,
     });
   }
-  const path = resolveContained(
-    workspacePaths(root).control,
-    project.scientificDesign.objectLocator,
-  );
-  const verified = await readAndVerifyScientificDesign(path, project.id);
-  if (verified.sha256 !== project.scientificDesign.designSha256) {
-    throw new CliError("Frozen evidence acquisition plan no longer matches its design binding.", {
-      code: "RESEARCH_EVIDENCE_ACCESS_PLAN_INVALID",
-      exitCode: 3,
-    });
-  }
-  return verified.contract;
+  return (await loadScientificFulfillmentView(root, project)).contract;
 }
 
 export async function resolveAgentAcquisitionRoute(input: {

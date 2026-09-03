@@ -323,6 +323,7 @@ export type ScientificGateStatus =
 export interface ScientificDesignBinding {
   schemaVersion: 1;
   designSha256: string;
+  fulfillmentSha256?: string | null;
   objectLocator: string;
   centralStudyKind: string;
   producer: {

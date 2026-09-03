@@ -16,6 +16,10 @@ import {
   type ScientificDesignContract,
 } from "./scientific-design.js";
 import { resolveScientificObjectBinding, type ScientificObjectKind } from "./scientific-objects.js";
+import {
+  loadScientificFulfillmentView,
+  scientificFulfillmentLocator,
+} from "./scientific-fulfillment.js";
 import { sanitizeResearchValue } from "./sanitization.js";
 import {
   canonicalJson,
@@ -191,6 +195,8 @@ interface ScientificReviewStageInput {
     | "inherited-gap"
     | "model-implementation"
     | "model-environment-lock"
+    | "scientific-fulfillment"
+    | "effective-scientific-design"
     | "stage-output";
   ownerId: string;
   sourceLocator: string;
@@ -208,6 +214,7 @@ export interface ScientificReviewPacket {
   design: {
     sha256: string;
     objectLocator: string;
+    fulfillment?: { headSha256: string | null; effectiveSha256: string };
   };
   policy: {
     resolvedPolicySha256: string;
@@ -546,7 +553,8 @@ export async function prepareScientificReview(input: {
         exitCode: 3,
       });
     }
-    const design = await loadBoundScientificDesign(input.root, project);
+    const fulfillment = await loadScientificFulfillmentView(input.root, project, input.role);
+    const design = fulfillment.contract;
     const assessment = await readAssessment(input.assessmentPath, input.role);
     if (assessment.designSha256 !== project.scientificDesign.designSha256) {
       throw new CliError("Scientific assessment does not match the frozen design.", {
@@ -562,6 +570,35 @@ export async function prepareScientificReview(input: {
       assessment,
       input.canaryArtifactPaths ?? [],
     );
+    if (input.role !== "research-design")
+      stageInputs.push(...(await modelObjectInputs(input.root, project.id, design)));
+    if (fulfillment.records.length) {
+      for (const record of fulfillment.records) {
+        const locator = scientificFulfillmentLocator(project.id, record.recordSha256);
+        stageInputs.push({
+          ...(await fileRecord(resolveContained(paths.control, locator), locator)),
+          purpose: "scientific-fulfillment",
+          ownerId: project.id,
+          sourceLocator: locator,
+          hashBasis: "raw-file-bytes",
+          mediaType: "application/json",
+          objectKind: null,
+          registrationRecordSha256: null,
+        });
+      }
+      const locator = `projects/${project.id}/scientific/design/views/${fulfillment.effectiveSha256}.json`;
+      await writeImmutableJson(resolveContained(paths.control, locator), design);
+      stageInputs.push({
+        ...(await fileRecord(resolveContained(paths.control, locator), locator)),
+        purpose: "effective-scientific-design",
+        ownerId: project.id,
+        sourceLocator: locator,
+        hashBasis: "raw-file-bytes",
+        mediaType: "application/json",
+        objectKind: null,
+        registrationRecordSha256: null,
+      });
+    }
     const assessmentSha256 = exactJsonSha256(assessment);
     const assessmentLocator = `projects/${project.id}/scientific/assessments/${input.role}/${assessmentSha256}.json`;
     await writeImmutableJson(join(paths.control, assessmentLocator), assessment);
@@ -587,6 +624,7 @@ export async function prepareScientificReview(input: {
       project.evidenceRequirements,
       project.publicationPolicy,
       await assessmentEvidenceContext(input.root, project, input.role, stageInputs),
+      fulfillment.deferredObjectRuleIds,
     );
     const futureGateObligations = scientificFutureGateObligations(design, input.role);
     const packetCore = {
@@ -597,6 +635,10 @@ export async function prepareScientificReview(input: {
       design: {
         sha256: project.scientificDesign.designSha256,
         objectLocator: project.scientificDesign.objectLocator,
+        fulfillment: {
+          headSha256: fulfillment.headSha256,
+          effectiveSha256: fulfillment.effectiveSha256,
+        },
       },
       policy: packetPolicy,
       reviewer: { agent: input.reviewerAgent, sessionSha256: reviewerSessionSha256 },
@@ -631,7 +673,10 @@ export async function prepareScientificReview(input: {
         newGenerationOnMaterialChange: true as const,
         revisionReserveIncluded: true as const,
       },
-      instructions: reviewInstructions(input.role),
+      instructions: [
+        ...reviewInstructions(input.role),
+        "Scientific fulfillment files supply only previously declared pending object slots. The base design and policy dispositions remain immutable. Discharging an object-filing blocker does not establish calibration, justification or scientific correctness: independently assess the actual code, locks and source-bound values under every original policy rule.",
+      ],
     };
     const packetSha256 = sha256Text(canonicalJson(packetCore));
     const packet: ScientificReviewPacket = { ...packetCore, packetSha256 };
@@ -846,8 +891,9 @@ export async function assertScientificGateForStage(
   stage: "discover" | "acquire" | "analyze" | "synthesize" | "review" | "close",
 ): Promise<void> {
   if (!project.scientificDesign) return;
-  const design = await loadBoundScientificDesign(root, project);
   for (const role of requiredGateRoles(stage)) {
+    const fulfillment = await loadScientificFulfillmentView(root, project, role);
+    const design = fulfillment.contract;
     const gate = project.scientificDesign.gates[role];
     if (gate.status !== "passed" || !gate.packetSha256 || !gate.reviewSha256) {
       throw new CliError(`Scientific ${role} review must pass before ${stage}.`, {
@@ -866,6 +912,7 @@ export async function assertScientificGateForStage(
       project.evidenceRequirements,
       project.publicationPolicy!,
       await assessmentEvidenceContext(root, project, role, packet.stageInputs),
+      fulfillment.deferredObjectRuleIds,
     ).map((issue) => issue.code);
     if (
       packet.assessment.sha256 !== gate.assessmentSha256 ||
@@ -922,6 +969,7 @@ function evaluateAssessment(
   requirements: ProjectState["evidenceRequirements"],
   policy: NonNullable<ProjectState["publicationPolicy"]>,
   evidenceContext: EvidenceConstructContext | null = null,
+  deferredObjectRuleIds: string[] = [],
 ): ScientificMechanicalIssue[] {
   const issues = new Map<string, ScientificMechanicalIssue>();
   const add = (code: string, message: string, objectIds: string[] = []) => {
@@ -943,13 +991,14 @@ function evaluateAssessment(
   const duePolicyRules = design.policyRuleDispositions.filter(
     (disposition) =>
       disposition.status === "planned" &&
+      !deferredObjectRuleIds.includes(disposition.ruleId) &&
       disposition.dueGate !== "publication-freeze" &&
       gateRank[disposition.dueGate] <= gateRank[role],
   );
   if (duePolicyRules.length) {
     add(
       "POLICY_RULE_DUE_UNRESOLVED",
-      "A planned Research Policy rule reached its declared early-review gate without a new design generation that records how it was satisfied.",
+      "A planned Research Policy rule reached its early-review gate without its declared object fulfillment or reviewed design resolution.",
       duePolicyRules.map((disposition) => disposition.ruleId),
     );
   }
@@ -961,7 +1010,7 @@ function evaluateAssessment(
   if (dueUncertaintyFreezes.length) {
     add(
       "UNCERTAINTY_STATE_VALUES_NOT_FROZEN",
-      "Source-derived uncertainty values reached their declared freeze gate without a new authoritative design generation containing exact states and source bindings.",
+      "Source-derived uncertainty values reached their freeze gate without exact states and admitted source bindings.",
       dueUncertaintyFreezes.map((parameter) => parameter.id),
     );
   }
@@ -973,7 +1022,7 @@ function evaluateAssessment(
   if (dueModelImplementations.length) {
     add(
       "MODEL_IMPLEMENTATION_NOT_FROZEN",
-      "A model implementation reached its declared freeze gate without a new authoritative design generation binding executable model bytes.",
+      "A model implementation reached its freeze gate without binding the declared executable bytes.",
       dueModelImplementations.map((model) => model.id),
     );
   }
@@ -985,7 +1034,7 @@ function evaluateAssessment(
   if (dueModelEnvironmentLocks.length) {
     add(
       "MODEL_ENVIRONMENT_LOCK_NOT_FROZEN",
-      "A model environment reached its declared freeze gate without a new authoritative design generation binding an exact runtime and dependency lock.",
+      "A model environment reached its freeze gate without an exact runtime and dependency lock.",
       dueModelEnvironmentLocks.map((model) => model.id),
     );
   }
@@ -1448,34 +1497,7 @@ async function stageInputRecords(
         registrationRecordSha256: null,
       });
     };
-    for (const model of design.identity.modelStructures) {
-      if (model.implementationStatus === "executable-frozen") {
-        records.push(
-          await promoteRegisteredModelObject({
-            root,
-            projectId: project.id,
-            objectKind: "model-implementation",
-            sourceLocator: model.implementationArtifactLocator!,
-            sha256: model.implementationArtifactSha256!,
-            purpose: "model-implementation",
-            ownerId: model.id,
-          }),
-        );
-      }
-      if (model.environmentLockStatus === "exact-frozen") {
-        records.push(
-          await promoteRegisteredModelObject({
-            root,
-            projectId: project.id,
-            objectKind: "environment-lock",
-            sourceLocator: model.environmentLockLocator!,
-            sha256: model.environmentLockSha256!,
-            purpose: "model-environment-lock",
-            ownerId: model.id,
-          }),
-        );
-      }
-    }
+    records.push(...(await modelObjectInputs(root, project.id, design)));
     for (const gap of design.knownGaps) {
       for (const artifact of gap.sourceArtifacts) {
         await promoteLegacyJson({
@@ -1599,6 +1621,41 @@ async function stageInputRecords(
     });
   }
   return [...stageOutputs, ...canaryRecords];
+}
+
+async function modelObjectInputs(
+  root: string,
+  projectId: string,
+  design: ScientificDesignContract,
+): Promise<ScientificReviewStageInput[]> {
+  const records: ScientificReviewStageInput[] = [];
+  for (const model of design.identity.modelStructures) {
+    if (model.implementationStatus === "executable-frozen")
+      records.push(
+        await promoteRegisteredModelObject({
+          root,
+          projectId,
+          objectKind: "model-implementation",
+          sourceLocator: model.implementationArtifactLocator!,
+          sha256: model.implementationArtifactSha256!,
+          purpose: "model-implementation",
+          ownerId: model.id,
+        }),
+      );
+    if (model.environmentLockStatus === "exact-frozen")
+      records.push(
+        await promoteRegisteredModelObject({
+          root,
+          projectId,
+          objectKind: "environment-lock",
+          sourceLocator: model.environmentLockLocator!,
+          sha256: model.environmentLockSha256!,
+          purpose: "model-environment-lock",
+          ownerId: model.id,
+        }),
+      );
+  }
+  return records;
 }
 
 async function promoteRegisteredModelObject(input: {
@@ -1798,20 +1855,7 @@ async function loadBoundScientificDesign(
   root: string,
   project: ProjectState,
 ): Promise<ScientificDesignContract> {
-  const binding = project.scientificDesign;
-  if (!binding) throw scientificGateError("Project has no scientific design binding.");
-  const path = join(workspacePaths(root).control, binding.objectLocator);
-  const value = await readExactJson(path, "Scientific design", "RESEARCH_SCIENTIFIC_GATE_INVALID");
-  const design = parseScientificDesign(value);
-  const normalized = normalizedJson(design);
-  if (
-    design.projectId !== project.id ||
-    sha256Text(normalized) !== binding.designSha256 ||
-    (await readFile(path, "utf8")) !== normalized
-  ) {
-    throw scientificGateError("Frozen scientific design failed its exact binding.");
-  }
-  return design;
+  return (await loadScientificFulfillmentView(root, project)).contract;
 }
 
 async function loadBoundPacket(
@@ -1852,6 +1896,26 @@ async function loadBoundPacket(
     throw scientificGateError("Scientific review packet failed its immutable hash binding.", role);
   }
   await assertBoundPolicyObject(root, project, value.policy);
+  const fulfillment = await loadScientificFulfillmentView(root, project, role);
+  if (value.design.fulfillment) {
+    if (
+      value.design.fulfillment.effectiveSha256 !== fulfillment.effectiveSha256 ||
+      (value.design.fulfillment.headSha256 !== null &&
+        !fulfillment.records.some(
+          (record) => record.recordSha256 === value.design.fulfillment!.headSha256,
+        ))
+    ) {
+      throw scientificGateError(
+        "Scientific review has a stale or uncommitted fulfillment view.",
+        role,
+      );
+    }
+  } else if (canonicalJson(fulfillment.contract) !== canonicalJson(fulfillment.base)) {
+    throw scientificGateError(
+      "Scientific review does not bind the fulfilled scientific objects.",
+      role,
+    );
+  }
   if (
     canonicalJson(value.taskContract ?? null) !== canonicalJson(await taskContext(root, project.id))
   ) {
@@ -2122,6 +2186,13 @@ function isScientificReviewPacket(
     isObject(value.design) &&
     typeof value.design.sha256 === "string" &&
     typeof value.design.objectLocator === "string" &&
+    (value.design.fulfillment === undefined ||
+      (isObject(value.design.fulfillment) &&
+        (value.design.fulfillment.headSha256 === null ||
+          (typeof value.design.fulfillment.headSha256 === "string" &&
+            new RegExp(SHA256_PATTERN).test(value.design.fulfillment.headSha256))) &&
+        typeof value.design.fulfillment.effectiveSha256 === "string" &&
+        new RegExp(SHA256_PATTERN).test(value.design.fulfillment.effectiveSha256))) &&
     isObject(value.policy) &&
     typeof value.policy.resolvedPolicySha256 === "string" &&
     typeof value.policy.approvalSha256 === "string" &&
@@ -2149,6 +2220,8 @@ function isScientificReviewPacket(
           "inherited-gap",
           "model-implementation",
           "model-environment-lock",
+          "scientific-fulfillment",
+          "effective-scientific-design",
           "stage-output",
         ].includes(String(record.purpose)) &&
         typeof record.ownerId === "string" &&

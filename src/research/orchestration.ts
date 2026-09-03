@@ -136,6 +136,11 @@ import {
   registerScientificObject,
 } from "./workspace/scientific-objects.js";
 import {
+  inspectScientificFulfillment,
+  recordScientificFulfillment,
+  scientificFulfillmentSchema,
+} from "./workspace/scientific-fulfillment.js";
+import {
   inspectScientificReviewStatus,
   prepareScientificReview,
   scientificGateAssessmentSchema,
@@ -213,6 +218,8 @@ export function researchOrchestrationHelp(): string {
   tiangong-ai research publication close <project-id> [--workspace <path>] [--json]
   tiangong-ai research scientific object register --kind model-implementation|environment-lock --path <absolute-file> [--media-type <type>] [--workspace <path>] [--json]
   tiangong-ai research scientific object inspect --kind model-implementation|environment-lock --locator <control-relative-locator> [--workspace <path>] [--json]
+  tiangong-ai research scientific fulfillment record <project> --input <json-file> [--workspace <path>] [--json]
+  tiangong-ai research scientific fulfillment status <project> [--workspace <path>] [--json]
   tiangong-ai research project init <project-id> --question <question> [--goal evidence-report|top-journal] [--design <absolute-json> --design-producer-agent codex|claude --design-producer-session <opaque-id>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--confirm-budget] [--workspace <path>] [--json]
   tiangong-ai research project preflight --question <question> [--goal evidence-report|top-journal] [--policy-project <project-id> --design <absolute-json>] [--requirements <absolute-json>] [--input-plan <absolute-json>] [--workspace <path>] [--json]
   tiangong-ai research project input add <project-id> --path <absolute-file> [--role primary|reference|replication] [--trust-status verified-owner-input|unverified-owner-input|reference-only|replication-candidate] [--independently-reproduced] [--workspace <path>] [--json]
@@ -271,6 +278,42 @@ ${researchSetupHelp()}
 async function runScientific(argv: string[], io: CliIO): Promise<number> {
   const [action, ...rest] = argv;
   if (!action || action === "--help" || action === "-h") return writeHelp(io);
+  if (action === "fulfillment") {
+    const [operation, ...arguments_] = rest;
+    if (operation !== "record" && operation !== "status")
+      throw unknownAction("research scientific fulfillment", operation ?? "");
+    const args = parseStrictArgs(
+      arguments_,
+      { ...WORKSPACE_OPTIONS, ...(operation === "record" ? { input: "string" as const } : {}) },
+      `research scientific fulfillment ${operation}`,
+    );
+    if (strictBoolean(args, "help")) return writeHelp(io);
+    const projectId = onePositional(
+      args.positionals,
+      `research scientific fulfillment ${operation}`,
+    );
+    const root = await workspaceFromArgs(args);
+    if (operation === "status")
+      writeJson(io, await inspectScientificFulfillment(root, projectId), args);
+    else {
+      const path = strictString(args, "input");
+      if (!path)
+        throw new CliError("Fulfillment record requires --input.", {
+          code: "RESEARCH_SCIENTIFIC_FULFILLMENT_INVALID",
+          exitCode: 2,
+        });
+      writeJson(
+        io,
+        await recordScientificFulfillment(
+          root,
+          projectId,
+          await readBoundedJsonRecord(path, "--input", "RESEARCH_SCIENTIFIC_FULFILLMENT_INVALID"),
+        ),
+        args,
+      );
+    }
+    return 0;
+  }
   if (action !== "object") throw unknownAction("research scientific", action);
   const [objectAction, ...objectRest] = rest;
   if (objectAction === "register") {
@@ -710,6 +753,8 @@ async function runSchema(argv: string[], io: CliIO): Promise<number> {
     schema = evidenceContentInputSchema(stage);
   } else if (stage === "scientific-design") {
     schema = scientificDesignSchema();
+  } else if (stage === "scientific-fulfillment") {
+    schema = scientificFulfillmentSchema();
   } else if (stage.startsWith("scientific-assessment-")) {
     const role = scientificReviewRole(stage.slice("scientific-assessment-".length));
     schema = scientificGateAssessmentSchema(role);

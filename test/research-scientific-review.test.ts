@@ -8,12 +8,17 @@ import { runCli } from "../src/cli.js";
 import { declaredSourceTypes } from "../src/research/workspace/evidence-role-coverage.js";
 import type { CliIO } from "../src/io.js";
 import { lockCapabilities } from "../src/research/workspace/capabilities.js";
-import { exportProjectAuditBundle } from "../src/research/workspace/audit-bundle.js";
+import {
+  exportProjectAuditBundle,
+  verifyProjectAuditBundle,
+} from "../src/research/workspace/audit-bundle.js";
 import {
   appendEvidenceLedgerEvent,
   evidenceLedgerPath,
 } from "../src/research/workspace/evidence-ledger.js";
 import { inspectEvidenceAccessStatus } from "../src/research/workspace/evidence-exhaustion.js";
+import { loadBoundAcquisitionDesign } from "../src/research/workspace/acquisition-routes.js";
+import { registerScientificObject } from "../src/research/workspace/scientific-objects.js";
 import { appendJournalEvent } from "../src/research/workspace/journal.js";
 import { recordNativeResearchActivity } from "../src/research/workspace/native-activity.js";
 import {
@@ -915,7 +920,7 @@ describe("top-journal early scientific reviews", () => {
     }
   });
 
-  it("exposes pending model and environment freezes before they become pilot-methods blockers", async () => {
+  it("fulfills predeclared model objects in place while preserving earlier reviews and rejecting a stale due packet", async () => {
     const fixture = await projectFixture("scientific-future-model-freeze", {
       pendingModels: true,
     });
@@ -982,6 +987,246 @@ describe("top-journal early scientific reviews", () => {
         assert.ok(duePacket.mechanicalAssessment.issueCodes.includes(code), code);
       }
       assert.equal(duePacket.mechanicalAssessment.canPass, false);
+
+      const before = await loadProject(fixture.root, fixture.projectId);
+      const basePath = join(
+        workspacePaths(fixture.root).control,
+        before.scientificDesign!.objectLocator,
+      );
+      const baseBytes = await readFile(basePath, "utf8");
+      const implementations = [];
+      const environments = [];
+      for (const model of fixture.design.identity.modelStructures) {
+        const codePath = join(fixture.root, `${model.id}-implementation.py`);
+        const lockPath = join(fixture.root, `${model.id}-environment.lock`);
+        await writeTextAtomic(codePath, `def evaluate(value):\n    return value\n# ${model.id}\n`);
+        await writeTextAtomic(lockPath, `python==3.13.15\n# ${model.id}\n`);
+        const code = await registerScientificObject({
+          root: fixture.root,
+          objectKind: "model-implementation",
+          path: codePath,
+          mediaType: "text/x-python",
+        });
+        const environment = await registerScientificObject({
+          root: fixture.root,
+          objectKind: "environment-lock",
+          path: lockPath,
+          mediaType: "text/plain",
+        });
+        implementations.push({
+          modelId: model.id,
+          objectLocator: code.objectLocator,
+          sha256: code.sha256,
+          recordSha256: code.recordSha256,
+          entrypoint: "evaluate",
+        });
+        environments.push({
+          modelId: model.id,
+          objectLocator: environment.objectLocator,
+          sha256: environment.sha256,
+          recordSha256: environment.recordSha256,
+        });
+      }
+      const fulfillmentPath = join(fixture.root, "fulfillment.json");
+      await writeJsonAtomic(fulfillmentPath, {
+        schemaVersion: 1,
+        designSha256: fixture.designSha256,
+        parentFulfillmentSha256: null,
+        reason:
+          "Freeze only the model and runtime slots declared before discovery; independent scientific review remains required.",
+        modelImplementations: implementations,
+        environmentLocks: environments,
+        parameterStates: [],
+      });
+      const argv = [
+        "research",
+        "scientific",
+        "fulfillment",
+        "record",
+        fixture.projectId,
+        "--input",
+        fulfillmentPath,
+        "--workspace",
+        fixture.root,
+        "--json",
+      ];
+      const recorded = await invokeCli(argv);
+      assert.equal(recorded.exitCode, 0, recorded.stderr);
+      const record = JSON.parse(recorded.stdout);
+      assert.match(record.recordSha256, /^[a-f0-9]{64}$/);
+      assert.equal(
+        (await invokeCli(argv)).stdout,
+        recorded.stdout,
+        "identical intent is an idempotent replay",
+      );
+      const after = await loadProject(fixture.root, fixture.projectId);
+      assert.equal(after.id, before.id);
+      assert.equal(after.scientificDesign!.designSha256, fixture.designSha256);
+      assert.equal(await readFile(basePath, "utf8"), baseBytes);
+      assert.deepEqual(
+        after.scientificDesign!.gates["research-design"],
+        before.scientificDesign!.gates["research-design"],
+      );
+      assert.deepEqual(
+        after.scientificDesign!.gates["evidence-construct"],
+        before.scientificDesign!.gates["evidence-construct"],
+      );
+      assert.equal(after.scientificDesign!.gates["pilot-methods"].status, "pending");
+      const effective = await loadBoundAcquisitionDesign(fixture.root, after);
+      assert.ok(
+        effective.identity.modelStructures.every(
+          (model) =>
+            model.implementationStatus === "executable-frozen" &&
+            model.environmentLockStatus === "exact-frozen",
+        ),
+      );
+      assert.deepEqual(effective.claims, fixture.design.claims);
+      assert.deepEqual(effective.thresholds, fixture.design.thresholds);
+      assert.deepEqual(
+        effective.policyRuleDispositions,
+        fixture.design.policyRuleDispositions,
+        "object filing must not silently mark a scientific policy rule satisfied",
+      );
+      await assertScientificGateForStage(fixture.root, after, "discover");
+      const staleReviewPath = join(fixture.root, "stale-pilot-review.json");
+      await writeJsonAtomic(
+        staleReviewPath,
+        passingReview(duePacket, "future-model-pilot-reviewer"),
+      );
+      await assert.rejects(
+        submitScientificReview({
+          root: fixture.root,
+          projectId: fixture.projectId,
+          role: "pilot-methods",
+          reviewPath: staleReviewPath,
+        }),
+      );
+      const refreshed = await prepareScientificReview({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        role: "pilot-methods",
+        assessmentPath: pilotPath,
+        reviewerAgent: "claude",
+        reviewerSessionId: "fulfilled-model-pilot-reviewer",
+      });
+      for (const code of [
+        "MODEL_IMPLEMENTATION_NOT_FROZEN",
+        "MODEL_ENVIRONMENT_LOCK_NOT_FROZEN",
+        "POLICY_RULE_DUE_UNRESOLVED",
+      ]) {
+        assert.equal(refreshed.mechanicalAssessment.issueCodes.includes(code), false, code);
+      }
+      assert.equal(
+        refreshed.stageInputs.filter((item) =>
+          ["model-implementation", "model-environment-lock"].includes(item.purpose),
+        ).length,
+        implementations.length + environments.length,
+      );
+      assert.ok(
+        refreshed.stageInputs.some((item) => String(item.purpose) === "scientific-fulfillment"),
+      );
+      const illegal = JSON.parse(await readFile(fulfillmentPath, "utf8"));
+      illegal.parentFulfillmentSha256 = record.recordSha256;
+      illegal.claims = [{ id: "silent-question-change" }];
+      await writeJsonAtomic(fulfillmentPath, illegal);
+      const rejected = await invokeCli(argv);
+      assert.equal(rejected.exitCode, 2, rejected.stderr);
+      assert.match(rejected.stderr, /RESEARCH_SCIENTIFIC_FULFILLMENT_INVALID/);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("exports fulfillment objects and rejects a rehashed audit that loses the committed fulfillment head", async () => {
+    const fixture = await projectFixture("scientific-fulfillment-audit", { pendingModels: true });
+    try {
+      const model = fixture.design.identity.modelStructures[0]!;
+      const path = join(fixture.root, "observed-model.py");
+      await writeTextAtomic(path, "def evaluate(value):\n    return value\n");
+      const object = await registerScientificObject({
+        root: fixture.root,
+        objectKind: "model-implementation",
+        path,
+        mediaType: "text/x-python",
+      });
+      const inputPath = join(fixture.root, "fulfillment.json");
+      await writeJsonAtomic(inputPath, {
+        schemaVersion: 1,
+        designSha256: fixture.designSha256,
+        parentFulfillmentSha256: null,
+        reason:
+          "Supply the one predeclared implementation; environment and all independent scientific judgements are still pending.",
+        modelImplementations: [
+          {
+            modelId: model.id,
+            objectLocator: object.objectLocator,
+            sha256: object.sha256,
+            recordSha256: object.recordSha256,
+            entrypoint: "evaluate",
+          },
+        ],
+        environmentLocks: [],
+        parameterStates: [],
+      });
+      const result = await invokeCli([
+        "research",
+        "scientific",
+        "fulfillment",
+        "record",
+        fixture.projectId,
+        "--input",
+        inputPath,
+        "--workspace",
+        fixture.root,
+        "--json",
+      ]);
+      assert.equal(result.exitCode, 0, result.stderr);
+      const destination = join(fixture.root, "portable-fulfillment");
+      const manifest = await exportProjectAuditBundle({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        destination,
+      });
+      assert.ok(
+        manifest.files.some((file) => file.path === `workspace-objects/${object.objectLocator}`),
+        "a fulfillment must export its actual raw bytes, not only a hash",
+      );
+      assert.ok(
+        manifest.files.some((file) => file.path === `workspace-objects/${object.recordLocator}`),
+      );
+      assert.equal((await verifyProjectAuditBundle(destination)).status, "verified");
+      const statePath = join(destination, "state/project.json");
+      const state = JSON.parse(await readFile(statePath, "utf8"));
+      state.scientificDesign.fulfillmentSha256 = null;
+      await writeJsonAtomic(statePath, state);
+      const stateFile = manifest.files.find((file) => file.path === "state/project.json")!;
+      stateFile.sha256 = await sha256File(statePath);
+      stateFile.bytes = Buffer.byteLength(await readFile(statePath, "utf8"));
+      const { manifestSha256: _old, ...core } = manifest;
+      await writeJsonAtomic(join(destination, "manifest.json"), {
+        ...core,
+        manifestSha256: sha256Text(canonicalJson(core)),
+      });
+      await assert.rejects(verifyProjectAuditBundle(destination), /fulfillment/i);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps frozen base design raw-byte identity while loading a fulfillment-aware gate", async () => {
+    const fixture = await projectFixture("scientific-base-bytes");
+    try {
+      await passResearchDesign(fixture);
+      const project = await loadProject(fixture.root, fixture.projectId);
+      const path = join(
+        workspacePaths(fixture.root).control,
+        project.scientificDesign!.objectLocator,
+      );
+      await writeTextAtomic(path, `${await readFile(path, "utf8")}\n`);
+      await assert.rejects(
+        assertScientificGateForStage(fixture.root, project, "discover"),
+        /binding|bytes/i,
+      );
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }
