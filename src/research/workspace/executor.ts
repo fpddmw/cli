@@ -26,6 +26,7 @@ import {
   type ArtifactViewBinding,
 } from "./artifact-views.js";
 import { ARTIFACT_VIEW_TOOL_NAMES, startArtifactViewServer } from "./artifact-view-mcp.js";
+import { codexArtifactTrace, isPacketArtifactTool } from "./artifact-trace.js";
 import { researchPlatformCapabilities } from "./platform-capabilities.js";
 import {
   configuredResearchSecrets,
@@ -71,6 +72,7 @@ const CODEX_DISABLED_FEATURES = [
   "tool_call_mcp_elicitation",
   "tool_suggest",
   "workspace_dependencies",
+  "view_image",
 ] as const;
 
 const ROUTE_AUTH_ENVIRONMENT: Record<AgentRoute["agent"], readonly string[]> = {
@@ -100,7 +102,7 @@ export interface AgentExecutionRequest {
   workspaceRoot: string;
   timeoutSeconds: number;
   maxTurns: number;
-  /** Approximate planning turns; maxTurns remains the independent finite loop guard. */
+  /** Approximate planning turns; provider turn guards apply only where supported. */
   reservationTurns?: number;
   maxOutputTokens: number;
   maxToolContextTokens?: number;
@@ -237,6 +239,7 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
         capsuleAuth.environment,
       ),
       timeoutMs: request.timeoutSeconds * 1000,
+      compactArtifactTrace: request.route.agent === "codex" && request.toolPolicy === "packet-read",
       maxCaptureBytes: Math.min(
         MAX_CAPTURE_BYTES,
         Math.max(
@@ -277,15 +280,22 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
   }
   const parsed = parseAgentResult(request.route, completed.stdout, completed.stderr);
   const redacted = redactResult(parsed.stdout, parsed.stderr, secrets);
+  const toolPolicyViolated =
+    request.toolPolicy === "packet-read"
+      ? (parsed.telemetry.packetReadViolations ?? 0) > 0
+      : request.toolPolicy === "none" &&
+        (parsed.telemetry.toolCalls > 0 || (parsed.telemetry.packetReadViolations ?? 0) > 0);
   const exitCode = redacted.exposed
     ? 86
     : completed.captureExceeded
       ? 75
       : completed.exitCode !== 0
         ? completed.exitCode
-        : parsed.parseFailed
-          ? 3
-          : 0;
+        : toolPolicyViolated
+          ? 78
+          : parsed.parseFailed
+            ? 3
+            : 0;
   const inputTokens = redacted.exposed ? 0 : parsed.inputTokens;
   const cachedInputTokens = redacted.exposed ? 0 : parsed.cachedInputTokens;
   const outputTokens = redacted.exposed ? 0 : parsed.outputTokens;
@@ -297,7 +307,9 @@ export async function executeAgent(request: AgentExecutionRequest): Promise<Exec
     stdout: redacted.stdout,
     stderr: completed.captureExceeded
       ? `${redacted.stderr}\nagent output exceeded the configured capture limit`.trim()
-      : redacted.stderr,
+      : toolPolicyViolated
+        ? `${redacted.stderr}\nreviewer tool policy violation: an unapproved I/O tool was reported`.trim()
+        : redacted.stderr,
     tokens,
     inputTokens,
     cachedInputTokens,
@@ -1122,6 +1134,7 @@ async function spawnCaptured(input: {
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
   maxCaptureBytes: number;
+  compactArtifactTrace?: boolean;
 }): Promise<{ exitCode: number; stdout: string; stderr: string; captureExceeded: boolean }> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(input.binary, input.args, {
@@ -1164,7 +1177,19 @@ async function spawnCaptured(input: {
       }
       target.push(chunk);
     };
-    child.stdout.on("data", (chunk: Buffer) => capture(stdout, chunk));
+    const artifactTrace = input.compactArtifactTrace
+      ? codexArtifactTrace({
+          maxControlBytes: input.maxCaptureBytes,
+          line: (chunk) => capture(stdout, chunk),
+          oversized: () => {
+            captureExceeded = true;
+            terminate();
+          },
+        })
+      : null;
+    child.stdout.on("data", (chunk: Buffer) =>
+      artifactTrace ? artifactTrace.write(chunk) : capture(stdout, chunk),
+    );
     child.stderr.on("data", (chunk: Buffer) => capture(stderr, chunk));
     child.on("error", (error) => {
       if (settled) return;
@@ -1174,6 +1199,7 @@ async function spawnCaptured(input: {
     });
     child.on("close", (code, signal) => {
       if (settled) return;
+      artifactTrace?.end();
       settled = true;
       clearTimeout(timer);
       const detail = signal ? `\nprocess terminated by ${signal}` : "";
@@ -1212,6 +1238,7 @@ function parseAgentResult(
     const eventCounts: Record<string, number> = {};
     const itemCounts: Record<string, number> = {};
     let toolCalls = 0;
+    let packetReadViolations = 0;
     let reasoningOutputTokens = 0;
     const providerErrors: string[] = [];
     for (const line of stdout.split(/\r?\n/)) {
@@ -1232,6 +1259,11 @@ function parseAgentResult(
           if (typeof event.item.type === "string") {
             incrementCount(itemCounts, event.item.type);
             if (isToolItemType(event.item.type)) toolCalls += 1;
+            if (
+              event.item.type === "file_change" ||
+              (isToolItemType(event.item.type) && !isPacketArtifactTool(event.item))
+            )
+              packetReadViolations += 1;
             if (event.item.type === "error") appendProviderError(providerErrors, event.item);
           }
           if (event.item.type === "agent_message" && typeof event.item.text === "string") {
@@ -1255,6 +1287,7 @@ function parseAgentResult(
         eventCounts,
         itemCounts,
         toolCalls,
+        ...(packetReadViolations ? { packetReadViolations } : {}),
         providerTurns: eventCounts["turn.completed"] ?? eventCounts["turn.started"] ?? null,
         reasoningOutputTokens,
         providerErrors,

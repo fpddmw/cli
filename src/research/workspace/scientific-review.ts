@@ -197,6 +197,7 @@ interface ScientificReviewStageInput {
     | "model-environment-lock"
     | "scientific-fulfillment"
     | "effective-scientific-design"
+    | "original-request-source"
     | "stage-output";
   ownerId: string;
   sourceLocator: string;
@@ -570,6 +571,21 @@ export async function prepareScientificReview(input: {
       assessment,
       input.canaryArtifactPaths ?? [],
     );
+    const currentTask = await taskContext(input.root, project.id);
+    const requestSource = currentTask?.requestProvenance.source;
+    if (requestSource) {
+      const locator = `projects/${project.id}/task/request-sources/${requestSource.objectSha256}.json`;
+      stageInputs.push({
+        ...(await fileRecord(resolveContained(paths.control, locator), locator)),
+        purpose: "original-request-source",
+        ownerId: project.id,
+        sourceLocator: locator,
+        hashBasis: "raw-file-bytes",
+        mediaType: "application/json",
+        objectKind: null,
+        registrationRecordSha256: null,
+      });
+    }
     if (input.role !== "research-design")
       stageInputs.push(...(await modelObjectInputs(input.root, project.id, design)));
     if (fulfillment.records.length) {
@@ -644,7 +660,7 @@ export async function prepareScientificReview(input: {
       reviewer: { agent: input.reviewerAgent, sessionSha256: reviewerSessionSha256 },
       preparedAt: new Date().toISOString(),
       stageInputs,
-      taskContract: await taskContext(input.root, project.id),
+      taskContract: currentTask,
       assessment: { sha256: assessmentSha256, objectLocator: assessmentLocator },
       mechanicalAssessment: {
         canPass: issues.length === 0 && assessment.recommendation === "pass",
@@ -2222,6 +2238,7 @@ function isScientificReviewPacket(
           "model-environment-lock",
           "scientific-fulfillment",
           "effective-scientific-design",
+          "original-request-source",
           "stage-output",
         ].includes(String(record.purpose)) &&
         typeof record.ownerId === "string" &&

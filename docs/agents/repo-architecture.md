@@ -13,7 +13,7 @@ checkPaths:
   - src/**
   - bin/**
 lastReviewedAt: 2026-09-03
-lastReviewedCommit: d6ba1e16a27834daf3cbe471eebb3ef40e84db54
+lastReviewedCommit: 0ded79c7acefc557f154115a6bf9a5b1a0ed67d7
 ---
 
 # Repo Architecture
@@ -154,6 +154,8 @@ storage writes, queueing, and document status transitions.
   but finite production runaway ceilings,
   stdin-delivered agent prompts that are independent of host argv limits,
   tool-context-aware process capture, classified retries,
+  incremental Codex JSONL compaction of duplicated packet-only MCP payloads
+  without trimming model-visible evidence or final answers,
   project-scoped scheduling/exit status, durable user-action and
   external-response handoffs, JSONL progress, recovery events, exact
   companion readiness gates, domain-scoped setup readiness, persistent review
@@ -485,7 +487,14 @@ context-length admission gate. Request provenance distinguishes exact source
 wording, interpretation, reconstruction and unrecorded origin. Original source
 bytes and hashed locators survive scope/fork/audit; supplied transcripts are not
 authenticated authorship.
-Scientific/publication packets carry the current task binding. Status/run derive
+Scientific/publication packets carry the current task binding.
+Scientific review stages the request-source bytes as well as the declared origin.
+The packet MCP surface has only the two closed read tools. Codex additionally
+disables supported I/O features and rejects reported non-packet I/O tool use;
+this is not a claim that its runtime has no built-in utility tools. Finite time
+and token/cost guards remain; only Claude exposes the configured provider turn cap.
+
+Status/run derive
 original/current scope completion independently of workflow/publication state;
 there is no mutable acceptance cache. Portable audit shares relationship validation
 and uses an operation-local file/JSON index after the original workspace is gone.

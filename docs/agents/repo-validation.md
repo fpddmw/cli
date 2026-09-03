@@ -19,7 +19,7 @@ checkPaths:
   - test/**
   - .github/workflows/**
 lastReviewedAt: 2026-09-03
-lastReviewedCommit: d6ba1e16a27834daf3cbe471eebb3ef40e84db54
+lastReviewedCommit: 0ded79c7acefc557f154115a6bf9a5b1a0ed67d7
 ---
 
 # Repo Validation
@@ -245,7 +245,12 @@ locators, distinguish interpreted/unrecorded origin, and reject false verbatim
 claims or retrospective replacement. `test/research-artifact-views.test.ts` covers
 complete oversized reads, UTF-8 pagination, bounded per-object verification work,
 late-file exclusion, links/tamper, secret refusal, exact persisted receipts,
-Host/Origin checks, and actual isolated mock Codex/Claude MCP clients.
+Host/Origin checks, and actual isolated mock Codex/Claude MCP clients. The mock
+Codex consumer verifies all 6 MiB of one read before emitting its duplicate JSONL
+tool trace; only that duplicate capture is compacted, not delivered evidence.
+Unexpected general I/O tool events are rejected. Preflight/design regressions
+separate total corpus size and large legacy planning hints from finite execution
+budgets; scientific cost tests distinguish a rough estimate from the approved ceiling.
 Bridge tests carry the same read-only binding through the signed sidecar and still
 refuse general workspace tools or external MCP/broker routes. Native/scientific
 regressions first reproduce former context-length refusals, then require normal

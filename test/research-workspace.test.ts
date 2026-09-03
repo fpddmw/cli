@@ -518,7 +518,7 @@ describe("research project execution", () => {
   );
 
   it(
-    "reserves capture space for bounded MCP tool context",
+    "reserves capture space for explicitly allowed bounded MCP tool context",
     { skip: !researchPlatformCapabilities().nativeReviewerExecution },
     async () => {
       const capsule = await temporaryDirectory();
@@ -571,7 +571,7 @@ describe("research project execution", () => {
           maxOutputTokens: 100,
           maxToolContextTokens: 40_000,
           maxCostUsd: 1,
-          toolPolicy: "none",
+          toolPolicy: "workspace-read",
           environment: { PATH: process.env.PATH },
           brokerUrl: null,
         });
@@ -1333,7 +1333,45 @@ describe("research project execution", () => {
     }
   });
 
-  it("reserves the same acquire input ceiling at preflight without enlarging the output ceiling", async () => {
+  it("does not turn a large legacy context planning hint into an indirect preflight admission ceiling", async () => {
+    const root = await temporaryDirectory();
+    try {
+      await initializeResearchWorkspace(root, undefined);
+      const config = await loadWorkspaceConfig(root);
+      const baseline = await evaluateProjectPreflight(
+        root,
+        "Estimate on-demand artifact reads.",
+        null,
+        null,
+      );
+      config.budget.maxInputContextTokens = 5_000_000;
+      await writeFile(workspacePaths(root).config, JSON.stringify(config));
+      const largeHint = await evaluateProjectPreflight(
+        root,
+        "Estimate on-demand artifact reads.",
+        null,
+        null,
+      );
+      assert.deepEqual(
+        largeHint.budget.preCallTokenReservations,
+        baseline.budget.preCallTokenReservations,
+      );
+      assert.deepEqual(
+        largeHint.gaps.filter((gap) => gap.startsWith("package-precall-reservation-exceeds-")),
+        baseline.gaps.filter((gap) => gap.startsWith("package-precall-reservation-exceeds-")),
+        "a planning hint cannot introduce additional package admission failures",
+      );
+      assert.equal(
+        (largeHint.budget as unknown as { inputContextTokenLimit: number | null })
+          .inputContextTokenLimit,
+        null,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reserves a rough initial acquire context without enlarging the output ceiling", async () => {
     const root = await temporaryDirectory();
     try {
       await initializeResearchWorkspace(root, undefined);
@@ -1346,7 +1384,7 @@ describe("research project execution", () => {
       );
       assert.equal(
         preflight.budget.stageContextTokenReservations.acquire,
-        config.budget.maxInputContextTokens,
+        Math.min(config.budget.maxInputContextTokens, 8_000),
       );
       assert.equal(preflight.budget.maxOutputTokens, config.budget.maxOutputTokens);
       assert.ok(
@@ -3130,10 +3168,10 @@ describe("research workspace CLI", () => {
           preflightValue.budget.maxInputContextTokens,
       );
       assert.deepEqual(preflightValue.budget.stageContextTokenReservations, {
-        acquire: 128_000,
-        analyze: 128_000,
-        synthesize: 128_000,
-        review: 256_000,
+        acquire: 8_000,
+        analyze: 8_000,
+        synthesize: 8_000,
+        review: 24_000,
       });
       assert.deepEqual(preflightValue.budget.outputTokenLimitEnforcement, {
         producer: "reserved-native-host-on-submit",

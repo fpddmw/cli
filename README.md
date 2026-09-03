@@ -13,7 +13,7 @@ checkPaths:
   - bin/**
   - src/**
 lastReviewedAt: 2026-09-03
-lastReviewedCommit: d6ba1e16a27834daf3cbe471eebb3ef40e84db54
+lastReviewedCommit: 0ded79c7acefc557f154115a6bf9a5b1a0ed67d7
 ---
 
 # Tiangong AI CLI
@@ -1188,10 +1188,14 @@ output bytes/tokens, provenance, coverage, hashes, and remaining project budget.
 It does not claim a provider-side turn or output-token cap for the host app.
 
 Independent review uses the pre-call reservation calculator and the reviewer's
-provider-side structured-output/turn controls where available. Packet-only reads
-have a separate 64-turn runaway guard; planning uses the route's smaller estimated
-turn count and estimated read allowance, not the entire corpus size. These are
-approximate estimates, not precise billing. Formatting repair remains one separately budgeted,
+provider-side structured-output/turn controls where available. Claude packet-only
+review has a 64-turn provider guard; Codex uses the existing finite wall-time and
+token/cost guards because its CLI has no equivalent turn flag. Planning uses a
+small initial-context estimate and expected reads, not the entire corpus or an
+unbounded legacy context hint. Preflight reports `inputContextTokenLimit=null`.
+These are approximate estimates, not precise billing; scientific review keeps
+the approved remaining cost ceiling separate from its rough read-cost estimate.
+Formatting repair remains one separately budgeted,
 tool-free JSON correction. Production workspaces enforce a finite 256-view
 broker ceiling mechanically, while each project derives a much smaller working
 budget from its reviewed coverage requirements and stops early when they are
@@ -1531,6 +1535,8 @@ endings. Source bytes are immutable; locator values are retained only by hash.
 Missing provenance is explicitly `unrecorded`, never inferred retroactively.
 Scope changes and forks preserve it. Declared origin is not authenticated authorship;
 secrets are rejected before admission.
+Scientific review also stages the exact supplied request-source object, so its
+original bytes are available through the same packet-only read channel as its hash.
 
 Before analysis, use `research schema show task-scope-change` and
 `project task scope propose PROJECT --input FILE --expected-contract SHA` to

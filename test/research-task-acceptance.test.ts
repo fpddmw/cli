@@ -631,6 +631,24 @@ describe("lightweight original task and authorized scope", () => {
         scientificPolicy(id),
         await scientificDesignInput(fx.root, id),
       );
+      const sourceText =
+        "Exact owner-provided scientific request, including counterevidence and unsuccessful outcomes.\r\n";
+      await writeFile(
+        fx.inputPath,
+        JSON.stringify({
+          ...contractInput(),
+          requestProvenance: {
+            mode: "interpreted",
+            source: {
+              kind: "user-message",
+              text: sourceText,
+              locator: "conversation:scientific-original",
+            },
+            explanation:
+              "The operational checklist interprets the supplied original request without authenticating authorship.",
+          },
+        }),
+      );
       const defined = await fx.task(["define", "--input", fx.inputPath], id);
       assert.equal(defined.exitCode, 0, defined.stderr);
       const originalContract = JSON.parse(defined.stdout).contractSha256;
@@ -644,6 +662,19 @@ describe("lightweight original task and authorized scope", () => {
       );
       const packetBytes = await readFile(packetPath, "utf8");
       assert.equal(JSON.parse(packetBytes).taskContract.contractSha256, originalContract);
+      const sourceRecord = JSON.parse(packetBytes).stageInputs.find(
+        (item: { purpose: string }) => item.purpose === "original-request-source",
+      );
+      assert.ok(
+        sourceRecord,
+        "the real canary exposed a request hash with no reviewer-readable original source",
+      );
+      const sourceObjectBytes = await readFile(
+        join(workspacePaths(fx.root).control, sourceRecord.path),
+        "utf8",
+      );
+      assert.equal(JSON.parse(sourceObjectBytes).text, sourceText);
+      assert.equal(sourceRecord.sha256, sha256Text(sourceObjectBytes));
       const proposalPath = join(fx.files, "science-scope.json");
       await writeFile(
         proposalPath,

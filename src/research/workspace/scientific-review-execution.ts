@@ -19,6 +19,7 @@ import {
   calculateAgentCallTokenReservation,
   RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
   RESEARCH_PACKET_READ_MAX_TURNS,
+  RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS,
   researchStructuredOutputMaxTurns,
   reservedAgentPackageCost,
 } from "./preflight.js";
@@ -216,11 +217,12 @@ export async function executeScientificReview(
         repairPayloadTokens: 0,
         maxTurns: researchStructuredOutputMaxTurns(config.reviewer),
         maxOutputTokens: config.budget.maxOutputTokens,
-        maxToolContextTokens: config.budget.maxInputContextTokens,
+        maxToolContextTokens: RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS,
         maxRepairTokens: 0,
         reserveRepair: false,
       }).totalTokens;
       const reservedCostUsd = reservedAgentPackageCost(config.reviewer, reservation, config);
+      const availableCostUsd = Math.max(0, config.budget.maxCostUsd - project.usage.costUsd);
       const timeoutSeconds = Math.min(
         config.budget.earlyScientificReviewMaxWallSeconds,
         config.budget.maxWallSeconds - project.usage.wallSeconds,
@@ -228,7 +230,7 @@ export async function executeScientificReview(
       if (
         reservation > config.budget.earlyScientificReviewMaxTokens ||
         reservation > config.budget.maxTokens - project.usage.tokens ||
-        reservedCostUsd > config.budget.maxCostUsd - project.usage.costUsd ||
+        reservedCostUsd > availableCostUsd ||
         timeoutSeconds <= 0
       ) {
         throw executionError(
@@ -273,8 +275,8 @@ export async function executeScientificReview(
         timeoutSeconds,
         maxTurns,
         maxOutputTokens: config.budget.maxOutputTokens,
-        maxToolContextTokens: config.budget.maxInputContextTokens,
-        maxCostUsd: reservedCostUsd,
+        maxToolContextTokens: RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS,
+        maxCostUsd: availableCostUsd,
         expectedRuntime,
         toolPolicy: "packet-read",
         artifactViews: { index: artifactViews, packetSha256: packet.packetSha256 },
@@ -320,12 +322,12 @@ export async function executeScientificReview(
             config.budget.maxTokens - priorUsage.tokens,
           ) ||
         usage.outputTokens > config.budget.maxOutputTokens ||
-        (config.reviewer.pricing && usage.costUsd > reservedCostUsd) ||
+        usage.costUsd > availableCostUsd ||
         usage.wallSeconds > timeoutSeconds
       ) {
         throw executionError(
           "RESEARCH_BUDGET_EXCEEDED",
-          "The reviewer exceeded its reserved execution limit. No review was submitted.",
+          "The reviewer exceeded an approved finite execution limit. No review was submitted.",
         );
       }
       if (

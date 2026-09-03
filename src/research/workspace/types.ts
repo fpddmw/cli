@@ -486,6 +486,7 @@ export interface AgentExecutionTelemetry {
   eventCounts: Record<string, number>;
   itemCounts: Record<string, number>;
   toolCalls: number;
+  packetReadViolations?: number;
   providerTurns: number | null;
   reasoningOutputTokens: number;
   providerErrors: string[];

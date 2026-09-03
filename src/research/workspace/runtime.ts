@@ -82,6 +82,7 @@ import {
   RESEARCH_MAX_REPAIR_SOURCE_BYTES,
   RESEARCH_REPAIR_MAX_TURNS,
   RESEARCH_PACKET_READ_MAX_TURNS,
+  RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS,
   researchStructuredOutputMaxTurns,
   reservedAgentPackageCost,
 } from "./preflight.js";
@@ -3451,7 +3452,7 @@ function agentRequest(input: {
       ? input.config.budget.maxBrokerContextTokens *
         (input.brokerCallBudget ?? input.config.budget.maxBrokerCalls)
       : packetRead
-        ? input.config.budget.maxInputContextTokens
+        ? RESEARCH_EXPECTED_ARTIFACT_READ_TOKENS
         : 0,
     maxCostUsd: input.maxCostUsd,
     expectedRuntime: input.expectedRuntime,

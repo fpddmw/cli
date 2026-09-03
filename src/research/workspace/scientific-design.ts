@@ -2662,13 +2662,10 @@ export function evaluateScientificDesign(
       unboundDecisionLossMetrics.map((metric) => metric.id),
     );
   }
-  if (
-    design.contextPlan.estimatedTokens > design.contextPlan.maxEstimatedTokens ||
-    !design.contextPlan.centralEvidenceFits
-  ) {
+  if (!design.contextPlan.centralEvidenceFits) {
     add(
       "CONTEXT_PLAN_OVER_LIMIT",
-      "The planned claim-critical context does not fit its reviewed token boundary.",
+      "The design declares no workable route to review its claim-critical evidence. Provide a complete packet/on-demand read route; token estimates alone are not an admission ceiling.",
     );
   }
   if (design.contextPlan.claimCriticalCapsuleIds.length === 0) {

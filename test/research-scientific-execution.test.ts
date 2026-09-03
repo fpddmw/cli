@@ -27,6 +27,31 @@ import { scientificDesignInput } from "./helpers/scientific-design.js";
 import { appendJournalEvent, readVerifiedJournal } from "../src/research/workspace/journal.js";
 
 describe("explicit isolated scientific review execution", () => {
+  it("uses the approved finite cost ceiling instead of treating a rough read-cost estimate as exact", async () => {
+    const fixture = await preparedFixture("execution-estimated-read-cost");
+    try {
+      const config = await loadWorkspaceConfig(fixture.root);
+      config.reviewer.pricing = {
+        inputUsdPerMillionTokens: 1,
+        cachedInputUsdPerMillionTokens: 0.1,
+        outputUsdPerMillionTokens: 5,
+      };
+      await writeJsonAtomic(workspacePaths(fixture.root).config, config);
+      const executed = await executeScientificReview(
+        { ...fixture, role: "research-design", confirmCost: true, environment: {} },
+        async (request) => {
+          assert.ok(
+            request.maxCostUsd > 2,
+            "a rough sub-dollar read estimate is not the owner's hard cost ceiling",
+          );
+          return { ...result(fixture.packet), costUsd: 2 };
+        },
+      );
+      assert.equal(executed.status, "passed");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
   it("does not execute a reviewer for a derived project without its authority commit", async () => {
     const fixture = await preparedFixture("execution-uncommitted-target");
     try {

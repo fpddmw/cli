@@ -135,17 +135,23 @@ describe("snapshot-bound on-demand artifact views", () => {
   });
 
   it(
-    "gives actual isolated Codex and Claude processes only packet-read tools",
+    "connects actual isolated Codex and Claude processes to exact packet reads without capping duplicated artifact traces",
     { skip: !researchPlatformCapabilities().nativeReviewerExecution },
     async () => {
-      for (const agent of ["codex", "claude"] as const) {
-        const fx = await fixture({ "outputs/counterevidence.txt": "Critical negative result.\n" });
+      for (const [agent, padding] of [
+        ["codex", 0],
+        ["claude", 0],
+        ["codex", 6 * 1024 * 1024],
+      ] as const) {
+        const source = "Critical negative result.\n" + "x".repeat(padding);
+        const fx = await fixture({ "outputs/counterevidence.txt": source });
         try {
           const binary = join(fx.root, `fake-${agent}.mjs`);
           await writeFile(
             binary,
             `#!/usr/bin/env node
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 if (process.argv.includes('--version')) { console.log('fake-artifact-reviewer 1'); process.exit(0); }
 const args = process.argv.slice(2);
@@ -165,9 +171,12 @@ async function rpc(method, params) {
 }
 await rpc('initialize', {protocolVersion:'2025-03-26'});
 const directory = JSON.parse((await rpc('tools/call',{name:'research_list_artifacts',arguments:{}})).content[0].text);
-const content = JSON.parse((await rpc('tools/call',{name:'research_read_artifact',arguments:{objectId:directory.items[0].objectId}})).content[0].text);
-assert.equal(content.content, 'Critical negative result.\\n');
+const selection = {objectId:directory.items[0].objectId,length:null};
+const toolResult = await rpc('tools/call',{name:'research_read_artifact',arguments:selection});
+const content = JSON.parse(toolResult.content[0].text);
+assert.equal(createHash('sha256').update(content.content).digest('hex'), ${JSON.stringify(sha256Text(source))});
 if (${JSON.stringify(agent)} === 'codex') {
+ console.log(JSON.stringify({type:'item.completed',item:{id:'read-exact-source',type:'mcp_tool_call',server:'research_artifacts',tool:'research_read_artifact',arguments:selection,result:{content:toolResult.content,structured_content:null},error:null,status:'completed'}}));
  console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'{"ok":true}'}}));
  console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:2,output_tokens:1}}));
 } else console.log(JSON.stringify({result:'{"ok":true}',usage:{input_tokens:2,output_tokens:1}}));
@@ -202,13 +211,58 @@ if (${JSON.stringify(agent)} === 'codex') {
           assert.equal(result.isolation?.toolPolicy, "packet-read");
           assert.equal(result.isolation?.networkPolicy, "reviewer-provider-and-local-artifacts");
           assert.equal(result.artifactReads?.length, 1);
-          assert.equal(
-            result.artifactReads?.[0]?.objectSha256,
-            sha256Text("Critical negative result.\n"),
-          );
+          assert.equal(result.artifactReads?.[0]?.objectSha256, sha256Text(source));
         } finally {
           await fx.cleanup();
         }
+      }
+    },
+  );
+
+  it(
+    "does not accept a packet-read result when Codex reports general file editing",
+    { skip: !researchPlatformCapabilities().nativeReviewerExecution },
+    async () => {
+      const fx = await fixture({ "outputs/source.txt": "Read-only input.\n" });
+      try {
+        const binary = join(fx.root, "fake-unexpected-tool.mjs");
+        await writeFile(
+          binary,
+          `#!/usr/bin/env node
+if (process.argv.includes('--version')) { console.log('fake-review-policy 1'); process.exit(0); }
+console.log(JSON.stringify({type:'item.completed',item:{id:'unexpected-write',type:'file_change',changes:[{path:'unrequested-file.txt',kind:'add'}],status:'completed'}}));
+console.log(JSON.stringify({type:'item.completed',item:{id:'answer',type:'agent_message',text:'{"ok":true}'}}));
+console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:2,output_tokens:1}}));
+`,
+        );
+        await chmod(binary, 0o755);
+        const result = await executeAgent({
+          route: { agent: "codex", binary, model: "packet-policy-test" },
+          prompt: "Read only the exact supplied source.",
+          outputSchema: {
+            type: "object",
+            properties: { ok: { const: true } },
+            required: ["ok"],
+            additionalProperties: false,
+          },
+          requestId: "unexpected-tool-test",
+          purpose: "primary",
+          capsuleRoot: fx.root,
+          projectRoot: fx.project,
+          workspaceRoot: fx.root,
+          timeoutSeconds: 10,
+          maxTurns: 8,
+          maxOutputTokens: 100,
+          maxCostUsd: 1,
+          toolPolicy: "packet-read",
+          artifactViews: { index: fx.binding, packetSha256: fx.packetSha256 },
+          environment: { PATH: process.env.PATH },
+          brokerUrl: null,
+        });
+        assert.notEqual(result.exitCode, 0);
+        assert.match(result.stderr, /tool policy/i);
+      } finally {
+        await fx.cleanup();
       }
     },
   );
