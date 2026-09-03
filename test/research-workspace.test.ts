@@ -416,6 +416,10 @@ describe("research project execution", () => {
               /claude-result-error-boundary/u,
               "Sanitize complete provider errors before truncating at a secret boundary",
             );
+            assert.ok(
+              !result.telemetry?.providerErrors.join("; ").includes(secret.slice(0, 10)),
+              "Even the ten-character secret fragment left by premature truncation must be absent",
+            );
           } else {
             assert.equal(result.exitCode, 0, result.stderr);
             assert.equal(result.stdout, '{"ok":true}');

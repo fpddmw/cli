@@ -42,6 +42,11 @@ import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { passResearchDesignGate, scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("predeclared scientific parameter fulfillment", () => {
+  it("recognizes native POSIX and Windows atom paths in the I/O counter", () => {
+    assert.equal(isAtomRecordRead("/study/evidence/atoms/source.json", "source"), true);
+    assert.equal(isAtomRecordRead("C:\\study\\evidence\\atoms\\source.json", "source"), true);
+    assert.equal(isAtomRecordRead("/study/evidence/atoms/other.json", "source"), false);
+  });
   it("binds exact source-derived states and loads their atom store once per fulfillment view", async (t) => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-parameter-fulfillment-"));
     const projectId = "parameter-fulfillment";
@@ -246,7 +251,7 @@ describe("predeclared scientific parameter fulfillment", () => {
       let atomReads = 0;
       const originalReadFile = fs.readFile;
       const reader = t.mock.method(fs, "readFile", (...args: Parameters<typeof readFile>) => {
-        if (String(args[0]).endsWith(`/evidence/atoms/${atom.atomId}.json`)) atomReads += 1;
+        if (isAtomRecordRead(args[0], atom.atomId)) atomReads += 1;
         return originalReadFile(...args);
       });
       syncBuiltinESMExports();
@@ -335,6 +340,10 @@ describe("predeclared scientific parameter fulfillment", () => {
     }
   });
 });
+
+function isAtomRecordRead(path: unknown, atomId: string): boolean {
+  return String(path).replaceAll("\\", "/").endsWith(`/evidence/atoms/${atomId}.json`);
+}
 
 async function parameterPolicy(root: string, projectId: string): Promise<ResearchPolicyBinding> {
   const sourceRoot = join(root, "synthetic-policy");
