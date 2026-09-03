@@ -21,6 +21,7 @@ import {
   researchDataCredentialIds,
 } from "./credentials.js";
 import {
+  loadProjectEvidenceReceipts,
   persistDataEvidence,
   type BrokerEvidenceReceipt,
   type DataEvidenceArtifactInput,
@@ -97,6 +98,27 @@ export interface ExecuteResearchDataCapabilityInput {
   registry?: DataRegistry;
   fetchImpl?: typeof fetch;
   clock?: () => Date;
+}
+
+export interface ReadResearchDataEvidenceInput {
+  root: string;
+  projectId: string;
+  receiptId: string;
+  cursor: string;
+}
+
+export interface ResearchDataEvidenceViewResult {
+  schemaVersion: 1;
+  kind: "tiangong-research-data-evidence-view";
+  projectId: string;
+  receiptId: string;
+  evidenceSha256: string;
+  boundedContext: {
+    encoding: "utf8";
+    text: string;
+    truncated: boolean;
+  };
+  communication: ResearchDataCommunication;
 }
 
 export function researchDataCapabilityId(capabilityId: string, operationId: string): string {
@@ -262,10 +284,16 @@ export async function executeResearchDataCapability(
         "RESEARCH_DATA_CONTEXT_TOO_LARGE",
       );
     }
-    const communication = buildResearchDataCommunication(coreResult, context, {
-      maxBytes: maxContextBytes,
-      maxItems: config.budget.maxBrokerItems,
-    });
+    const evidenceSha256 = sha256Bytes(serialized);
+    const communication = buildResearchDataCommunication(
+      coreResult,
+      context,
+      {
+        maxBytes: maxContextBytes,
+        maxItems: config.budget.maxBrokerItems,
+      },
+      (offset) => encodeDataEvidenceCursor(evidenceSha256, offset),
+    );
     const receipt = await persistDataEvidence(
       input.root,
       {
@@ -282,7 +310,7 @@ export async function executeResearchDataCapability(
         contextItems: context.itemCount,
         contextOffset: 0,
         contextTotalItems: coreResult.summary.recordCount,
-        contextNextOffset: null,
+        contextNextOffset: context.nextOffset,
         contextTruncated: context.projected,
         redactions: 0,
         retrievedAt: coreResult.receipt.generatedAt,
@@ -299,6 +327,8 @@ export async function executeResearchDataCapability(
           outputSchemaDigest: coreResult.contract.outputSchema!.digest,
           resultStatus: coreResult.status,
           coverage: communication.requestCoverage,
+          providerCoverage: communication.providerCoverage,
+          limitCoverage: communication.limitCoverage,
           contextView: communication.contextView,
         },
       },
@@ -364,6 +394,91 @@ export async function executeResearchDataCapability(
   } finally {
     if (artifactDirectory) await rm(artifactDirectory, { recursive: true, force: true });
   }
+}
+
+export async function readResearchDataEvidence(
+  input: ReadResearchDataEvidenceInput,
+): Promise<ResearchDataEvidenceViewResult> {
+  const project = await loadProject(input.root, input.projectId);
+  const discover = project.packages.find((workPackage) => workPackage.stage === "discover");
+  if (discover?.status !== "running" || discover.executor !== "producer") {
+    throw researchDataError(
+      "Research data evidence can be read only during an active native discover stage.",
+      "RESEARCH_NATIVE_STAGE_REQUIRED",
+    );
+  }
+  const receipts = await loadProjectEvidenceReceipts(input.root, input.projectId);
+  const receipt = receipts.find((candidate) => candidate.attemptId === input.receiptId);
+  if (!receipt || receipt.evidenceKind !== "data") {
+    throw researchDataError(
+      "The requested Research data evidence receipt does not exist.",
+      "RESEARCH_DATA_EVIDENCE_NOT_FOUND",
+      2,
+    );
+  }
+  const offset = decodeDataEvidenceCursor(input.cursor, receipt.sha256);
+  const serialized = await readFile(join(workspacePaths(input.root).control, receipt.locator));
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(serialized)) as unknown;
+    validateDataPublicContract("runResult", parsed);
+  } catch {
+    throw researchDataError(
+      "The persisted Research data evidence object is not a valid core result.",
+      "RESEARCH_EVIDENCE_STORE_INVALID",
+    );
+  }
+  const coreResult = parsed as DataRunResult;
+  if (offset < 0 || offset >= coreResult.summary.recordCount) {
+    throw researchDataError(
+      "The Research data evidence cursor is outside the persisted result.",
+      "RESEARCH_DATA_EVIDENCE_CURSOR_INVALID",
+      2,
+    );
+  }
+  const config = await loadWorkspaceConfig(input.root);
+  const maxContextBytes = config.budget.maxBrokerContextTokens * DATA_CONTEXT_BYTES_PER_TOKEN;
+  const context = boundedResearchDataContext(
+    coreResult,
+    maxContextBytes,
+    config.budget.maxBrokerItems,
+    offset,
+  );
+  const communication = buildResearchDataCommunication(
+    coreResult,
+    context,
+    {
+      maxBytes: maxContextBytes,
+      maxItems: config.budget.maxBrokerItems,
+    },
+    (nextOffset) => encodeDataEvidenceCursor(receipt.sha256, nextOffset),
+  );
+  await appendJournalEvent(
+    workspacePaths(input.root).journal,
+    "data.evidence.viewed",
+    input.projectId,
+    {
+      receiptId: receipt.attemptId,
+      evidenceSha256: receipt.sha256,
+      offset: context.offset,
+      itemCount: context.itemCount,
+      totalItems: context.totalItems,
+      remainingItems: context.remainingItems,
+    },
+  );
+  return {
+    schemaVersion: 1,
+    kind: "tiangong-research-data-evidence-view",
+    projectId: input.projectId,
+    receiptId: receipt.attemptId,
+    evidenceSha256: receipt.sha256,
+    boundedContext: {
+      encoding: "utf8",
+      text: Buffer.from(context.bytes).toString("utf8"),
+      truncated: context.remainingItems > 0,
+    },
+    communication,
+  };
 }
 
 function projectCapability(
@@ -456,11 +571,58 @@ function candidateExcerpt(sourceSummary: string, communication: ResearchDataComm
         ? `Request coverage is bounded${stopReason}; the persisted evidence contains every returned record.`
         : `Request coverage is partial${stopReason}; inspect missing ranges and validation issues.`;
   const context = communication.contextView;
+  const limitText =
+    communication.limitCoverage.status === "bounded"
+      ? ` Explicit limits were also reached: ${communication.limitCoverage.limitsHit.join(", ")}.`
+      : "";
   const contextText =
     context.status === "full"
       ? "The Agent context contains the full result."
-      : `The Agent context is a ${context.strategy} view of ${context.itemCount}/${context.totalItems} returned records; the full result remains in evidence.`;
-  return `${sourceSummary} Returned ${coverage.recordCount} record(s). ${coverageText} ${contextText}`;
+      : context.nextCursor
+        ? `The Agent context is a ${context.strategy} view of ${context.itemCount}/${context.totalItems} returned records; ${context.remainingItems} remain in evidence. Continue reading with the returned cursor before claiming full row-level review, or disclose the presented fraction as a limitation.`
+        : `The Agent context is a ${context.strategy} view of ${context.itemCount}/${context.totalItems} returned records; ${context.remainingItems} remain in evidence, but no further item view fits the configured context ceiling. Use a narrower request or disclose this limitation.`;
+  return `${sourceSummary} Returned ${coverage.recordCount} record(s). ${coverageText}${limitText} ${contextText}`;
+}
+
+function encodeDataEvidenceCursor(evidenceSha256: string, offset: number): string {
+  const core = { schemaVersion: 1, evidenceSha256, offset };
+  return Buffer.from(
+    canonicalJson({ ...core, bindingSha256: sha256Text(canonicalJson(core)) }),
+    "utf8",
+  ).toString("base64url");
+}
+
+function decodeDataEvidenceCursor(cursor: string, evidenceSha256: string): number {
+  try {
+    if (!/^[A-Za-z0-9_-]{16,2048}$/.test(cursor)) throw new Error("invalid cursor encoding");
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as {
+      schemaVersion?: unknown;
+      evidenceSha256?: unknown;
+      offset?: unknown;
+      bindingSha256?: unknown;
+    };
+    const core = {
+      schemaVersion: value.schemaVersion,
+      evidenceSha256: value.evidenceSha256,
+      offset: value.offset,
+    };
+    if (
+      value.schemaVersion !== 1 ||
+      value.evidenceSha256 !== evidenceSha256 ||
+      !Number.isInteger(value.offset) ||
+      Number(value.offset) < 0 ||
+      value.bindingSha256 !== sha256Text(canonicalJson(core))
+    ) {
+      throw new Error("invalid cursor binding");
+    }
+    return Number(value.offset);
+  } catch {
+    throw researchDataError(
+      "The Research data evidence cursor is invalid or belongs to another evidence object.",
+      "RESEARCH_DATA_EVIDENCE_CURSOR_INVALID",
+      2,
+    );
+  }
 }
 
 function collectArtifactRecords(value: unknown): DataArtifactRecord[] {

@@ -20,11 +20,24 @@ export interface ResearchDataCoverage {
   missing: DataMissingRange[];
 }
 
+export interface ResearchDataProviderCoverage {
+  status: "complete" | "partial";
+  missing: DataMissingRange[];
+}
+
+export interface ResearchDataLimitCoverage {
+  status: "bounded" | "within-requested-limits";
+  limitsHit: string[];
+}
+
 export interface ResearchDataContextView {
   status: "full" | "metadata-only" | "projected";
   strategy: ResearchDataContextStrategy;
   itemCount: number;
   totalItems: number;
+  offset: number;
+  remainingItems: number;
+  nextCursor: string | null;
   maxItems: number;
   maxBytes: number;
 }
@@ -34,6 +47,8 @@ export interface ResearchDataCommunication {
     status: "issues" | "valid";
     issueCodes: string[];
   };
+  providerCoverage: ResearchDataProviderCoverage;
+  limitCoverage: ResearchDataLimitCoverage;
   requestCoverage: ResearchDataCoverage;
   contextView: ResearchDataContextView;
 }
@@ -43,6 +58,9 @@ export interface BoundedResearchDataContext {
   projected: boolean;
   itemCount: number;
   totalItems: number;
+  offset: number;
+  remainingItems: number;
+  nextOffset: number | null;
   strategy: ResearchDataContextStrategy;
   status: ResearchDataContextView["status"];
 }
@@ -68,31 +86,44 @@ export function boundedResearchDataContext(
   result: DataRunResult,
   maxBytes: number,
   maxItems: number,
+  offset = 0,
 ): BoundedResearchDataContext {
   const totalItems = result.summary.recordCount;
   const availableItems = Math.max(totalItems, inferAvailableItems(result.data));
   const full = encode(result);
-  if (full.byteLength <= maxBytes && availableItems <= maxItems) {
+  if (offset === 0 && full.byteLength <= maxBytes && availableItems <= maxItems) {
     return {
       bytes: full,
       projected: false,
       itemCount: totalItems,
       totalItems,
+      offset: 0,
+      remainingItems: 0,
+      nextOffset: null,
       strategy: "full",
       status: "full",
     };
   }
 
   let lower = 0;
-  let upper = Math.min(maxItems, availableItems);
+  let upper = Math.min(maxItems, Math.max(0, availableItems - offset));
   let best:
     | { bytes: Uint8Array; itemCount: number; strategy: DataProjection["strategy"] }
     | undefined;
   while (lower <= upper) {
     const candidate = Math.floor((lower + upper) / 2);
-    const projection = projectData(result.data, candidate);
+    const projection = projectData(result.data, candidate, offset);
     if (!projection) break;
-    const bytes = encode(projectedResult(result, projection, totalItems));
+    const nextOffset = Math.min(totalItems, offset + projection.itemCount);
+    const bytes = encode(
+      projectedResult(
+        result,
+        projection,
+        totalItems,
+        offset,
+        nextOffset < totalItems ? nextOffset : null,
+      ),
+    );
     if (bytes.byteLength <= maxBytes) {
       best = { bytes, itemCount: projection.itemCount, strategy: projection.strategy };
       lower = candidate + 1;
@@ -101,15 +132,19 @@ export function boundedResearchDataContext(
     }
   }
   if (best && best.itemCount > 0) {
+    const nextOffset = Math.min(totalItems, offset + best.itemCount);
     return {
       ...best,
       projected: true,
       totalItems,
+      offset,
+      remainingItems: Math.max(0, totalItems - nextOffset),
+      nextOffset: nextOffset < totalItems ? nextOffset : null,
       status: "projected",
     };
   }
 
-  const metadata = encode(metadataOnlyResult(result, totalItems));
+  const metadata = encode(metadataOnlyResult(result, totalItems, offset));
   if (metadata.byteLength > maxBytes) {
     throw new Error("Data evidence metadata exceeds the Research bounded-context ceiling.");
   }
@@ -118,6 +153,9 @@ export function boundedResearchDataContext(
     projected: true,
     itemCount: 0,
     totalItems,
+    offset,
+    remainingItems: Math.max(0, totalItems - offset),
+    nextOffset: null,
     strategy: "metadata-only",
     status: "metadata-only",
   };
@@ -127,8 +165,11 @@ export function buildResearchDataCommunication(
   result: DataRunResult,
   context: BoundedResearchDataContext,
   limits: { maxBytes: number; maxItems: number },
+  cursorForOffset: (offset: number) => string = (offset) => String(offset),
 ): ResearchDataCommunication {
   const issueCodes = collectIssueCodes(result);
+  const providerStatus = result.summary.completeness === "partial" ? "partial" : "complete";
+  const limitsHit = result.summary.truncated ? limitReasons(result.data) : [];
   const coverageStatus =
     result.summary.completeness === "partial"
       ? "partial"
@@ -139,6 +180,14 @@ export function buildResearchDataCommunication(
     validation: {
       status: issueCodes.length === 0 && result.status === "success" ? "valid" : "issues",
       issueCodes,
+    },
+    providerCoverage: {
+      status: providerStatus,
+      missing: structuredClone(result.summary.missing ?? []),
+    },
+    limitCoverage: {
+      status: result.summary.truncated ? "bounded" : "within-requested-limits",
+      limitsHit,
     },
     requestCoverage: {
       status: coverageStatus,
@@ -152,6 +201,9 @@ export function buildResearchDataCommunication(
       strategy: context.strategy,
       itemCount: context.itemCount,
       totalItems: context.totalItems,
+      offset: context.offset,
+      remainingItems: context.remainingItems,
+      nextCursor: context.nextOffset === null ? null : cursorForOffset(context.nextOffset),
       maxItems: limits.maxItems,
       maxBytes: limits.maxBytes,
     },
@@ -162,6 +214,8 @@ function projectedResult(
   result: DataRunResult,
   projection: DataProjection,
   totalItems: number,
+  offset: number,
+  nextOffset: number | null,
 ): Record<string, unknown> {
   return {
     schemaVersion: result.schemaVersion,
@@ -176,8 +230,11 @@ function projectedResult(
       contextView: {
         projected: true,
         strategy: projection.strategy,
+        offset,
         itemCount: projection.itemCount,
         totalItems,
+        remainingItems: Math.max(0, totalItems - offset - projection.itemCount),
+        nextOffset,
         normalizedDataDigest: result.receipt.normalizedDataDigest,
         fullEvidenceLocatorAvailableInReceipt: true,
       },
@@ -186,7 +243,11 @@ function projectedResult(
   };
 }
 
-function metadataOnlyResult(result: DataRunResult, totalItems: number): Record<string, unknown> {
+function metadataOnlyResult(
+  result: DataRunResult,
+  totalItems: number,
+  offset: number,
+): Record<string, unknown> {
   return {
     schemaVersion: result.schemaVersion,
     status: result.status,
@@ -200,8 +261,11 @@ function metadataOnlyResult(result: DataRunResult, totalItems: number): Record<s
       contextView: {
         projected: true,
         strategy: "metadata-only",
+        offset,
         itemCount: 0,
         totalItems,
+        remainingItems: Math.max(0, totalItems - offset),
+        nextOffset: null,
         normalizedDataDigest: result.receipt.normalizedDataDigest,
         fullEvidenceLocatorAvailableInReceipt: true,
       },
@@ -209,11 +273,11 @@ function metadataOnlyResult(result: DataRunResult, totalItems: number): Record<s
   };
 }
 
-function projectData(data: unknown, maxItems: number): DataProjection | null {
+function projectData(data: unknown, maxItems: number, offset: number): DataProjection | null {
   const value = objectValue(data);
   if (!value) return null;
   if (Array.isArray(value.records)) {
-    const grouped = projectRecords(value.records, maxItems);
+    const grouped = projectRecords(value.records, maxItems, offset);
     return {
       value: { ...value, records: grouped.records },
       itemCount: grouped.records.length,
@@ -221,7 +285,7 @@ function projectData(data: unknown, maxItems: number): DataProjection | null {
     };
   }
   if (Array.isArray(value.locations) && value.locations.some(hasTimeAxis)) {
-    const projected = projectLocations(value.locations, maxItems);
+    const projected = projectLocations(value.locations, maxItems, offset);
     return {
       value: { ...value, locations: projected.locations },
       itemCount: projected.itemCount,
@@ -230,16 +294,19 @@ function projectData(data: unknown, maxItems: number): DataProjection | null {
   }
   if (Array.isArray(value.files)) {
     return {
-      value: projectTopLevelCollections(value, maxItems, "files"),
-      itemCount: Math.min(maxItems, value.files.length),
+      value: projectTopLevelCollections(value, maxItems, offset, "files"),
+      itemCount: Math.min(maxItems, Math.max(0, value.files.length - offset)),
       strategy: "artifact-manifest",
     };
   }
   const collection = largestTopLevelArray(value);
   if (collection) {
     return {
-      value: { ...value, [collection.key]: collection.values.slice(0, maxItems) },
-      itemCount: Math.min(maxItems, collection.values.length),
+      value: {
+        ...value,
+        [collection.key]: collection.values.slice(offset, offset + maxItems),
+      },
+      itemCount: Math.min(maxItems, Math.max(0, collection.values.length - offset)),
       strategy: "structured-prefix",
     };
   }
@@ -249,10 +316,11 @@ function projectData(data: unknown, maxItems: number): DataProjection | null {
 function projectRecords(
   records: unknown[],
   maxItems: number,
+  offset: number,
 ): { records: unknown[]; grouped: boolean } {
   const rows = records.map(objectValue);
   if (!rows.every((row) => row && typeof row.threadId === "string")) {
-    return { records: records.slice(0, maxItems), grouped: false };
+    return { records: records.slice(offset, offset + maxItems), grouped: false };
   }
   const groups = new Map<string, unknown[]>();
   for (let index = 0; index < records.length; index += 1) {
@@ -261,30 +329,109 @@ function projectRecords(
     group.push(records[index]);
     groups.set(key, group);
   }
-  const selected: unknown[] = [];
-  for (const group of groups.values()) {
-    const remaining = maxItems - selected.length;
-    if (remaining <= 0) break;
-    if (group.length <= remaining) selected.push(...group);
-    else {
-      const root = group.find((record) => objectValue(record)?.parentId === null);
-      if (root !== undefined) selected.push(root);
-      for (const record of group) {
-        if (selected.length >= maxItems) break;
-        if (record !== root) selected.push(record);
-      }
-    }
-  }
-  return { records: selected, grouped: true };
+  const ordered = [...groups.values()].flatMap((group) => {
+    const root = group.find((record) => objectValue(record)?.parentId === null);
+    return root === undefined ? group : [root, ...group.filter((record) => record !== root)];
+  });
+  return { records: ordered.slice(offset, offset + maxItems), grouped: true };
 }
 
 function projectLocations(
   locations: unknown[],
   maxItems: number,
+  offset: number,
 ): { locations: unknown[]; itemCount: number } {
   const capacities = locations.map(locationRecordCount);
-  const allocations = new Array<number>(locations.length).fill(0);
-  let remaining = maxItems;
+  const starts = allocateAcross(capacities, offset);
+  const ends = allocateAcross(capacities, offset + maxItems);
+  return {
+    locations: locations.map((location, index) =>
+      projectLocationRange(location, starts[index] ?? 0, ends[index] ?? 0),
+    ),
+    itemCount: ends.reduce(
+      (total, count, index) => total + Math.max(0, count - (starts[index] ?? 0)),
+      0,
+    ),
+  };
+}
+
+function projectLocationRange(location: unknown, offset: number, end: number): unknown {
+  const value = objectValue(location);
+  if (!value) return location;
+  const directAxis = timeAxis(value);
+  if (directAxis) return sliceAlignedSeries(value, directAxis, offset, end);
+  const sectionKeys = Object.keys(value).filter((key) => {
+    const section = objectValue(value[key]);
+    return section !== null && timeAxis(section) !== null;
+  });
+  if (sectionKeys.length === 0) return structuredClone(value);
+  const capacities = sectionKeys.map((key) => {
+    const section = objectValue(value[key])!;
+    return timeAxis(section)!.values.length;
+  });
+  const starts = allocateAcross(capacities, offset);
+  const ends = allocateAcross(capacities, end);
+  const projected: Record<string, unknown> = { ...value };
+  for (let index = 0; index < sectionKeys.length; index += 1) {
+    const key = sectionKeys[index]!;
+    const section = objectValue(value[key])!;
+    projected[key] = sliceAlignedSeries(
+      section,
+      timeAxis(section)!,
+      starts[index] ?? 0,
+      ends[index] ?? 0,
+    );
+  }
+  return projected;
+}
+
+function sliceAlignedSeries(
+  value: Record<string, unknown>,
+  axis: { key: string; values: unknown[] },
+  offset: number,
+  end: number,
+): Record<string, unknown> {
+  const projected: Record<string, unknown> = {
+    ...value,
+    [axis.key]: axis.values.slice(offset, end),
+  };
+  for (const [key, candidate] of Object.entries(value)) {
+    if (key === axis.key) continue;
+    if (Array.isArray(candidate) && candidate.length === axis.values.length) {
+      projected[key] = candidate.slice(offset, end);
+      continue;
+    }
+    if (
+      Array.isArray(candidate) &&
+      candidate.every((item) => Array.isArray(objectValue(item)?.values))
+    ) {
+      projected[key] = candidate.map((item) => {
+        const record = objectValue(item)!;
+        return { ...record, values: (record.values as unknown[]).slice(offset, end) };
+      });
+    }
+  }
+  return projected;
+}
+
+function projectTopLevelCollections(
+  value: Record<string, unknown>,
+  maxItems: number,
+  offset: number,
+  primaryKey: string,
+): Record<string, unknown> {
+  const projected: Record<string, unknown> = { ...value };
+  for (const [key, candidate] of Object.entries(value)) {
+    if (!Array.isArray(candidate)) continue;
+    const count = key === primaryKey ? maxItems : Math.min(maxItems, 20);
+    projected[key] = candidate.slice(offset, offset + count);
+  }
+  return projected;
+}
+
+function allocateAcross(capacities: number[], requested: number): number[] {
+  const allocations = new Array<number>(capacities.length).fill(0);
+  let remaining = Math.max(0, requested);
   while (remaining > 0) {
     let allocated = false;
     for (let index = 0; index < capacities.length && remaining > 0; index += 1) {
@@ -295,88 +442,7 @@ function projectLocations(
     }
     if (!allocated) break;
   }
-  return {
-    locations: locations.map((location, index) =>
-      projectLocation(location, allocations[index] ?? 0),
-    ),
-    itemCount: allocations.reduce((total, count) => total + count, 0),
-  };
-}
-
-function projectLocation(location: unknown, maxItems: number): unknown {
-  const value = objectValue(location);
-  if (!value) return location;
-  const directAxis = timeAxis(value);
-  if (directAxis) return sliceAlignedSeries(value, directAxis, maxItems);
-  const sectionKeys = Object.keys(value).filter((key) => {
-    const section = objectValue(value[key]);
-    return section !== null && timeAxis(section) !== null;
-  });
-  if (sectionKeys.length === 0) return structuredClone(value);
-  const capacities = sectionKeys.map((key) => {
-    const section = objectValue(value[key])!;
-    return timeAxis(section)!.values.length;
-  });
-  const allocations = new Array<number>(sectionKeys.length).fill(0);
-  let remaining = maxItems;
-  while (remaining > 0) {
-    let allocated = false;
-    for (let index = 0; index < sectionKeys.length && remaining > 0; index += 1) {
-      if (allocations[index]! >= capacities[index]!) continue;
-      allocations[index]! += 1;
-      remaining -= 1;
-      allocated = true;
-    }
-    if (!allocated) break;
-  }
-  const projected: Record<string, unknown> = { ...value };
-  for (let index = 0; index < sectionKeys.length; index += 1) {
-    const key = sectionKeys[index]!;
-    const section = objectValue(value[key])!;
-    projected[key] = sliceAlignedSeries(section, timeAxis(section)!, allocations[index] ?? 0);
-  }
-  return projected;
-}
-
-function sliceAlignedSeries(
-  value: Record<string, unknown>,
-  axis: { key: string; values: unknown[] },
-  maxItems: number,
-): Record<string, unknown> {
-  const projected: Record<string, unknown> = {
-    ...value,
-    [axis.key]: axis.values.slice(0, maxItems),
-  };
-  for (const [key, candidate] of Object.entries(value)) {
-    if (key === axis.key) continue;
-    if (Array.isArray(candidate) && candidate.length === axis.values.length) {
-      projected[key] = candidate.slice(0, maxItems);
-      continue;
-    }
-    if (
-      Array.isArray(candidate) &&
-      candidate.every((item) => Array.isArray(objectValue(item)?.values))
-    ) {
-      projected[key] = candidate.map((item) => {
-        const record = objectValue(item)!;
-        return { ...record, values: (record.values as unknown[]).slice(0, maxItems) };
-      });
-    }
-  }
-  return projected;
-}
-
-function projectTopLevelCollections(
-  value: Record<string, unknown>,
-  maxItems: number,
-  primaryKey: string,
-): Record<string, unknown> {
-  const projected: Record<string, unknown> = { ...value };
-  for (const [key, candidate] of Object.entries(value)) {
-    if (!Array.isArray(candidate)) continue;
-    projected[key] = candidate.slice(0, key === primaryKey ? maxItems : Math.min(maxItems, 20));
-  }
-  return projected;
+  return allocations;
 }
 
 function locationRecordCount(location: unknown): number {
@@ -439,6 +505,11 @@ function collectIssueCodes(result: DataRunResult): string[] {
 function stopReason(data: unknown): string | null {
   const value = objectValue(data)?.stopReason;
   return typeof value === "string" ? value : null;
+}
+
+function limitReasons(data: unknown): string[] {
+  const reason = stopReason(data);
+  return reason?.startsWith("max-") ? [reason] : ["runtime-limit"];
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {

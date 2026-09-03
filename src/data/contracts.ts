@@ -67,6 +67,7 @@ export interface DataEndpointScope {
   pathPrefixes: string[];
   allowedMethods: Array<"GET" | "POST">;
   allowedContentTypes: string[];
+  sessionCookies?: "same-origin-memory" | undefined;
 }
 
 export interface DataCredentialDeclaration {

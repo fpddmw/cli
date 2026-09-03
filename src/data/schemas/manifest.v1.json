@@ -100,7 +100,8 @@
           "minItems": 1,
           "uniqueItems": true
         },
-        "allowedContentTypes": { "$ref": "#/$defs/stringArray" }
+        "allowedContentTypes": { "$ref": "#/$defs/stringArray" },
+        "sessionCookies": { "enum": ["same-origin-memory"] }
       }
     },
     "credential": {

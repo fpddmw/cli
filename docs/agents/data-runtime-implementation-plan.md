@@ -18,8 +18,8 @@ checkPaths:
   - src/data/**
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
-lastReviewedAt: 2026-09-01
-lastReviewedCommit: e387a5e66221ab91920a6e6c960cc717919caecb
+lastReviewedAt: 2026-09-02
+lastReviewedCommit: ee38c04ae1c5a7782275b3e9674218f02cfb4ef3
 ---
 
 # 原子数据运行时实施计划
@@ -526,6 +526,24 @@ TypeScript 7 typecheck 已通过；薄 Skill、binding、clean-container GREEN�
 
 状态：CLI connector、对应薄 Skill 和候选 binding 已在本地完成并验证；正式 binding
 等待包含全部 connector 的精确 npm 版本发布。
+
+## 2026-09-02 可靠性与 Agent 消费补强
+
+- Research data Evidence 增加 digest-bound opaque cursor 和只读 `data read` 入口；完整
+  acquisition 结果仍只持久化一次，后续 Agent 视图不重取 provider、不消耗 provider quota
+  或 evidence-call budget。native packet 明确要求需要逐行穷尽时读到 `nextCursor=null`，
+  否则必须披露 presented/total 比例。
+- Research communication 将 provider coverage、显式 limit coverage 与 context coverage
+  分开；保留旧 `requestCoverage` 兼容投影，因此 provider partial 与 runtime bounded 不再
+  相互覆盖。
+- EPA EIS 的已声明 endpoint 单独启用 same-origin、memory-only cookie session，以通过官方
+  初始重定向；cookie 不进入持久化、错误、摘要或跨域请求。该能力不扩展到其他 connector。
+- AirNow 小时文件改为固定三路并发获取并保持稳定输出顺序；bounded HTTP 失败补充脱敏的
+  attempt/retry/redirect/phase/status，便于区分 provider 响应、超时和 transport failure。
+- YouTube comments 增加显式 `top-level-only|all-visible` reply 策略，并报告 thread/reply
+  request 消耗、剩余预算与已知未展开线程；默认兼容既有 `includeReplies` 行为，不以
+  embedded reply sample 冒充完整回复。
+- Regulations.gov 按用户决定暂缓，本批不修改其 connector 或 Skill。
 
 ## PR 与提交拆分
 

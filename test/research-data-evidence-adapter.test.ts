@@ -4,13 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
+import { runCli } from "../src/cli.js";
 import { createDataRegistry } from "../src/data/catalog.js";
 import { builtInDataRegistry } from "../src/data/builtins.js";
 import type { DataRunRequest } from "../src/data/contracts.js";
 import { executeDataRun } from "../src/data/runtime/execute.js";
+import type { CliIO } from "../src/io.js";
 import {
   executeResearchDataCapability,
   projectResearchDataCapabilities,
+  readResearchDataEvidence,
 } from "../src/research/workspace/data-evidence-adapter.js";
 import {
   researchDataCredentialId,
@@ -37,6 +40,18 @@ function request(): DataRunRequest {
     operationVersion: "1.0.0",
     input: { value: "research evidence" },
   };
+}
+
+async function invokeCli(argv: string[]) {
+  let stdout = "";
+  let stderr = "";
+  const io: CliIO = {
+    env: {},
+    stdout: { write: (chunk) => ((stdout += chunk), true) },
+    stderr: { write: (chunk) => ((stderr += chunk), true) },
+  };
+  const exitCode = await runCli(argv, io);
+  return { exitCode, stdout, stderr };
 }
 
 describe("research data evidence adapter", () => {
@@ -184,6 +199,7 @@ describe("research data evidence adapter", () => {
       assert.equal(result.communication?.contextView.totalItems, 144);
       assert.equal(result.evidenceReceipt?.contextItems, 100);
       assert.equal(result.evidenceReceipt?.contextTotalItems, 144);
+      assert.equal(result.evidenceReceipt?.contextNextOffset, 100);
       assert.equal(result.evidenceReceipt?.contextTruncated, true);
       assert.equal(result.evidenceReceipt?.data?.coverage?.status, "complete");
       assert.equal(result.evidenceReceipt?.data?.contextView?.status, "projected");
@@ -199,6 +215,47 @@ describe("research data evidence adapter", () => {
       assert.equal(persisted.data.records.length, 144);
       assert.match(result.candidate?.excerpt ?? "", /Request coverage is complete/);
       assert.match(result.candidate?.excerpt ?? "", /100\/144/);
+      assert.match(result.candidate?.excerpt ?? "", /continue reading/i);
+
+      const second = await readResearchDataEvidence({
+        root,
+        projectId: "data-view-budget",
+        receiptId: result.evidenceReceipt!.attemptId,
+        cursor: result.communication!.contextView.nextCursor!,
+      });
+      assert.equal(second.communication.contextView.offset, 100);
+      assert.equal(second.communication.contextView.itemCount, 44);
+      assert.equal(second.communication.contextView.remainingItems, 0);
+      assert.equal(second.communication.contextView.nextCursor, null);
+      const secondPage = JSON.parse(second.boundedContext.text) as {
+        data: { value: { records: Array<{ id: number }> } };
+      };
+      assert.deepEqual(
+        secondPage.data.value.records.map((record) => record.id),
+        Array.from({ length: 44 }, (_, index) => index + 100),
+      );
+
+      const cliRead = await invokeCli([
+        "research",
+        "project",
+        "evidence",
+        "data",
+        "read",
+        "data-view-budget",
+        "--receipt",
+        result.evidenceReceipt!.attemptId,
+        "--cursor",
+        result.communication!.contextView.nextCursor!,
+        "--workspace",
+        root,
+        "--json",
+      ]);
+      assert.equal(cliRead.exitCode, 0, cliRead.stderr);
+      const cliPage = JSON.parse(cliRead.stdout) as {
+        communication: { contextView: { offset: number; nextCursor: string | null } };
+      };
+      assert.equal(cliPage.communication.contextView.offset, 100);
+      assert.equal(cliPage.communication.contextView.nextCursor, null);
 
       const projected = projectResearchDataCapabilities(registry).capabilities[0];
       assert.equal(projected?.resultShape, "record-list");
@@ -225,6 +282,7 @@ describe("research data evidence adapter", () => {
       });
 
       assert.ok(packet.commands.runDataCapability);
+      assert.ok(packet.commands.runDataCapability.readArgv);
       assert.equal(
         packet.commands.runDataCapability.catalog.capabilities.length,
         packet.commands.runDataCapability.catalog.capabilities.filter((capability) =>

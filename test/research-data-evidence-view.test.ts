@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import type { DataExecutionSummary, DataRunResult } from "../src/data/contracts.js";
 import {
   boundedResearchDataContext,
+  buildResearchDataCommunication,
   inferResearchDataResultShape,
 } from "../src/research/workspace/data-evidence-view.js";
 
@@ -135,6 +136,124 @@ describe("Research data evidence views", () => {
       parsed.data.value.records.map((record) => record.id),
       ["a-root", "a-reply", "b-root"],
     );
+  });
+
+  it("continues a projected record result without refetching or losing rows", () => {
+    const records = Array.from({ length: 7 }, (_, id) => ({ id, value: `record-${id}` }));
+    const first = boundedResearchDataContext(
+      result({ records, stopReason: "completed" }, summary(records.length)),
+      1_000_000,
+      3,
+    );
+    const second = boundedResearchDataContext(
+      result({ records, stopReason: "completed" }, summary(records.length)),
+      1_000_000,
+      3,
+      first.nextOffset ?? 0,
+    );
+    const third = boundedResearchDataContext(
+      result({ records, stopReason: "completed" }, summary(records.length)),
+      1_000_000,
+      3,
+      second.nextOffset ?? 0,
+    );
+
+    const ids = [first, second, third].flatMap((context) => {
+      const parsed = JSON.parse(Buffer.from(context.bytes).toString("utf8")) as {
+        data: { value: { records: Array<{ id: number }> } };
+      };
+      return parsed.data.value.records.map((record) => record.id);
+    });
+    assert.deepEqual(ids, [0, 1, 2, 3, 4, 5, 6]);
+    assert.equal(first.nextOffset, 3);
+    assert.equal(second.nextOffset, 6);
+    assert.equal(third.nextOffset, null);
+    assert.equal(third.remainingItems, 0);
+  });
+
+  it("continues grouped records without duplicating a thread root", () => {
+    const records = [
+      { id: "a-root", threadId: "a", parentId: null },
+      { id: "a-reply", threadId: "a", parentId: "a-root" },
+      { id: "b-root", threadId: "b", parentId: null },
+      { id: "b-reply", threadId: "b", parentId: "b-root" },
+    ];
+    const first = boundedResearchDataContext(
+      result({ records, stopReason: "completed" }, summary(records.length)),
+      1_000_000,
+      3,
+    );
+    const second = boundedResearchDataContext(
+      result({ records, stopReason: "completed" }, summary(records.length)),
+      1_000_000,
+      3,
+      first.nextOffset ?? 0,
+    );
+
+    const ids = [first, second].flatMap((context) => {
+      const parsed = JSON.parse(Buffer.from(context.bytes).toString("utf8")) as {
+        data: { value: { records: Array<{ id: string }> } };
+      };
+      return parsed.data.value.records.map((record) => record.id);
+    });
+    assert.deepEqual(ids, ["a-root", "a-reply", "b-root", "b-reply"]);
+    assert.equal(second.nextOffset, null);
+  });
+
+  it("continues aligned time-series without duplicating or omitting values", () => {
+    const locations = Array.from({ length: 2 }, (_, locationIndex) => ({
+      locationIndex,
+      hourly: {
+        timesUtc: Array.from({ length: 4 }, (_, index) => `2026-09-01T0${index}:00:00Z`),
+        values: Array.from({ length: 4 }, (_, index) => locationIndex * 100 + index),
+      },
+    }));
+    const dataResult = result({ locations, stopReason: "completed" }, summary(8));
+    const pages: ReturnType<typeof boundedResearchDataContext>[] = [];
+    let offset = 0;
+    do {
+      const page = boundedResearchDataContext(dataResult, 1_000_000, 3, offset);
+      pages.push(page);
+      if (page.nextOffset === null) break;
+      offset = page.nextOffset;
+    } while (true);
+
+    const values = pages.flatMap((context) => {
+      const parsed = JSON.parse(Buffer.from(context.bytes).toString("utf8")) as {
+        data: { value: { locations: Array<{ hourly: { values: number[] } }> } };
+      };
+      return parsed.data.value.locations.flatMap((location) => location.hourly.values);
+    });
+    assert.deepEqual(
+      values.toSorted((left, right) => left - right),
+      [0, 1, 2, 3, 100, 101, 102, 103],
+    );
+    assert.equal(new Set(values).size, 8);
+    assert.equal(pages.at(-1)?.nextOffset, null);
+  });
+
+  it("reports provider gaps and explicit limits as independent coverage dimensions", () => {
+    const partialAndBounded = result(
+      { records: [{ id: 1 }], stopReason: "partial" },
+      {
+        recordCount: 1,
+        pageCount: 1,
+        chunkCount: 1,
+        truncated: true,
+        completeness: "partial",
+        missing: [{ kind: "page", identifiers: ["page:2"] }],
+      },
+    );
+    const context = boundedResearchDataContext(partialAndBounded, 1_000_000, 100);
+    const communication = buildResearchDataCommunication(partialAndBounded, context, {
+      maxBytes: 1_000_000,
+      maxItems: 100,
+    });
+
+    assert.equal(communication.providerCoverage.status, "partial");
+    assert.equal(communication.limitCoverage.status, "bounded");
+    assert.deepEqual(communication.limitCoverage.limitsHit, ["runtime-limit"]);
+    assert.equal(communication.requestCoverage.status, "partial");
   });
 
   it("projects artifact manifests without changing the persisted acquisition result", () => {

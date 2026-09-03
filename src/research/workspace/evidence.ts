@@ -69,11 +69,22 @@ export interface DataEvidenceBinding {
     recordCount: number;
     missing: DataMissingRange[];
   };
+  providerCoverage?: {
+    status: "complete" | "partial";
+    missing: DataMissingRange[];
+  };
+  limitCoverage?: {
+    status: "bounded" | "within-requested-limits";
+    limitsHit: string[];
+  };
   contextView?: {
     status: "full" | "metadata-only" | "projected";
     strategy: string;
     itemCount: number;
     totalItems: number;
+    offset?: number;
+    remainingItems?: number;
+    nextCursor?: string | null;
     maxItems: number;
     maxBytes: number;
   };
@@ -459,6 +470,23 @@ function parseDataEvidenceBinding(value: unknown): DataEvidenceBinding {
       throw evidenceStoreError("Data evidence coverage binding is invalid.");
     }
   }
+  if (
+    binding.providerCoverage !== undefined &&
+    (!binding.providerCoverage ||
+      !["complete", "partial"].includes(binding.providerCoverage.status) ||
+      !Array.isArray(binding.providerCoverage.missing))
+  ) {
+    throw evidenceStoreError("Data evidence provider-coverage binding is invalid.");
+  }
+  if (
+    binding.limitCoverage !== undefined &&
+    (!binding.limitCoverage ||
+      !["bounded", "within-requested-limits"].includes(binding.limitCoverage.status) ||
+      !Array.isArray(binding.limitCoverage.limitsHit) ||
+      binding.limitCoverage.limitsHit.some((item) => typeof item !== "string"))
+  ) {
+    throw evidenceStoreError("Data evidence limit-coverage binding is invalid.");
+  }
   if (binding.contextView !== undefined) {
     if (
       !binding.contextView ||
@@ -468,6 +496,14 @@ function parseDataEvidenceBinding(value: unknown): DataEvidenceBinding {
       binding.contextView.itemCount < 0 ||
       !Number.isInteger(binding.contextView.totalItems) ||
       binding.contextView.totalItems < 0 ||
+      (binding.contextView.offset !== undefined &&
+        (!Number.isInteger(binding.contextView.offset) || binding.contextView.offset < 0)) ||
+      (binding.contextView.remainingItems !== undefined &&
+        (!Number.isInteger(binding.contextView.remainingItems) ||
+          binding.contextView.remainingItems < 0)) ||
+      (binding.contextView.nextCursor !== undefined &&
+        binding.contextView.nextCursor !== null &&
+        typeof binding.contextView.nextCursor !== "string") ||
       !Number.isInteger(binding.contextView.maxItems) ||
       binding.contextView.maxItems < 1 ||
       !Number.isInteger(binding.contextView.maxBytes) ||

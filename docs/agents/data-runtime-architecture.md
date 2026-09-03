@@ -16,8 +16,8 @@ checkPaths:
   - src/data/**
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
-lastReviewedAt: 2026-09-01
-lastReviewedCommit: e387a5e66221ab91920a6e6c960cc717919caecb
+lastReviewedAt: 2026-09-02
+lastReviewedCommit: ee38c04ae1c5a7782275b3e9674218f02cfb4ef3
 ---
 
 # 原子数据运行时目标架构
@@ -150,7 +150,8 @@ catalog、两个公共对象、canonical JSON 和 digest 计算必须与 locale�
 CSV header/值并按 bbox、时间和 pollutant 过滤。每条记录和文件摘要保留 source-file
 lineage；缺文件、坏文件以 `partial` 和明确 missing file 返回。Discovery Metadata 固化
 AirNow 数据为 preliminary、subject to change，并禁止把它当作 regulatory-grade AQS
-数据。
+数据。互不依赖的小时文件使用固定小并发获取，归一化、record cap、文件摘要与最终记录
+仍按 UTC 小时稳定排序；失败请求保留安全的 attempt/retry/redirect/phase/status 诊断。
 字段依据官方
 [`HourlyAQObs` 格式说明](https://docs.airnowapi.org/docs/HourlyAQObsFactSheet.pdf)，使用
 限制依据 [AirNow FAQ/Data Use Guidelines](https://docs.airnowapi.org/faq)。
@@ -195,8 +196,10 @@ counter 都是可变快照，不能代表总体意见、验证身份、证明事
 `youtube.public-content` 共享一个 `YOUTUBE_API_KEY` 逻辑凭证，但保持两个 operation：
 `search-videos` 用 `search.list` 得到去重 candidate IDs，再以最多 50 个 ID 的 `videos.list`
 批次补齐 snippet/statistics/contentDetails/status 并执行显式公开计数过滤；`fetch-comments` 只接受
-最多 25 个显式 video IDs，以 `commentThreads.list` 获取 top-level comments，并在需要 replies
-时始终使用 `comments.list` 分页，不把 embedded reply sample 当作完整回复。凭证仅经
+最多 50 个显式 video IDs，以 `commentThreads.list` 获取 top-level comments，并通过显式
+`top-level-only` 或 `all-visible` 策略决定是否使用 `comments.list` 分页，绝不把 embedded reply
+sample 当作完整回复。输出分别报告 thread/reply request 消耗、剩余请求预算、已发现回复线程、
+完整展开线程和已知未展开线程。凭证仅经
 `X-Goog-Api-Key` header 注入，绝不进入 URL。两个 operation 共用全局 request/record limits，
 评论还具有 per-video thread page 与 per-thread reply page cap；失败视频保留已经验证的其他记录。
 Discovery Metadata 明确 quota、search ranking、visibility、moderation、统计和用户文本均为可变
@@ -390,6 +393,9 @@ URL query、header、环境变量值、本地绝对路径和 provider 原始错�
   必须逐项声明来源、优先级、文件权限和禁用方式，并加入泄漏回归测试。
 - endpoint 和重定向必须在 connector 的 HTTPS scope 内；IP literal、降级到 HTTP、
   跨域重定向和 credential 转发默认拒绝。
+- 只有 manifest 明确声明 `same-origin-memory` 的 endpoint 才能使用短期 cookie jar；它
+  仅存在于当前 data client 内存、只随同一 endpoint scope 请求发送，不进入 request digest、
+  输出、错误、回执或日志。默认仍忽略 provider 会话状态。
 - 请求体和 provider 响应体必须有字节上限；超时、重试和 `Retry-After` 处理必须有
   硬上限。Agent context 与 Evidence package 的大小控制属于 Research 层，不能反向改写
   connector 的采集语义。
@@ -418,14 +424,17 @@ lock、预算、候选/来源准入、永久证据、journal 和 review 规则�
 当前实现从内置 registry 动态投影每个 operation 为
 `data:<capability-id>:<operation-id>` Research capability；十九个 connector 当前产生
 二十三个 operation 投影。native discover packet 携带这份摘要 catalog、独立
-`data describe` 命令和 `research project evidence data run` 命令。后者在同一进程调用
+`data describe` 命令、`research project evidence data run` 命令及只读的
+`research project evidence data read` 续读命令。run 命令在同一进程调用
 `executeDataRun`。三层预算相互独立：connector manifest 与调用者显式 overrides 控制采集；
 `maxBytesPerPackage` 与文件数控制完整结果和 artifacts 的 Evidence 持久化；
 `maxBrokerItems` 与 `maxBrokerContextTokens` 只控制 Agent 可见视图。adapter 不再把 broker
 response/item budget 下压为 `maxResponseBytes` 或 `maxRecords`。它按 record list、thread
-group、对齐 time-series chunk 和 artifact manifest 生成语义化视图，并在 receipt、candidate
-和 journal 中分别声明 validation issue、request coverage（complete/bounded/partial）与
-context view（full/projected/metadata-only）。owner-only credential map 只映射当前 connector
+group、对齐 time-series chunk 和 artifact manifest 生成语义化视图；投影视图返回绑定
+Evidence digest 的 opaque cursor，后续页直接从已校验的内容寻址对象读取，不重复请求 provider，
+也不消耗 evidence-call budget。receipt、candidate 和 journal 分别声明 validation issue、
+provider coverage、limits hit 与 context view（full/projected/metadata-only）；`partial` 与
+`bounded` 可同时为真。owner-only credential map 只映射当前 connector
 需要的命名空间化逻辑凭证；adapter 不接收完整宿主环境，也不允许宿主同名 provider key
 作为后备。成功或 partial 结果、核心 receipt digest 与可选 artifact bytes 内容寻址地写入
 既有 receipt/ledger/audit 链；blocked 结果只记失败 journal，不晋升为证据。新增 registry

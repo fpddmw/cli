@@ -87,8 +87,12 @@ Auto Research keeps three budgets separate: connector acquisition limits,
 Evidence package bytes/files, and the Agent-visible context view. A validated
 result is persisted in full when it fits the Evidence package budget;
 `maxBrokerItems` and the context-token ceiling only shape the Agent view.
-Receipts distinguish request coverage (`complete`, `bounded`, or `partial`)
-from context projection (`full`, shape-aware `projected`, or `metadata-only`).
+Receipts distinguish provider coverage, explicit limits reached, and context
+projection instead of forcing them into one status. A projected result returns
+an opaque, evidence-bound cursor; `research project evidence data read` serves
+the next shape-aware view from immutable local Evidence without another
+provider request or provider quota charge. Agents must either continue until
+`nextCursor` is null or disclose the exact presented/total fraction.
 
 JSON exits are `0` for success, `2` for request/contract errors, `3` for a
 blocked execution, and `4` for an explicit partial result. Public machine
@@ -99,7 +103,9 @@ The built-in capabilities are:
 - `airnow.hourly-observations` / `fetch-hourly`: fetches official AirNow
   `HourlyAQObs` files for a bounded UTC-hour window, bounding box, and pollutant
   list. Results retain source-file lineage and always state that AirNow data are
-  preliminary and unsuitable as regulatory-grade AQS evidence.
+  preliminary and unsuitable as regulatory-grade AQS evidence. Independent
+  hourly files use bounded concurrency while output files and records retain
+  deterministic UTC-hour order.
 - `bluesky.public-posts` / `fetch-cascades`: fetches bounded public Bluesky
   post seeds from search, an author feed, a custom feed, or a list feed and can
   flatten visible reply cascades. Ranking, counters, moderation visibility, and
@@ -107,7 +113,10 @@ The built-in capabilities are:
 - `epa.eis-records` / `search`: retrieves bounded official EPA EIS Database
   common-search or UI-created search pages and parses title, CEQ/provider IDs,
   document type, dates, agencies, state, detail links, and document-availability
-  cues. It does not fetch or assess linked EIS documents.
+  cues. Its endpoint-scoped, same-origin session cookie jar exists only in
+  memory so the provider's initial redirect can complete; cookies never enter
+  results, receipts, logs, or cross-origin requests. It does not fetch or assess
+  linked EIS documents.
 - `federal-register.documents` / `search`: searches bounded
   FederalRegister.gov document metadata by publication date plus term, agency,
   document type, topic, docket, or RIN filters. It does not follow result links,
@@ -1277,6 +1286,11 @@ with `tiangong-ai data describe`, then run the exact request through:
 tiangong-ai research project evidence data run <project-id> \
   --request /absolute/path/to/data-run-request.json \
   --workspace /absolute/path/to/workspace --json
+
+# When contextView.nextCursor is non-null, continue from persisted Evidence:
+tiangong-ai research project evidence data read <project-id> \
+  --receipt <attempt-id> --cursor <opaque-next-cursor> \
+  --workspace /absolute/path/to/workspace --json
 ```
 
 This Research command calls the same TypeScript data service in-process; it does
@@ -1289,6 +1303,9 @@ credentialed operation must resolve its namespaced logical credential from the
 workspace's owner-only store or it is blocked before any provider request.
 Standalone `tiangong-ai data run` keeps its separate manifest-declared
 environment-variable policy. A blocked data result is not promoted to evidence.
+Data Evidence continuation is read-only and does not consume another evidence-call
+or provider-request budget. Provider coverage, limits reached, and Agent context
+coverage are reported independently, so a result may be both partial and bounded.
 Analyze and synthesize packets contain hash-verified prior-stage artifacts and
 require no external evidence calls. Base and scientific review use only the
 packet-bound `research_list_artifacts` and `research_read_artifact` tools; shell,
