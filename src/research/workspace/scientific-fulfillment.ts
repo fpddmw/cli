@@ -325,12 +325,18 @@ export async function loadScientificFulfillmentView(
     if (records.length !== events.length) throw conflict();
     records.reverse();
   }
+  // Reuse verified atom identities within this load only. A later operation
+  // must reload the store so changed evidence cannot hide behind a cache.
+  const atomBindings = records.some((record) => record.parameterStates.length)
+    ? await loadAtomBindings(root, project.id)
+    : undefined;
   const complete = structuredClone(verified.contract);
-  const contract = structuredClone(verified.contract);
+  const contract = throughGate ? structuredClone(verified.contract) : complete;
   for (const record of records) {
-    await assertObjectRecords(root, record);
+    await assertObjectRecords(root, record, atomBindings);
+    // Even an early-gate projection must reject invalid future-due slots.
     applyScientificFulfillmentRecord(complete, record);
-    applyScientificFulfillmentRecord(contract, record, throughGate);
+    if (throughGate) applyScientificFulfillmentRecord(contract, record, throughGate);
   }
   return {
     base: verified.contract,
@@ -346,7 +352,17 @@ export async function loadScientificFulfillmentView(
     ),
   };
 }
-async function assertObjectRecords(root: string, record: ScientificFulfillmentRecord) {
+async function loadAtomBindings(root: string, projectId: string): Promise<Map<string, string>> {
+  const { loadEvidenceAtomRecords } = await import("./content-evidence.js");
+  return new Map(
+    (await loadEvidenceAtomRecords(root, projectId)).map((atom) => [atom.atomId, atom.atomSha256]),
+  );
+}
+async function assertObjectRecords(
+  root: string,
+  record: ScientificFulfillmentRecord,
+  knownAtomBindings?: ReadonlyMap<string, string>,
+) {
   for (const [kind, items] of [
     ["model-implementation", record.modelImplementations],
     ["environment-lock", record.environmentLocks],
@@ -362,14 +378,11 @@ async function assertObjectRecords(root: string, record: ScientificFulfillmentRe
     }
   }
   if (record.parameterStates.length) {
-    const { loadEvidenceAtomRecords } = await import("./content-evidence.js");
-    const atoms = new Map(
-      (await loadEvidenceAtomRecords(root, record.projectId)).map((atom) => [atom.atomId, atom]),
-    );
+    const atoms = knownAtomBindings ?? (await loadAtomBindings(root, record.projectId));
     for (const parameter of record.parameterStates)
       for (const state of parameter.states)
         for (const atom of state.atoms) {
-          if (atoms.get(atom.id)?.atomSha256 !== atom.sha256) throw conflict();
+          if (atoms.get(atom.id) !== atom.sha256) throw conflict();
         }
   }
 }

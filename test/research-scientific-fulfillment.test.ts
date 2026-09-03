@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -18,6 +20,7 @@ import {
   loadProject,
 } from "../src/research/workspace/projects.js";
 import { recordScientificFulfillment } from "../src/research/workspace/scientific-fulfillment.js";
+import { readAndVerifyScientificDesign } from "../src/research/workspace/scientific-design.js";
 import { prepareScientificReview } from "../src/research/workspace/scientific-review.js";
 import {
   initializeResearchPolicy,
@@ -39,7 +42,7 @@ import type { ResearchPolicyBinding } from "../src/research/workspace/types.js";
 import { passResearchDesignGate, scientificDesignInput } from "./helpers/scientific-design.js";
 
 describe("predeclared scientific parameter fulfillment", () => {
-  it("binds exact source-derived states after real native stage admission without changing their identity or units", async () => {
+  it("binds exact source-derived states and loads their atom store once per fulfillment view", async (t) => {
     const root = await mkdtemp(join(tmpdir(), "tiangong-parameter-fulfillment-"));
     const projectId = "parameter-fulfillment";
     try {
@@ -55,6 +58,17 @@ describe("predeclared scientific parameter fulfillment", () => {
       const parameter = original.uncertaintyParameters.find(
         (item) => item.stateValueStatus === "pending-source-acquisition",
       )!;
+      const secondParameter = original.uncertaintyParameters.find(
+        (item) => item.id === "uncertainty-shared-layer-modulus",
+      )!;
+      secondParameter.stateValueStatus = "pending-source-acquisition";
+      secondParameter.freezeBeforeGate = "evidence-construct";
+      original.policyRuleDispositions
+        .find((item) => item.ruleId === "uncertainty-propagated")!
+        .uncertaintyParameterIds.push(secondParameter.id);
+      const designPath = join(root, `${projectId}-scientific-design.json`);
+      await writeJsonAtomic(designPath, original);
+      designInput.design = await readAndVerifyScientificDesign(designPath, projectId);
       const project = await initializeProject(
         root,
         projectId,
@@ -73,7 +87,7 @@ describe("predeclared scientific parameter fulfillment", () => {
       }));
       await writeFile(
         inputPath,
-        `Synthetic source states for a deterministic protocol test only: ${states.map((state) => `${state.stateId}=${state.value}`).join(", ")}.\n`,
+        `Synthetic source states for a deterministic protocol test only: ${states.map((state) => `${state.stateId}=${state.value}`).join(", ")}; ${secondParameter.states.map((state) => `${state.id}=${state.value}`).join(", ")}.\n`,
       );
       await addProjectInput(root, projectId, inputPath, "primary");
       await passResearchDesignGate(root, projectId);
@@ -215,7 +229,39 @@ describe("predeclared scientific parameter fulfillment", () => {
           (state) => state.atoms[0]?.sha256 === atom.atomSha256,
         ),
       );
-      const effective = await loadBoundAcquisitionDesign(root, await loadProject(root, projectId));
+      await recordScientificFulfillment(root, projectId, {
+        ...input,
+        parentFulfillmentSha256: record.recordSha256,
+        parameterStates: [
+          {
+            parameterId: secondParameter.id,
+            states: secondParameter.states.map((state) => ({
+              stateId: state.id,
+              value: state.value,
+              evidenceAtomIds: [atom.atomId],
+            })),
+          },
+        ],
+      });
+      let atomReads = 0;
+      const originalReadFile = fs.readFile;
+      const reader = t.mock.method(fs, "readFile", (...args: Parameters<typeof readFile>) => {
+        if (String(args[0]).endsWith(`/evidence/atoms/${atom.atomId}.json`)) atomReads += 1;
+        return originalReadFile(...args);
+      });
+      syncBuiltinESMExports();
+      const effective = await loadBoundAcquisitionDesign(
+        root,
+        await loadProject(root, projectId),
+      ).finally(() => {
+        reader.mock.restore();
+        syncBuiltinESMExports();
+      });
+      assert.equal(
+        atomReads,
+        1,
+        "One view must verify the atom store once, not once per fulfillment record",
+      );
       const frozen = effective.uncertaintyParameters.find((item) => item.id === parameter.id)!;
       assert.equal(frozen.stateValueStatus, "frozen");
       assert.equal(frozen.freezeBeforeGate, parameter.freezeBeforeGate);
