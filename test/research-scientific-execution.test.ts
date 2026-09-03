@@ -481,6 +481,14 @@ describe("explicit isolated scientific review execution", () => {
               ...result(fixture.packet),
               exitCode: 2,
               stderr: `Unknown reviewer option. Authorization: Bearer ${secret}\nCookie: session=${secret}\n${fixture.root}/runtime/file\n${"x".repeat(5000)}`,
+              telemetry: {
+                eventCounts: { result: 1 },
+                itemCounts: {},
+                toolCalls: 0,
+                providerTurns: 1,
+                reasoningOutputTokens: 0,
+                providerErrors: ["error_during_execution: precise provider cause"],
+              },
             };
           },
         ),
@@ -489,6 +497,10 @@ describe("explicit isolated scientific review execution", () => {
           assert.equal(value.code, "RESEARCH_SCIENTIFIC_REVIEW_EXECUTION_FAILED");
           assert.equal(value.details?.exitCode, 2);
           assert.match(String(value.details?.diagnostic), /Unknown reviewer option/u);
+          assert.match(
+            String(value.details?.diagnostic),
+            /^error_during_execution: precise provider cause/u,
+          );
           assert.ok(String(value.details?.diagnostic).length <= 2048);
           assert.doesNotMatch(JSON.stringify(value.details), new RegExp(secret));
           assert.ok(!JSON.stringify(value.details).includes(fixture.root));

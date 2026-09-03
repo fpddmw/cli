@@ -351,6 +351,83 @@ describe("research capability locks", () => {
 
 describe("research project execution", () => {
   it(
+    "handles Claude structured results and declared errors instead of trusting final text",
+    {
+      skip: !researchPlatformCapabilities().nativeReviewerExecution,
+    },
+    async () => {
+      const secret = "claude-result-error-boundary-secret";
+      for (const message of [
+        { type: "result", subtype: "success", is_error: false, structured_output: { ok: true } },
+        {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "Informal summary, not JSON",
+          structured_output: { ok: true },
+        },
+        {
+          type: "result",
+          subtype: "error_max_structured_output_retries",
+          is_error: true,
+          result: '{"ok":true}',
+          errors: ["x".repeat(990) + secret],
+        },
+      ]) {
+        const capsule = await temporaryDirectory();
+        try {
+          const projectRoot = join(capsule, "project");
+          await mkdir(projectRoot);
+          const binary = join(capsule, "fake-claude-result.mjs");
+          await writeFile(
+            binary,
+            `#!/usr/bin/env node\nif(process.argv.includes('--version')){console.log('fake-claude-result 1');process.exit(0)}\nprocess.stdout.write(JSON.stringify(${JSON.stringify(message)}));\n`,
+          );
+          await chmod(binary, 0o755);
+          const result = await executeAgent({
+            route: { agent: "claude", binary, model: "test-model" },
+            prompt: "Return the requested result.",
+            outputSchema: schemaForStage("doctor"),
+            requestId: "claude-result-shape",
+            purpose: "doctor",
+            capsuleRoot: capsule,
+            projectRoot,
+            workspaceRoot: capsule,
+            timeoutSeconds: 10,
+            maxTurns: 2,
+            maxOutputTokens: 100,
+            maxCostUsd: 1,
+            toolPolicy: "none",
+            brokerUrl: null,
+            environment: { PATH: process.env.PATH, RESEARCH_API_KEY: secret },
+          });
+          if (message.is_error) {
+            assert.notEqual(
+              result.exitCode,
+              0,
+              "A declared provider error cannot become success through result text",
+            );
+            assert.match(
+              result.telemetry?.providerErrors.join("; ") ?? "",
+              /error_max_structured_output_retries/u,
+            );
+            assert.doesNotMatch(
+              JSON.stringify(result),
+              /claude-result-error-boundary/u,
+              "Sanitize complete provider errors before truncating at a secret boundary",
+            );
+          } else {
+            assert.equal(result.exitCode, 0, result.stderr);
+            assert.equal(result.stdout, '{"ok":true}');
+          }
+        } finally {
+          await rm(capsule, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it(
     "streams large Codex and Claude prompts over stdin instead of argv",
     { skip: !researchPlatformCapabilities().nativeReviewerExecution },
     async () => {

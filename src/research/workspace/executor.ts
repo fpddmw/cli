@@ -1302,8 +1302,26 @@ function parseAgentResult(
   try {
     const value = JSON.parse(stdout) as Record<string, unknown>;
     const usage = isObject(value.usage) ? value.usage : {};
+    const providerFailed =
+      value.is_error === true ||
+      (typeof value.subtype === "string" && value.subtype.startsWith("error_"));
+    const providerErrors: string[] = [];
+    if (providerFailed) {
+      if (typeof value.subtype === "string")
+        appendProviderError(providerErrors, { message: value.subtype });
+      if (Array.isArray(value.errors)) {
+        for (const error of value.errors)
+          if (typeof error === "string") appendProviderError(providerErrors, { message: error });
+      }
+    }
+    const structured = value.structured_output !== undefined && value.structured_output !== null;
+    const answer = structured
+      ? JSON.stringify(value.structured_output)
+      : typeof value.result === "string"
+        ? value.result
+        : stdout;
     return {
-      stdout: typeof value.result === "string" ? value.result : stdout,
+      stdout: providerFailed ? "" : answer,
       stderr,
       inputTokens: numeric(usage.input_tokens),
       cachedInputTokens:
@@ -1311,14 +1329,14 @@ function parseAgentResult(
       outputTokens: numeric(usage.output_tokens),
       costUsd: numeric(value.total_cost_usd),
       model: typeof value.model === "string" ? value.model : route.model,
-      parseFailed: typeof value.result !== "string",
+      parseFailed: providerFailed || (!structured && typeof value.result !== "string"),
       telemetry: {
         eventCounts: { result: 1 },
         itemCounts: {},
         toolCalls: 0,
         providerTurns: numeric(value.num_turns) || null,
         reasoningOutputTokens: numeric(usage.reasoning_output_tokens),
-        providerErrors: [],
+        providerErrors,
       },
     };
   } catch {
@@ -1596,8 +1614,9 @@ function appendProviderError(target: string[], value: Record<string, unknown>): 
     })
     .find(Boolean);
   if (!candidate) return;
-  const bounded = candidate.slice(0, 1_000);
-  if (!target.includes(bounded)) target.push(bounded);
+  // Truncate only after sanitization; otherwise a boundary can leave part of a
+  // configured secret unmatched by the later exact-value redactor.
+  if (!target.includes(candidate)) target.push(candidate);
 }
 
 function sanitizeExecutionTelemetry(

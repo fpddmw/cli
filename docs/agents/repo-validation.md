@@ -263,6 +263,11 @@ tool/model work. Its provider view and manual `--compatibility claude-code`
 share one adapter; constraints, literal values and the canonical validation
 schema remain unchanged. Scientific-execution failures retain bounded sanitized
 exit diagnostics in both the structured error and journal, never the full prompt.
+Executor regressions consume Claude's actual `structured_output` envelope,
+prefer it over informal `result` text, and reject `is_error`/error-subtype results
+even when a wrapper exits zero. Structured errors take priority over incidental
+stderr warnings and are sanitized before truncation, including a secret that
+crosses the diagnostic boundary.
 
 `test/research-scientific-review.test.ts` exercises same-project fulfillment of
 predeclared model/environment slots, byte-identical base design preservation,

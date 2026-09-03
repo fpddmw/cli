@@ -683,6 +683,9 @@ the journal; no full prompt or raw authentication output is persisted. Automatic
 Claude invocation uses the same dialect-annotation conversion as
 `research schema show NAME --compatibility claude-code`; canonical controller
 validation and its scientific constraints remain unchanged.
+Claude's structured result is used instead of any accompanying narrative;
+declared error results remain failures, with their safe diagnostic ahead of
+incidental stderr warnings.
 A nonpassing mechanical packet can receive an independent stop verdict, never
 an override. The existing manual submit command remains available for an exact
 independent review.

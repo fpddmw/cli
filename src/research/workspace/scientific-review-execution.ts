@@ -684,8 +684,9 @@ function reviewerFailureDiagnostic(
 ): Record<string, unknown> {
   const secrets = configuredResearchSecrets(input.environment);
   let diagnostic = sanitizeResearchText(
-    result.stderr.trim() ||
-      result.telemetry?.providerErrors.join("; ") ||
+    [result.telemetry?.providerErrors.join("; "), result.stderr.trim()]
+      .filter(Boolean)
+      .join("\n") ||
       "Reviewer exited without a textual diagnostic; inspect the configured runtime before retrying.",
     secrets,
   );
