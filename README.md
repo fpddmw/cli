@@ -153,15 +153,6 @@ The built-in capabilities are:
   discovers filtered OpenAQ v3 locations and retrieves a bounded raw, hourly,
   or daily series for one sensor. It preserves provider/license context but
   does not calculate AQI or make health or regulatory determinations.
-- `regulations-gov.comments` / `search` and `fetch-details`: searches bounded
-  Regulations.gov public-comment metadata and retrieves curated details for
-  explicit comment IDs. It omits named personal-profile fields, never submits
-  comments, and returns attachment metadata without downloading file bytes.
-- `regulations-gov.attachments` / `download`: retrieves attachment metadata for
-  exact public comment IDs and writes bounded files only from the official
-  Regulations.gov download origin. It requires `--artifact-dir`, refuses to
-  overwrite files, and commits SHA-256-bound relative files plus a manifest;
-  it does not scan, open, extract, or interpret the untrusted bytes.
 - `usbr.project-records` / `fetch`: inventories caller-supplied official
   `www.usbr.gov` project or program pages plus bounded same-origin links. It
   preserves page response provenance but does not follow, download, parse, or
@@ -179,12 +170,16 @@ The built-in capabilities are:
   comment/reply text for explicit video IDs. It does not download media or
   transcripts and does not treat ranking or comments as representative opinion.
 
+Regulations.gov connector definitions and fixture tests are retained for future
+qualification, but its comment and attachment capabilities are temporarily not
+registered, discoverable, or executable because production search/detail and
+attachment live checks did not produce a successful end-to-end result.
+
 Fourteen capabilities are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
 CLI injects as a protected provider path segment; OpenAQ requires
-`OPENAQ_API_KEY`, Regulations.gov requires `REGGOV_API_KEY`, and YouTube requires
-`YOUTUBE_API_KEY`; the CLI injects all three as protected provider headers, with
-YouTube using `X-Goog-Api-Key` rather than a URL parameter. No secret is accepted
-in argv or input JSON. Exact input and output schemas,
+`OPENAQ_API_KEY`, and YouTube requires `YOUTUBE_API_KEY`; the CLI injects the
+latter two as protected provider headers, with YouTube using `X-Goog-Api-Key`
+rather than a URL parameter. No secret is accepted in argv or input JSON. Exact input and output schemas,
 endpoint scopes and limits are available through the execution manifest, while
 source notes, coverage, selection guidance and license restrictions are
 available in the discovery metadata returned by `data describe`; static

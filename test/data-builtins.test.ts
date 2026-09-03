@@ -37,8 +37,6 @@ describe("built-in data connectors", () => {
         "open-meteo.flood",
         "open-meteo.historical-weather",
         "openaq.air-quality",
-        "regulations-gov.attachments",
-        "regulations-gov.comments",
         "usbr.project-records",
         "usbr.rise",
         "usgs.water-instantaneous-values",
@@ -70,8 +68,6 @@ describe("built-in data connectors", () => {
       "open-meteo.flood",
       "open-meteo.historical-weather",
       "openaq.air-quality",
-      "regulations-gov.attachments",
-      "regulations-gov.comments",
       "usbr.project-records",
       "usbr.rise",
       "usgs.water-instantaneous-values",
@@ -80,12 +76,7 @@ describe("built-in data connectors", () => {
       const description = builtInDataRegistry.describe(capabilityId);
       assert.equal(
         description?.operations.length,
-        [
-          "openaq.air-quality",
-          "regulations-gov.comments",
-          "usbr.rise",
-          "youtube.public-content",
-        ].includes(capabilityId)
+        ["openaq.air-quality", "usbr.rise", "youtube.public-content"].includes(capabilityId)
           ? 2
           : 1,
       );
@@ -119,8 +110,6 @@ describe("built-in data connectors", () => {
       const requiresCredential = [
         "nasa-firms.active-fire",
         "openaq.air-quality",
-        "regulations-gov.attachments",
-        "regulations-gov.comments",
         "youtube.public-content",
       ].includes(capabilityId);
       assert.equal(exitCode, requiresCredential ? 3 : 0);
@@ -146,20 +135,6 @@ describe("built-in data connectors", () => {
           ),
         );
       }
-      if (capabilityId === "regulations-gov.comments") {
-        assert.ok(
-          doctor.checks.some(
-            (check) => check.checkId === "credential:api-key" && check.status === "fail",
-          ),
-        );
-      }
-      if (capabilityId === "regulations-gov.attachments") {
-        assert.ok(
-          doctor.checks.some(
-            (check) => check.checkId === "credential:api-key" && check.status === "fail",
-          ),
-        );
-      }
       if (capabilityId === "youtube.public-content") {
         assert.ok(
           doctor.checks.some(
@@ -168,6 +143,17 @@ describe("built-in data connectors", () => {
         );
       }
       assert.equal(capture.stderr(), "");
+    }
+  });
+
+  it("keeps temporarily suspended Regulations.gov capabilities out of the public registry", () => {
+    const publicCapabilityIds = builtInDataRegistry
+      .catalog()
+      .capabilities.map((item) => item.capabilityId);
+    for (const capabilityId of ["regulations-gov.comments", "regulations-gov.attachments"]) {
+      assert.equal(publicCapabilityIds.includes(capabilityId), false);
+      assert.equal(builtInDataRegistry.describe(capabilityId), undefined);
+      assert.equal(builtInDataRegistry.registered(capabilityId), undefined);
     }
   });
 });

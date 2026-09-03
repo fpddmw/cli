@@ -17,7 +17,7 @@ checkPaths:
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
 lastReviewedAt: 2026-09-02
-lastReviewedCommit: ee38c04ae1c5a7782275b3e9674218f02cfb4ef3
+lastReviewedCommit: 0bc216585fce958cf75e579363ae2d5f579e0e6a
 ---
 
 # 原子数据运行时目标架构
@@ -287,7 +287,10 @@ aggregate 不可无方法混用，也不提供 AQI、健康或监管判断。接
 与 [rate limits](https://docs.openaq.org/using-the-api/rate-limits)，使用边界依据
 [OpenAQ terms](https://docs.openaq.org/about/terms)。
 
-`regulations-gov.comments/search` 要求 posted 或 last-modified 二选一的最长 366 天窗口，
+Regulations.gov 的 connector 定义暂时保留但不进入 built-in registry，因此 catalog、describe、
+doctor、run 和 Research 均不可发现或调用。恢复注册的前提是使用真实 key 连续通过 production
+search、detail 和 attachment download 的 live gate；fixture 测试本身不构成可用性证据。
+保留定义中的 `regulations-gov.comments/search` 要求 posted 或 last-modified 二选一的最长 366 天窗口，
 按对应日期字段与 document ID 稳定排序，并可用 agency、comment-on ID 和 search term
 收窄；`fetch-details` 只接受最多 100 个显式 comment ID，可选择返回 attachment metadata，
 但不下载文件。两个 operation 共用 `REGGOV_API_KEY` 逻辑凭证。详情输出只保留评论证据、
@@ -309,10 +312,10 @@ operation 要求独立 artifact directory，按 file/total-byte/runtime limits �
 任意 URL、redirect 和旧脚本假设的独立 attachment endpoint。文件按不可信 public-submission
 bytes 处理，不做 malware scan、打开、OCR、text extraction、stance、法律或证据判断。
 
-十九个 capability 的默认 static doctor 均完全离线。四个 GDELT capability 共享受限的
+十七个已注册 capability 的默认 static doctor 均完全离线。四个 GDELT capability 共享受限的
 文件流机制，但不互相调用 capability 业务入口；其余 connector 也互不导入业务函数。十四个
 capability 无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY`、OpenAQ 从 `OPENAQ_API_KEY`、
-两个 Regulations.gov capability 从 `REGGOV_API_KEY`、YouTube 从 `YOUTUBE_API_KEY` 解析逻辑凭证，
+YouTube 从 `YOUTUBE_API_KEY` 解析逻辑凭证，
 缺失时离线报告 blocked。测试 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制
 的 live provider 响应或真实凭证。
 

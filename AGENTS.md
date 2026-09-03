@@ -65,10 +65,13 @@ This repository owns the Tiangong AI command-line interface.
 - `tiangong-ai research search`
 - `tiangong-ai education search`
 
-The built-in atomic data catalog currently contains 19 independently
+The built-in atomic data catalog currently contains 17 independently
 discoverable capabilities for public environmental, regulatory, news-event,
 social, video, and water-project data, including bounded USBR RISE and project
 record capabilities.
+Regulations.gov connector sources remain in the repository for future
+qualification but are not registered, discoverable, or executable while their
+production search/detail and attachment paths fail live availability gates.
 Connector execution, normalization, schemas, provider limits, and
 source/license restrictions belong under `src/data/**`. The execution manifest
 digest is deliberately separate from the Agent-facing discovery metadata

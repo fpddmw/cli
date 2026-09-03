@@ -97,8 +97,6 @@ describe("data package contract", () => {
         "open-meteo.flood",
         "open-meteo.historical-weather",
         "openaq.air-quality",
-        "regulations-gov.attachments",
-        "regulations-gov.comments",
         "usbr.project-records",
         "usbr.rise",
         "usgs.water-instantaneous-values",
