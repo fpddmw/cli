@@ -137,24 +137,22 @@ describe("lightweight original task and authorized scope", () => {
     }
   });
 
-  it("still rejects a genuinely oversized task prompt before spending a native attempt", async () => {
+  it("prepares a detailed original task without an arbitrary input length rejection", async () => {
     const fx = await fixture();
     try {
       const input = contractInput();
       input.originalRequest = "Preserve this detailed original requirement. ".repeat(1_000);
       await writeFile(fx.inputPath, JSON.stringify(input));
       assert.equal((await fx.task(["define", "--input", fx.inputPath])).exitCode, 0);
-      await assert.rejects(
-        prepareNativeResearchStage({
-          root: fx.root,
-          projectId: "task-project",
-          stage: "discover",
-          hostAgent: "codex",
-        }),
-        { code: "RESEARCH_TASK_CONTEXT_TOO_LARGE" },
-      );
+      const prepared = await prepareNativeResearchStage({
+        root: fx.root,
+        projectId: "task-project",
+        stage: "discover",
+        hostAgent: "codex",
+      });
+      assert.match(prepared.prompt, /Original task and current authorized scope/);
       const project = await loadProject(fx.root, "task-project");
-      assert.ok(project.packages.every((item) => item.attempts === 0));
+      assert.equal(project.packages.find((item) => item.id === "discover")?.attempts, 1);
       assert.equal(project.usage.tokens, 0);
     } finally {
       await fx.cleanup();

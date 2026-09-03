@@ -1357,38 +1357,26 @@ describe("research project execution", () => {
     }
   });
 
-  it("rejects real acquire input overflow before spending an attempt and preserves frozen evidence", async () => {
-    const fixture = await nativeDiscoveryContextFixture(40_000);
+  it("prepares acquire above 32,000 context tokens without rewriting frozen evidence", async () => {
+    const fixture = await nativeDiscoveryContextFixture(125_000, 32_000);
     try {
       const config = await loadWorkspaceConfig(fixture.root);
       assert.ok(fixture.contextTokens > config.budget.maxInputContextTokens);
-      await assert.rejects(
-        prepareNativeResearchStage({
-          root: fixture.root,
-          projectId: fixture.projectId,
-          stage: "acquire",
-          hostAgent: "codex",
-        }),
-        (error: unknown) => {
-          assert.ok(error instanceof CliError);
-          assert.equal(error.code, "RESEARCH_INPUT_CONTEXT_BUDGET_EXCEEDED");
-          const details = error.details as Record<string, unknown>;
-          assert.equal(details.maxStageContextTokens, config.budget.maxInputContextTokens);
-          assert.equal(details.limitField, "budget.maxInputContextTokens");
-          assert.match(String(details.recommendedAction), /fork|bounded/i);
-          assert.match(String(details.recommendedAction), /immutable|frozen/i);
-          return true;
-        },
-      );
+      const packet = await prepareNativeResearchStage({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        stage: "acquire",
+        hostAgent: "codex",
+      });
       const project = await loadProject(fixture.root, fixture.projectId);
-      assert.equal(project.packages.find((item) => item.id === "acquire")?.attempts, 0);
+      assert.equal(project.packages.find((item) => item.id === "acquire")?.attempts, 1);
       assert.equal(await sha256File(fixture.evidencePath), fixture.evidenceSha256);
-      assert.equal(
-        await lstat(
-          join(workspacePaths(fixture.root).projects, fixture.projectId, "native", "active.json"),
-        ).catch(() => null),
-        null,
-      );
+      assert.equal(packet.limits.maxOutputTokens, config.budget.maxOutputTokens);
+      await abortNativeResearchStage({
+        root: fixture.root,
+        projectId: fixture.projectId,
+        sessionId: packet.sessionId,
+      });
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }
@@ -3222,10 +3210,17 @@ describe("research workspace CLI", () => {
   });
 });
 
-async function nativeDiscoveryContextFixture(relevanceBytes: number) {
+async function nativeDiscoveryContextFixture(relevanceBytes: number, contextCeiling?: number) {
   const root = await temporaryDirectory();
   const projectId = "incremental-context";
   await initializeResearchWorkspace(root, undefined);
+  if (contextCeiling !== undefined) {
+    const config = await loadWorkspaceConfig(root);
+    await writeJsonAtomic(workspacePaths(root).config, {
+      ...config,
+      budget: { ...config.budget, maxInputContextTokens: contextCeiling },
+    });
+  }
   await lockCapabilities(root);
   await initializeProject(root, projectId, "Bound incremental evidence metadata at acquisition.");
   const inputPath = join(root, "context-source.txt");

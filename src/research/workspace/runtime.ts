@@ -71,7 +71,6 @@ import {
   RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
   RESEARCH_MAX_REPAIR_SOURCE_BYTES,
   RESEARCH_REPAIR_MAX_TURNS,
-  researchStageContextTokenLimit,
   researchStructuredOutputMaxTurns,
   reservedAgentPackageCost,
 } from "./preflight.js";
@@ -723,7 +722,6 @@ export async function prepareNativeResearchStage(input: {
         capsule.projectRoot,
         project,
         workPackage,
-        config,
       );
       const declarations = await loadCapabilityDeclarations(input.root);
       const hasBrokeredEvidence = declarations.capabilities.some((capability) =>
@@ -753,21 +751,6 @@ export async function prepareNativeResearchStage(input: {
         ? "Original task and current authorized scope (a workflow finish is not task completion):\n" +
           JSON.stringify(taskContract)
         : "";
-      if (
-        taskContract &&
-        Buffer.byteLength(
-          taskPrompt +
-            (input.stage === "discover" ? capsule.contextBundleContent : "") +
-            stageContextContent,
-          "utf8",
-        ) >
-          config.budget.maxInputContextTokens * RESEARCH_ESTIMATED_BYTES_PER_TOKEN
-      ) {
-        throw new CliError(
-          "The complete task and evidence context exceeds the reviewed input allowance. Condense representation without dropping requirements or explicitly review a larger context budget.",
-          { code: "RESEARCH_TASK_CONTEXT_TOO_LARGE", exitCode: 3 },
-        );
-      }
       const prompt = [
         "Perform this producer stage in the current interactive host session. Do not launch codex exec, claude -p, or any other nested reasoning agent.",
         capsule.publicationPolicyDocumentation,
@@ -1887,7 +1870,6 @@ async function executeWorkPackage(
         capsule.projectRoot,
         project,
         workPackage,
-        config,
       );
       const route = workPackage.executor === "reviewer" ? config.reviewer : config.producer;
       const selectedPackageExecutor =
@@ -4213,7 +4195,6 @@ async function stageContextForPackage(
   capsuleProject: string,
   project: ProjectState,
   workPackage: WorkPackage,
-  config: WorkspaceConfig,
 ): Promise<string> {
   let analyzeFallbackContext: string[] = [];
   if (workPackage.stage === "analyze") {
@@ -4260,32 +4241,6 @@ async function stageContextForPackage(
     sections.push(`### ${logicalPath}\n${content.trimEnd()}`);
   }
   const bundled = sections.join("\n\n");
-  const estimatedTokens = Math.ceil(
-    Buffer.byteLength(bundled, "utf8") / RESEARCH_ESTIMATED_BYTES_PER_TOKEN,
-  );
-  const maxStageContextTokens = researchStageContextTokenLimit(
-    config,
-    workPackage.stage,
-    project.lineage.kind === "addendum",
-  );
-  if (estimatedTokens > maxStageContextTokens) {
-    throw new CliError(
-      `Admitted stage context exceeds the configured input context limit for ${workPackage.id}.`,
-      {
-        code: "RESEARCH_INPUT_CONTEXT_BUDGET_EXCEEDED",
-        exitCode: 3,
-        details: {
-          packageId: workPackage.id,
-          estimatedTokens,
-          maxStageContextTokens,
-          limitField: "budget.maxInputContextTokens",
-          contextPaths: logicalPaths,
-          recommendedAction:
-            "Keep frozen evidence unchanged. Use research project fork to regenerate a bounded context with concise metadata, or explicitly review budget.maxInputContextTokens in .tiangong-research/config.json and rerun project preflight plus workspace doctor before preparing this stage again. Do not raise output limits to accommodate input context.",
-        },
-      },
-    );
-  }
   return bundled;
 }
 
