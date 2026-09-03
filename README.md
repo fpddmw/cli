@@ -696,6 +696,8 @@ Reviewer status is read-only and transport-aware. Native-direct does not
 require a bridge connection. Smoke configuration readiness is explicitly not
 production readiness and does not demand an attestation that smoke mode never
 writes. Production still requires its current reviewer doctor attestation.
+Packet read responses carry their actual content and receipt together; a
+receipt alone does not establish that the host displayed the content to its model.
 
 Repeat the same prepare/execute route for `evidence-construct`, adding an
 owner-reviewed JSON array of absolute canonical canary paths with

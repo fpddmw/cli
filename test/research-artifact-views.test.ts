@@ -198,9 +198,15 @@ describe("snapshot-bound on-demand artifact views", () => {
         name: "research_read_artifact",
         arguments: { objectId: fx.views.index.objects[0]!.objectId },
       });
+      const fallback = JSON.parse(
+        (view.result.content as Array<{ text: string }>)[0]!.text,
+      ) as Record<string, unknown>;
+      const clientVisible = (view.result.structuredContent ?? fallback) as Record<string, unknown>;
+      assert.equal(clientVisible.objectSha256, sha256Text("A failed check remains visible.\n"));
       assert.equal(
-        (view.result.structuredContent as Record<string, unknown>).objectSha256,
-        sha256Text("A failed check remains visible.\n"),
+        clientVisible.content,
+        "A failed check remains visible.\n",
+        "A client preferring structuredContent must receive actual content, not only receipts",
       );
       const invalid = await rpc("tools/call", {
         name: "research_read_artifact",
@@ -265,7 +271,9 @@ await rpc('initialize', {protocolVersion:'2025-03-26'});
 const directory = JSON.parse((await rpc('tools/call',{name:'research_list_artifacts',arguments:{}})).content[0].text);
 const selection = {objectId:directory.items[0].objectId,length:null};
 const toolResult = await rpc('tools/call',{name:'research_read_artifact',arguments:selection});
-const content = JSON.parse(toolResult.content[0].text);
+const content = ${JSON.stringify(agent)} === 'claude' && toolResult.structuredContent
+  ? toolResult.structuredContent : JSON.parse(toolResult.content[0].text);
+assert.equal(typeof content.content, 'string', 'The model-visible result must include artifact bytes');
 assert.equal(createHash('sha256').update(content.content).digest('hex'), ${JSON.stringify(sha256Text(source))});
 if (${JSON.stringify(agent)} === 'codex') {
  console.log(JSON.stringify({type:'item.completed',item:{id:'read-exact-source',type:'mcp_tool_call',server:'research_artifacts',tool:'research_read_artifact',arguments:selection,result:{content:toolResult.content,structured_content:null},error:null,status:'completed'}}));

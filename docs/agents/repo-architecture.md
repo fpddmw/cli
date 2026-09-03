@@ -562,6 +562,8 @@ Reviewer transport is separate from producer host and reviewer model identity.
 UTF-8/base64 byte views, exact delivery receipts and once-per-selected-object
 verification for adjacent pages. `artifact-view-mcp.ts` exposes only directory
 listing and reading on an ephemeral loopback endpoint with Host/Origin checks.
+It returns the complete bytes and receipt in one text result, without a
+metadata-only structured alternative that a client could prefer and hide text.
 No total corpus or requested-read length gate is added. Initial embedding targets
 choose inline content versus a retrievable reference; they do not drop artifacts.
 Reviewer invocation carries the exact index/packet binding, disables unrestricted

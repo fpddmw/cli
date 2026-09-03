@@ -184,12 +184,11 @@ export async function startArtifactViewServer(views: ArtifactViews) {
         params.name === ARTIFACT_VIEW_TOOL_NAMES[0]
           ? views.list(params.arguments)
           : await views.read(params.arguments as unknown as ArtifactReadSelection);
-      // Keep large content once in the text block for older CLI clients. Structured
-      // metadata is small and excludes the duplicate artifact content.
-      const { content: _content, ...metadata } = output as typeof output & { content?: string };
+      // One complete text result works with both legacy and current MCP clients.
+      // Do not add metadata-only structuredContent: clients such as Claude prefer
+      // it over the text block, hiding the actual evidence while showing receipts.
       result({
         content: [{ type: "text", text: JSON.stringify(output) }],
-        structuredContent: metadata,
       });
     } catch (error) {
       const safe = sanitizeResearchRecord({

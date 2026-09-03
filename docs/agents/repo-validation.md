@@ -246,6 +246,12 @@ claims or retrospective replacement. `test/research-artifact-views.test.ts` cove
 complete oversized reads, UTF-8 pagination, bounded per-object verification work,
 late-file exclusion, links/tamper, secret refusal, exact persisted receipts,
 Host/Origin checks, and actual isolated mock Codex/Claude MCP clients. The mock
+Claude client follows its structured-result preference and must receive actual
+content, not just receipts. The server sends one complete text response; it must
+not attach a metadata-only structured alternative. Native qualification also
+requires recovery of unpredictable fixture text omitted from the prompt, not
+merely a model assertion that it read a file.
+The mock
 Codex consumer verifies all 6 MiB of one read before emitting its duplicate JSONL
 tool trace; only that duplicate capture is compacted, not delivered evidence.
 Unexpected general I/O tool events are rejected. Preflight/design regressions
