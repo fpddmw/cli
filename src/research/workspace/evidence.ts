@@ -80,6 +80,7 @@ export interface DataEvidenceBinding {
   contextView?: {
     status: "full" | "metadata-only" | "projected";
     strategy: string;
+    collection?: string | null;
     itemCount: number;
     totalItems: number;
     offset?: number;

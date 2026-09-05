@@ -317,6 +317,7 @@ export const youtubePublicContentConnector: DataConnectorDefinition = {
     {
       operationId: "fetch-comments",
       operationVersion: "1.0.1",
+      features: ["youtube.reply-strategy"],
       summary: "Fetch visible public comments and replies for explicit YouTube video IDs.",
       description:
         "Runs bounded commentThreads.list pages for caller-supplied IDs, optionally expands every visible reply page through comments.list, applies an optional UTC window client-side, and preserves completed videos when another video fails.",

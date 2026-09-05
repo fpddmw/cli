@@ -16,8 +16,8 @@ checkPaths:
   - src/data/**
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
-lastReviewedAt: 2026-09-02
-lastReviewedCommit: 0bc216585fce958cf75e579363ae2d5f579e0e6a
+lastReviewedAt: 2026-09-05
+lastReviewedCommit: 16b436927ca3967673b46be41135e415f87704d9
 ---
 
 # 原子数据运行时目标架构
@@ -119,8 +119,10 @@ CLI 拥有与 connector 实现直接相关的客观来源语义、覆盖范围�
 - `schemaVersion`、命名空间化的 `capabilityId`、`capabilityVersion` 和
   `minimumCliVersion`；
 - 稳定的 `providerId`、官方 endpoint scope、认证类型和逻辑 credential ID；
-- operation ID/version、输入/输出 Schema ID/digest 和执行 limits；
+- operation ID/version、输入/输出 Schema ID/digest、执行 limits，以及可选的稳定
+  feature ID（供依赖同 major 内特定行为的 Skill 检验）；
 - operation 可选的受控本地 `artifactOutput` 声明；未声明的 operation 不能接收输出目录；
+- 暂停 capability 可选的 `availability.status` 与稳定 `reasonCode`；
 - capability 级超时、请求/provider response 字节、分页/分块、重试、速率、记录数和
   诊断上限；
 - 仅覆盖上述执行字段的 `manifestDigest`。
@@ -132,6 +134,7 @@ CLI 拥有与 connector 实现直接相关的客观来源语义、覆盖范围�
 - capability 的 summary/description、`provides`、`doesNotProvide`；
 - `selectionHints`、`typicalUseCases` 和 `sourceDocumentation`；
 - 许可证、时效、限制和每个 operation 的 summary/description；
+- 暂停 capability 的客观原因、说明和重新开放标准；
 - 仅覆盖发现语义的 `discoveryDigest`。
 
 `catalog` 为低成本 Agent 初筛投影必要的发现字段，同时发布 manifest/discovery 两个
@@ -139,7 +142,8 @@ digest；`describe` 发布两个完整对象和 operation Schema。修改来源�
 `discoveryDigest`，不得改变 `manifestDigest`、operation Schema digest 或运行回执。
 operation 输入 Schema 自身的字段语义仍通过 `description` 和 `examples` 就地公开。
 
-catalog、两个公共对象、canonical JSON 和 digest 计算必须与 locale、路径分隔符和运行
+catalog 对每项 capability 显式发布 `available|suspended`；暂停项仍可 describe，但
+doctor/run 必须在网络前稳定阻断。两个公共对象、canonical JSON 和 digest 计算必须与 locale、路径分隔符和运行
 主机无关。connector 可以共同编译进一个 npm 包，但不得导入另一个 connector 的业务
 实现。
 
@@ -287,9 +291,11 @@ aggregate 不可无方法混用，也不提供 AQI、健康或监管判断。接
 与 [rate limits](https://docs.openaq.org/using-the-api/rate-limits)，使用边界依据
 [OpenAQ terms](https://docs.openaq.org/about/terms)。
 
-Regulations.gov 的 connector 定义暂时保留但不进入 built-in registry，因此 catalog、describe、
-doctor、run 和 Research 均不可发现或调用。恢复注册的前提是使用真实 key 连续通过 production
-search、detail 和 attachment download 的 live gate；fixture 测试本身不构成可用性证据。
+Regulations.gov 的两个 capability 保留在 built-in catalog，并以
+`availability.status=suspended` 发布稳定原因与恢复标准；`describe` 可用于诊断，`doctor`
+与 `run` 在凭证或网络前返回 blocked。Research 的动态投影只包含 `available` capability，
+因此 Agent 不会把暂停来源当作可执行证据入口。恢复可用状态的前提是使用真实 key 连续
+通过 production search、detail 和 attachment download 的 live gate；fixture 测试本身不构成可用性证据。
 保留定义中的 `regulations-gov.comments/search` 要求 posted 或 last-modified 二选一的最长 366 天窗口，
 按对应日期字段与 document ID 稳定排序，并可用 agency、comment-on ID 和 search term
 收窄；`fetch-details` 只接受最多 100 个显式 comment ID，可选择返回 attachment metadata，
@@ -312,9 +318,10 @@ operation 要求独立 artifact directory，按 file/total-byte/runtime limits �
 任意 URL、redirect 和旧脚本假设的独立 attachment endpoint。文件按不可信 public-submission
 bytes 处理，不做 malware scan、打开、OCR、text extraction、stance、法律或证据判断。
 
-十七个已注册 capability 的默认 static doctor 均完全离线。四个 GDELT capability 共享受限的
-文件流机制，但不互相调用 capability 业务入口；其余 connector 也互不导入业务函数。十四个
-capability 无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY`、OpenAQ 从 `OPENAQ_API_KEY`、
+十九个已注册 capability 的默认 static doctor 均完全离线；其中十七个可用，两个
+Regulations.gov capability 稳定报告 suspended/blocked。四个 GDELT capability 共享受限的
+文件流机制，但不互相调用 capability 业务入口；其余 connector 也互不导入业务函数。可用
+capability 中十四个无凭证；NASA FIRMS 从 `NASA_FIRMS_MAP_KEY`、OpenAQ 从 `OPENAQ_API_KEY`、
 YouTube 从 `YOUTUBE_API_KEY` 解析逻辑凭证，
 缺失时离线报告 blocked。测试 fixture 仅按官方格式和旧 Skill 外部行为重建，不包含复制
 的 live provider 响应或真实凭证。
@@ -424,22 +431,27 @@ lock、预算、候选/来源准入、永久证据、journal 和 review 规则�
 独立调用与 Research 调用中必须得到相同核心数据和核心回执；Research 只增加上层证据
 链，不改变 connector 语义。
 
-当前实现从内置 registry 动态投影每个 operation 为
-`data:<capability-id>:<operation-id>` Research capability；十九个 connector 当前产生
-二十三个 operation 投影。native discover packet 携带这份摘要 catalog、独立
+当前实现从内置 registry 动态投影每个 `available` operation 为
+`data:<capability-id>:<operation-id>` Research capability；catalog 的十九个 capability/
+二十三个 operation 中，两个 suspended capability 的三个 operation 不进入 Research，
+因此当前投影为十七个 capability/二十个 operation。native discover packet 携带这份摘要 catalog、独立
 `data describe` 命令、`research project evidence data run` 命令及只读的
 `research project evidence data read` 续读命令。run 命令在同一进程调用
-`executeDataRun`。三层预算相互独立：connector manifest 与调用者显式 overrides 控制采集；
+`executeDataRun`。这些 packet 参数以 `workspace-cli-relative-argv` 发布，宿主必须交给同一
+workspace runtime lock 的 resolver，不能从 PATH 解析另一个全局 CLI。三层预算相互独立：connector manifest 与调用者显式 overrides 控制采集；
 `maxBytesPerPackage` 与文件数控制完整结果和 artifacts 的 Evidence 持久化；
 `maxBrokerItems` 与 `maxBrokerContextTokens` 只控制 Agent 可见视图。adapter 不再把 broker
 response/item budget 下压为 `maxResponseBytes` 或 `maxRecords`。它按 record list、thread
 group、对齐 time-series chunk 和 artifact manifest 生成语义化视图；投影视图返回绑定
-Evidence digest 的 opaque cursor，后续页直接从已校验的内容寻址对象读取，不重复请求 provider，
+Evidence digest 与选中 collection 的 opaque cursor；空 `records` 不会遮蔽非空
+`filteredOut`、`failures` 或其他顶层集合。后续页直接从已校验的内容寻址对象读取，不重复请求 provider，
 也不消耗 evidence-call budget。receipt、candidate 和 journal 分别声明 validation issue、
 provider coverage、limits hit 与 context view（full/projected/metadata-only）；`partial` 与
 `bounded` 可同时为真。owner-only credential map 只映射当前 connector
 需要的命名空间化逻辑凭证；adapter 不接收完整宿主环境，也不允许宿主同名 provider key
-作为后备。成功或 partial 结果、核心 receipt digest 与可选 artifact bytes 内容寻址地写入
+作为后备。公开 run/read 输出只包含回执身份、coverage、结构化有界视图和 continuation，
+完整 `coreResult` 只保存在 Evidence，避免绕过 Agent 输出预算或把有界 JSON 二次转义放大。
+成功或 partial 结果、核心 receipt digest 与可选 artifact bytes 内容寻址地写入
 既有 receipt/ledger/audit 链；blocked 结果只记失败 journal，不晋升为证据。新增 registry
 operation 无需修改 Research provider 代码。
 

@@ -18,8 +18,8 @@ checkPaths:
   - src/data/**
   - src/research/workspace/data-evidence-adapter.ts
   - test/**
-lastReviewedAt: 2026-09-02
-lastReviewedCommit: 0bc216585fce958cf75e579363ae2d5f579e0e6a
+lastReviewedAt: 2026-09-05
+lastReviewedCommit: 16b436927ca3967673b46be41135e415f87704d9
 ---
 
 # 原子数据运行时实施计划
@@ -543,9 +543,10 @@ TypeScript 7 typecheck 已通过；薄 Skill、binding、clean-container GREEN�
 - YouTube comments 增加显式 `top-level-only|all-visible` reply 策略，并报告 thread/reply
   request 消耗、剩余预算与已知未展开线程；默认兼容既有 `includeReplies` 行为，不以
   embedded reply sample 冒充完整回复。
-- Regulations.gov 的 connector 源码和 fixture 保留，但两个 capability 已从 built-in registry
-  暂时撤下。真实 key 下 production search 返回 503，旧 fetcher 同样超时，attachment origin
-  在当前执行环境返回 403；重新注册必须先通过 search、detail、attachment 三段 live gate。
+- Regulations.gov 的两个 capability 保留在 built-in registry，以 suspended availability
+  发布原因和恢复标准；catalog/describe 可诊断，doctor/run 在网络前阻断，Auto Research 不投影。
+  真实 key 下 production search 返回 503，旧 fetcher 同样超时，attachment origin 在当前执行
+  环境返回 403；恢复 available 必须先通过 search、detail、attachment 三段 live gate。
 
 ## PR 与提交拆分
 

@@ -216,6 +216,7 @@ export const openMeteoAirQualityConnector: DataConnectorDefinition = {
     {
       operationId: "fetch-hourly",
       operationVersion: "1.0.1",
+      features: ["open-meteo.series-all-null"],
       summary: "Fetch one bounded GMT window of Open-Meteo modeled hourly air-quality variables.",
       description:
         "Builds one stable public-endpoint query for up to ten coordinates and sixteen documented variables, validates aligned hourly arrays independently, and applies the shared byte, retry, timeout, and record limits.",

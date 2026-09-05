@@ -225,6 +225,7 @@ export const openMeteoFloodConnector: DataConnectorDefinition = {
     {
       operationId: "fetch-daily",
       operationVersion: "1.0.1",
+      features: ["open-meteo.series-all-null"],
       summary: "Fetch one bounded GMT window of Open-Meteo daily simulated river discharge.",
       description:
         "Builds one stable public-endpoint query for up to ten coordinates, seven documented discharge variables, and optional ensemble members, then validates aligned daily arrays under shared byte, retry, timeout, and record limits.",

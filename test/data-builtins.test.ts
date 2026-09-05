@@ -37,6 +37,8 @@ describe("built-in data connectors", () => {
         "open-meteo.flood",
         "open-meteo.historical-weather",
         "openaq.air-quality",
+        "regulations-gov.attachments",
+        "regulations-gov.comments",
         "usbr.project-records",
         "usbr.rise",
         "usgs.water-instantaneous-values",
@@ -50,6 +52,10 @@ describe("built-in data connectors", () => {
       assert.ok(capability.provides.length > 0);
       assert.ok(Array.isArray(capability.doesNotProvide));
       assert.match(String(capability.discoveryDigest), /^[a-f0-9]{64}$/);
+      assert.equal(
+        capability.availability.status,
+        capability.capabilityId.startsWith("regulations-gov.") ? "suspended" : "available",
+      );
     }
   });
 
@@ -68,6 +74,8 @@ describe("built-in data connectors", () => {
       "open-meteo.flood",
       "open-meteo.historical-weather",
       "openaq.air-quality",
+      "regulations-gov.attachments",
+      "regulations-gov.comments",
       "usbr.project-records",
       "usbr.rise",
       "usgs.water-instantaneous-values",
@@ -76,7 +84,12 @@ describe("built-in data connectors", () => {
       const description = builtInDataRegistry.describe(capabilityId);
       assert.equal(
         description?.operations.length,
-        ["openaq.air-quality", "usbr.rise", "youtube.public-content"].includes(capabilityId)
+        [
+          "openaq.air-quality",
+          "regulations-gov.comments",
+          "usbr.rise",
+          "youtube.public-content",
+        ].includes(capabilityId)
           ? 2
           : 1,
       );
@@ -112,7 +125,8 @@ describe("built-in data connectors", () => {
         "openaq.air-quality",
         "youtube.public-content",
       ].includes(capabilityId);
-      assert.equal(exitCode, requiresCredential ? 3 : 0);
+      const suspended = capabilityId.startsWith("regulations-gov.");
+      assert.equal(exitCode, requiresCredential || suspended ? 3 : 0);
       assert.equal(fetched, false);
       const doctor = JSON.parse(capture.stdout()) as {
         networkAttempted: boolean;
@@ -120,7 +134,14 @@ describe("built-in data connectors", () => {
         checks: Array<{ checkId: string; status: string }>;
       };
       assert.equal(doctor.networkAttempted, false);
-      assert.equal(doctor.status, requiresCredential ? "blocked" : "ready");
+      assert.equal(doctor.status, requiresCredential || suspended ? "blocked" : "ready");
+      if (suspended) {
+        assert.ok(
+          doctor.checks.some(
+            (check) => check.checkId === "availability" && check.status === "fail",
+          ),
+        );
+      }
       if (capabilityId === "nasa-firms.active-fire") {
         assert.ok(
           doctor.checks.some(
@@ -146,14 +167,36 @@ describe("built-in data connectors", () => {
     }
   });
 
-  it("keeps temporarily suspended Regulations.gov capabilities out of the public registry", () => {
-    const publicCapabilityIds = builtInDataRegistry
-      .catalog()
-      .capabilities.map((item) => item.capabilityId);
+  it("keeps temporarily suspended Regulations.gov capabilities discoverable but unavailable", () => {
     for (const capabilityId of ["regulations-gov.comments", "regulations-gov.attachments"]) {
-      assert.equal(publicCapabilityIds.includes(capabilityId), false);
-      assert.equal(builtInDataRegistry.describe(capabilityId), undefined);
-      assert.equal(builtInDataRegistry.registered(capabilityId), undefined);
+      const catalogEntry = builtInDataRegistry
+        .catalog()
+        .capabilities.find((item) => item.capabilityId === capabilityId);
+      assert.equal(catalogEntry?.availability.status, "suspended");
+      assert.equal(catalogEntry?.availability.reasonCode, "provider-live-gate-failed");
+      assert.equal(builtInDataRegistry.describe(capabilityId)?.availability?.status, "suspended");
+      assert.equal(builtInDataRegistry.discovery(capabilityId)?.availability?.status, "suspended");
+      assert.ok(builtInDataRegistry.registered(capabilityId));
     }
+  });
+
+  it("publishes operation features required by thin Skills", () => {
+    for (const capabilityId of [
+      "open-meteo.air-quality",
+      "open-meteo.flood",
+      "open-meteo.historical-weather",
+    ]) {
+      assert.ok(
+        builtInDataRegistry
+          .describe(capabilityId)
+          ?.operations[0]?.features?.includes("open-meteo.series-all-null"),
+      );
+    }
+    assert.ok(
+      builtInDataRegistry
+        .describe("youtube.public-content")
+        ?.operations.find((operation) => operation.operationId === "fetch-comments")
+        ?.features?.includes("youtube.reply-strategy"),
+    );
   });
 });

@@ -36,6 +36,8 @@ import { fetchNativeCandidateSource } from "./workspace/broker.js";
 import { preflightEvidenceArtifact, registerEvidenceArtifact } from "./workspace/artifacts.js";
 import {
   executeResearchDataCapability,
+  projectResearchDataEvidenceViewResult,
+  projectResearchDataExecutionResult,
   readResearchDataEvidence,
 } from "./workspace/data-evidence-adapter.js";
 import { exportProjectAuditBundle, verifyProjectAuditBundle } from "./workspace/audit-bundle.js";
@@ -1601,7 +1603,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
         const result = await withWorkspaceLock(root, "research.data-evidence.read", () =>
           readResearchDataEvidence({ root, projectId, receiptId, cursor }),
         );
-        writeJson(io, result, args);
+        writeJson(io, projectResearchDataEvidenceViewResult(result), args);
         return 0;
       }
       const args = parseStrictArgs(
@@ -1631,7 +1633,7 @@ async function runProject(argv: string[], io: CliIO): Promise<number> {
           request,
         }),
       );
-      writeJson(io, result, args);
+      writeJson(io, projectResearchDataExecutionResult(result), args);
       return result.coreResult.status === "success"
         ? 0
         : result.coreResult.status === "partial"

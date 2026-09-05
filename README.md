@@ -76,12 +76,16 @@ context budgets as provider or record limits. Data commands deliberately do
 not load a cwd `.env` file.
 
 `data catalog` also returns a concise capability summary, what the capability
-provides and does not provide, operation summaries, and a separate discovery
-digest. `data describe` expands that layer with source ownership, coverage,
+provides and does not provide, operation summaries, a separate discovery
+digest, and an explicit `available` or `suspended` status. Suspended entries
+remain inspectable, but `doctor` and `run` block before any provider request.
+`data describe` expands that layer with source ownership, coverage,
 granularity, selection hints, typical uses, official documentation, freshness,
 license restrictions, and operation descriptions. Narrative discovery changes
 do not change the execution manifest digest used for compatibility binding.
 Operation input schemas include field-level descriptions and examples.
+Operations may also publish stable feature IDs for Skills that depend on a
+specific compatible behavior within the same contract major.
 
 Auto Research keeps three budgets separate: connector acquisition limits,
 Evidence package bytes/files, and the Agent-visible context view. A validated
@@ -93,6 +97,9 @@ an opaque, evidence-bound cursor; `research project evidence data read` serves
 the next shape-aware view from immutable local Evidence without another
 provider request or provider quota charge. Agents must either continue until
 `nextCursor` is null or disclose the exact presented/total fraction.
+The public Research command returns receipt identity, coverage, a structured
+bounded context view, and continuation metadata. The complete core result
+remains in immutable Evidence and is not duplicated into Agent stdout.
 
 JSON exits are `0` for success, `2` for request/contract errors, `3` for a
 blocked execution, and `4` for an explicit partial result. Public machine
@@ -170,10 +177,11 @@ The built-in capabilities are:
   comment/reply text for explicit video IDs. It does not download media or
   transcripts and does not treat ranking or comments as representative opinion.
 
-Regulations.gov connector definitions and fixture tests are retained for future
-qualification, but its comment and attachment capabilities are temporarily not
-registered, discoverable, or executable because production search/detail and
-attachment live checks did not produce a successful end-to-end result.
+Regulations.gov comment and attachment capabilities remain discoverable with
+`availability.status=suspended`, a stable reason code, and explicit resume
+criteria. `doctor` and `run` block locally without network access, and Auto
+Research excludes them from its executable projection until production
+search/detail/attachment live gates qualify them again.
 
 Fourteen capabilities are keyless. NASA FIRMS requires `NASA_FIRMS_MAP_KEY`, which the
 CLI injects as a protected provider path segment; OpenAQ requires
@@ -1298,6 +1306,9 @@ credentialed operation must resolve its namespaced logical credential from the
 workspace's owner-only store or it is blocked before any provider request.
 Standalone `tiangong-ai data run` keeps its separate manifest-declared
 environment-variable policy. A blocked data result is not promoted to evidence.
+Native packets publish data commands as `workspace-cli-relative-argv`;
+installed Auto Research must prefix them with its workspace-locked resolver
+rather than resolving a global CLI from `PATH`.
 Data Evidence continuation is read-only and does not consume another evidence-call
 or provider-request budget. Provider coverage, limits reached, and Agent context
 coverage are reported independently, so a result may be both partial and bounded.

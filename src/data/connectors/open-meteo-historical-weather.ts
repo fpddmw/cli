@@ -234,6 +234,7 @@ export const openMeteoHistoricalWeatherConnector: DataConnectorDefinition = {
     {
       operationId: "fetch",
       operationVersion: "1.0.1",
+      features: ["open-meteo.series-all-null"],
       summary: "Fetch one bounded GMT window of Open-Meteo historical weather reanalysis.",
       description:
         "Builds one stable public-endpoint query for up to ten coordinates, one model, and curated hourly or daily variables, then validates aligned numeric arrays under shared byte, retry, timeout, and time-row limits.",

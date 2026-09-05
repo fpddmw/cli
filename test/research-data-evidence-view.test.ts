@@ -61,6 +61,39 @@ function summary(recordCount: number): DataExecutionSummary {
 }
 
 describe("Research data evidence views", () => {
+  it("pages a non-empty diagnostic collection when records is empty", () => {
+    const diagnosticResult = result(
+      {
+        records: [],
+        filteredOut: Array.from({ length: 5 }, (_, id) => ({ id, reason: "filtered" })),
+        failures: [{ id: "failed-1", reason: "provider" }],
+        stopReason: "completed",
+      },
+      summary(0),
+    );
+    const first = boundedResearchDataContext(diagnosticResult, 1_000_000, 2);
+    const firstWithCollection = first as typeof first & { collection?: string };
+
+    assert.equal(firstWithCollection.collection, "filteredOut");
+    assert.equal(first.totalItems, 5);
+    assert.equal(first.itemCount, 2);
+    assert.equal(first.nextOffset, 2);
+    const firstPage = JSON.parse(Buffer.from(first.bytes).toString("utf8")) as {
+      data: { value: { filteredOut: Array<{ id: number }> } };
+    };
+    assert.deepEqual(
+      firstPage.data.value.filteredOut.map((item) => item.id),
+      [0, 1],
+    );
+
+    const second = boundedResearchDataContext(diagnosticResult, 1_000_000, 2, 2);
+    const secondWithCollection = second as typeof second & { collection?: string };
+    assert.equal(secondWithCollection.collection, "filteredOut");
+    assert.equal(second.totalItems, 5);
+    assert.equal(second.itemCount, 2);
+    assert.equal(second.nextOffset, 4);
+  });
+
   it("keeps every location and slices aligned time-series chunks to the context item budget", () => {
     const times = Array.from(
       { length: 48 },

@@ -1,4 +1,5 @@
 import { createDataRegistry } from "./catalog.js";
+import type { DataConnectorDefinition } from "./contracts.js";
 import { airNowHourlyObservationsConnector } from "./connectors/airnow-hourly-observations.js";
 import { blueskyPublicPostsConnector } from "./connectors/bluesky-public-posts.js";
 import { epaEisRecordsConnector } from "./connectors/epa-eis-records.js";
@@ -14,6 +15,8 @@ import { openMeteoAirQualityConnector } from "./connectors/open-meteo-air-qualit
 import { openMeteoFloodConnector } from "./connectors/open-meteo-flood.js";
 import { openMeteoHistoricalWeatherConnector } from "./connectors/open-meteo-historical-weather.js";
 import { openAqAirQualityConnector } from "./connectors/openaq-air-quality.js";
+import { regulationsGovAttachmentsConnector } from "./connectors/regulations-gov-attachments.js";
+import { regulationsGovCommentsConnector } from "./connectors/regulations-gov-comments.js";
 import { usbrProjectRecordsConnector } from "./connectors/usbr-project-records.js";
 import { usbrRiseConnector } from "./connectors/usbr-rise.js";
 import { usgsWaterInstantaneousValuesConnector } from "./connectors/usgs-water-instantaneous-values.js";
@@ -33,10 +36,40 @@ export const builtInDataRegistry = createDataRegistry([
   openMeteoFloodConnector,
   openMeteoHistoricalWeatherConnector,
   openAqAirQualityConnector,
-  // Regulations.gov definitions remain fixture-tested but are intentionally not
-  // registered until production search, detail, and attachment live gates pass.
+  suspendBuiltInCapability(
+    regulationsGovAttachmentsConnector,
+    "The provider currently returns HTTP 503 for validated production requests, so attachment execution is paused while the capability remains discoverable.",
+    [
+      "The Regulations.gov comment/detail live gate succeeds.",
+      "A production attachment metadata and download request succeeds within the declared bounds.",
+    ],
+  ),
+  suspendBuiltInCapability(
+    regulationsGovCommentsConnector,
+    "The provider currently returns HTTP 503 for validated production requests, so this capability is discoverable but execution is paused.",
+    [
+      "A production search request succeeds with the documented API contract.",
+      "A production detail request succeeds with the documented API contract.",
+    ],
+  ),
   usbrProjectRecordsConnector,
   usbrRiseConnector,
   usgsWaterInstantaneousValuesConnector,
   youtubePublicContentConnector,
 ]);
+
+function suspendBuiltInCapability(
+  definition: DataConnectorDefinition,
+  description: string,
+  resumeCriteria: string[],
+): DataConnectorDefinition {
+  return {
+    ...definition,
+    availability: {
+      status: "suspended",
+      reasonCode: "provider-live-gate-failed",
+      description,
+      resumeCriteria,
+    },
+  };
+}

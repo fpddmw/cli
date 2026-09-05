@@ -491,6 +491,7 @@ export interface NativeStagePacket {
     readArtifact: { argv: string[] };
     fetchEvidence: { argv: string[]; requestSchema: Record<string, unknown> } | null;
     runDataCapability: {
+      executionKind: "workspace-cli-relative-argv";
       argv: string[];
       readArgv: string[];
       describeArgv: string[];
@@ -881,7 +882,7 @@ export async function prepareNativeResearchStage(input: {
                 ? "Use native Web/Browser broadly for discovery when useful, but record every native search/navigation with recordActivity and register its candidates. Before admitting any native lead, formalize the same URL or DOI through fetchEvidence so it receives an immutable broker receipt."
                 : null,
               hasDataEvidence
-                ? "Use the dynamically projected structured data capabilities when their source coverage and operation semantics fit the question. Inspect a selected capability with the supplied describe command, then call runDataCapability with the exact published DataRunRequest. The Research adapter invokes the same TypeScript runtime in-process and returns an immutable data receipt plus candidate ID; do not invoke standalone data run for project evidence. If the returned contextView has a nextCursor, use runDataCapability.readArgv to continue from immutable local evidence without another provider request. Do not claim complete row-level review until nextCursor is null; when exhaustive review is unnecessary, record the presented/total fraction as a limitation."
+                ? "Use the dynamically projected structured data capabilities when their source coverage and operation semantics fit the question. All runDataCapability commands declare workspace-cli-relative-argv: pass the published argv, readArgv, or describeArgv to the host's workspace-locked resolver, never a PATH-resolved global CLI. Inspect a selected capability with the supplied describe command, then call runDataCapability with the exact published DataRunRequest. The Research adapter invokes the same TypeScript runtime in-process and returns an immutable data receipt plus candidate ID; do not invoke standalone data run for project evidence. If the returned contextView has a nextCursor, use runDataCapability.readArgv to continue from immutable local evidence without another provider request. Do not claim complete item-level review until nextCursor is null; when exhaustive review is unnecessary, record the presented/total fraction as a limitation."
                 : null,
               "Assess candidates in bounded batches with recordAssessment as they arrive; the final output is only a small coverage closeout. Native results without broker/data/input provenance are discovery leads, never evidence.",
             ]
@@ -1041,8 +1042,8 @@ export async function prepareNativeResearchStage(input: {
           runDataCapability:
             input.stage === "discover" && hasDataEvidence
               ? {
+                  executionKind: "workspace-cli-relative-argv" as const,
                   argv: [
-                    "tiangong-ai",
                     "research",
                     "project",
                     "evidence",
@@ -1056,7 +1057,6 @@ export async function prepareNativeResearchStage(input: {
                     "--json",
                   ],
                   readArgv: [
-                    "tiangong-ai",
                     "research",
                     "project",
                     "evidence",
@@ -1071,7 +1071,7 @@ export async function prepareNativeResearchStage(input: {
                     input.root,
                     "--json",
                   ],
-                  describeArgv: ["tiangong-ai", "data", "describe", "<capability-id>", "--json"],
+                  describeArgv: ["data", "describe", "<capability-id>", "--json"],
                   requestSchema: structuredClone(dataPublicSchemas.runRequest) as Record<
                     string,
                     unknown

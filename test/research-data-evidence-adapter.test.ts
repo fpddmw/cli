@@ -10,8 +10,10 @@ import { builtInDataRegistry } from "../src/data/builtins.js";
 import type { DataRunRequest } from "../src/data/contracts.js";
 import { executeDataRun } from "../src/data/runtime/execute.js";
 import type { CliIO } from "../src/io.js";
+import { stringifyJson } from "../src/io.js";
 import {
   executeResearchDataCapability,
+  projectResearchDataExecutionResult,
   projectResearchDataCapabilities,
   readResearchDataEvidence,
 } from "../src/research/workspace/data-evidence-adapter.js";
@@ -217,6 +219,24 @@ describe("research data evidence adapter", () => {
       assert.match(result.candidate?.excerpt ?? "", /100\/144/);
       assert.match(result.candidate?.excerpt ?? "", /continue reading/i);
 
+      const publicResult = projectResearchDataExecutionResult(result);
+      const serializedPublicResult = stringifyJson(publicResult, true);
+      assert.equal("coreResult" in publicResult, false);
+      assert.equal("boundedContext" in publicResult, false);
+      assert.ok(
+        Buffer.byteLength(serializedPublicResult, "utf8") <= publicResult.outputBudget.maxBytes,
+      );
+      assert.doesNotMatch(serializedPublicResult, /record-100/);
+      assert.equal(publicResult.contextView?.itemCount, 100);
+      assert.equal(
+        (
+          publicResult.contextView?.content as {
+            records?: unknown[];
+          }
+        ).records?.length,
+        100,
+      );
+
       const second = await readResearchDataEvidence({
         root,
         projectId: "data-view-budget",
@@ -252,10 +272,18 @@ describe("research data evidence adapter", () => {
       ]);
       assert.equal(cliRead.exitCode, 0, cliRead.stderr);
       const cliPage = JSON.parse(cliRead.stdout) as {
-        communication: { contextView: { offset: number; nextCursor: string | null } };
+        contextView: {
+          offset: number;
+          nextCursor: string | null;
+          content: { records: Array<{ id: number }> };
+        };
+        outputBudget: { maxBytes: number };
       };
-      assert.equal(cliPage.communication.contextView.offset, 100);
-      assert.equal(cliPage.communication.contextView.nextCursor, null);
+      assert.equal("boundedContext" in cliPage, false);
+      assert.ok(Buffer.byteLength(cliRead.stdout, "utf8") <= cliPage.outputBudget.maxBytes);
+      assert.equal(cliPage.contextView.offset, 100);
+      assert.equal(cliPage.contextView.nextCursor, null);
+      assert.equal(cliPage.contextView.content.records.length, 44);
 
       const projected = projectResearchDataCapabilities(registry).capabilities[0];
       assert.equal(projected?.resultShape, "record-list");
@@ -283,6 +311,7 @@ describe("research data evidence adapter", () => {
 
       assert.ok(packet.commands.runDataCapability);
       assert.ok(packet.commands.runDataCapability.readArgv);
+      assert.equal(packet.commands.runDataCapability.executionKind, "workspace-cli-relative-argv");
       assert.equal(
         packet.commands.runDataCapability.catalog.capabilities.length,
         packet.commands.runDataCapability.catalog.capabilities.filter((capability) =>
@@ -291,19 +320,32 @@ describe("research data evidence adapter", () => {
       );
       const registeredOperationCount = builtInDataRegistry
         .catalog()
-        .capabilities.reduce((total, capability) => total + capability.operations.length, 0);
+        .capabilities.filter((capability) => capability.availability.status === "available")
+        .reduce((total, capability) => total + capability.operations.length, 0);
       assert.equal(
         packet.commands.runDataCapability.catalog.capabilities.length,
         registeredOperationCount,
       );
-      assert.deepEqual(packet.commands.runDataCapability.argv.slice(0, 6), [
-        "tiangong-ai",
+      assert.deepEqual(packet.commands.runDataCapability.argv.slice(0, 5), [
         "research",
         "project",
         "evidence",
         "data",
         "run",
       ]);
+      assert.equal(packet.commands.runDataCapability.readArgv[0], "research");
+      assert.deepEqual(packet.commands.runDataCapability.describeArgv, [
+        "data",
+        "describe",
+        "<capability-id>",
+        "--json",
+      ]);
+      assert.equal(
+        packet.commands.runDataCapability.catalog.capabilities.some((capability) =>
+          capability.capabilityId.startsWith("regulations-gov."),
+        ),
+        false,
+      );
       assert.match(packet.prompt, /structured data capabilities/i);
       await abortNativeResearchStage({
         root,
